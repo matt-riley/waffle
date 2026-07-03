@@ -4,13 +4,25 @@ A personal AI agent, written in Go, that runs on your own hardware — one
 binary containing the agent loop, a messaging gateway, a terminal UI, and a
 provider-agnostic LLM layer.
 
-Status: Phase 0 (skeleton) — module layout, config loading, SQLite store
-with migrations, encrypted secret store (`waffle secret`), OTel wiring, CI.
+Status: Phase 1 (the loop) — a working terminal agent: streaming agent loop,
+Anthropic + OpenAI-compatible providers behind one canonical message format,
+native tools (bash, file read/write/edit, fetch), encrypted secret store.
 
 ```sh
 go build ./cmd/waffle
-./waffle help
-./waffle secret init   # then: printf 'sk-...' | ./waffle secret set anthropic/api-key
+./waffle secret init
+printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key
+./waffle chat
+```
+
+Point it elsewhere in `~/.waffle/config.toml` — any OpenAI-compatible
+endpoint (OpenRouter, Ollama, a running workweave/router) works:
+
+```toml
+[provider]
+name = "openai"
+base_url = "http://localhost:11434/v1"
+model = "qwen3:32b"
 ```
 
 Start here:

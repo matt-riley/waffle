@@ -19,8 +19,22 @@ import (
 
 // Config is the root of config.toml.
 type Config struct {
-	Gateway Gateway `toml:"gateway"`
-	Log     Log     `toml:"log"`
+	Gateway  Gateway  `toml:"gateway"`
+	Provider Provider `toml:"provider"`
+	Log      Log      `toml:"log"`
+}
+
+// Provider selects and configures the LLM backend.
+type Provider struct {
+	// Name is "anthropic" or "openai" (any OpenAI-compatible endpoint:
+	// OpenAI, OpenRouter, Ollama, a running workweave/router, ...).
+	Name  string `toml:"name"`
+	Model string `toml:"model"`
+	// APIKey is a secret:// reference or empty to fall back to the
+	// provider's conventional environment variable. Never a raw key.
+	APIKey    string `toml:"api_key"`
+	BaseURL   string `toml:"base_url"`
+	MaxTokens int    `toml:"max_tokens"`
 }
 
 // Gateway configures the control plane.
@@ -39,7 +53,13 @@ type Log struct {
 func Default() Config {
 	return Config{
 		Gateway: Gateway{Listen: "127.0.0.1:8420"},
-		Log:     Log{Level: "info"},
+		Provider: Provider{
+			Name:      "anthropic",
+			Model:     "claude-opus-4-8",
+			APIKey:    "secret://anthropic/api-key",
+			MaxTokens: 64000,
+		},
+		Log: Log{Level: "info"},
 	}
 }
 
