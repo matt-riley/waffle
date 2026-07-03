@@ -1,0 +1,17 @@
+[tools]
+go = "1.25.11"
+
+[tasks.build]
+run = "go build ./..."
+
+[tasks.vet]
+run = "go vet ./..."
+
+[tasks.test]
+run = "go test -race ./..."
+
+[tasks.fmt]
+run = "gofmt -l . && test -z \"$(gofmt -l .)\""
+
+[tasks.lint]
+run = "golangci-lint run ./..."
