@@ -4,7 +4,13 @@ A personal AI agent, written in Go, that runs on your own hardware — one
 binary containing the agent loop, a messaging gateway, a terminal UI, and a
 provider-agnostic LLM layer.
 
-Status: Phase 3 (gateway) — message waffle from your phone: `waffle serve`
+Status: Phase 4 (isolation) — tool execution can move into a container:
+set `[sandbox] mode = "docker"` and tools run inside any image via the
+bind-mounted `waffle runner`, talking to the host over a single-writer
+SQLite queue pair (memory tools stay host-side). Tool allow/deny policy is
+enforced on the host, and the credential broker (`[broker] listen`) fronts
+provider APIs with per-session `wk_` tokens so raw keys never leave the
+host. Phase 3 (gateway) — message waffle from your phone: `waffle serve`
 runs the gateway with a Telegram adapter, routing every message through the
 entity model (identity → channel group → session). waffle is single-owner:
 unknown senders get a pairing code redeemable only via `waffle pair

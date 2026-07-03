@@ -22,7 +22,32 @@ type Config struct {
 	Gateway  Gateway  `toml:"gateway"`
 	Provider Provider `toml:"provider"`
 	Channel  Channels `toml:"channel"`
+	Sandbox  Sandbox  `toml:"sandbox"`
+	Broker   Broker   `toml:"broker"`
 	Log      Log      `toml:"log"`
+}
+
+// Sandbox names the trust boundary for tool execution (docs/plan.md,
+// "Sandboxing & IPC"). Policy is enforced host-side either way.
+type Sandbox struct {
+	// Mode is "host" (tools run in-process) or "docker" (tools run in a
+	// container via waffle runner).
+	Mode string `toml:"mode"`
+	// Image for docker mode; any image works — the waffle binary is
+	// bind-mounted in.
+	Image string `toml:"image"`
+	// Network for docker mode: "none" (default) or "bridge".
+	Network string `toml:"network"`
+	// WorkDir on the host is mounted read-write at /work in the sandbox.
+	WorkDir string `toml:"work_dir"`
+	// Allow/Deny filter tools by name (empty allow = everything).
+	Allow []string `toml:"allow"`
+	Deny  []string `toml:"deny"`
+}
+
+// Broker configures the credential broker's HTTP listener; empty disables.
+type Broker struct {
+	Listen string `toml:"listen"`
 }
 
 // Channels configures messaging surfaces for waffle serve.
@@ -76,6 +101,11 @@ func Default() Config {
 		},
 		Channel: Channels{
 			Telegram: Telegram{Token: "secret://telegram/bot-token"},
+		},
+		Sandbox: Sandbox{
+			Mode:    "host",
+			Image:   "debian:stable-slim",
+			Network: "none",
 		},
 		Log: Log{Level: "info"},
 	}

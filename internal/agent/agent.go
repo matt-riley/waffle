@@ -16,7 +16,7 @@ import (
 // Agent runs conversations against one provider with one toolset.
 type Agent struct {
 	Provider  llm.Provider
-	Tools     *tool.Registry
+	Tools     tool.Toolbox
 	System    string
 	Model     string
 	MaxTokens int

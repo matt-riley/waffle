@@ -57,6 +57,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return serveCmd(ctx, stderr)
 	case "pair":
 		return pairCmd(ctx, args[1:], stdout, stderr)
+	case "runner":
+		return runnerCmd(ctx, args[1:], stderr)
+	case "sandbox":
+		return sandboxCmd(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil

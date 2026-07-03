@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
@@ -57,10 +61,12 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	defer st.Close() //nolint:errcheck // read-mostly handle, process is exiting
 
-	c, err := newChat(ctx, cfg, st, continueLast)
+	c, cleanup, err := newChat(ctx, cfg, st, continueLast)
 	if err != nil {
+		cleanup()
 		return err
 	}
+	defer cleanup()
 
 	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
 		c.agent.Model, cfg.Provider.Name, c.current.ID)
@@ -231,46 +237,50 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 	return cfg, st, nil
 }
 
-func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool) (*chat, error) {
+func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool) (*chat, func(), error) {
+	cleanup := func() {}
 	ws, err := memory.Open(memory.DefaultAgent)
 	if err != nil {
-		return nil, err
+		return nil, cleanup, err
 	}
 	skills, err := skill.Discover(ws.SkillsDir())
 	if err != nil {
-		return nil, err
+		return nil, cleanup, err
 	}
 	sessions := session.New(st)
 
-	a, err := buildAgent(cfg, ws, skills, sessions)
+	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions)
 	if err != nil {
-		return nil, err
+		return nil, cleanup, err
 	}
 
 	c := &chat{agent: a, sessions: sessions, skills: skills}
 	if continueLast {
 		if c.current, err = sessions.Latest(ctx); err != nil && !errors.Is(err, session.ErrNotFound) {
-			return nil, err
+			return nil, cleanup, err
 		}
 	}
 	if c.current == nil {
 		if c.current, err = sessions.Create(ctx, ""); err != nil {
-			return nil, err
+			return nil, cleanup, err
 		}
 	} else {
 		if c.history, err = sessions.Turns(ctx, c.current.ID); err != nil {
-			return nil, err
+			return nil, cleanup, err
 		}
 		c.history = session.Repair(c.history)
 		c.persisted = len(c.history)
 	}
-	return c, nil
+	return c, cleanup, nil
 }
 
-func buildAgent(cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (*agent.Agent, error) {
+// buildAgent assembles the agent. The returned cleanup stops any sandbox
+// container; call it when done (it is never nil).
+func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (*agent.Agent, func(), error) {
+	cleanup := func() {}
 	apiKey, redact, err := resolveAPIKey(cfg.Provider)
 	if err != nil {
-		return nil, err
+		return nil, cleanup, err
 	}
 
 	var provider llm.Provider
@@ -284,27 +294,61 @@ func buildAgent(cfg config.Config, ws memory.Workspace, skills []skill.Skill, se
 		}
 		provider = openaip.New(apiKey, base)
 	default:
-		return nil, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", cfg.Provider.Name)
+		return nil, cleanup, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", cfg.Provider.Name)
 	}
 
-	registry := tool.NewRegistry(
-		tool.Bash{}, tool.ReadFile{}, tool.WriteFile{}, tool.EditFile{}, tool.Fetch{},
+	// Memory tools always execute on the host — they are waffle's own
+	// state, not something a sandbox should reach.
+	hostTools := tool.NewRegistry(
 		memory.RememberTool{WS: ws},
 		memory.RecallTool{Sessions: sessions},
 	)
 
+	var toolbox tool.Toolbox
+	switch cfg.Sandbox.Mode {
+	case "host", "":
+		toolbox = tool.Combine(tool.Builtins(), hostTools)
+	case "docker":
+		home, err := config.Home()
+		if err != nil {
+			return nil, cleanup, err
+		}
+		executor, err := sandbox.StartDocker(ctx, sandbox.DockerOpts{
+			Image:    cfg.Sandbox.Image,
+			Network:  cfg.Sandbox.Network,
+			WorkDir:  cfg.Sandbox.WorkDir,
+			QueueDir: filepath.Join(home, "sandboxes", newSandboxID()),
+		})
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
+		}
+		cleanup = func() { _ = executor.Close() }
+		toolbox = tool.Combine(executor, hostTools)
+	default:
+		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q (want \"host\" or \"docker\")", cfg.Sandbox.Mode)
+	}
+	toolbox = tool.Restrict(toolbox, tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
+
 	sys, err := systemPrompt(ws, skills)
 	if err != nil {
-		return nil, err
+		return nil, cleanup, err
 	}
 	return &agent.Agent{
 		Provider:  provider,
-		Tools:     registry,
+		Tools:     toolbox,
 		System:    sys,
 		Model:     cfg.Provider.Model,
 		MaxTokens: cfg.Provider.MaxTokens,
 		Redact:    redact,
-	}, nil
+	}, cleanup, nil
+}
+
+func newSandboxID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // resolveAPIKey turns the configured api_key into a real key: secret://
