@@ -171,6 +171,10 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 		if g.Agent != nil && g.Agent.Redact != nil {
 			detail = g.Agent.Redact(detail)
 		}
+		// Keep short to avoid channel limits and excessive internal detail.
+		if len(detail) > 200 {
+			detail = detail[:200] + "..."
+		}
 		reply = "something went wrong: " + detail
 	}
 	if reply == "" {

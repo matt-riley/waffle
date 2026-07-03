@@ -63,7 +63,8 @@ func Resolve(store Store, s string) (string, error) {
 // TryOpen returns a Store if an identity can be loaded from keyring or env,
 // otherwise (nil, nil) so callers fall back to environment variables.
 // Load failures (bad identity etc) are treated as no-store to match prior
-// resolver fallback semantics. Path errors after successful load are returned.
+// resolver fallback semantics. Errors from config.SecretsPath() are returned
+// (path errors are not after "successful load" since OpenFile is lazy).
 func TryOpen() (Store, error) {
 	id, err := LoadIdentity()
 	if err != nil {

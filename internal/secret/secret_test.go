@@ -156,3 +156,56 @@ func TestRedactorWithRuntimeSecrets(t *testing.T) {
 		t.Errorf("Redact = %q, want %q", got, want)
 	}
 }
+
+func TestResolveRef(t *testing.T) {
+	// literal value
+	if v, err := ResolveRef("literal-value", "ENV"); err != nil || v != "literal-value" {
+		t.Errorf("literal: got %q %v", v, err)
+	}
+
+	// empty -> env fallback
+	os.Setenv("TEST_REF_ENV", "env-fallback")
+	defer os.Unsetenv("TEST_REF_ENV")
+	if v, err := ResolveRef("", "TEST_REF_ENV"); err != nil || v != "env-fallback" {
+		t.Errorf("empty ref: got %q %v", v, err)
+	}
+
+	// ref with store
+	s := newTestStore(t)
+	if err := s.Set("my/secret", "stored-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := ResolveRef("secret://my/secret", "ENV"); err != nil || v != "stored-secret" {
+		t.Errorf("ref: got %q %v", v, err)
+	}
+
+	// ref not found, env fallback
+	if v, err := ResolveRef("secret://missing", "TEST_REF_ENV"); err != nil || v != "env-fallback" {
+		t.Errorf("missing with env: got %q %v", v, err)
+	}
+
+	// ref not found, no env -> ErrNotFound with hint
+	if _, err := ResolveRef("secret://missing", "NONEXISTENT_ENV"); !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "waffle secret set") {
+		t.Errorf("missing no env: got err %v", err)
+	}
+}
+
+func TestRedactorFor(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Set("k", "secretval"); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := RedactorFor(s, "k", "secretval")
+	if err != nil || r == nil {
+		t.Fatalf("RedactorFor: %v %v", r, err)
+	}
+	if got := r("before secretval after"); got != "before [redacted:k] after" {
+		t.Errorf("redact: %q", got)
+	}
+
+	// nil cases
+	if r, err := RedactorFor(nil, "", ""); err != nil || r != nil {
+		t.Errorf("empty nil: got %v %v", r, err)
+	}
+}
