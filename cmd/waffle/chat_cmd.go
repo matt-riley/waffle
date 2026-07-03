@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +15,7 @@ import (
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
@@ -394,11 +393,15 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		if err != nil {
 			return nil, cleanup, err
 		}
+		sandboxID, err := id.NewBytes(4)
+		if err != nil {
+			return nil, cleanup, err
+		}
 		executor, err := sandbox.StartDocker(ctx, sandbox.DockerOpts{
 			Image:    cfg.Sandbox.Image,
 			Network:  cfg.Sandbox.Network,
 			WorkDir:  cfg.Sandbox.WorkDir,
-			QueueDir: filepath.Join(home, "sandboxes", newSandboxID()),
+			QueueDir: filepath.Join(home, "sandboxes", sandboxID),
 		})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
@@ -451,14 +454,6 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		MaxTokens: cfg.Provider.MaxTokens,
 		Redact:    redact,
 	}, cleanup, nil
-}
-
-func newSandboxID() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b[:])
 }
 
 // resolveAPIKey turns the configured api_key into a real key: secret://

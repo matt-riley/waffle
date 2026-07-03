@@ -33,7 +33,7 @@ func TestHelperAgainstBroker(t *testing.T) {
 	}
 	srv := httptest.NewServer(b)
 	defer srv.Close()
-	token := b.Mint(ctx, "ws-session")
+	token, _ := b.Mint(ctx, "ws-session")
 
 	// What git writes to a credential helper on stdin.
 	request := "protocol=https\nhost=github.com\npath=matt-riley/waffle.git\n"
@@ -91,7 +91,7 @@ func TestRunGet(t *testing.T) {
 	}
 	srv := httptest.NewServer(b)
 	defer srv.Close()
-	token := b.Mint(context.Background(), "s")
+	token, _ := b.Mint(context.Background(), "s")
 
 	t.Setenv(EnvBroker, srv.URL)
 	t.Setenv(EnvToken, token)

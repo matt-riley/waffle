@@ -196,7 +196,7 @@ func newTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) 
 	rt := newFakeRuntime(tools)
 	mgr := NewManager(st, session.New(st), rt, t.TempDir())
 	mgr.ExecTimeout = 10 * time.Second
-	mgr.MintToken = func(ctx context.Context, sessionID string) string { return "wk_test" }
+	mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return "wk_test", nil }
 	mgr.BrokerURL = "http://waffle-host:8421"
 	return mgr, rt
 }
@@ -244,7 +244,7 @@ func TestOpenRefreshesBrokerTokenForExistingWorkspace(t *testing.T) {
 	ctx := context.Background()
 	mgr, rt := newTestManager(t, &scriptedBash{})
 	token := "wk_first"
-	mgr.MintToken = func(context.Context, string) string { return token }
+	mgr.MintToken = func(context.Context, string) (string, error) { return token, nil }
 
 	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
 	if err != nil {

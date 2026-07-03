@@ -7,12 +7,12 @@ package entity
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -78,20 +78,6 @@ func (s *Store) Identify(ctx context.Context, channel, externalID string) (*Iden
 	return &id, nil
 }
 
-// pairingAlphabet avoids ambiguous characters (0/O, 1/I).
-const pairingAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-func newPairingCode() string {
-	var b [6]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
-	}
-	for i := range b {
-		b[i] = pairingAlphabet[int(b[i])%len(pairingAlphabet)]
-	}
-	return string(b[:])
-}
-
 // Pair returns the sender's pairing code, creating one on first contact.
 // Re-messaging returns the same code rather than minting endlessly.
 func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatID string) (*Pairing, error) {
@@ -109,7 +95,11 @@ func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatI
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	p = Pairing{Code: newPairingCode(), Channel: channel, ExternalID: externalID, SenderName: senderName, ChatID: chatID}
+	code, err := id.NewPairingCode()
+	if err != nil {
+		return nil, err
+	}
+	p = Pairing{Code: code, Channel: channel, ExternalID: externalID, SenderName: senderName, ChatID: chatID}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO pairings (code, channel, external_id, sender_name, chat_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,

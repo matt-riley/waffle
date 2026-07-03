@@ -9,9 +9,7 @@ package broker
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/store"
 )
 
@@ -90,12 +89,12 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 }
 
 // Mint issues a wk_ session token bound to sessionID.
-func (b *Broker) Mint(ctx context.Context, sessionID string) string {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
+func (b *Broker) Mint(ctx context.Context, sessionID string) (string, error) {
+	raw, err := id.NewBytes(16)
+	if err != nil {
+		return "", err // crypto/rand failing is not a recoverable state
 	}
-	token := "wk_" + hex.EncodeToString(raw[:])
+	token := "wk_" + raw
 	b.mu.Lock()
 	if old := b.sessions[sessionID]; old != "" {
 		delete(b.tokens, old)
@@ -104,7 +103,7 @@ func (b *Broker) Mint(ctx context.Context, sessionID string) string {
 	b.sessions[sessionID] = token
 	b.mu.Unlock()
 	b.record(ctx, token, sessionID, "mint", "")
-	return token
+	return token, nil
 }
 
 // Revoke invalidates a token (session ended).

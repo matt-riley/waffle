@@ -6,9 +6,7 @@ package schedule
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +16,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -49,14 +48,6 @@ func NewStore(st *store.Store) *Store { return &Store{db: st.DB} }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-func newJobID() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
-	}
-	return "job-" + hex.EncodeToString(b[:])
-}
-
 // parser accepts standard 5-field cron expressions.
 var parser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
@@ -65,8 +56,12 @@ func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*J
 	if _, err := parser.Parse(spec); err != nil {
 		return nil, fmt.Errorf("invalid cron %q: %w", spec, err)
 	}
-	j := &Job{ID: newJobID(), Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Enabled: true}
-	_, err := s.db.ExecContext(ctx, `
+	jobID, err := id.New("job-")
+	if err != nil {
+		return nil, err
+	}
+	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Enabled: true}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?)`, j.ID, name, spec, prompt, deliver, now())
 	if err != nil {
