@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -173,5 +175,23 @@ func TestDockerRunArgs(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestDockerCloseIgnoresAlreadyRemovedContainer(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\necho 'Error response from daemon: No such container: waffle-sb-gone' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client, err := NewClient(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &DockerExecutor{client: client, container: "waffle-sb-gone"}
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close returned an error for an already-removed container: %v", err)
 	}
 }

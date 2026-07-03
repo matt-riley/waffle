@@ -188,3 +188,37 @@ func TestDistinctChatsGetDistinctSessions(t *testing.T) {
 		t.Error("chats share a session")
 	}
 }
+
+func TestCompletedConversationReleasesGroupLock(t *testing.T) {
+	gw, adapter, entities, _, cancel := newTestGateway(t)
+	defer cancel()
+	ctx := context.Background()
+
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner", Text: "pair"}
+	adapter.waitForReply(t, "c1", 1)
+	pending, err := entities.Pairings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entities.Approve(ctx, pending[0].Code, "Matt"); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner", Text: "hello"}
+	adapter.waitForReply(t, "c1", 2)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gw.mu.Lock()
+		remaining := len(gw.groups)
+		gw.mu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	gw.mu.Lock()
+	remaining := len(gw.groups)
+	gw.mu.Unlock()
+	t.Fatalf("completed conversation left %d group lock entries", remaining)
+}

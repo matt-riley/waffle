@@ -31,7 +31,12 @@ type Gateway struct {
 	MaxConcurrent int
 
 	mu     sync.Mutex
-	groups map[string]*sync.Mutex // per-conversation serialization
+	groups map[string]*groupLock // active per-conversation serialization
+}
+
+type groupLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // defaultMaxConcurrent caps simultaneous message handlers. Generous for a
@@ -44,7 +49,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	if g.Log == nil {
 		g.Log = slog.Default()
 	}
-	g.groups = make(map[string]*sync.Mutex)
+	g.groups = make(map[string]*groupLock)
 	if len(g.Adapters) == 0 {
 		return errors.New("gateway: no channels configured (enable one in config.toml)")
 	}
@@ -106,15 +111,26 @@ func (g *Gateway) adapter(name string) channel.Adapter {
 	return nil
 }
 
-func (g *Gateway) groupLock(key string) *sync.Mutex {
+func (g *Gateway) lockGroup(key string) func() {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	l, ok := g.groups[key]
 	if !ok {
-		l = &sync.Mutex{}
+		l = &groupLock{}
 		g.groups[key] = l
 	}
-	return l
+	l.refs++
+	g.mu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		g.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(g.groups, key)
+		}
+		g.mu.Unlock()
+	}
 }
 
 func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
@@ -145,9 +161,8 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 		return
 	}
 
-	lock := g.groupLock(msg.Channel + "\x00" + msg.ChatID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := g.lockGroup(msg.Channel + "\x00" + msg.ChatID)
+	defer unlock()
 
 	reply, err := g.converse(ctx, msg)
 	if err != nil {

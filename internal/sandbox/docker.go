@@ -133,7 +133,12 @@ func (d *DockerExecutor) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = d.client.Shutdown(ctx)
-	err := exec.CommandContext(ctx, "docker", "rm", "-f", d.container).Run()
+	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", d.container).CombinedOutput()
+	if err != nil && strings.Contains(string(out), "No such container:") {
+		err = nil
+	} else if err != nil {
+		err = fmt.Errorf("sandbox: docker rm: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
 	return errors.Join(err, d.client.Close())
 }
 

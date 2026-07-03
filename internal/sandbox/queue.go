@@ -40,8 +40,9 @@ CREATE TABLE IF NOT EXISTS results (
     created_at TEXT NOT NULL
 ) STRICT`
 
-// openQueueDB opens one side of the queue. Only the writer passes schema;
-// the reader waits for the writer to have created the file.
+// openQueueDB opens one side of the queue and initializes its schema when
+// provided. Both client and runner pass the idempotent schema for each file,
+// so either process can start first.
 func openQueueDB(path, schema string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
