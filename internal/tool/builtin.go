@@ -16,7 +16,6 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
-
 func mustSchema(s string) json.RawMessage {
 	var v map[string]any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
