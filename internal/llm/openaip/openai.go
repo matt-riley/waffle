@@ -117,10 +117,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.St
 
 	maxBytes := maxAccumulatedBytes
 	if req.MaxTokens > 0 {
-		// Rough byte estimate per output token (generous for UTF-8); tighten
-		// the cap relative to the caller's MaxTokens budget but never exceed
-		// the absolute memory safety limit.
-		if est := req.MaxTokens * 4; est > 0 && est < maxBytes {
+		// Conservative byte estimate per output token (UTF-8 can be higher
+		// ratio in practice); tighten relative to MaxTokens but never exceed
+		// the hard 2MiB memory safety limit. Using *8 to avoid truncating
+		// valid output that respects the token budget.
+		if est := req.MaxTokens * 8; est > 0 && est < maxBytes {
 			maxBytes = est
 		}
 	}
