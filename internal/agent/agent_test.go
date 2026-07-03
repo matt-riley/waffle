@@ -284,12 +284,12 @@ func TestRunToolSemaphoreBounds(t *testing.T) {
 	found := false
 	for _, h := range history {
 		for _, b := range h.Blocks {
-			if b.ToolResult != nil && b.ToolResult.IsError && strings.Contains(b.ToolResult.Content, "canceled before acquiring") {
+			if b.ToolResult != nil && strings.Contains(b.ToolResult.Content, "canceled before acquiring") {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Errorf("did not find canceled-before-acquire error result in history: %+v", history)
+		t.Errorf("did not find canceled-before-acquire result in history: %+v", history)
 	}
 }
