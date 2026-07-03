@@ -1,0 +1,11 @@
+# build output
+/waffle
+/dist/
+
+# local state that must never be committed
+*.age
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*

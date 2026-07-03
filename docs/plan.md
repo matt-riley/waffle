@@ -27,6 +27,16 @@ each borrowed idea are in [research.md](./research.md).
 6. **Provider-agnostic core.** The agent loop speaks one canonical message
    format. Providers are translators. Swapping Anthropic for OpenRouter for a
    local Ollama model is config, not code.
+7. **Config is for trust boundaries; everything else is code.** nanoclaw's
+   minimal-config philosophy, adapted to Go: `config.toml` names listen
+   addresses, policies, and `secret://` references — and rejects unknown
+   keys. Behavioral customization happens by changing waffle's own source.
+   Your instance is your fork; upstream is a remote you merge. Which leads
+   to:
+8. **waffle works on waffle.** The agent can improve its own code through
+   the same repo-workspace machinery it uses for any repo, with git as the
+   audit trail and tests + self-check as the gate (see "Self-development
+   loop").
 
 ## Architecture
 
@@ -200,6 +210,44 @@ cannot read another repo, another session's secrets, or any raw key.
 - Learning loop (later phase): after a complex task completes, the agent is
   prompted to distill the procedure into a new or improved skill file.
 
+### Self-development loop (waffle works on waffle)
+
+hermes-agent improves itself at the *prompt* level (skills). waffle goes one
+level down: because it is a compiled single binary and its source is just a
+git repo, code-level self-improvement is repo-workspace work where the repo
+happens to be waffle's own.
+
+The pipeline, using only machinery that already exists by Phase 5:
+
+1. **Propose.** "Fix that timeout you keep hitting" (or the agent notices a
+   recurring papercut during reflection) opens a workspace on the waffle
+   repo — sandboxed container, scoped git credentials, like any other repo.
+2. **Change.** The agent edits, then must get `go build`, `go vet`,
+   `go test -race`, and `golangci-lint` green *inside the workspace*. The
+   running gateway is never edited in place.
+3. **Land.** The change is pushed as a branch. The approval gate is
+   config-per-instance: review every diff, review PRs with CI green, or
+   auto-land patch-level changes. Git is the audit trail either way — every
+   self-modification is a commit that can be read, reverted, and merged
+   with upstream.
+4. **Deploy.** `waffle upgrade` builds the new binary from the approved
+   ref, runs `waffle doctor` against it (self-check: config parses, DB
+   migrates on a copy, secret store round-trips, providers reachable), then
+   atomically swaps and re-execs the gateway. The previous binary is kept;
+   `waffle rollback` is one command and no thought.
+
+Two loops, one ladder: when reflection notices a *skill* shelling out the
+same fragile pipeline for the third time, the distillation target stops
+being SKILL.md and becomes a native Go tool submitted as a self-PR. Skills
+are how waffle learns behavior; self-PRs are how learned behavior hardens
+into code.
+
+Safety properties worth stating: the self-workspace is sandboxed like any
+other (a bad self-change can't touch the running host); the gate is
+mechanical (tests + doctor) plus configurable human review; and because
+customization-by-code replaces config sprawl (principle 7), the diff *is*
+the config change — there is no second system to keep consistent.
+
 ### Scheduling
 
 `robfig/cron`-style scheduler persisted in SQLite. A job is: cron expression +
@@ -279,9 +327,11 @@ channel spins up a container and ends in a pushed branch.*
 (parallel sandboxed sessions reporting back to a parent); MCP client.
 *Milestone: unattended recurring jobs, including scheduled repo work.*
 
-**Phase 7 — The learning loop.** Post-task skill distillation, in-use skill
-refinement, memory-curation nudges; optional weave-router deployment docs
-for smart model routing; second channel (Discord) if wanted.
+**Phase 7 — The learning loops.** Post-task skill distillation, in-use
+skill refinement, memory-curation nudges; the self-development loop
+(`waffle upgrade`, `waffle doctor`, `waffle rollback`, skill→Go-tool
+promotion via self-PRs); optional weave-router deployment docs for smart
+model routing; second channel (Discord) if wanted.
 
 ## Decisions to make now
 
