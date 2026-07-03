@@ -164,8 +164,7 @@ func TestResolveRef(t *testing.T) {
 	}
 
 	// empty -> env fallback
-	os.Setenv("TEST_REF_ENV", "env-fallback")
-	defer os.Unsetenv("TEST_REF_ENV")
+	t.Setenv("TEST_REF_ENV", "env-fallback")
 	if v, err := ResolveRef("", "TEST_REF_ENV"); err != nil || v != "env-fallback" {
 		t.Errorf("empty ref: got %q %v", v, err)
 	}
