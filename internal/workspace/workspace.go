@@ -255,15 +255,6 @@ func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd st
 	return strings.TrimSpace(out), nil
 }
 
-// bashOut runs a best-effort command and returns "" on failure.
-// It distinguishes ENOENT/no-such-file (expected for optional files) from
-// other exec failures internally (see isMissingFileError) but returns ""
-// either way, as before.
-func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
-	out, _ := m.bashOutput(ctx, client, cmd)
-	return out
-}
-
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
