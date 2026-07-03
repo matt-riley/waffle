@@ -32,35 +32,36 @@ const (
 	BlockRedactedThinking BlockType = "redacted_thinking"
 )
 
-// Block is one content block within a message.
+// Block is one content block within a message. The JSON encoding is
+// waffle's storage format for persisted turns.
 type Block struct {
-	Type BlockType
+	Type BlockType `json:"type"`
 
-	Text       string      // BlockText, and the visible text of BlockThinking
-	Signature  string      // BlockThinking replay token
-	Data       string      // BlockRedactedThinking payload
-	ToolUse    *ToolUse    // BlockToolUse
-	ToolResult *ToolResult // BlockToolResult
+	Text       string      `json:"text,omitempty"`        // BlockText, and the visible text of BlockThinking
+	Signature  string      `json:"signature,omitempty"`   // BlockThinking replay token
+	Data       string      `json:"data,omitempty"`        // BlockRedactedThinking payload
+	ToolUse    *ToolUse    `json:"tool_use,omitempty"`    // BlockToolUse
+	ToolResult *ToolResult `json:"tool_result,omitempty"` // BlockToolResult
 }
 
 // ToolUse is the model asking for a tool invocation.
 type ToolUse struct {
-	ID    string
-	Name  string
-	Input json.RawMessage
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // ToolResult is the outcome of a tool invocation, sent back as user content.
 type ToolResult struct {
-	ToolUseID string
-	Content   string
-	IsError   bool
+	ToolUseID string `json:"tool_use_id"`
+	Content   string `json:"content"`
+	IsError   bool   `json:"is_error,omitempty"`
 }
 
 // Message is one turn of conversation.
 type Message struct {
-	Role   Role
-	Blocks []Block
+	Role   Role    `json:"role"`
+	Blocks []Block `json:"blocks"`
 }
 
 // UserText builds a plain-text user message.

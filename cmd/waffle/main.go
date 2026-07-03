@@ -50,7 +50,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "secret":
 		return secretCmd(args[1:], stdin, stdout, stderr)
 	case "chat":
-		return chatCmd(ctx, stdin, stdout, stderr)
+		return chatCmd(ctx, args[1:], stdin, stdout, stderr)
+	case "session":
+		return sessionCmd(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return errors.New("serve is not implemented yet (phase 3, see docs/plan.md)")
 	case "help", "-h", "--help":
@@ -69,7 +71,8 @@ Usage:
   waffle <command> [arguments]
 
 Commands:
-  chat      interactive terminal session
+  chat      interactive terminal session (-c continues the last session)
+  session   list past sessions
   serve     run the gateway (phase 3)
   secret    manage the encrypted secret store
   version   print version

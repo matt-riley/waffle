@@ -21,15 +21,18 @@ func TestOpenAppliesMigrations(t *testing.T) {
 		`INSERT INTO meta (key, value) VALUES ('probe', 'ok')`); err != nil {
 		t.Fatalf("meta table missing after migrate: %v", err)
 	}
-	var version int
-	var name string
+	var applied int
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1`).
-		Scan(&version, &name); err != nil {
+		`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("read schema_migrations: %v", err)
 	}
-	if version != 1 || name != "init" {
-		t.Errorf("latest migration = %d %q, want 1 \"init\"", version, name)
+	if want := len(mustLoadMigrations(t)); applied != want {
+		t.Errorf("applied migrations = %d, want %d", applied, want)
+	}
+	// Spot-check the newest schema is usable (0002: sessions + FTS).
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {
+		t.Fatalf("sessions table missing: %v", err)
 	}
 }
 
@@ -46,6 +49,15 @@ func TestOpenIsIdempotent(t *testing.T) {
 			t.Fatalf("Close #%d: %v", i+1, err)
 		}
 	}
+}
+
+func mustLoadMigrations(t *testing.T) []migration {
+	t.Helper()
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	return ms
 }
 
 func TestLoadMigrationsSortedAndUnique(t *testing.T) {

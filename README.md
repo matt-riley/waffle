@@ -4,9 +4,13 @@ A personal AI agent, written in Go, that runs on your own hardware — one
 binary containing the agent loop, a messaging gateway, a terminal UI, and a
 provider-agnostic LLM layer.
 
-Status: Phase 1 (the loop) — a working terminal agent: streaming agent loop,
-Anthropic + OpenAI-compatible providers behind one canonical message format,
-native tools (bash, file read/write/edit, fetch), encrypted secret store.
+Status: Phase 2 (memory) — a terminal agent that remembers you: streaming
+agent loop, Anthropic + OpenAI-compatible providers, native tools plus
+`remember`/`recall`, every conversation persisted to SQLite with FTS5
+search, workspace prompt files (`AGENT.md`/`USER.md`/`MEMORY.md`), and
+agentskills.io-compatible `SKILL.md` skills invoked with `/skill`.
+`waffle chat -c` resumes where you left off; sessions are summarized on
+exit for future recall.
 
 ```sh
 go build ./cmd/waffle
