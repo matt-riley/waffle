@@ -39,13 +39,24 @@ func (failTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
 	return "", context.DeadlineExceeded
 }
 
+type bigOutputTool struct{}
+
+func (bigOutputTool) Def() llm.Tool {
+	return llm.Tool{Name: "big", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (bigOutputTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	// > OutputLimit to exercise runner truncation before the DB write.
+	return strings.Repeat("X", 100*1024) + "END", nil
+}
+
 // startRunner runs a Runner against dir until the test ends.
 func startRunner(t *testing.T, dir string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		r := &Runner{Tools: tool.NewRegistry(upperTool{}, failTool{})}
+		r := &Runner{Tools: tool.NewRegistry(upperTool{}, failTool{}, bigOutputTool{})}
 		done <- r.Serve(ctx, dir)
 	}()
 	t.Cleanup(func() {
@@ -193,5 +204,64 @@ func TestDockerCloseIgnoresAlreadyRemovedContainer(t *testing.T) {
 	executor := &DockerExecutor{client: client, container: "waffle-sb-gone"}
 	if err := executor.Close(); err != nil {
 		t.Fatalf("Close returned an error for an already-removed container: %v", err)
+	}
+}
+
+func TestRunnerEnforcesTruncationBeforeOutboundWrite(t *testing.T) {
+	dir := t.TempDir()
+	startRunner(t, dir)
+
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, isError, err := client.Exec(ctx, "big", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Exec big: %v", err)
+	}
+	if isError {
+		t.Fatalf("big returned error: %s", out)
+	}
+	if len(out) > tool.OutputLimit+200 {
+		t.Fatalf("runner did not truncate; got %d bytes", len(out))
+	}
+	if !strings.Contains(out, "truncated") || !strings.Contains(out, "X") {
+		t.Errorf("expected truncation marker and content, got: %q", out[:min(100, len(out))])
+	}
+}
+
+func TestClientExecDetectsDeadRunnerEarly(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+
+	// No runner started; with heartbeat detection we should fail fast
+	// rather than block for the whole ctx.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, _, err = client.Exec(ctx, "anything", json.RawMessage(`{}`))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error from dead runner")
+	}
+	if !strings.Contains(err.Error(), "runner appears dead") {
+		t.Fatalf("expected 'runner appears dead' error, got: %v", err)
+	}
+	// Should detect within ~10s + margin, not wait anywhere near 30s.
+	if elapsed > 15*time.Second {
+		t.Fatalf("took too long to detect dead runner: %s", elapsed)
+	}
+	if elapsed < 8*time.Second {
+		t.Fatalf("detected too fast (before no-health wait): %s", elapsed)
 	}
 }

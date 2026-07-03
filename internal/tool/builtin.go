@@ -16,8 +16,6 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
-const outputLimit = 48 * 1024
-
 func mustSchema(s string) json.RawMessage {
 	var v map[string]any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
@@ -70,7 +68,7 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "bash", "-c", in.Command).CombinedOutput()
-	result := truncate(string(out), outputLimit)
+	result := Truncate(string(out), OutputLimit)
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("command timed out after %s\n%s", timeout, result)
 	}
@@ -113,7 +111,7 @@ func (ReadFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	return truncate(string(b), outputLimit), nil
+	return Truncate(string(b), OutputLimit), nil
 }
 
 // WriteFile writes a file, creating parent directories.
@@ -257,7 +255,7 @@ func (Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", err
 	}
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, truncate(string(body), 2048))
+		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(string(body), 2048))
 	}
-	return truncate(string(body), outputLimit), nil
+	return Truncate(string(body), OutputLimit), nil
 }

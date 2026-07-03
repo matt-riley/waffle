@@ -99,11 +99,11 @@ func TestRegistry(t *testing.T) {
 
 func TestTruncateKeepsHeadAndTail(t *testing.T) {
 	s := strings.Repeat("a", 100) + strings.Repeat("z", 100)
-	got := truncate(s, 50)
+	got := Truncate(s, 50)
 	if !strings.HasPrefix(got, "aaa") || !strings.HasSuffix(got, "zzz") || !strings.Contains(got, "truncated") {
 		t.Errorf("truncate = %q", got)
 	}
-	if truncate("short", 50) != "short" {
+	if Truncate("short", 50) != "short" {
 		t.Error("short string modified")
 	}
 	if len(got) > 50 {

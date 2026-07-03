@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go sqlite driver
 )
@@ -22,7 +23,19 @@ const (
 
 	// shutdownTool is a sentinel request asking the runner to exit.
 	shutdownTool = "__shutdown"
+
+	// runnerHealthID is the sentinel (negative to avoid clashing with real
+	// positive request ids) PK used for the runner's liveness heartbeat row
+	// in the outbound results table. The client uses it to detect a dead or
+	// missing runner without blocking for the full tool timeout.
+	runnerHealthID = -1
 )
+
+// DefaultToolTimeout is the default overall per-tool timeout enforced by
+// QueueToolbox and DockerExecutor (independent of or capping the caller's
+// context). Combined with runner heartbeats this prevents a stuck runner
+// from blocking callers for the full duration.
+const DefaultToolTimeout = 11 * time.Minute
 
 const inboundSchema = `
 CREATE TABLE IF NOT EXISTS requests (

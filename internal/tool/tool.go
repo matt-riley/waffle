@@ -69,9 +69,15 @@ func Builtins() *Registry {
 	return NewRegistry(Bash{}, ReadFile{}, WriteFile{}, EditFile{}, Fetch{})
 }
 
-// truncate caps tool output so a chatty command can't blow out the context
-// window; it keeps the head and tail, which is where the signal usually is.
-func truncate(s string, limit int) string {
+// OutputLimit is the maximum size (bytes) for tool output returned to the
+// caller or written into the sandbox queue outbound row. Truncation keeps
+// head+tail so the interesting parts are preserved.
+const OutputLimit = 48 * 1024
+
+// Truncate caps tool output so a chatty command can't blow out the context
+// window or bloat the queue DB; it keeps the head and tail, which is where
+// the signal usually is.
+func Truncate(s string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}

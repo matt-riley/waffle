@@ -41,6 +41,28 @@ func (r *Runner) Serve(ctx context.Context, dir string) error {
 		return err
 	}
 
+	// Heartbeat goroutine tied to a derived ctx canceled on any Serve return
+	// (including early errors), so it exits before DB close even if caller ctx
+	// is still alive.
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
+	go func() {
+		hb := time.NewTicker(2 * time.Second)
+		defer hb.Stop()
+		for {
+			select {
+			case <-hb.C:
+				ts := time.Now().UTC().Format(time.RFC3339Nano)
+				_, _ = out.ExecContext(serveCtx,
+					`INSERT OR REPLACE INTO results (request_id, content, is_error, created_at)
+					 VALUES (?, 'alive', 0, ?)`, runnerHealthID, ts)
+			case <-serveCtx.Done():
+				return
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -93,6 +115,10 @@ func (r *Runner) step(ctx context.Context, in, out *sql.DB, last int64) (int64, 
 		content = "error: " + runErr.Error()
 		isError = 1
 	}
+	// Enforce truncation inside the runner (before the outbound write) so
+	// that the result row never exceeds the host limit, regardless of what
+	// the tool implementation returned. This also covers non-builtin tools.
+	content = tool.Truncate(content, tool.OutputLimit)
 	if _, err := out.ExecContext(ctx, `
 		INSERT OR IGNORE INTO results (request_id, content, is_error, created_at)
 		VALUES (?, ?, ?, ?)`,
