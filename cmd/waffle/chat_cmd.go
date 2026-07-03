@@ -475,11 +475,18 @@ func resolveAPIKey(p config.Provider) (string, func(string) string, error) {
 		store = secret.OpenFile(path, id)
 	}
 
-	var redact func(string) string
-	if store != nil {
-		if r, err := secret.NewRedactor(store); err == nil {
-			redact = r.Redact
+	buildRedact := func(key string) func(string) string {
+		if key == "" && store == nil {
+			return nil
 		}
+		r, err := secret.NewRedactorWith(store, secret.NamedValue{
+			Name:  providerSecretName(p.Name),
+			Value: key,
+		})
+		if err != nil {
+			return nil
+		}
+		return r.Redact
 	}
 
 	if secret.IsRef(p.APIKey) {
@@ -487,7 +494,7 @@ func resolveAPIKey(p config.Provider) (string, func(string) string, error) {
 			// No secret store — fall through to env vars rather than
 			// failing, so `ANTHROPIC_API_KEY=... waffle chat` just works.
 			if key := envKey(p.Name); key != "" {
-				return key, redact, nil
+				return key, buildRedact(key), nil
 			}
 			return "", nil, fmt.Errorf("api_key is %q but no secret store is available: run `waffle secret init`, or set %s", p.APIKey, envName(p.Name))
 		}
@@ -495,18 +502,19 @@ func resolveAPIKey(p config.Provider) (string, func(string) string, error) {
 		if err != nil {
 			if errors.Is(err, secret.ErrNotFound) {
 				if key := envKey(p.Name); key != "" {
-					return key, redact, nil
+					return key, buildRedact(key), nil
 				}
 				return "", nil, fmt.Errorf("%w — store it with: printf '%%s' YOUR_KEY | waffle secret set %s", err, strings.TrimPrefix(p.APIKey, "secret://"))
 			}
 			return "", nil, err
 		}
-		return key, redact, nil
+		return key, buildRedact(key), nil
 	}
 	if p.APIKey != "" {
-		return p.APIKey, redact, nil
+		return p.APIKey, buildRedact(p.APIKey), nil
 	}
-	return envKey(p.Name), redact, nil
+	key := envKey(p.Name)
+	return key, buildRedact(key), nil
 }
 
 func envName(provider string) string {
@@ -517,6 +525,13 @@ func envName(provider string) string {
 }
 
 func envKey(provider string) string { return os.Getenv(envName(provider)) }
+
+func providerSecretName(provider string) string {
+	if provider == "openai" {
+		return "openai/api-key"
+	}
+	return "anthropic/api-key"
+}
 
 func systemPrompt(ws memory.Workspace, skills []skill.Skill) (string, error) {
 	cwd, _ := os.Getwd()

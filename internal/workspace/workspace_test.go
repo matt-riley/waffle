@@ -221,7 +221,7 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	if !tools.ran("credential.helper '!waffle git-credential'") {
 		t.Error("credential helper not configured")
 	}
-	if !tools.ran("git clone https://github.com/matt-riley/waffle.git /work/repo") {
+	if !tools.ran("git clone -- 'https://github.com/matt-riley/waffle.git' /work/repo") {
 		t.Errorf("clone not run; commands = %v", tools.commands)
 	}
 	// Broker env reached the container opts.
@@ -480,6 +480,8 @@ func TestNormalizeRepo(t *testing.T) {
 		{"matt-riley/waffle", "matt-riley/waffle", "https://github.com/matt-riley/waffle.git", false},
 		{"matt-riley/waffle.git", "matt-riley/waffle", "https://github.com/matt-riley/waffle.git", false},
 		{"https://github.com/matt-riley/waffle", "matt-riley/waffle", "https://github.com/matt-riley/waffle.git", false},
+		{"https://github.com/matt-riley/waffle?tab=readme", "", "", true},
+		{"https://github.com/matt-riley/waffle;echo-pwned", "", "", true},
 		{"not a repo", "", "", true},
 		{"a/b/c", "", "", true},
 	}

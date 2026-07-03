@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -87,9 +88,12 @@ func normalizeRepo(arg string) (repo, url string, err error) {
 		return arg, "https://github.com/" + arg + ".git", nil
 	}
 	if strings.HasPrefix(arg, "https://") {
-		trimmed := strings.TrimPrefix(arg, "https://")
-		if i := strings.Index(trimmed, "/"); i > 0 && strings.Count(trimmed[i+1:], "/") == 1 {
-			return trimmed[i+1:], arg + ".git", nil
+		u, err := neturl.Parse(arg)
+		if err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" {
+			repoPath := strings.Trim(u.Path, "/")
+			if repoRE.MatchString(repoPath) {
+				return repoPath, "https://" + u.Host + "/" + repoPath + ".git", nil
+			}
 		}
 	}
 	return "", "", fmt.Errorf("can't parse repo %q (want owner/name or an https URL)", arg)
@@ -193,7 +197,7 @@ func (m *Manager) setup(ctx context.Context, client *sandbox.Client, ws *Workspa
 	steps := []string{
 		"git config --global credential.helper '!waffle git-credential'",
 		"git config --global user.name waffle && git config --global user.email waffle@localhost",
-		fmt.Sprintf("git clone %s /work/repo", ws.URL),
+		fmt.Sprintf("git clone -- %s /work/repo", shellQuote(ws.URL)),
 	}
 	for _, cmd := range steps {
 		if err := m.bash(ctx, client, cmd); err != nil {
@@ -235,6 +239,10 @@ func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd st
 func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
 	out, _ := m.bashOutput(ctx, client, cmd)
 	return out
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned

@@ -136,3 +136,23 @@ func TestRedactor(t *testing.T) {
 		t.Errorf("Redact = %q, want %q", got, want)
 	}
 }
+
+func TestRedactorWithRuntimeSecrets(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Set("github/pat", "ghp_supersecrettoken"); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewRedactorWith(s, NamedValue{
+		Name:  "anthropic/api-key",
+		Value: "sk-ant-runtime-secret",
+	})
+	if err != nil {
+		t.Fatalf("NewRedactorWith: %v", err)
+	}
+	got := r.Redact("ghp_supersecrettoken and sk-ant-runtime-secret")
+	want := "[redacted:github/pat] and [redacted:anthropic/api-key]"
+	if got != want {
+		t.Errorf("Redact = %q, want %q", got, want)
+	}
+}

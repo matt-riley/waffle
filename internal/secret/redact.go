@@ -17,20 +17,36 @@ type Redactor struct {
 // Rebuild after mutations; for phase 0 scale (a handful of secrets) that is
 // perfectly cheap.
 func NewRedactor(store Store) (*Redactor, error) {
-	names, err := store.List()
-	if err != nil {
-		return nil, err
-	}
-	pairs := make([]string, 0, len(names)*2)
-	for _, name := range names {
-		v, err := store.Get(name)
+	return NewRedactorWith(store)
+}
+
+// NamedValue is an extra secret value that should be redacted under name
+// even when it did not come from the secret store.
+type NamedValue struct {
+	Name  string
+	Value string
+}
+
+// NewRedactorWith builds a Redactor over every value currently in the store
+// plus any explicitly supplied runtime-only secret values.
+func NewRedactorWith(store Store, extras ...NamedValue) (*Redactor, error) {
+	pairs := make([]string, 0, len(extras)*2)
+	if store != nil {
+		names, err := store.List()
 		if err != nil {
 			return nil, err
 		}
-		if len(v) < minRedactLen {
-			continue
+		pairs = make([]string, 0, (len(names)+len(extras))*2)
+		for _, name := range names {
+			v, err := store.Get(name)
+			if err != nil {
+				return nil, err
+			}
+			pairs = appendRedactionPair(pairs, name, v)
 		}
-		pairs = append(pairs, v, "[redacted:"+name+"]")
+	}
+	for _, extra := range extras {
+		pairs = appendRedactionPair(pairs, extra.Name, extra.Value)
 	}
 	return &Redactor{replacer: strings.NewReplacer(pairs...)}, nil
 }
@@ -38,3 +54,10 @@ func NewRedactor(store Store) (*Redactor, error) {
 // Redact returns s with every known secret value replaced by its
 // [redacted:name] marker.
 func (r *Redactor) Redact(s string) string { return r.replacer.Replace(s) }
+
+func appendRedactionPair(pairs []string, name, value string) []string {
+	if len(value) < minRedactLen {
+		return pairs
+	}
+	return append(pairs, value, "[redacted:"+name+"]")
+}
