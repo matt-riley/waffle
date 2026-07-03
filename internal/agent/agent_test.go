@@ -242,8 +242,9 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 		t.Errorf("summarize request msgs=%d want 2 (flat+prompt)", len(sumReq.Messages))
 	}
 
-	// Main request uses summary + recent window (may be +1 or +2 if we
-	// pulled in a preceding tool_use to avoid orphaning a tool_result).
+	// Main request uses recent window (may be wider than 20 if we pulled in
+	// preceding messages to avoid orphaning a tool_result or to ensure a
+	// user-role first message).
 	mainReq := p.requests[1]
 	if len(mainReq.Messages) > recentWindow+2 {
 		t.Errorf("main context msgs=%d exceeds window+2", len(mainReq.Messages))
@@ -251,11 +252,16 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 	if len(mainReq.Messages) < 2 {
 		t.Errorf("main context too small")
 	}
-	// The first msg in main context should be the injected summary note.
-	// (RoleAssistant + explicit label per review feedback to reduce
-	// prompt-injection risk from model-generated content.)
-	if mainReq.Messages[0].Role != llm.RoleAssistant || !strings.Contains(mainReq.Messages[0].Text(), "CONTEXT SUMMARY") {
-		t.Errorf("first main msg not summary: %+v", mainReq.Messages[0])
+	// Summary is carried as extra system text (not as a message) to satisfy
+	// provider invariants: first message must be user role, messages must
+	// alternate. Injecting it into System is also immune to prompt injection
+	// from model-generated content.
+	if !strings.Contains(mainReq.System, "CONTEXT SUMMARY") {
+		t.Errorf("system text does not contain summary: %q", mainReq.System)
+	}
+	// First message sent to provider must always be user role.
+	if mainReq.Messages[0].Role != llm.RoleUser {
+		t.Errorf("first message role = %q, want user", mainReq.Messages[0].Role)
 	}
 }
 

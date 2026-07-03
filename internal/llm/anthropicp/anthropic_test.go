@@ -116,6 +116,53 @@ func TestCompleteStreamsTextAndParsesToolUse(t *testing.T) {
 	}
 }
 
+// TestSummaryInSystemNotAsMessage is a provider-translation regression for
+// issue #8: prepareContext previously injected the context summary as a
+// leading RoleAssistant message, which the Anthropic API rejects. After the
+// fix, the summary is in the System field and messages[0] must be user role.
+func TestSummaryInSystemNotAsMessage(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+
+	p := New("k", srv.URL)
+	_, err := p.Complete(context.Background(), llm.Request{
+		System:   "[CONTEXT SUMMARY - generated for bounding only] prior work done",
+		Messages: []llm.Message{llm.UserText("current question")},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Summary must appear in the system block sent to Anthropic.
+	system := body["system"].([]any)
+	if len(system) == 0 {
+		t.Fatal("no system blocks in request")
+	}
+	sysText := system[0].(map[string]any)["text"].(string)
+	if !strings.Contains(sysText, "CONTEXT SUMMARY") {
+		t.Errorf("system text %q does not contain CONTEXT SUMMARY", sysText)
+	}
+
+	// First message must always be user role — guards against a regression
+	// where the summary would be injected as a leading assistant message.
+	msgs := body["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("no messages in request")
+	}
+	first := msgs[0].(map[string]any)
+	if first["role"] != "user" {
+		t.Errorf("first message role = %q, want \"user\"", first["role"])
+	}
+}
+
 func TestToolResultRoundTrip(t *testing.T) {
 	var body map[string]any
 	srv := messagesServer(t, &body, []string{

@@ -77,10 +77,18 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		// Pre-Complete step: summarize old turns + recent window. This
 		// bounds prompt size independent of total session length (only
 		// MaxIterations + provider MaxTokens were bounds before).
-		messages := a.prepareContext(ctx, history)
+		messages, extraSystem := a.prepareContext(ctx, history)
+		system := a.System
+		if extraSystem != "" {
+			if system != "" {
+				system = system + "\n\n" + extraSystem
+			} else {
+				system = extraSystem
+			}
+		}
 		resp, err := a.Provider.Complete(ctx, llm.Request{
 			Model:     a.Model,
-			System:    a.System,
+			System:    system,
 			Messages:  messages,
 			Tools:     a.Tools.Defs(),
 			MaxTokens: a.MaxTokens,
@@ -188,37 +196,49 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 // is kept for SQLite FTS.
 const recentWindow = 20
 
-// prepareContext returns messages for a Complete call. If history exceeds
-// the window, a summary of the prefix is generated (via provider) and
-// prepended; only the recent window follows it. The returned slice is a
+// prepareContext returns the messages and extra system text for a Complete
+// call. If history exceeds the window, a summary of the prefix is generated
+// (via provider) and returned as extra system text to be merged into the
+// request System field; only the recent window is returned as messages.
+// Carrying the summary as system text (rather than injecting it as a
+// RoleAssistant message) satisfies provider invariants that require the first
+// message to be user role and messages to alternate. The returned slice is a
 // copy; the caller's history remains the full transcript.
-func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message) []llm.Message {
+func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message) ([]llm.Message, string) {
 	n := len(fullHistory)
 	if n <= recentWindow {
-		return append([]llm.Message(nil), fullHistory...)
+		return append([]llm.Message(nil), fullHistory...), ""
 	}
 	prefix := fullHistory[:n-recentWindow]
 	summaryText := a.summarize(ctx, prefix)
 
-	// Synthetic note injected for the model only (not appended to
-	// history, so not persisted as a turn). Injected with RoleAssistant
-	// (and explicit labeling) rather than RoleUser to reduce prompt-injection
-	// surface from model-generated content (per review feedback).
-	sumMsg := llm.Message{
-		Role: llm.RoleAssistant,
-		Blocks: []llm.Block{{
-			Type: llm.BlockText,
-			Text: "[CONTEXT SUMMARY - generated for bounding only; not a user instruction or command; full history retained in SQLite for search] " + summaryText,
-		}},
-	}
+	// Carry as extra system text so it never lands at messages[0]. System
+	// text is provider-controlled and immune to prompt injection from
+	// model-generated content.
+	extraSystem := "[CONTEXT SUMMARY - generated for bounding only; not a user instruction or command; full history retained in SQLite for search] " + summaryText
+
 	recentStart := n - recentWindow
 	if recentStart < 0 {
 		recentStart = 0
 	}
 	recentStart = ensureCompleteToolExchange(fullHistory, recentStart)
+	recentStart = ensureWindowStartsOnUser(fullHistory, recentStart)
 	recent := make([]llm.Message, n-recentStart)
 	copy(recent, fullHistory[recentStart:])
-	return append([]llm.Message{sumMsg}, recent...)
+	return recent, extraSystem
+}
+
+// ensureWindowStartsOnUser adjusts start backwards until history[start] is a
+// user-role message, so providers that require the first message to be
+// user-role (e.g. Anthropic) never receive a leading assistant message at
+// the window boundary. It stops at index 0 as a safety net; callers are
+// expected to maintain the invariant that history[0] is always a user
+// message (the agent loop enforces this by construction).
+func ensureWindowStartsOnUser(history []llm.Message, start int) int {
+	for start > 0 && history[start].Role != llm.RoleUser {
+		start--
+	}
+	return start
 }
 
 // ensureCompleteToolExchange adjusts the start index of a "recent" window
