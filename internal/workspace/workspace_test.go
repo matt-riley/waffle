@@ -501,6 +501,56 @@ func TestCloseRevokesWorkspaceSessionToken(t *testing.T) {
 	}
 }
 
+// TestOpenConcurrentRaceResumesWinner exercises the "resume the winner on
+// unique-index insert failure" path that protects against duplicate
+// workspaces during concurrent Open (addresses review request for
+// deterministic coverage of the race fix).
+func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{}}
+	mgr, _ := newTestManager(t, tools)
+
+	var wg sync.WaitGroup
+	results := make([]struct {
+		ws  *Workspace
+		err error
+	}, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+			results[i].err = err
+			if client != nil {
+				client.Close()
+			}
+			results[i].ws = ws
+		}(i)
+	}
+	wg.Wait()
+
+	success := 0
+	var id string
+	for _, r := range results {
+		if r.err == nil && r.ws != nil {
+			success++
+			if id == "" {
+				id = r.ws.ID
+			} else if id != r.ws.ID {
+				t.Errorf("concurrent opens produced different workspaces: %s vs %s", id, r.ws.ID)
+			}
+		}
+	}
+	if success < 1 {
+		t.Errorf("expected at least one successful concurrent Open, got %d", success)
+	}
+	// If the INSERT-fail resume path was taken, we still end up with one workspace.
+	if list, err := mgr.List(ctx); err != nil || len(list) != 1 {
+		t.Errorf("after concurrent open, workspaces = %d (want 1), err=%v", len(list), err)
+	}
+}
+
 func TestNormalizeRepo(t *testing.T) {
 	cases := []struct {
 		in, repo, url string

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/sandbox"
@@ -64,6 +65,10 @@ type Manager struct {
 	RevokeSession func(sessionID string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
+
+	// ensureOnce ensures the active-repo index is created only once per
+	// Manager (process lifetime) to avoid repeated DDL in hot path.
+	ensureOnce sync.Once
 }
 
 // NewManager wires a Manager with defaults.
@@ -112,15 +117,19 @@ func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // ensureActiveRepoIndex installs (idempotently) a partial UNIQUE index so
 // that concurrent Open calls for the same repo cannot both succeed in
 // inserting a non-closed row. This fixes the TOCTOU in check-then-create.
-// It is a hard requirement; failure is returned as error.
+// It runs only once per Manager lifetime (see ensureOnce) to avoid repeated
+// DDL on every Open; new DBs get it from migrations.
 func (m *Manager) ensureActiveRepoIndex(ctx context.Context) error {
-	if _, err := m.DB.ExecContext(ctx, `
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
-		ON workspaces(repo) WHERE status != 'closed'
-	`); err != nil {
-		return fmt.Errorf("ensure active repo index: %w", err)
-	}
-	return nil
+	var err error
+	m.ensureOnce.Do(func() {
+		if _, e := m.DB.ExecContext(ctx, `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
+			ON workspaces(repo) WHERE status != 'closed'
+		`); e != nil {
+			err = fmt.Errorf("ensure active repo index: %w", e)
+		}
+	})
+	return err
 }
 
 // Open creates a workspace for repoArg: container + volume + session, repo
@@ -191,14 +200,19 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now()); err != nil {
 		// Concurrent Open raced us (or other insert error); clean up our
-		// side effects and resume the winner instead of duplicating.
+		// side effects.
 		_ = client.Close()
 		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
 		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
 		m.revokeSession(ws.SessionID)
-		if existing, err2 := m.ForRepo(ctx, repo); err2 == nil {
-			return m.Resume(ctx, existing.ID)
+		if isUniqueConstraintError(err) {
+			// Expected race on the active-repo index: resume the winner.
+			if existing, err2 := m.ForRepo(ctx, repo); err2 == nil {
+				return m.Resume(ctx, existing.ID)
+			}
 		}
+		// Real DB error (disk full, locked, schema, etc.) or no winner found:
+		// return original error after cleanup.
 		return nil, nil, err
 	}
 	return ws, client, nil
@@ -274,12 +288,23 @@ func isMissingFileError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// Match common "file not found" messages from exec/cat in container.
-	// Avoid loose "cat " + ": " which would match permission errors etc.
-	return strings.Contains(msg, "no such file") ||
-		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no such") ||
-		(strings.Contains(msg, "cat:") && (strings.Contains(msg, "no such") || strings.Contains(msg, "not found")))
+	// Strict match for expected "file not found" from cat/exec in the
+	// container (e.g. no .devcontainer.json). Broad "not found" can
+	// hide real errors like "command not found" or permission denied.
+	return strings.Contains(msg, "no such file or directory") ||
+		(strings.Contains(msg, "cat:") && strings.Contains(msg, "no such file or directory"))
+}
+
+// isUniqueConstraintError reports whether err is the expected SQLite
+// UNIQUE constraint violation from our partial active-repo index (used
+// to detect concurrent Open races and resume the winner).
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "unique constraint failed") ||
+		strings.Contains(s, "constraint failed")
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
