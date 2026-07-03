@@ -143,3 +143,80 @@ func TestHTTPErrorSurfaced(t *testing.T) {
 		t.Fatalf("err = %v, want body surfaced", err)
 	}
 }
+
+func TestCompleteSizeCap(t *testing.T) {
+	orig := maxAccumulatedBytes
+	maxAccumulatedBytes = 5 // tiny cap to exercise truncation without huge payloads
+	defer func() { maxAccumulatedBytes = orig }()
+
+	// Text accumulation cap.
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"content":"12345"}}]}`,
+		`{"choices":[{"delta":{"content":"6789"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	full := resp.Message.Text()
+	if !strings.Contains(full, "12345") {
+		t.Errorf("expected partial text prefix, got %q", full)
+	}
+	if strings.Contains(full, "6789") {
+		t.Errorf("overflow delta should have been dropped, got %q", full)
+	}
+	if !strings.Contains(full, "WARNING") || !strings.Contains(full, "truncated") {
+		t.Errorf("expected warning block in text, got %q", full)
+	}
+	// Verify warning is a separate block appended.
+	foundWarning := false
+	for _, b := range resp.Message.Blocks {
+		if b.Type == llm.BlockText && strings.Contains(b.Text, "truncated") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Error("warning block not present in Blocks")
+	}
+
+	// Tool call arg accumulation cap (separate server).
+	srv2 := sseServer(t, nil,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"a\":\""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1234567890\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv2.Close()
+
+	p2 := New("k", srv2.URL+"/v1")
+	resp2, err := p2.Complete(context.Background(), llm.Request{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("Complete tool: %v", err)
+	}
+	if resp2.StopReason != llm.StopToolUse {
+		t.Fatalf("stop=%q", resp2.StopReason)
+	}
+	uses := resp2.ToolUses()
+	if len(uses) != 1 {
+		t.Fatalf("tool uses=%d", len(uses))
+	}
+	arg := string(uses[0].Input)
+	// With cap=5, first arg chunk is 6 bytes `{"a":"` so we take [:5] = `{"a":`
+	if arg != `{"a":` || len(arg) != 5 {
+		t.Errorf("tool arg should be capped to first 5 bytes, got %q (len=%d)", arg, len(arg))
+	}
+	// Warning block present.
+	foundW := false
+	for _, b := range resp2.Message.Blocks {
+		if b.Type == llm.BlockText && strings.Contains(b.Text, "truncated") {
+			foundW = true
+		}
+	}
+	if !foundW {
+		t.Error("expected warning block for capped tool args")
+	}
+}

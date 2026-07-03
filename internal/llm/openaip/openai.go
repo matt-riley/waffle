@@ -20,6 +20,12 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
+// maxAccumulatedBytes caps text + tool call argument accumulation in readStream
+// to prevent unbounded memory growth from verbose or malicious streams.
+// It can be lowered in tests. The default is 2 MiB; Complete may tighten it
+// based on req.MaxTokens.
+var maxAccumulatedBytes = 2 * 1024 * 1024
+
 // Provider calls an OpenAI-compatible chat completions endpoint.
 type Provider struct {
 	APIKey  string
@@ -108,7 +114,17 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.St
 		msg, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
 		return nil, fmt.Errorf("openai: %s: %s", httpResp.Status, strings.TrimSpace(string(msg)))
 	}
-	return p.readStream(httpResp.Body, onEvent)
+
+	maxBytes := maxAccumulatedBytes
+	if req.MaxTokens > 0 {
+		// Rough byte estimate per output token (generous for UTF-8); tighten
+		// the cap relative to the caller's MaxTokens budget but never exceed
+		// the absolute memory safety limit.
+		if est := req.MaxTokens * 4; est > 0 && est < maxBytes {
+			maxBytes = est
+		}
+	}
+	return p.readStream(httpResp.Body, onEvent, maxBytes)
 }
 
 func (p *Provider) client() *http.Client {
@@ -177,10 +193,15 @@ func translateMessage(m llm.Message) []wireMessage {
 	return msgs
 }
 
-func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc) (*llm.Response, error) {
+func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes int) (*llm.Response, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxAccumulatedBytes
+	}
 	resp := &llm.Response{Message: llm.Message{Role: llm.RoleAssistant}, StopReason: llm.StopOther}
 	var text strings.Builder
 	toolCalls := map[int]*wireToolCall{}
+	hitCap := false
+	currentSize := 0
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -208,9 +229,26 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc) (*llm.Resp
 		choice := chunk.Choices[0]
 
 		if choice.Delta.Content != "" {
-			text.WriteString(choice.Delta.Content)
-			if onEvent != nil {
-				onEvent(llm.Event{Type: llm.EventTextDelta, Text: choice.Delta.Content})
+			if !hitCap {
+				d := choice.Delta.Content
+				room := maxBytes - currentSize
+				if len(d) > room {
+					if room > 0 {
+						d = d[:room]
+						text.WriteString(d)
+						currentSize += len(d)
+						if onEvent != nil {
+							onEvent(llm.Event{Type: llm.EventTextDelta, Text: d})
+						}
+					}
+					hitCap = true
+				} else if room > 0 {
+					text.WriteString(d)
+					currentSize += len(d)
+					if onEvent != nil {
+						onEvent(llm.Event{Type: llm.EventTextDelta, Text: d})
+					}
+				}
 			}
 		}
 		for _, tc := range choice.Delta.ToolCalls {
@@ -225,7 +263,21 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc) (*llm.Resp
 			if tc.Function.Name != "" {
 				acc.Function.Name = tc.Function.Name
 			}
-			acc.Function.Arguments += tc.Function.Arguments
+			if tc.Function.Arguments != "" && !hitCap {
+				arg := tc.Function.Arguments
+				room := maxBytes - currentSize
+				if len(arg) > room {
+					if room > 0 {
+						arg = arg[:room]
+						acc.Function.Arguments += arg
+						currentSize += len(arg)
+					}
+					hitCap = true
+				} else {
+					acc.Function.Arguments += arg
+					currentSize += len(arg)
+				}
+			}
 		}
 		switch choice.FinishReason {
 		case "stop":
@@ -259,6 +311,14 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc) (*llm.Resp
 			Name:  tc.Function.Name,
 			Input: json.RawMessage(args),
 		}})
+	}
+	if hitCap {
+		// Append a warning block (as text) so callers see a bounded partial
+		// response plus an explicit indicator, matching the review guidance.
+		resp.Message.Blocks = append(resp.Message.Blocks, llm.Block{
+			Type: llm.BlockText,
+			Text: "\n[WARNING: output truncated due to size limit]",
+		})
 	}
 	return resp, nil
 }
