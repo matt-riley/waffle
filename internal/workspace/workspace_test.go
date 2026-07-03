@@ -523,7 +523,7 @@ func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
 			ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
 			results[i].err = err
 			if client != nil {
-				client.Close()
+				client.Close() //nolint:errcheck // test cleanup
 			}
 			results[i].ws = ws
 		}(i)
