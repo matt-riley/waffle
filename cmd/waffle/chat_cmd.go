@@ -261,37 +261,10 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 		if c.history, err = sessions.Turns(ctx, c.current.ID); err != nil {
 			return nil, err
 		}
-		c.history = repairHistory(c.history)
+		c.history = session.Repair(c.history)
 		c.persisted = len(c.history)
 	}
 	return c, nil
-}
-
-// repairHistory makes a resumed transcript valid: a session that died
-// mid-tool-loop ends with unanswered tool_use blocks, which providers
-// reject. Close them out with error results.
-func repairHistory(history []llm.Message) []llm.Message {
-	if len(history) == 0 {
-		return history
-	}
-	last := history[len(history)-1]
-	if last.Role != llm.RoleAssistant {
-		return history
-	}
-	var results []llm.Block
-	for _, b := range last.Blocks {
-		if b.Type == llm.BlockToolUse {
-			results = append(results, llm.Block{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{
-				ToolUseID: b.ToolUse.ID,
-				Content:   "session was interrupted before this tool ran",
-				IsError:   true,
-			}})
-		}
-	}
-	if len(results) == 0 {
-		return history
-	}
-	return append(history, llm.Message{Role: llm.RoleUser, Blocks: results})
 }
 
 func buildAgent(cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (*agent.Agent, error) {

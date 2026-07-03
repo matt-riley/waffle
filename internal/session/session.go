@@ -177,6 +177,33 @@ func indexableText(msg llm.Message) string {
 	return strings.Join(parts, "\n")
 }
 
+// Repair makes a resumed transcript valid: a session that died mid-tool-
+// loop ends with unanswered tool_use blocks, which providers reject. Close
+// them out with error results.
+func Repair(history []llm.Message) []llm.Message {
+	if len(history) == 0 {
+		return history
+	}
+	last := history[len(history)-1]
+	if last.Role != llm.RoleAssistant {
+		return history
+	}
+	var results []llm.Block
+	for _, b := range last.Blocks {
+		if b.Type == llm.BlockToolUse {
+			results = append(results, llm.Block{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{
+				ToolUseID: b.ToolUse.ID,
+				Content:   "session was interrupted before this tool ran",
+				IsError:   true,
+			}})
+		}
+	}
+	if len(results) == 0 {
+		return history
+	}
+	return append(history, llm.Message{Role: llm.RoleUser, Blocks: results})
+}
+
 // Hit is one recall search result.
 type Hit struct {
 	SessionID string

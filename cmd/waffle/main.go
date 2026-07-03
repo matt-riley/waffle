@@ -54,7 +54,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "session":
 		return sessionCmd(ctx, args[1:], stdout, stderr)
 	case "serve":
-		return errors.New("serve is not implemented yet (phase 3, see docs/plan.md)")
+		return serveCmd(ctx, stderr)
+	case "pair":
+		return pairCmd(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil
@@ -72,8 +74,9 @@ Usage:
 
 Commands:
   chat      interactive terminal session (-c continues the last session)
+  serve     run the gateway (channels from config.toml)
+  pair      approve your accounts on connected channels
   session   list past sessions
-  serve     run the gateway (phase 3)
   secret    manage the encrypted secret store
   version   print version
   help      show this help

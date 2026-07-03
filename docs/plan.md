@@ -17,10 +17,13 @@ each borrowed idea are in [research.md](./research.md).
 3. **SQLite for everything.** State, memory, message queues, schedules — all
    SQLite (pure-Go driver, no cgo). No Postgres, no Redis. Single-user scale
    makes this correct, not just convenient.
-4. **Trust is tiered.** The owner's primary session runs tools on the host.
-   Every other session — group chats, unknown senders, scheduled jobs —
-   runs in a sandbox with an explicit tool policy. Unknown DM senders get a
-   pairing code, not an agent.
+4. **Single-owner, tiered trust.** waffle serves exactly one person. There
+   is no guest tier: pairing exists to bind the *owner's own* accounts on
+   new channels (approval happens on the host — shell access is the
+   ownership proof), and anyone else gets a pairing code and nothing more.
+   Trust still tiers by *session*: the owner's interactive sessions run
+   tools on the host; risky contexts — repo workspaces, scheduled jobs —
+   run in sandboxes with explicit tool policies.
 5. **Keys never leave the host.** Sandboxes and subagents authenticate to a
    host-side provider proxy with scoped tokens. Real provider keys exist in
    exactly one place.
@@ -256,7 +259,8 @@ sessions, so "email me a Monday summary of my starred repos" is one row.
 
 ### Security posture (from openclaw)
 
-- Unknown senders: pairing-code handshake before any agent access.
+- Single-owner: only paired identities reach the agent at all; unknown
+  senders get a pairing code that is redeemable only via the host CLI.
 - Group chats: sandboxed, restricted tool policy, mention-gated.
 - Gateway binds loopback by default; remote access is an explicit opt-in.
 - All external content (messages, fetched pages, tool output) is treated as
@@ -314,8 +318,9 @@ channel `Adapter` interface, Telegram adapter, pairing codes,
 
 **Phase 4 — Isolation & the broker.** Docker executor + `waffle runner`,
 SQLite queue-pair IPC, per-session tool policies, credential broker
-(provider proxy + `wk_` session tokens), secret redaction filter, group-chat
-support. *Milestone: safe to add a group chat or a second user.*
+(provider proxy + `wk_` session tokens), secret redaction filter.
+*Milestone: untrusted work (repo checkouts, scheduled jobs) runs in
+containers, not on the host.*
 
 **Phase 5 — Repo workspaces.** `internal/workspace` lifecycle
 (open/idle/close), devcontainer image selection, broker-minted git

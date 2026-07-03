@@ -4,7 +4,11 @@ A personal AI agent, written in Go, that runs on your own hardware — one
 binary containing the agent loop, a messaging gateway, a terminal UI, and a
 provider-agnostic LLM layer.
 
-Status: Phase 2 (memory) — a terminal agent that remembers you: streaming
+Status: Phase 3 (gateway) — message waffle from your phone: `waffle serve`
+runs the gateway with a Telegram adapter, routing every message through the
+entity model (identity → channel group → session). waffle is single-owner:
+unknown senders get a pairing code redeemable only via `waffle pair
+approve` on the host. Also: a terminal agent that remembers you — streaming
 agent loop, Anthropic + OpenAI-compatible providers, native tools plus
 `remember`/`recall`, every conversation persisted to SQLite with FTS5
 search, workspace prompt files (`AGENT.md`/`USER.md`/`MEMORY.md`), and

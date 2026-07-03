@@ -21,7 +21,22 @@ import (
 type Config struct {
 	Gateway  Gateway  `toml:"gateway"`
 	Provider Provider `toml:"provider"`
+	Channel  Channels `toml:"channel"`
 	Log      Log      `toml:"log"`
+}
+
+// Channels configures messaging surfaces for waffle serve.
+type Channels struct {
+	Telegram Telegram `toml:"telegram"`
+}
+
+// Telegram is the Telegram bot channel.
+type Telegram struct {
+	Enabled bool `toml:"enabled"`
+	// Token is a secret:// reference (or empty to use TELEGRAM_BOT_TOKEN).
+	Token string `toml:"token"`
+	// BaseURL overrides the Bot API endpoint; for tests and proxies.
+	BaseURL string `toml:"base_url"`
 }
 
 // Provider selects and configures the LLM backend.
@@ -58,6 +73,9 @@ func Default() Config {
 			Model:     "claude-opus-4-8",
 			APIKey:    "secret://anthropic/api-key",
 			MaxTokens: 64000,
+		},
+		Channel: Channels{
+			Telegram: Telegram{Token: "secret://telegram/bot-token"},
 		},
 		Log: Log{Level: "info"},
 	}
