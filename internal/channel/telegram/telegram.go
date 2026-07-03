@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
@@ -72,20 +74,29 @@ type apiResponse struct {
 // Run long-polls getUpdates until ctx is done.
 func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error {
 	var offset int64
+	consecutive := 0
 	for {
 		updates, err := a.getUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			// Transient network/API trouble: back off and keep polling.
+			consecutive++
+			// Exponential backoff with jitter for long-poll robustness.
+			// 1s, 2s, 4s, 8s, 16s, 32s cap + up to 1s jitter.
+			d := time.Duration(1<<min(consecutive, 5)) * time.Second
+			d += time.Duration(rand.Int63n(int64(time.Second)))
+			if consecutive > 3 {
+				slog.Default().Error("telegram getUpdates persistent errors, backing off", "consecutive", consecutive, "backoff", d, "err", err)
+			}
 			select {
-			case <-time.After(3 * time.Second):
+			case <-time.After(d):
 				continue
 			case <-ctx.Done():
 				return nil
 			}
 		}
+		consecutive = 0
 		for _, u := range updates {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
@@ -116,14 +127,40 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 func (a *Adapter) getUpdates(ctx context.Context, offset int64) ([]update, error) {
 	// The request context caps the long poll a little past the server-side
 	// timeout so a wedged connection can't hang the loop.
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	raw, err := a.call(ctx, "getUpdates", map[string]any{
+	// Small bounded retry for transient before surfacing to caller.
+	for attempt := 0; attempt < 2; attempt++ {
+		callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		raw, err := a.call(callCtx, "getUpdates", map[string]any{
+			"offset":          offset,
+			"timeout":         50,
+			"allowed_updates": []string{"message"},
+		})
+		cancel()
+		if err == nil {
+			var updates []update
+			if err := json.Unmarshal(raw, &updates); err != nil {
+				return nil, fmt.Errorf("telegram: parse updates: %w", err)
+			}
+			return updates, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// brief retry delay inside getUpdates
+		select {
+		case <-time.After(time.Duration(attempt+1) * 250 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	// final attempt
+	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	raw, err := a.call(callCtx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         50,
 		"allowed_updates": []string{"message"},
 	})
+	cancel()
 	if err != nil {
 		return nil, err
 	}

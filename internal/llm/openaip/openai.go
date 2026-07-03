@@ -196,6 +196,9 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc) (*llm.Resp
 		}
 		var chunk wireChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if scanErr := scanner.Err(); scanErr != nil {
+				return nil, fmt.Errorf("openai: read stream: %w", scanErr)
+			}
 			return nil, fmt.Errorf("openai: bad stream chunk: %w", err)
 		}
 		if chunk.Usage != nil {
