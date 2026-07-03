@@ -114,9 +114,10 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 		FROM jobs WHERE id = ?`, id))
 }
 
-func (s *Store) markRun(ctx context.Context, id, status string) {
-	_, _ = s.db.ExecContext(ctx,
+func (s *Store) markRun(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE jobs SET last_run = ?, last_status = ? WHERE id = ?`, now(), status, id)
+	return err
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -133,8 +134,15 @@ func scanJob(row rowScanner) (*Job, error) {
 		return nil, err
 	}
 	j.Enabled = enabled != 0
-	j.LastRun, _ = time.Parse(time.RFC3339Nano, lastRun)
-	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	var parseErr error
+	if lastRun != "" {
+		if j.LastRun, parseErr = time.Parse(time.RFC3339Nano, lastRun); parseErr != nil {
+			return nil, fmt.Errorf("parse job last_run: %w", parseErr)
+		}
+	}
+	if j.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, created); parseErr != nil && created != "" {
+		return nil, fmt.Errorf("parse job created_at: %w", parseErr)
+	}
 	return &j, nil
 }
 
@@ -227,7 +235,9 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		status = "error: " + err.Error()
 		s.Log.Error("job failed", "job", j.ID, "err", err)
 	}
-	s.Store.markRun(context.WithoutCancel(runCtx), j.ID, status)
+	if err := s.Store.markRun(context.WithoutCancel(runCtx), j.ID, status); err != nil {
+		s.Log.Error("mark job run failed (audit)", "job", j.ID, "err", err)
+	}
 }
 
 // ParseTarget splits a delivery target "channel:chat_id".

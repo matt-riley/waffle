@@ -432,7 +432,12 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	ws.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	var parseErr error
+	if ws.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, created); parseErr != nil && created != "" {
+		return nil, fmt.Errorf("parse workspace created_at: %w", parseErr)
+	}
+	if ws.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updated); parseErr != nil && updated != "" {
+		return nil, fmt.Errorf("parse workspace updated_at: %w", parseErr)
+	}
 	return &ws, nil
 }

@@ -138,7 +138,9 @@ func (s *Store) Pairings(ctx context.Context) ([]Pairing, error) {
 		if err := rows.Scan(&p.Code, &p.Channel, &p.ExternalID, &p.SenderName, &p.ChatID, &created); err != nil {
 			return nil, err
 		}
-		p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if p.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
+			return nil, fmt.Errorf("parse pairing created_at: %w", err)
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
