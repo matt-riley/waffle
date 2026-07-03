@@ -6,6 +6,7 @@ require (
 	filippo.io/age v1.3.1
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.56.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0
@@ -32,7 +33,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

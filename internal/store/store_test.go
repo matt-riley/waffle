@@ -2,9 +2,87 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSnapshotMissingSource(t *testing.T) {
+	ctx := context.Background()
+	dst := filepath.Join(t.TempDir(), "snap.db")
+
+	ok, err := Snapshot(ctx, filepath.Join(t.TempDir(), "nope.db"), dst)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if ok {
+		t.Error("ok = true for a missing source")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("snapshot written for a missing source")
+	}
+}
+
+func TestSnapshotCopiesLiveData(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "waffle.db")
+
+	// Populate a live WAL-mode DB so recent writes sit in the -wal sidecar,
+	// which a raw file copy would miss.
+	live, err := Open(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live.DB.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES ('probe', 'live-value')`); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(dir, "snap.db")
+	ok, err := Snapshot(ctx, src, dst)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false for an existing source")
+	}
+	_ = live.Close()
+
+	// The snapshot opens and carries the row written before the copy.
+	snap, err := Open(ctx, dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	defer snap.Close() //nolint:errcheck // test teardown
+	var value string
+	if err := snap.DB.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = 'probe'`).Scan(&value); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if value != "live-value" {
+		t.Errorf("snapshot value = %q, want live-value", value)
+	}
+}
+
+func TestSnapshotRefusesExistingDest(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "waffle.db")
+	if s, err := Open(ctx, src); err != nil {
+		t.Fatal(err)
+	} else {
+		_ = s.Close()
+	}
+	dst := filepath.Join(dir, "snap.db")
+	if err := os.WriteFile(dst, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// VACUUM INTO requires the destination not exist; the error must surface.
+	if _, err := Snapshot(ctx, src, dst); err == nil {
+		t.Error("Snapshot overwrote an existing destination without error")
+	}
+}
 
 func TestOpenAppliesMigrations(t *testing.T) {
 	ctx := context.Background()

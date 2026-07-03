@@ -10,9 +10,42 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/channel"
 )
+
+func TestSplitKeepsValidUTF8(t *testing.T) {
+	// A run of 3-byte runes with no newline, forced to split mid-run.
+	text := strings.Repeat("界", 100) // 300 bytes
+	chunks := split(text, 50)
+
+	if strings.Join(chunks, "") != text {
+		t.Fatal("chunks don't reassemble to the original")
+	}
+	for i, c := range chunks {
+		if len(c) > 50 {
+			t.Errorf("chunk %d is %d bytes, over limit", i, len(c))
+		}
+		if !utf8.ValidString(c) {
+			t.Errorf("chunk %d is not valid UTF-8: %q", i, c)
+		}
+	}
+}
+
+func TestSplitPrefersNewlines(t *testing.T) {
+	text := strings.Repeat("line\n", 20) // 100 bytes, newline every 5
+	chunks := split(text, 40)
+	if strings.Join(chunks, "") != text {
+		t.Fatal("chunks don't reassemble")
+	}
+	// Every chunk but the last should end on a newline boundary.
+	for i, c := range chunks[:len(chunks)-1] {
+		if !strings.HasSuffix(c, "\n") {
+			t.Errorf("chunk %d did not end on a newline: %q", i, c)
+		}
+	}
+}
 
 func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 	var mu sync.Mutex

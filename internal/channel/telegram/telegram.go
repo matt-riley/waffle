@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/channel"
 )
@@ -178,11 +179,13 @@ func (a *Adapter) call(ctx context.Context, method string, params map[string]any
 }
 
 // split breaks text into chunks of at most limit bytes, preferring line
-// boundaries so code blocks and lists survive.
+// boundaries so code blocks and lists survive. When no line boundary is
+// available it cuts on a UTF-8 rune boundary, so a multi-byte character
+// (accented text, emoji) is never split into invalid UTF-8.
 func split(text string, limit int) []string {
 	var chunks []string
 	for len(text) > limit {
-		cut := limit
+		cut := runeBoundary(text, limit)
 		if i := lastIndexByte(text[:limit], '\n'); i > limit/2 {
 			cut = i + 1
 		}
@@ -193,6 +196,19 @@ func split(text string, limit int) []string {
 		chunks = append(chunks, text)
 	}
 	return chunks
+}
+
+// runeBoundary returns the largest index <= limit at which text can be cut
+// without splitting a multi-byte rune (i.e. text[index] begins a rune).
+func runeBoundary(text string, limit int) int {
+	i := limit
+	for i > 0 && !utf8.RuneStart(text[i]) {
+		i--
+	}
+	if i == 0 {
+		return limit // a single rune longer than limit; cut anyway to progress
+	}
+	return i
 }
 
 func lastIndexByte(s string, b byte) int {

@@ -26,9 +26,18 @@ type Gateway struct {
 	Adapters []channel.Adapter
 	Log      *slog.Logger
 
+	// MaxConcurrent bounds in-flight message handlers so a flooding
+	// channel can't spawn unbounded goroutines. Zero means the default.
+	MaxConcurrent int
+
 	mu     sync.Mutex
 	groups map[string]*sync.Mutex // per-conversation serialization
 }
+
+// defaultMaxConcurrent caps simultaneous message handlers. Generous for a
+// single-owner agent, but bounded so a misbehaving channel can't exhaust
+// memory.
+const defaultMaxConcurrent = 8
 
 // Run starts every adapter and processes inbound messages until ctx ends.
 func (g *Gateway) Run(ctx context.Context) error {
@@ -41,11 +50,11 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 
 	inbound := make(chan channel.Message, 64)
-	var wg sync.WaitGroup
+	var adapters sync.WaitGroup
 	for _, a := range g.Adapters {
-		wg.Add(1)
+		adapters.Add(1)
 		go func(a channel.Adapter) {
-			defer wg.Done()
+			defer adapters.Done()
 			if err := a.Run(ctx, inbound); err != nil {
 				g.Log.Error("adapter stopped", "channel", a.Name(), "err", err)
 			}
@@ -53,15 +62,37 @@ func (g *Gateway) Run(ctx context.Context) error {
 		g.Log.Info("channel up", "channel", a.Name())
 	}
 
+	// Bound in-flight handlers with a semaphore, and track them so shutdown
+	// drains work already accepted rather than abandoning it mid-turn.
+	maxConcurrent := g.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrent
+	}
+	sem := make(chan struct{}, maxConcurrent)
+	var handlers sync.WaitGroup
+
 	for {
 		select {
 		case <-ctx.Done():
-			wg.Wait()
+			adapters.Wait() // adapters stop feeding inbound
+			handlers.Wait() // in-flight handlers finish
 			return nil
 		case msg := <-inbound:
-			// Handle concurrently across conversations, serially within
-			// one (the per-group lock).
-			go g.handle(ctx, msg)
+			// Acquire a slot before spawning: under a flood this blocks the
+			// loop (applying backpressure) instead of piling up goroutines.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				continue
+			}
+			handlers.Add(1)
+			go func(msg channel.Message) {
+				defer handlers.Done()
+				defer func() { <-sem }()
+				// Handle concurrently across conversations, serially within
+				// one (the per-group lock).
+				g.handle(ctx, msg)
+			}(msg)
 		}
 	}
 }
