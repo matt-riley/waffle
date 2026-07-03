@@ -64,9 +64,26 @@ func Builtins() *Registry {
 // truncate caps tool output so a chatty command can't blow out the context
 // window; it keeps the head and tail, which is where the signal usually is.
 func truncate(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(s) <= limit {
 		return s
 	}
-	half := limit / 2
-	return s[:half] + fmt.Sprintf("\n... [%d bytes truncated] ...\n", len(s)-limit) + s[len(s)-half:]
+	marker := ""
+	head, tail := 0, 0
+	for {
+		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", len(s)-head-tail)
+		available := limit - len(marker)
+		if available <= 0 {
+			return s[:limit]
+		}
+		nextHead := available / 2
+		nextTail := available - nextHead
+		if nextHead == head && nextTail == tail {
+			break
+		}
+		head, tail = nextHead, nextTail
+	}
+	return s[:head] + marker + s[len(s)-tail:]
 }

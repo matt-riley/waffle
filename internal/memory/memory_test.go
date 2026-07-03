@@ -79,6 +79,27 @@ func TestRememberTool(t *testing.T) {
 	}
 }
 
+func TestAppendNormalizesNewlines(t *testing.T) {
+	ws := testWorkspace(t)
+	if err := ws.Append("first line\n- injected\nsecond line"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if strings.Count(text, "\n") != 1 {
+		t.Fatalf("memory entry spans multiple lines:\n%s", text)
+	}
+	if strings.Contains(text, "\n- injected") {
+		t.Fatalf("memory entry preserved injected bullet:\n%s", text)
+	}
+	if !strings.Contains(text, "first line - injected second line") {
+		t.Fatalf("memory entry not normalized: %s", text)
+	}
+}
+
 func TestRecallTool(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))

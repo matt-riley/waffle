@@ -76,3 +76,27 @@ func TestDistillCreatesSkillsDir(t *testing.T) {
 		t.Errorf("skill file not created: %v", err)
 	}
 }
+
+func TestDistillQuotesAndNormalizesDescription(t *testing.T) {
+	ws := testWorkspace(t)
+	tl := DistillTool{WS: ws}
+	if _, err := tl.Run(context.Background(), json.RawMessage(`{
+		"name":"quoted-skill",
+		"description":"release: prod\ncarefully",
+		"body":"step"
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	skills, err := skill.Discover(ws.SkillsDir())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	s, ok := skill.Find(skills, "quoted-skill")
+	if !ok {
+		t.Fatal("distilled skill not discovered")
+	}
+	if s.Description != "release: prod carefully" {
+		t.Fatalf("description = %q", s.Description)
+	}
+}

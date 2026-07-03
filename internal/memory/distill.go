@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -61,7 +62,7 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		return "", err
 	}
 	content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n",
-		in.Name, in.Description, strings.TrimSpace(in.Body))
+		in.Name, strconv.Quote(oneLine(in.Description)), strings.TrimSpace(in.Body))
 	path := filepath.Join(dir, "SKILL.md")
 	existed := fileExists(path)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

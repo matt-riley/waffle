@@ -108,7 +108,7 @@ func dockerRunArgs(name string, opts DockerOpts) []string {
 			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
 		)
 	}
-	return append(args, opts.Image, "waffle", "runner", "--queue", "/waffle/queue")
+	return append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
 }
 
 // Defs implements tool.Toolbox: the sandbox serves the builtin toolset.

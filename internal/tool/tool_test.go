@@ -106,4 +106,7 @@ func TestTruncateKeepsHeadAndTail(t *testing.T) {
 	if truncate("short", 50) != "short" {
 		t.Error("short string modified")
 	}
+	if len(got) > 50 {
+		t.Fatalf("truncate produced %d bytes, want <= 50", len(got))
+	}
 }

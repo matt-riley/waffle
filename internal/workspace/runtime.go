@@ -75,7 +75,7 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
 		)
 	}
-	return append(args, opts.Image, "waffle", "runner", "--queue", "/waffle/queue")
+	return append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
 }
 
 func (d DockerRuntime) StopContainer(ctx context.Context, name string) error {

@@ -170,7 +170,7 @@ func TestDockerRunArgs(t *testing.T) {
 		"-v /home/u/project:/work",
 		"--add-host waffle-host:host-gateway",
 		"-e WAFFLE_SESSION_TOKEN=wk_abc",
-		"debian:stable-slim waffle runner --queue /waffle/queue",
+		"debian:stable-slim /usr/local/bin/waffle runner --queue /waffle/queue",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q:\n%s", want, joined)

@@ -79,12 +79,16 @@ func (w Workspace) Append(note string) error {
 	if err != nil {
 		return err
 	}
-	line := fmt.Sprintf("- %s: %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(note))
+	line := fmt.Sprintf("- %s: %s\n", time.Now().Format("2006-01-02"), oneLine(note))
 	if _, err := f.WriteString(line); err != nil {
 		f.Close() //nolint:errcheck // write already failed
 		return err
 	}
 	return f.Close()
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
 // RememberTool lets the model curate MEMORY.md.
