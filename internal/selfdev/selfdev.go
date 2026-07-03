@@ -9,12 +9,15 @@ package selfdev
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	_ "modernc.org/sqlite" // pure-Go sqlite driver, for VACUUM INTO snapshots
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -48,22 +51,26 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	cfg, err := config.Load(cfgPath)
 	add("config parses", err, cfgPath)
 
-	// Migrate on a copy of the real DB (or a fresh one) so a bad migration
-	// is caught without risking live data.
+	// Migrate on a consistent snapshot of the real DB (or a fresh one) so a
+	// bad migration is caught without risking live data. The store runs in
+	// WAL mode, where recent writes live in -wal/-shm sidecars; a raw file
+	// copy of the main .db alone can be inconsistent. `VACUUM INTO` writes
+	// a single self-contained file that folds in the WAL, from a separate
+	// connection — safe even while the gateway is running.
 	tmp, err := os.MkdirTemp("", "waffle-doctor-*")
 	if err != nil {
 		return nil, false, err
 	}
 	defer os.RemoveAll(tmp) //nolint:errcheck // temp dir
-	if dbPath, e := config.DBPath(); e == nil {
-		if src, e := os.ReadFile(dbPath); e == nil {
-			_ = os.WriteFile(filepath.Join(tmp, "waffle.db"), src, 0o600)
+	snapshot := filepath.Join(tmp, "waffle.db")
+	if err := snapshotDB(ctx, snapshot); err != nil {
+		add("database snapshot", err, "")
+	} else {
+		st, err := store.Open(ctx, snapshot)
+		add("database migrates", err, "on a throwaway snapshot")
+		if st != nil {
+			_ = st.Close()
 		}
-	}
-	st, err := store.Open(ctx, filepath.Join(tmp, "waffle.db"))
-	add("database migrates", err, "on a throwaway copy")
-	if st != nil {
-		_ = st.Close()
 	}
 
 	// Secret store: if an identity exists, it must decrypt.
@@ -153,6 +160,28 @@ func Rollback() (string, error) {
 		return "", err
 	}
 	return self, nil
+}
+
+// snapshotDB writes a consistent copy of the live database to dst. If there
+// is no live database yet, it leaves dst absent so store.Open creates a
+// fresh one — which still exercises every migration.
+func snapshotDB(ctx context.Context, dst string) error {
+	dbPath, err := config.DBPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+		return nil // no live DB; migrations run on a fresh file
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck // read-only handle
+	// VACUUM INTO produces a self-contained, consistent copy including any
+	// WAL contents. The destination must not already exist.
+	_, err = db.ExecContext(ctx, "VACUUM INTO ?", dst)
+	return err
 }
 
 func run(ctx context.Context, dir string, stderr io.Writer, name string, args ...string) error {

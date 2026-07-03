@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/tool"
-
-	"os"
 )
 
 // runnerCmd is the sandbox-side entrypoint: the same waffle binary,

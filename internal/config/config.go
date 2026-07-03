@@ -166,8 +166,8 @@ func DBPath() (string, error) { return homePath("waffle.db") }
 func SecretsPath() (string, error) { return homePath("secrets.age") }
 
 // Load reads the config file at path, layered over Default. A missing file
-// is not an error. Unknown keys are: they are almost always typos, and a
-// silently ignored policy key is a security bug.
+// is not an error, but unknown keys are rejected: they are almost always
+// typos, and a silently ignored policy key would be a security bug.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	meta, err := toml.DecodeFile(path, &cfg)

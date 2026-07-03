@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,6 +68,39 @@ func TestConnectListAndCall(t *testing.T) {
 	}
 	if out != "pong" {
 		t.Errorf("out = %q", out)
+	}
+}
+
+// TestConcurrentCalls exercises the demux reader: many parallel tool calls
+// on one connection must each get their own response, none dropped.
+func TestConcurrentCalls(t *testing.T) {
+	path := writeFakeServer(t)
+	ctx := context.Background()
+	client, err := Connect(ctx, Server{Name: "fake", Command: "bash", Args: []string{path}})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close() //nolint:errcheck // test teardown
+	tb, err := client.Toolbox(ctx)
+	if err != nil {
+		t.Fatalf("Toolbox: %v", err)
+	}
+
+	const n = 20
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			out, err := tb.Run(ctx, "fake__echo", json.RawMessage(`{"text":"ping"}`))
+			if err == nil && out != "pong" {
+				err = fmt.Errorf("got %q", out)
+			}
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent call %d: %v", i, err)
+		}
 	}
 }
 

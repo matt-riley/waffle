@@ -49,15 +49,22 @@ type rpcError struct {
 
 func (e *rpcError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Code, e.Message) }
 
-// Client is a live connection to one MCP server.
+// Client is a live connection to one MCP server. A single reader goroutine
+// demultiplexes responses by request id, so concurrent calls (the agent
+// dispatches tools in parallel) never race on the stdout stream.
 type Client struct {
 	name string
 	cmd  *exec.Cmd
 	in   io.WriteCloser
 	out  *bufio.Reader
 
-	mu     sync.Mutex
-	nextID int
+	writeMu sync.Mutex // serializes writes to stdin
+
+	mu      sync.Mutex // guards nextID and pending
+	nextID  int
+	pending map[int]chan rpcResponse
+	readErr error // set once when the reader loop exits
+	closed  chan struct{}
 }
 
 // Connect launches the server process and performs the initialize
@@ -75,7 +82,15 @@ func Connect(ctx context.Context, s Server) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("mcp %s: start %q: %w", s.Name, s.Command, err)
 	}
-	c := &Client{name: s.Name, cmd: cmd, in: stdin, out: bufio.NewReader(stdout)}
+	c := &Client{
+		name:    s.Name,
+		cmd:     cmd,
+		in:      stdin,
+		out:     bufio.NewReader(stdout),
+		pending: map[int]chan rpcResponse{},
+		closed:  make(chan struct{}),
+	}
+	go c.readLoop()
 
 	if _, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
@@ -101,66 +116,94 @@ func (c *Client) Close() error {
 	return c.cmd.Wait()
 }
 
+// readLoop is the sole reader of the server's stdout. It routes each
+// response to the channel registered under its id and, on stream error,
+// fails every in-flight call.
+func (c *Client) readLoop() {
+	defer close(c.closed)
+	for {
+		line, err := c.out.ReadBytes('\n')
+		if err != nil {
+			c.mu.Lock()
+			c.readErr = err
+			for id, ch := range c.pending {
+				close(ch)
+				delete(c.pending, id)
+			}
+			c.mu.Unlock()
+			return
+		}
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == "" {
+			continue
+		}
+		var resp rpcResponse
+		if err := json.Unmarshal([]byte(trimmed), &resp); err != nil {
+			continue // skip non-JSON log lines the server may emit
+		}
+		c.mu.Lock()
+		ch, ok := c.pending[resp.ID]
+		if ok {
+			delete(c.pending, resp.ID)
+		}
+		c.mu.Unlock()
+		if ok {
+			ch <- resp
+		}
+	}
+}
+
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
+	if c.readErr != nil {
+		c.mu.Unlock()
+		return nil, c.readErr
+	}
 	c.nextID++
 	id := c.nextID
-	req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
-	body, err := json.Marshal(req)
-	if err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-	if _, err := fmt.Fprintf(c.in, "%s\n", body); err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
+	ch := make(chan rpcResponse, 1)
+	c.pending[id] = ch
 	c.mu.Unlock()
 
-	type result struct {
-		resp *rpcResponse
-		err  error
+	unregister := func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 	}
-	done := make(chan result, 1)
-	go func() {
-		for {
-			line, err := c.out.ReadBytes('\n')
-			if err != nil {
-				done <- result{err: err}
-				return
-			}
-			line = []byte(strings.TrimSpace(string(line)))
-			if len(line) == 0 {
-				continue
-			}
-			var resp rpcResponse
-			if err := json.Unmarshal(line, &resp); err != nil {
-				continue // skip non-JSON log lines
-			}
-			if resp.ID == id {
-				done <- result{resp: &resp}
-				return
-			}
-		}
-	}()
+
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+	if err != nil {
+		unregister()
+		return nil, err
+	}
+	c.writeMu.Lock()
+	_, err = fmt.Fprintf(c.in, "%s\n", body)
+	c.writeMu.Unlock()
+	if err != nil {
+		unregister()
+		return nil, err
+	}
 
 	select {
 	case <-ctx.Done():
+		unregister()
 		return nil, ctx.Err()
-	case r := <-done:
-		if r.err != nil {
-			return nil, r.err
+	case resp, ok := <-ch:
+		if !ok {
+			return nil, fmt.Errorf("mcp %s: connection closed: %w", c.name, c.readErr)
 		}
-		if r.resp.Error != nil {
-			return nil, r.resp.Error
+		if resp.Error != nil {
+			return nil, resp.Error
 		}
-		return r.resp.Result, nil
+		return resp.Result, nil
 	}
 }
 
 func (c *Client) notify(method string) error {
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
+	c.writeMu.Lock()
 	_, err := fmt.Fprintf(c.in, "%s\n", body)
+	c.writeMu.Unlock()
 	return err
 }
 
