@@ -41,9 +41,12 @@ func (r *Runner) Serve(ctx context.Context, dir string) error {
 		return err
 	}
 
-	// Background heartbeat so that clients can detect whether this runner
-	// is alive (or has died) *while* a long-running tool is executing.
-	// The main Serve loop blocks in step/Run for the duration of e.g. bash.
+	// Heartbeat goroutine tied to a derived ctx canceled on any Serve return
+	// (including early errors), so it exits before DB close even if caller ctx
+	// is still alive.
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
 	go func() {
 		hb := time.NewTicker(2 * time.Second)
 		defer hb.Stop()
@@ -51,10 +54,10 @@ func (r *Runner) Serve(ctx context.Context, dir string) error {
 			select {
 			case <-hb.C:
 				ts := time.Now().UTC().Format(time.RFC3339Nano)
-				_, _ = out.ExecContext(ctx,
+				_, _ = out.ExecContext(serveCtx,
 					`INSERT OR REPLACE INTO results (request_id, content, is_error, created_at)
 					 VALUES (?, 'alive', 0, ?)`, runnerHealthID, ts)
-			case <-ctx.Done():
+			case <-serveCtx.Done():
 				return
 			}
 		}

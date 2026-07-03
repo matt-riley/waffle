@@ -110,10 +110,13 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 }
 
 // lastHealth returns the timestamp of the most recent runner heartbeat row
-// (or zero time if none present).
+// (or zero time if none present). It uses a short internal timeout to avoid
+// blocking on SQLite locks beyond the per-poll deadline.
 func (c *Client) lastHealth(ctx context.Context) (time.Time, error) {
+	hctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
 	var ts string
-	err := c.outbound.QueryRowContext(ctx,
+	err := c.outbound.QueryRowContext(hctx,
 		`SELECT created_at FROM results WHERE request_id = ?`, runnerHealthID).Scan(&ts)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -129,10 +132,12 @@ func (c *Client) lastHealth(ctx context.Context) (time.Time, error) {
 }
 
 // attemptShutdown tries to tell a possibly-alive runner to exit; best-effort.
+// Uses background so it runs even if caller ctx is already done/canceled.
 func (c *Client) attemptShutdown(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// ignore passed ctx; use fresh background for best-effort
+	hctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	_ = c.Shutdown(ctx)
+	_ = c.Shutdown(hctx)
 }
 
 // Shutdown asks the runner to exit after finishing in-flight work.
