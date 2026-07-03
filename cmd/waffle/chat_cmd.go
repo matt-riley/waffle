@@ -189,9 +189,16 @@ func (c *chat) finish(ctx context.Context, stdout io.Writer) {
 	defer cancel()
 
 	prompt := llm.UserText("The conversation is over. Summarize it in 2-3 sentences for future recall: what was worked on, decisions made, and anything left unfinished. Reply with only the summary.")
+	// Trim history for this direct Complete (summary) call to avoid
+	// appending full prior history every time; complements agent's
+	// prepareContext summarize-and-truncate (Issue 3).
+	hist := c.history
+	if len(hist) > 30 {
+		hist = hist[len(hist)-30:]
+	}
 	resp, err := c.agent.Provider.Complete(ctx, llm.Request{
 		Model:     c.agent.Model,
-		Messages:  append(append([]llm.Message{}, c.history...), prompt),
+		Messages:  append(append([]llm.Message{}, hist...), prompt),
 		MaxTokens: 1024,
 	}, nil)
 	if err != nil {

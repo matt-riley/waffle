@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -196,5 +197,61 @@ func TestRunIterationGuard(t *testing.T) {
 	}
 	if len(p.requests) != 3 {
 		t.Errorf("provider called %d times, want 3", len(p.requests))
+	}
+}
+
+// TestRunSummarizeAndTruncate verifies that prepareContext injects a
+// summary for long histories (Issue 3) and keeps Messages bounded in
+// Complete calls, while full history is still returned.
+func TestRunSummarizeAndTruncate(t *testing.T) {
+	// Provide responses: first for the summarize() Complete inside
+	// prepare, second for the main agent Complete.
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("old work: planned then coded"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("ok with recent"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+
+	// Build history > recentWindow (20). Only last 20 +1 summary go to main.
+	longHist := make([]llm.Message, 25)
+	for i := 0; i < 25; i++ {
+		longHist[i] = llm.UserText(fmt.Sprintf("turn %d", i))
+	}
+	// The last must be the "user" that Run expects to start from; but
+	// since we pass many, Run will treat whole as prior+current? In
+	// practice caller appends the latest user. For test, append final.
+	hist := append(longHist, llm.UserText("current question"))
+
+	history, err := a.Run(context.Background(), hist, Hooks{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// returned keeps full + the assistant reply
+	if len(history) != len(hist)+1 {
+		t.Fatalf("returned history len=%d want %d+1 (full preserved)", len(history), len(hist))
+	}
+
+	// Two completes: 0=sum, 1=main
+	if len(p.requests) != 2 {
+		t.Fatalf("completes=%d want 2 (one for summarize, one main)", len(p.requests))
+	}
+
+	// The summarize call uses only 2 msgs (flattened + prompt) not full history.
+	sumReq := p.requests[0]
+	if len(sumReq.Messages) != 2 {
+		t.Errorf("summarize request msgs=%d want 2 (flat+prompt)", len(sumReq.Messages))
+	}
+
+	// Main request uses summary + recent window (<=21)
+	mainReq := p.requests[1]
+	if len(mainReq.Messages) > recentWindow+1 {
+		t.Errorf("main context msgs=%d exceeds window+1", len(mainReq.Messages))
+	}
+	if len(mainReq.Messages) < 2 {
+		t.Errorf("main context too small")
+	}
+	// The first msg in main context should be the injected summary note.
+	if mainReq.Messages[0].Role != llm.RoleUser || !strings.Contains(mainReq.Messages[0].Text(), "Summary of earlier") {
+		t.Errorf("first main msg not summary: %+v", mainReq.Messages[0])
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -40,9 +41,22 @@ type Hooks struct {
 // ErrMaxIterations is returned when a Run hits the iteration guard.
 var ErrMaxIterations = errors.New("agent: too many iterations without completing")
 
+// maxToolConcurrency and toolSem provide a bounded global semaphore for
+// concurrent execution of tools and subagents (separate from gateway's
+// inbound MaxConcurrent semaphore for handlers). This bounds goroutine use
+// and prevents a blocking tool or deep subagent spawn (if depth bypassed)
+// from exhausting resources. Acquire before executing a tool dispatch.
+const maxToolConcurrency = 32
+
+var toolSem = make(chan struct{}, maxToolConcurrency)
+
 // Run advances the conversation until the model finishes its turn. history
 // must end with the user's message; the returned history includes every
 // assistant message and tool exchange appended during the run.
+//
+// Context for each provider.Complete uses prepareContext (summarize-and-
+// truncate for older turns per docs/plan.md:89) while the returned slice
+// retains the full history for persistence/FTS.
 func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]llm.Message, error) {
 	maxIter := a.MaxIterations
 	if maxIter <= 0 {
@@ -50,10 +64,14 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	}
 
 	for i := 0; i < maxIter; i++ {
+		// Pre-Complete step: summarize old turns + recent window. This
+		// bounds prompt size independent of total session length (only
+		// MaxIterations + provider MaxTokens were bounds before).
+		messages := a.prepareContext(ctx, history)
 		resp, err := a.Provider.Complete(ctx, llm.Request{
 			Model:     a.Model,
 			System:    a.System,
-			Messages:  history,
+			Messages:  messages,
 			Tools:     a.Tools.Defs(),
 			MaxTokens: a.MaxTokens,
 		}, func(e llm.Event) {
@@ -86,6 +104,10 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 
 // runTools executes tool calls in parallel (independent by contract) and
 // returns results in request order, as the API requires.
+//
+// Concurrency is bounded by the package toolSem (see maxToolConcurrency)
+// to avoid exhausting goroutines when many tools are called or a tool/subagent
+// blocks (depth limit in SubagentTool is belt-and-suspenders).
 func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) []llm.ToolResult {
 	results := make([]llm.ToolResult, len(uses))
 	var wg sync.WaitGroup
@@ -96,7 +118,19 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 		wg.Add(1)
 		go func(i int, use llm.ToolUse) {
 			defer wg.Done()
-			results[i] = a.runOne(ctx, use)
+			// Acquire bounded slot for this tool execution (covers
+			// subagent spawns too, since they execute via tool dispatch).
+			select {
+			case toolSem <- struct{}{}:
+				defer func() { <-toolSem }()
+				results[i] = a.runOne(ctx, use)
+			case <-ctx.Done():
+				results[i] = llm.ToolResult{
+					ToolUseID: use.ID,
+					Content:   "canceled before acquiring execution slot",
+					IsError:   true,
+				}
+			}
 		}(i, use)
 	}
 	wg.Wait()
@@ -119,4 +153,76 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 		res.Content = a.Redact(res.Content)
 	}
 	return res
+}
+
+// recentWindow is the number of trailing messages to keep verbatim for
+// provider calls. Older messages are summarized into a single injected
+// block (using reflection prompt style from chat finish). This implements
+// the summarize-and-truncate required by docs/plan.md while full history
+// is kept for SQLite FTS.
+const recentWindow = 20
+
+// prepareContext returns messages for a Complete call. If history exceeds
+// the window, a summary of the prefix is generated (via provider) and
+// prepended; only the recent window follows it. The returned slice is a
+// copy; the caller's history remains the full transcript.
+func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message) []llm.Message {
+	n := len(fullHistory)
+	if n <= recentWindow {
+		return append([]llm.Message(nil), fullHistory...)
+	}
+	prefix := fullHistory[:n-recentWindow]
+	summaryText := a.summarize(ctx, prefix)
+
+	// Synthetic note injected for the model only (not appended to
+	// history, so not persisted as a turn).
+	sumMsg := llm.Message{
+		Role: llm.RoleUser,
+		Blocks: []llm.Block{{
+			Type: llm.BlockText,
+			Text: "Summary of earlier conversation (context management; full turns stored in SQLite for search): " + summaryText,
+		}},
+	}
+	recent := make([]llm.Message, recentWindow)
+	copy(recent, fullHistory[n-recentWindow:])
+	return append([]llm.Message{sumMsg}, recent...)
+}
+
+// summarize uses a reflection-style prompt on a *flattened* prefix (single
+// message) so the summarizer Complete itself does not append full prior
+// history list. This also helps direct Provider.Complete callers for
+// summaries (e.g. chat finish).
+func (a *Agent) summarize(ctx context.Context, prefix []llm.Message) string {
+	if len(prefix) == 0 || a.Provider == nil {
+		return "(no prior context)"
+	}
+	// Flatten to text: avoids sending hundreds of Message structs for the
+	// summary request.
+	var b strings.Builder
+	for _, m := range prefix {
+		t := m.Text()
+		for _, bl := range m.Blocks {
+			if bl.Type == llm.BlockToolResult && bl.ToolResult != nil {
+				t += " " + bl.ToolResult.Content
+			}
+		}
+		if t != "" {
+			fmt.Fprintf(&b, "%s: %s\n", m.Role, t)
+		}
+	}
+	flat := llm.UserText("Prior turns (summarize these):\n" + b.String())
+	prompt := llm.UserText("Summarize the prior conversation turns above in 2-3 sentences for context. Focus on key facts, decisions, work done and anything unfinished. Reply with only the summary.")
+	resp, err := a.Provider.Complete(ctx, llm.Request{
+		Model:     a.Model,
+		Messages:  []llm.Message{flat, prompt},
+		MaxTokens: 256,
+	}, nil)
+	if err != nil {
+		return fmt.Sprintf("(summarization error: %v)", err)
+	}
+	s := strings.TrimSpace(resp.Message.Text())
+	if s == "" {
+		return "(no summary produced)"
+	}
+	return s
 }
