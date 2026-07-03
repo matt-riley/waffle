@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -68,11 +69,12 @@ func (s *scriptedBash) ran(substr string) bool {
 
 // fakeRuntime runs an in-process Runner per "container" instead of docker.
 type fakeRuntime struct {
-	mu      sync.Mutex
-	tools   *scriptedBash
-	cancels map[string]context.CancelFunc
-	events  []string
-	opts    []ContainerOpts
+	mu       sync.Mutex
+	tools    *scriptedBash
+	cancels  map[string]context.CancelFunc
+	events   []string
+	opts     []ContainerOpts
+	startErr error
 }
 
 func newFakeRuntime(tools *scriptedBash) *fakeRuntime {
@@ -88,8 +90,12 @@ func (f *fakeRuntime) log(e string) {
 func (f *fakeRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) error {
 	f.mu.Lock()
 	f.opts = append(f.opts, opts)
+	startErr := f.startErr
 	f.mu.Unlock()
 	f.log("start-workspace " + opts.Name + " image=" + opts.Image)
+	if startErr != nil {
+		return startErr
+	}
 	f.launch(opts.Name, opts.QueueDir)
 	return nil
 }
@@ -114,6 +120,11 @@ func (f *fakeRuntime) StopContainer(ctx context.Context, name string) error {
 func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
 	f.log("restart " + name)
 	f.mu.Lock()
+	if f.startErr != nil {
+		err := f.startErr
+		f.mu.Unlock()
+		return err
+	}
 	var queueDir string
 	for _, o := range f.opts {
 		if o.Name == name {
@@ -123,6 +134,13 @@ func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
 	f.mu.Unlock()
 	f.launch(name, queueDir)
 	return nil
+}
+
+func TestDefaultImageIncludesGit(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	if mgr.DefaultImage != "buildpack-deps:bookworm-scm" {
+		t.Fatalf("DefaultImage = %q, want an image containing Git", mgr.DefaultImage)
+	}
 }
 
 func (f *fakeRuntime) RemoveContainer(ctx context.Context, name string) error {
@@ -197,6 +215,35 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	defer client2.Close() //nolint:errcheck // test teardown
 	if ws2.ID != ws.ID {
 		t.Errorf("second open made a new workspace: %s vs %s", ws2.ID, ws.ID)
+	}
+}
+
+func TestOpenRefreshesBrokerTokenForExistingWorkspace(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	token := "wk_first"
+	mgr.MintToken = func(context.Context, string) string { return token }
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck // reopening with a new broker token
+
+	token = "wk_second"
+	resumed, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer client.Close() //nolint:errcheck // test teardown
+	if resumed.ID != ws.ID {
+		t.Fatalf("reopen created workspace %s, want %s", resumed.ID, ws.ID)
+	}
+	rt.mu.Lock()
+	opts := append([]ContainerOpts(nil), rt.opts...)
+	rt.mu.Unlock()
+	if len(opts) < 2 || opts[len(opts)-1].Token != "wk_second" {
+		t.Fatalf("container starts = %+v, want refreshed broker token", opts)
 	}
 }
 
@@ -308,6 +355,58 @@ func TestCloseRefusesUnpushedWork(t *testing.T) {
 	}
 	if got, _ := mgr.Get(ctx, ws.ID); got.Status != StatusClosed {
 		t.Errorf("status = %s", got.Status)
+	}
+}
+
+func TestCloseRefusesCommitsWithoutUpstream(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git log --oneline HEAD --not --remotes": "abc123 local commit",
+	}}
+	mgr, rt := newTestManager(t, tools)
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck // manager reconnects in Close
+
+	report, err := mgr.Close(ctx, ws.ID, false)
+	if err == nil {
+		t.Fatal("Close succeeded despite a commit not present on any remote")
+	}
+	if report.Unpushed != "abc123 local commit" {
+		t.Fatalf("Unpushed = %q", report.Unpushed)
+	}
+	if strings.Contains(strings.Join(rt.events, "\n"), "rmvol ") {
+		t.Fatal("workspace volume removed despite unpushed work")
+	}
+}
+
+func TestCloseAbortsWhenIdleWorkspaceCannotResume(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck // manager reconnects in Close
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	rt.startErr = errors.New("docker unavailable")
+	rt.mu.Unlock()
+
+	if _, err := mgr.Close(ctx, ws.ID, false); err == nil || !strings.Contains(err.Error(), "docker unavailable") {
+		t.Fatalf("Close error = %v, want resume failure", err)
+	}
+	if strings.Contains(strings.Join(rt.events, "\n"), "rmvol ") {
+		t.Fatal("workspace volume removed after resume failure")
+	}
+	if got, err := mgr.Get(ctx, ws.ID); err != nil || got.Status == StatusClosed {
+		t.Fatalf("workspace after failed close = %+v, %v", got, err)
 	}
 }
 

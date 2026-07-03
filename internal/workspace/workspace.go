@@ -71,7 +71,7 @@ func NewManager(st *store.Store, sessions *session.Store, rt Runtime, queueRoot 
 		Sessions:     sessions,
 		Runtime:      rt,
 		QueueRoot:    queueRoot,
-		DefaultImage: "debian:stable-slim",
+		DefaultImage: "buildpack-deps:bookworm-scm",
 		Network:      "bridge",
 		ExecTimeout:  10 * time.Minute,
 	}
@@ -213,16 +213,24 @@ func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) 
 	return nil
 }
 
-// bashOut runs a command and returns its output ("" on any failure).
-func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
+func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, m.ExecTimeout)
 	defer cancel()
 	input, _ := json.Marshal(map[string]any{"command": cmd})
 	out, isError, err := client.Exec(ctx, "bash", input)
-	if err != nil || isError {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return strings.TrimSpace(out)
+	if isError {
+		return "", fmt.Errorf("%s: %s", cmd, strings.TrimSpace(out))
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// bashOut runs a best-effort command and returns "" on failure.
+func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
+	out, _ := m.bashOutput(ctx, client, cmd)
+	return out
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
@@ -262,10 +270,24 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	if err != nil {
 		return nil, nil, err
 	}
-	switch ws.Status {
-	case StatusClosed:
+	if ws.Status == StatusClosed {
 		return nil, nil, fmt.Errorf("workspace %s is closed", id)
-	case StatusIdle:
+	}
+
+	if m.MintToken != nil {
+		token := m.MintToken(ctx, ws.SessionID)
+		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+			return nil, nil, fmt.Errorf("replace workspace container: %w", err)
+		}
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+			_ = m.setStatus(ctx, id, StatusIdle)
+			return nil, nil, fmt.Errorf("restart workspace with refreshed credentials: %w", err)
+		}
+		if err := m.setStatus(ctx, id, StatusOpen); err != nil {
+			return nil, nil, err
+		}
+		ws.Status = StatusOpen
+	} else if ws.Status == StatusIdle {
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			return nil, nil, err
 		}
@@ -299,19 +321,31 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 	}
 
 	report := &CloseReport{}
-	if ws.Status == StatusIdle {
-		if _, _, err := m.Resume(ctx, id); err == nil {
-			ws.Status = StatusOpen
+	if !force {
+		var client *sandbox.Client
+		if ws.Status == StatusIdle {
+			resumed, resumedClient, err := m.Resume(ctx, id)
+			if err != nil {
+				return report, fmt.Errorf("resume workspace for safety check: %w", err)
+			}
+			ws = resumed
+			client = resumedClient
+		} else {
+			client, err = sandbox.NewClient(m.queueDir(ws.ID))
+			if err != nil {
+				return report, fmt.Errorf("connect workspace for safety check: %w", err)
+			}
 		}
-	}
-	if ws.Status == StatusOpen {
-		client, err := sandbox.NewClient(m.queueDir(ws.ID))
+
+		report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
 		if err == nil {
-			report.Dirty = m.bashOut(ctx, client, "cd /work/repo && git status --porcelain")
-			report.Unpushed = m.bashOut(ctx, client, "cd /work/repo && git log --oneline @{upstream}..HEAD 2>/dev/null")
-			_ = client.Close()
+			report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
 		}
-		if !force && (report.Dirty != "" || report.Unpushed != "") {
+		_ = client.Close()
+		if err != nil {
+			return report, fmt.Errorf("inspect workspace before close: %w", err)
+		}
+		if report.Dirty != "" || report.Unpushed != "" {
 			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}
 	}

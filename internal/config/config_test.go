@@ -17,6 +17,12 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultSandboxImageIncludesWorkspaceTools(t *testing.T) {
+	if got := Default().Sandbox.Image; got != "buildpack-deps:bookworm-scm" {
+		t.Fatalf("Sandbox.Image = %q, want default image containing Git", got)
+	}
+}
+
 func TestLoadOverridesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[gateway]\nlisten = \"127.0.0.1:9999\"\n")

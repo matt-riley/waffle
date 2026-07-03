@@ -128,7 +128,7 @@ func Default() Config {
 		},
 		Sandbox: Sandbox{
 			Mode:    "host",
-			Image:   "debian:stable-slim",
+			Image:   "buildpack-deps:bookworm-scm",
 			Network: "none",
 		},
 		Agent: Agent{Subagents: true, Learn: true},
