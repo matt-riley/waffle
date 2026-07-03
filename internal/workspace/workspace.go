@@ -1,0 +1,384 @@
+// Package workspace implements repo workspaces (docs/plan.md, "Repo
+// workspaces"): "work on owner/repo" becomes a container + named volume
+// dedicated to that repository, bound to a session. The container never
+// holds a durable credential — git auth goes through `waffle
+// git-credential` to the host broker.
+package workspace
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/matt-riley/waffle/internal/sandbox"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/store"
+)
+
+// Workspace is one repo workspace.
+type Workspace struct {
+	ID        string
+	Repo      string // owner/name
+	URL       string
+	Image     string
+	Container string
+	Volume    string
+	SessionID string
+	Status    string // open | idle | closed
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Statuses.
+const (
+	StatusOpen   = "open"
+	StatusIdle   = "idle"
+	StatusClosed = "closed"
+)
+
+// Manager owns workspace lifecycle.
+type Manager struct {
+	DB       *sql.DB
+	Sessions *session.Store
+	Runtime  Runtime
+	// QueueRoot is where per-workspace queue dirs live.
+	QueueRoot string
+	// DefaultImage when the repo has no devcontainer (or before we can
+	// look).
+	DefaultImage string
+	// Network for workspace containers; cloning needs egress, so default
+	// bridge.
+	Network string
+	// BrokerURL as reachable from inside containers, plus a token minter.
+	BrokerURL string
+	MintToken func(ctx context.Context, sessionID string) string
+	// ExecTimeout bounds one in-container command.
+	ExecTimeout time.Duration
+}
+
+// NewManager wires a Manager with defaults.
+func NewManager(st *store.Store, sessions *session.Store, rt Runtime, queueRoot string) *Manager {
+	return &Manager{
+		DB:           st.DB,
+		Sessions:     sessions,
+		Runtime:      rt,
+		QueueRoot:    queueRoot,
+		DefaultImage: "debian:stable-slim",
+		Network:      "bridge",
+		ExecTimeout:  10 * time.Minute,
+	}
+}
+
+var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+
+// normalizeRepo accepts "owner/name" or a full https URL.
+func normalizeRepo(arg string) (repo, url string, err error) {
+	arg = strings.TrimSuffix(strings.TrimSpace(arg), ".git")
+	if repoRE.MatchString(arg) {
+		return arg, "https://github.com/" + arg + ".git", nil
+	}
+	if strings.HasPrefix(arg, "https://") {
+		trimmed := strings.TrimPrefix(arg, "https://")
+		if i := strings.Index(trimmed, "/"); i > 0 && strings.Count(trimmed[i+1:], "/") == 1 {
+			return trimmed[i+1:], arg + ".git", nil
+		}
+	}
+	return "", "", fmt.Errorf("can't parse repo %q (want owner/name or an https URL)", arg)
+}
+
+func newWSID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand failing is not a recoverable state
+	}
+	return "ws-" + hex.EncodeToString(b[:])
+}
+
+func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// Open creates a workspace for repoArg: container + volume + session, repo
+// cloned inside via the broker-backed credential helper. If a workspace
+// for the repo already exists (open or idle), it is resumed instead.
+func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbox.Client, error) {
+	repo, url, err := normalizeRepo(repoArg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if existing, err := m.ForRepo(ctx, repo); err == nil {
+		return m.Resume(ctx, existing.ID)
+	}
+
+	sess, err := m.Sessions.Create(ctx, "workspace "+repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	ws := &Workspace{
+		ID:        newWSID(),
+		Repo:      repo,
+		URL:       url,
+		Image:     m.DefaultImage,
+		SessionID: sess.ID,
+		Status:    StatusOpen,
+	}
+	ws.Container = "waffle-" + ws.ID
+	ws.Volume = "waffle-" + ws.ID
+
+	token := ""
+	if m.MintToken != nil {
+		token = m.MintToken(ctx, sess.ID)
+	}
+	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+		return nil, nil, err
+	}
+	client, err := sandbox.NewClient(m.queueDir(ws.ID))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := m.setup(ctx, client, ws); err != nil {
+		_ = client.Close()
+		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		return nil, nil, err
+	}
+
+	// devcontainer adoption: if the repo names an image, restart the
+	// container on it. The volume and queue survive; the runner resumes.
+	if img := m.devcontainerImage(ctx, client, ws); img != "" && img != ws.Image {
+		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err == nil {
+			ws.Image = img
+			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+				return nil, nil, fmt.Errorf("adopt devcontainer image %q: %w", img, err)
+			}
+		}
+	}
+
+	if _, err := m.DB.ExecContext(ctx, `
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now()); err != nil {
+		return nil, nil, err
+	}
+	return ws, client, nil
+}
+
+func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
+	return ContainerOpts{
+		Name:      ws.Container,
+		Image:     ws.Image,
+		Volume:    ws.Volume,
+		QueueDir:  m.queueDir(ws.ID),
+		Network:   m.Network,
+		BrokerURL: m.BrokerURL,
+		Token:     token,
+	}
+}
+
+func (m *Manager) queueDir(id string) string { return filepath.Join(m.QueueRoot, id) }
+
+// setup configures git and clones the repo inside the container.
+func (m *Manager) setup(ctx context.Context, client *sandbox.Client, ws *Workspace) error {
+	steps := []string{
+		"git config --global credential.helper '!waffle git-credential'",
+		"git config --global user.name waffle && git config --global user.email waffle@localhost",
+		fmt.Sprintf("git clone %s /work/repo", ws.URL),
+	}
+	for _, cmd := range steps {
+		if err := m.bash(ctx, client, cmd); err != nil {
+			return fmt.Errorf("workspace setup: %w", err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) error {
+	ctx, cancel := context.WithTimeout(ctx, m.ExecTimeout)
+	defer cancel()
+	input, _ := json.Marshal(map[string]any{"command": cmd, "timeout_seconds": 570})
+	out, isError, err := client.Exec(ctx, "bash", input)
+	if err != nil {
+		return err
+	}
+	if isError {
+		return fmt.Errorf("%s: %s", cmd, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// bashOut runs a command and returns its output ("" on any failure).
+func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
+	ctx, cancel := context.WithTimeout(ctx, m.ExecTimeout)
+	defer cancel()
+	input, _ := json.Marshal(map[string]any{"command": cmd})
+	out, isError, err := client.Exec(ctx, "bash", input)
+	if err != nil || isError {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// devcontainerImage reads .devcontainer/devcontainer.json from the cloned
+// repo and returns its "image", or "".
+func (m *Manager) devcontainerImage(ctx context.Context, client *sandbox.Client, ws *Workspace) string {
+	raw := m.bashOut(ctx, client, "cat /work/repo/.devcontainer/devcontainer.json 2>/dev/null")
+	if raw == "" {
+		return ""
+	}
+	var dc struct {
+		Image string `json:"image"`
+	}
+	if err := json.Unmarshal([]byte(raw), &dc); err != nil {
+		return ""
+	}
+	return dc.Image
+}
+
+// Idle stops the container; the volume (and queue) persist.
+func (m *Manager) Idle(ctx context.Context, id string) error {
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ws.Status != StatusOpen {
+		return fmt.Errorf("workspace %s is %s, not open", id, ws.Status)
+	}
+	if err := m.Runtime.StopContainer(ctx, ws.Container); err != nil {
+		return err
+	}
+	return m.setStatus(ctx, id, StatusIdle)
+}
+
+// Resume restarts an idle workspace's container and reconnects the queue.
+func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.Client, error) {
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch ws.Status {
+	case StatusClosed:
+		return nil, nil, fmt.Errorf("workspace %s is closed", id)
+	case StatusIdle:
+		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
+			return nil, nil, err
+		}
+		if err := m.setStatus(ctx, id, StatusOpen); err != nil {
+			return nil, nil, err
+		}
+		ws.Status = StatusOpen
+	}
+	client, err := sandbox.NewClient(m.queueDir(ws.ID))
+	if err != nil {
+		return nil, nil, err
+	}
+	return ws, client, nil
+}
+
+// CloseReport says what Close found before tearing down.
+type CloseReport struct {
+	Dirty    string // non-empty git status --porcelain output
+	Unpushed string // non-empty log of commits ahead of upstream
+}
+
+// Close tears the workspace down. When force is false and the tree is
+// dirty or has unpushed commits, it refuses and reports instead.
+func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if ws.Status == StatusClosed {
+		return nil, nil
+	}
+
+	report := &CloseReport{}
+	if ws.Status == StatusIdle {
+		if _, _, err := m.Resume(ctx, id); err == nil {
+			ws.Status = StatusOpen
+		}
+	}
+	if ws.Status == StatusOpen {
+		client, err := sandbox.NewClient(m.queueDir(ws.ID))
+		if err == nil {
+			report.Dirty = m.bashOut(ctx, client, "cd /work/repo && git status --porcelain")
+			report.Unpushed = m.bashOut(ctx, client, "cd /work/repo && git log --oneline @{upstream}..HEAD 2>/dev/null")
+			_ = client.Close()
+		}
+		if !force && (report.Dirty != "" || report.Unpushed != "") {
+			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
+		}
+	}
+
+	if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+		return report, err
+	}
+	if err := m.Runtime.RemoveVolume(ctx, ws.Volume); err != nil {
+		return report, err
+	}
+	return report, m.setStatus(ctx, id, StatusClosed)
+}
+
+func (m *Manager) setStatus(ctx context.Context, id, status string) error {
+	_, err := m.DB.ExecContext(ctx,
+		`UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`, status, now(), id)
+	return err
+}
+
+// Get loads one workspace.
+func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
+	return m.scanOne(m.DB.QueryRowContext(ctx, `
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		FROM workspaces WHERE id = ?`, id))
+}
+
+// ForRepo finds the non-closed workspace for a repo.
+func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
+	return m.scanOne(m.DB.QueryRowContext(ctx, `
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		FROM workspaces WHERE repo = ? AND status != 'closed'`, repo))
+}
+
+// List returns all workspaces, newest first.
+func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
+	rows, err := m.DB.QueryContext(ctx, `
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		FROM workspaces ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var out []Workspace
+	for rows.Next() {
+		ws, err := m.scanOne(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *ws)
+	}
+	return out, rows.Err()
+}
+
+type scanner interface{ Scan(dest ...any) error }
+
+func (m *Manager) scanOne(row scanner) (*Workspace, error) {
+	var ws Workspace
+	var created, updated string
+	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
+		&ws.SessionID, &ws.Status, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("workspace not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	ws.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	ws.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return &ws, nil
+}

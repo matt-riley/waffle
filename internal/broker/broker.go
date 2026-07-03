@@ -7,10 +7,13 @@
 package broker
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -33,10 +36,20 @@ type Upstream struct {
 	Value string
 }
 
+// GitCredentialFunc returns a git credential for host/path on behalf of a
+// session. First iteration: a stored fine-grained PAT; a GitHub App
+// minting short-lived installation tokens slots in behind the same
+// signature (docs/plan.md, "Secret management").
+type GitCredentialFunc func(ctx context.Context, sessionID, host, path string) (username, password string, err error)
+
 // Broker mints session tokens and proxies authenticated requests.
 type Broker struct {
 	audit     *sql.DB
 	upstreams map[string]*httputil.ReverseProxy
+
+	// GitCredential, when set, enables the /git-credential face used by
+	// `waffle git-credential` inside workspace containers.
+	GitCredential GitCredentialFunc
 
 	mu     sync.Mutex
 	tokens map[string]string // token → session id
@@ -116,6 +129,11 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/git-credential" {
+		b.serveGitCredential(w, r, token, sessionID)
+		return
+	}
+
 	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	proxy, ok := b.upstreams[name]
 	if !ok {
@@ -125,6 +143,38 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.record(r.Context(), token, sessionID, "proxy", name+"/"+rest)
 	r.URL.Path = "/" + rest
 	proxy.ServeHTTP(w, r)
+}
+
+// serveGitCredential speaks git's credential wire format: key=value lines
+// in, key=value lines out.
+func (b *Broker) serveGitCredential(w http.ResponseWriter, r *http.Request, token, sessionID string) {
+	if b.GitCredential == nil {
+		http.Error(w, "git credentials not configured", http.StatusNotFound)
+		return
+	}
+	attrs := ParseGitCredential(r.Body)
+	host, path := attrs["host"], attrs["path"]
+	user, pass, err := b.GitCredential(r.Context(), sessionID, host, path)
+	if err != nil {
+		b.record(r.Context(), token, sessionID, "denied", "git-credential "+host+"/"+path)
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	b.record(r.Context(), token, sessionID, "git-credential", host+"/"+path)
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprintf(w, "username=%s\npassword=%s\n", user, pass)
+}
+
+// ParseGitCredential reads git's key=value credential format.
+func ParseGitCredential(r io.Reader) map[string]string {
+	attrs := map[string]string{}
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		if k, v, ok := strings.Cut(sc.Text(), "="); ok {
+			attrs[k] = v
+		}
+	}
+	return attrs
 }
 
 // Serve runs the broker's HTTP listener until ctx ends.

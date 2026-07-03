@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
@@ -42,6 +43,14 @@ type chat struct {
 	current   *session.Session
 	history   []llm.Message
 	persisted int // history[:persisted] is already in the database
+
+	// workspace wiring, set up lazily by /repo.
+	cfg      config.Config
+	st       *store.Store
+	stderrW  io.Writer
+	wsBroker *broker.Broker
+	wsURL    string
+	wsClient io.Closer
 }
 
 func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -67,6 +76,12 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return err
 	}
 	defer cleanup()
+	c.stderrW = stderr
+	defer func() {
+		if c.wsClient != nil {
+			_ = c.wsClient.Close()
+		}
+	}()
 
 	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
 		c.agent.Model, cfg.Provider.Name, c.current.ID)
@@ -100,7 +115,7 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			fmt.Fprintf(stdout, "(new session %s)\n", c.current.ID)
 			continue
 		case line == "/help":
-			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
+			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/repo <owner/repo>    work on a repo in a container workspace\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
 			continue
 		case strings.HasPrefix(line, "/skill"):
 			message, err = c.skillMessage(strings.TrimSpace(strings.TrimPrefix(line, "/skill")))
@@ -108,6 +123,11 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 				fmt.Fprintf(stderr, "waffle: %v\n", err)
 				continue
 			}
+		case strings.HasPrefix(line, "/repo"):
+			if err := c.repoCommand(ctx, strings.TrimSpace(strings.TrimPrefix(line, "/repo")), stdout); err != nil {
+				fmt.Fprintf(stderr, "waffle: %v\n", err)
+			}
+			continue
 		default:
 			message = line
 		}
@@ -186,6 +206,57 @@ func (c *chat) finish(ctx context.Context, stdout io.Writer) {
 	}
 }
 
+// repoCommand opens (or resumes) a repo workspace and points the agent's
+// tools at its container. The chat switches to the workspace's session so
+// the conversation and the repo work live together.
+func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer) error {
+	if repoArg == "" {
+		return errors.New("usage: /repo <owner/repo>")
+	}
+	if c.wsBroker == nil {
+		b, url, err := startWorkspaceBroker(ctx, c.cfg, c.st, c.stderrW)
+		if err != nil {
+			return err
+		}
+		c.wsBroker, c.wsURL = b, url
+	}
+
+	mgr := newWorkspaceManager(c.cfg, c.st, c.wsBroker)
+	mgr.BrokerURL = c.wsURL
+	ws, client, err := mgr.Open(ctx, repoArg)
+	if err != nil {
+		return err
+	}
+	if c.wsClient != nil {
+		_ = c.wsClient.Close()
+	}
+	c.wsClient = client
+
+	// Same provider and memory tools; builtins now execute in the
+	// workspace container.
+	hostTools := c.agent.Tools
+	boxed := tool.Combine(sandbox.NewQueueToolbox(client), hostTools)
+	c.agent = &agent.Agent{
+		Provider:  c.agent.Provider,
+		Tools:     boxed,
+		System:    c.agent.System + fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo),
+		Model:     c.agent.Model,
+		MaxTokens: c.agent.MaxTokens,
+		Redact:    c.agent.Redact,
+	}
+
+	// Continue the workspace's own session.
+	c.finish(ctx, stdout)
+	sess := &session.Session{ID: ws.SessionID}
+	if turns, err := c.sessions.Turns(ctx, ws.SessionID); err == nil {
+		c.history = session.Repair(turns)
+		c.persisted = len(c.history)
+	}
+	c.current = sess
+	fmt.Fprintf(stdout, "(workspace %s: %s at /work/repo, image %s — session %s)\n", ws.ID, ws.Repo, ws.Image, ws.SessionID)
+	return nil
+}
+
 func (c *chat) skillMessage(rest string) (string, error) {
 	name, args, _ := strings.Cut(rest, " ")
 	if name == "" {
@@ -254,7 +325,7 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 		return nil, cleanup, err
 	}
 
-	c := &chat{agent: a, sessions: sessions, skills: skills}
+	c := &chat{agent: a, sessions: sessions, skills: skills, cfg: cfg, st: st}
 	if continueLast {
 		if c.current, err = sessions.Latest(ctx); err != nil && !errors.Is(err, session.ErrNotFound) {
 			return nil, cleanup, err

@@ -4,7 +4,12 @@ A personal AI agent, written in Go, that runs on your own hardware — one
 binary containing the agent loop, a messaging gateway, a terminal UI, and a
 provider-agnostic LLM layer.
 
-Status: Phase 4 (isolation) — tool execution can move into a container:
+Status: Phase 5 (repo workspaces) — `waffle ws open owner/repo` (or `/repo`
+in chat) clones a repository into a dedicated container + volume: image
+from the repo's `devcontainer.json` when present, git auth through the
+host broker via `waffle git-credential` (the container never holds a
+token), idle keeps the volume, close refuses if work is unpushed.
+Phase 4 (isolation) — tool execution can move into a container:
 set `[sandbox] mode = "docker"` and tools run inside any image via the
 bind-mounted `waffle runner`, talking to the host over a single-writer
 SQLite queue pair (memory tools stay host-side). Tool allow/deny policy is

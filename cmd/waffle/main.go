@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/telemetry"
 )
 
@@ -61,6 +62,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runnerCmd(ctx, args[1:], stderr)
 	case "sandbox":
 		return sandboxCmd(ctx, args[1:], stdout, stderr)
+	case "ws":
+		return wsCmd(ctx, args[1:], stdout, stderr)
+	case "git-credential":
+		op := ""
+		if len(args) > 1 {
+			op = args[1]
+		}
+		return gitcred.Run(ctx, op, stdin, stdout)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil
@@ -80,6 +89,7 @@ Commands:
   chat      interactive terminal session (-c continues the last session)
   serve     run the gateway (channels from config.toml)
   pair      approve your accounts on connected channels
+  ws        manage repo workspaces (open/ls/idle/close)
   session   list past sessions
   secret    manage the encrypted secret store
   version   print version
