@@ -7,6 +7,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,7 +65,6 @@ type Client struct {
 	nextID  int
 	pending map[int]chan rpcResponse
 	readErr error // set once when the reader loop exits
-	closed  chan struct{}
 }
 
 // Connect launches the server process and performs the initialize
@@ -88,7 +88,6 @@ func Connect(ctx context.Context, s Server) (*Client, error) {
 		in:      stdin,
 		out:     bufio.NewReader(stdout),
 		pending: map[int]chan rpcResponse{},
-		closed:  make(chan struct{}),
 	}
 	go c.readLoop()
 
@@ -120,7 +119,6 @@ func (c *Client) Close() error {
 // response to the channel registered under its id and, on stream error,
 // fails every in-flight call.
 func (c *Client) readLoop() {
-	defer close(c.closed)
 	for {
 		line, err := c.out.ReadBytes('\n')
 		if err != nil {
@@ -133,12 +131,12 @@ func (c *Client) readLoop() {
 			c.mu.Unlock()
 			return
 		}
-		trimmed := strings.TrimSpace(string(line))
-		if trimmed == "" {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
 			continue
 		}
 		var resp rpcResponse
-		if err := json.Unmarshal([]byte(trimmed), &resp); err != nil {
+		if err := json.Unmarshal(trimmed, &resp); err != nil {
 			continue // skip non-JSON log lines the server may emit
 		}
 		c.mu.Lock()
@@ -157,7 +155,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	c.mu.Lock()
 	if c.readErr != nil {
 		c.mu.Unlock()
-		return nil, c.readErr
+		return nil, c.connClosed()
 	}
 	c.nextID++
 	id := c.nextID
@@ -190,13 +188,23 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		return nil, ctx.Err()
 	case resp, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("mcp %s: connection closed: %w", c.name, c.readErr)
+			return nil, c.connClosed()
 		}
 		if resp.Error != nil {
 			return nil, resp.Error
 		}
 		return resp.Result, nil
 	}
+}
+
+// connClosed wraps the reader-loop's exit error uniformly, whether it is
+// detected up front or when a pending channel is closed mid-call. readErr
+// is written under mu by readLoop, so read it under mu here.
+func (c *Client) connClosed() error {
+	c.mu.Lock()
+	err := c.readErr
+	c.mu.Unlock()
+	return fmt.Errorf("mcp %s: connection closed: %w", c.name, err)
 }
 
 func (c *Client) notify(method string) error {

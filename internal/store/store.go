@@ -55,6 +55,26 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.DB.Close() }
 
+// Snapshot writes a consistent copy of the database at src to dst using
+// SQLite's `VACUUM INTO`, which folds in any WAL contents — safe to run
+// against a live database from another process. It reports whether a
+// snapshot was written; a missing src is not an error (ok is false), so
+// callers can fall back to a fresh database. dst must not already exist.
+func Snapshot(ctx context.Context, src, dst string) (ok bool, err error) {
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return false, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+src+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", src, err)
+	}
+	defer db.Close() //nolint:errcheck // read-only handle
+	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
+		return false, fmt.Errorf("snapshot %s: %w", src, err)
+	}
+	return true, nil
+}
+
 // migration is one embedded migrations/NNNN_name.sql file.
 type migration struct {
 	version int
