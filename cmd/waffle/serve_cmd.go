@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/matt-riley/waffle/internal/broker"
@@ -140,28 +139,7 @@ func brokerUpstreams(cfg config.Config) []broker.Upstream {
 
 // resolveSecretValue resolves a config value that may be a secret://
 // reference, falling back to envVar when unset or when the store has no
-// such secret.
+// such secret. Delegates to the shared helper in internal/secret.
 func resolveSecretValue(ref, envVar string) (string, error) {
-	if ref == "" {
-		return os.Getenv(envVar), nil
-	}
-	if !secret.IsRef(ref) {
-		return ref, nil
-	}
-	id, err := secret.LoadIdentity()
-	if err != nil {
-		return os.Getenv(envVar), nil //nolint:nilerr // no store → env fallback is the contract
-	}
-	path, err := config.SecretsPath()
-	if err != nil {
-		return "", err
-	}
-	value, err := secret.Resolve(secret.OpenFile(path, id), ref)
-	if errors.Is(err, secret.ErrNotFound) {
-		if v := os.Getenv(envVar); v != "" {
-			return v, nil
-		}
-		return "", fmt.Errorf("%w — store it with: printf '%%s' VALUE | waffle secret set %s", err, strings.TrimPrefix(ref, "secret://"))
-	}
-	return value, err
+	return secret.ResolveRef(ref, envVar)
 }

@@ -134,6 +134,9 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 
 		if err := c.turn(ctx, message, stdout, stderr); err != nil {
+			if c.agent != nil && c.agent.Redact != nil {
+				err = fmt.Errorf("%s", c.agent.Redact(err.Error()))
+			}
 			fmt.Fprintf(stderr, "\nwaffle: %v\n", err)
 		}
 	}
@@ -473,55 +476,24 @@ func newSandboxID() string {
 // provider's conventional env var (which the Anthropic SDK also reads on
 // its own). It also returns the redaction function when the store opens.
 func resolveAPIKey(p config.Provider) (string, func(string) string, error) {
-	var store secret.Store
-	if id, err := secret.LoadIdentity(); err == nil {
-		path, err := config.SecretsPath()
-		if err != nil {
-			return "", nil, err
-		}
-		store = secret.OpenFile(path, id)
+	key, err := secret.ResolveRef(p.APIKey, envName(p.Name))
+	if err != nil {
+		return "", nil, err
 	}
-
-	buildRedact := func(key string) func(string) string {
-		if key == "" && store == nil {
-			return nil
-		}
-		r, err := secret.NewRedactorWith(store, secret.NamedValue{
-			Name:  providerSecretName(p.Name),
-			Value: key,
-		})
-		if err != nil {
-			return nil
-		}
-		return r.Redact
+	if key == "" && secret.IsRef(p.APIKey) {
+		// No secret store (or notfound with no env) and ref was specified:
+		// the ResolveRef for notfound case already errors with hint; this
+		// path catches the no-store + empty-env case for the specific msg.
+		return "", nil, fmt.Errorf("api_key is %q but no secret store is available: run `waffle secret init`, or set %s", p.APIKey, envName(p.Name))
 	}
-
-	if secret.IsRef(p.APIKey) {
-		if store == nil {
-			// No secret store — fall through to env vars rather than
-			// failing, so `ANTHROPIC_API_KEY=... waffle chat` just works.
-			if key := envKey(p.Name); key != "" {
-				return key, buildRedact(key), nil
-			}
-			return "", nil, fmt.Errorf("api_key is %q but no secret store is available: run `waffle secret init`, or set %s", p.APIKey, envName(p.Name))
-		}
-		key, err := secret.Resolve(store, p.APIKey)
-		if err != nil {
-			if errors.Is(err, secret.ErrNotFound) {
-				if key := envKey(p.Name); key != "" {
-					return key, buildRedact(key), nil
-				}
-				return "", nil, fmt.Errorf("%w — store it with: printf '%%s' YOUR_KEY | waffle secret set %s", err, strings.TrimPrefix(p.APIKey, "secret://"))
-			}
-			return "", nil, err
-		}
-		return key, buildRedact(key), nil
+	if key == "" {
+		key = envKey(p.Name)
 	}
-	if p.APIKey != "" {
-		return p.APIKey, buildRedact(p.APIKey), nil
-	}
-	key := envKey(p.Name)
-	return key, buildRedact(key), nil
+	// build redactor using conventional name even for env fallbacks
+	store, _ := secret.TryOpen() // ignore err; redaction is best-effort here
+	redact, _ := secret.RedactorFor(store, providerSecretName(p.Name), key)
+	// RedactorFor errs only on store problems; swallow to nil like before
+	return key, redact, nil
 }
 
 func envName(provider string) string {

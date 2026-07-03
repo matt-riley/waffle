@@ -167,7 +167,15 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 	reply, err := g.converse(ctx, msg)
 	if err != nil {
 		log.Error("agent run", "err", err)
-		reply = fmt.Sprintf("something went wrong: %v", err)
+		detail := fmt.Sprintf("%v", err)
+		if g.Agent != nil && g.Agent.Redact != nil {
+			detail = g.Agent.Redact(detail)
+		}
+		// Keep short to avoid channel limits and excessive internal detail.
+		if len(detail) > 200 {
+			detail = detail[:200] + "..."
+		}
+		reply = "something went wrong: " + detail
 	}
 	if reply == "" {
 		return

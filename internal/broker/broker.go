@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -224,8 +225,10 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 	if len(prefix) > 11 {
 		prefix = prefix[:11]
 	}
-	_, _ = b.audit.ExecContext(ctx, `
+	if _, err := b.audit.ExecContext(ctx, `
 		INSERT INTO broker_audit (at, token_prefix, session, action, detail)
 		VALUES (?, ?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), prefix, sessionID, action, detail)
+		time.Now().UTC().Format(time.RFC3339Nano), prefix, sessionID, action, detail); err != nil {
+		slog.Default().Error("broker audit insert failed", "err", err, "token_prefix", prefix, "action", action)
+	}
 }

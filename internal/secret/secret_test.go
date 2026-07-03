@@ -156,3 +156,44 @@ func TestRedactorWithRuntimeSecrets(t *testing.T) {
 		t.Errorf("Redact = %q, want %q", got, want)
 	}
 }
+
+func TestResolveRef(t *testing.T) {
+	// literal value
+	if v, err := ResolveRef("literal-value", "ENV"); err != nil || v != "literal-value" {
+		t.Errorf("literal: got %q %v", v, err)
+	}
+
+	// empty -> env fallback
+	t.Setenv("TEST_REF_ENV", "env-fallback")
+	if v, err := ResolveRef("", "TEST_REF_ENV"); err != nil || v != "env-fallback" {
+		t.Errorf("empty ref: got %q %v", v, err)
+	}
+
+	// When no store (TryOpen returns nil in this test env), ref falls back to env or empty
+	if v, err := ResolveRef("secret://anything", "TEST_REF_ENV"); err != nil || v != "env-fallback" {
+		t.Errorf("ref no-store with env: got %q %v", v, err)
+	}
+	if v, err := ResolveRef("secret://anything", "NONEXISTENT"); err != nil || v != "" {
+		t.Errorf("ref no-store no-env: got %q %v", v, err)
+	}
+}
+
+func TestRedactorFor(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Set("k", "secretval"); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := RedactorFor(s, "k", "secretval")
+	if err != nil || r == nil {
+		t.Fatalf("RedactorFor: err=%v (r==nil)", err)
+	}
+	if got := r("before secretval after"); got != "before [redacted:k] after" {
+		t.Errorf("redact: %q", got)
+	}
+
+	// nil cases
+	if r, err := RedactorFor(nil, "", ""); err != nil || r != nil {
+		t.Errorf("empty nil: got err=%v r=%T", err, r)
+	}
+}

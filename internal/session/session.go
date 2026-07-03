@@ -107,8 +107,16 @@ func (s *Store) list(ctx context.Context, limit int) ([]Session, error) {
 		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &created, &updated); err != nil {
 			return nil, err
 		}
-		sess.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		sess.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		createdAt, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil && created != "" {
+			return nil, fmt.Errorf("parse session created_at: %w", err)
+		}
+		sess.CreatedAt = createdAt
+		updatedAt, err := time.Parse(time.RFC3339Nano, updated)
+		if err != nil && updated != "" {
+			return nil, fmt.Errorf("parse session updated_at: %w", err)
+		}
+		sess.UpdatedAt = updatedAt
 		out = append(out, sess)
 	}
 	return out, rows.Err()
@@ -247,7 +255,9 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 		if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &h.Snippet, &created); err != nil {
 			return nil, err
 		}
-		h.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
+			return nil, fmt.Errorf("parse hit created_at: %w", err)
+		}
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
