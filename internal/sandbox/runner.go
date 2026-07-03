@@ -51,7 +51,7 @@ func (r *Runner) Serve(ctx context.Context, dir string) error {
 			select {
 			case <-hb.C:
 				ts := time.Now().UTC().Format(time.RFC3339Nano)
-				_, _ = out.ExecContext(context.Background(),
+				_, _ = out.ExecContext(ctx,
 					`INSERT OR REPLACE INTO results (request_id, content, is_error, created_at)
 					 VALUES (?, 'alive', 0, ?)`, runnerHealthID, ts)
 			case <-ctx.Done():

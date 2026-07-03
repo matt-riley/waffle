@@ -90,20 +90,20 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 		case <-ticker.C:
 			// Heartbeat-based dead-runner detection (independent of ctx).
 			waited := time.Since(start)
-			h, herr := c.lastHealth(context.Background())
+			h, herr := c.lastHealth(ctx)
 			if herr == nil {
 				if !h.IsZero() {
 					if stale := time.Since(h); stale > runnerHealthGrace {
-						c.attemptShutdown(context.Background())
+						c.attemptShutdown(ctx)
 						return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no heartbeat for %s)", name, stale.Round(time.Second))
 					}
 				} else if waited > runnerNoHealthWait {
-					c.attemptShutdown(context.Background())
+					c.attemptShutdown(ctx)
 					return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no runner heartbeat seen)", name)
 				}
 			}
 		case <-ctx.Done():
-			c.attemptShutdown(context.Background())
+			c.attemptShutdown(ctx)
 			return "", false, fmt.Errorf("sandbox: waiting for %s: %w (runner may be stuck or dead)", name, ctx.Err())
 		}
 	}

@@ -235,13 +235,6 @@ func TestRunnerEnforcesTruncationBeforeOutboundWrite(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func TestClientExecDetectsDeadRunnerEarly(t *testing.T) {
 	dir := t.TempDir()
 	client, err := NewClient(dir)
