@@ -112,11 +112,15 @@ func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // ensureActiveRepoIndex installs (idempotently) a partial UNIQUE index so
 // that concurrent Open calls for the same repo cannot both succeed in
 // inserting a non-closed row. This fixes the TOCTOU in check-then-create.
-func (m *Manager) ensureActiveRepoIndex(ctx context.Context) {
-	_, _ = m.DB.ExecContext(ctx, `
+// It is a hard requirement; failure is returned as error.
+func (m *Manager) ensureActiveRepoIndex(ctx context.Context) error {
+	if _, err := m.DB.ExecContext(ctx, `
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
 		ON workspaces(repo) WHERE status != 'closed'
-	`)
+	`); err != nil {
+		return fmt.Errorf("ensure active repo index: %w", err)
+	}
+	return nil
 }
 
 // Open creates a workspace for repoArg: container + volume + session, repo
@@ -127,7 +131,9 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	if err != nil {
 		return nil, nil, err
 	}
-	m.ensureActiveRepoIndex(ctx)
+	if err := m.ensureActiveRepoIndex(ctx); err != nil {
+		return nil, nil, err
+	}
 	if existing, err := m.ForRepo(ctx, repo); err == nil {
 		return m.Resume(ctx, existing.ID)
 	}
@@ -268,9 +274,12 @@ func isMissingFileError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// Match common "file not found" messages from exec/cat in container.
+	// Avoid loose "cat " + ": " which would match permission errors etc.
 	return strings.Contains(msg, "no such file") ||
 		strings.Contains(msg, "not found") ||
-		(strings.Contains(msg, "cat ") && strings.Contains(msg, ": "))
+		strings.Contains(msg, "no such") ||
+		(strings.Contains(msg, "cat:") && (strings.Contains(msg, "no such") || strings.Contains(msg, "not found")))
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
@@ -393,13 +402,17 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 		_ = client.Close()
 		if err != nil {
 			if wasIdle {
-				_ = m.Idle(ctx, id) // restore prior idle state on inspect failure
+				if idleErr := m.Idle(ctx, id); idleErr != nil {
+					return report, fmt.Errorf("inspect workspace before close: %w (also failed to restore idle: %v)", err, idleErr)
+				}
 			}
 			return report, fmt.Errorf("inspect workspace before close: %w", err)
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
 			if wasIdle {
-				_ = m.Idle(ctx, id) // restore prior idle state on refusal
+				if idleErr := m.Idle(ctx, id); idleErr != nil {
+					return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard; also failed to restore idle: %v)", id, idleErr)
+				}
 			}
 			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}

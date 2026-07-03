@@ -432,6 +432,35 @@ func TestCloseAbortsWhenIdleWorkspaceCannotResume(t *testing.T) {
 	}
 }
 
+// TestCloseRestoresIdleOnRefusal exercises the restore-to-idle path for
+// an originally-idle workspace when safety check refuses (addresses review
+// feedback that this new behavior lacked coverage).
+func TestCloseRestoresIdleOnRefusal(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{outputs: map[string]string{
+		"cd /work/repo && git status --porcelain": " M file\n",
+	}})
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should refuse and restore to idle (not leave open)
+	_, err = mgr.Close(ctx, ws.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "unsaved work") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil || got.Status != StatusIdle {
+		t.Fatalf("after refuse for idle ws, status=%v err=%v (want idle)", got.Status, err)
+	}
+}
+
 func TestIdleRevokesWorkspaceSessionToken(t *testing.T) {
 	ctx := context.Background()
 	mgr, _ := newTestManager(t, &scriptedBash{})
