@@ -109,6 +109,16 @@ func newWSID() string {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// ensureActiveRepoIndex installs (idempotently) a partial UNIQUE index so
+// that concurrent Open calls for the same repo cannot both succeed in
+// inserting a non-closed row. This fixes the TOCTOU in check-then-create.
+func (m *Manager) ensureActiveRepoIndex(ctx context.Context) {
+	_, _ = m.DB.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
+		ON workspaces(repo) WHERE status != 'closed'
+	`)
+}
+
 // Open creates a workspace for repoArg: container + volume + session, repo
 // cloned inside via the broker-backed credential helper. If a workspace
 // for the repo already exists (open or idle), it is resumed instead.
@@ -117,6 +127,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	if err != nil {
 		return nil, nil, err
 	}
+	m.ensureActiveRepoIndex(ctx)
 	if existing, err := m.ForRepo(ctx, repo); err == nil {
 		return m.Resume(ctx, existing.ID)
 	}
@@ -173,6 +184,15 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now()); err != nil {
+		// Concurrent Open raced us (or other insert error); clean up our
+		// side effects and resume the winner instead of duplicating.
+		_ = client.Close()
+		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		m.revokeSession(ws.SessionID)
+		if existing, err2 := m.ForRepo(ctx, repo); err2 == nil {
+			return m.Resume(ctx, existing.ID)
+		}
 		return nil, nil, err
 	}
 	return ws, client, nil
@@ -236,6 +256,9 @@ func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd st
 }
 
 // bashOut runs a best-effort command and returns "" on failure.
+// It distinguishes ENOENT/no-such-file (expected for optional files) from
+// other exec failures internally (see isMissingFileError) but returns ""
+// either way, as before.
 func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
 	out, _ := m.bashOutput(ctx, client, cmd)
 	return out
@@ -245,11 +268,32 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+// isMissingFileError reports whether err represents an expected
+// "file not found" during best-effort container inspection (e.g. no
+// .devcontainer.json). Other errors are real failures (permissions,
+// I/O, etc).
+func isMissingFileError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "not found") ||
+		(strings.Contains(msg, "cat ") && strings.Contains(msg, ": "))
+}
+
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
-// repo and returns its "image", or "".
+// repo and returns its "image", or "". It now uses bashOutput so that
+// "no such file" (ENOENT) can be distinguished from other errors.
 func (m *Manager) devcontainerImage(ctx context.Context, client *sandbox.Client, ws *Workspace) string {
-	raw := m.bashOut(ctx, client, "cat /work/repo/.devcontainer/devcontainer.json 2>/dev/null")
-	if raw == "" {
+	raw, err := m.bashOutput(ctx, client, "cat /work/repo/.devcontainer/devcontainer.json")
+	if err != nil {
+		// expected "no .devcontainer" vs unexpected exec error
+		if isMissingFileError(err) {
+			return ""
+		}
+		// other error (e.g. permission, container problem): treat as no image
+		// (best-effort path; would log at debug if logger were attached)
 		return ""
 	}
 	var dc struct {
@@ -334,9 +378,10 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 	}
 
 	report := &CloseReport{}
+	wasIdle := ws.Status == StatusIdle
 	if !force {
 		var client *sandbox.Client
-		if ws.Status == StatusIdle {
+		if wasIdle {
 			resumed, resumedClient, err := m.Resume(ctx, id)
 			if err != nil {
 				return report, fmt.Errorf("resume workspace for safety check: %w", err)
@@ -356,9 +401,15 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 		}
 		_ = client.Close()
 		if err != nil {
+			if wasIdle {
+				_ = m.Idle(ctx, id) // restore prior idle state on inspect failure
+			}
 			return report, fmt.Errorf("inspect workspace before close: %w", err)
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
+			if wasIdle {
+				_ = m.Idle(ctx, id) // restore prior idle state on refusal
+			}
 			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}
 	}
