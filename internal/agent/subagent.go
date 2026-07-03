@@ -15,9 +15,9 @@ import (
 // with a clean history, so it doesn't inherit or pollute the conversation.
 //
 // Tool dispatch (including subagent spawning) is concurrent via goroutines
-// but bounded by the process-global package-level toolSem in the agent
-// package (independent by contract, see Tool docs). Depth is
-// belt-and-suspenders; sub-toolbox normally omits spawn_subagent.
+// but bounded (regular tools via toolSem, subagent dispatches via separate
+// subagentSem to avoid deadlock on nested tool use). See agent package.
+// Depth is belt-and-suspenders; sub-toolbox normally omits spawn_subagent.
 type SubagentTool struct {
 	Provider  llm.Provider
 	Tools     tool.Toolbox

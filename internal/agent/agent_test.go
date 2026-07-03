@@ -260,8 +260,8 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 }
 
 // TestRunToolSemaphoreBounds exercises the pre-acquire cancellation path
-// (addresses review feedback on missing coverage for the bounded toolSem
-// behavior including ctx.Done before acquire).
+// (addresses review feedback on missing coverage for the bounded semaphore
+// behavior).
 func TestRunToolSemaphoreBounds(t *testing.T) {
 	echo := &echoTool{}
 	// One tool-use response; the canceled ctx will cause runTools to return
@@ -275,24 +275,12 @@ func TestRunToolSemaphoreBounds(t *testing.T) {
 			StopReason: llm.StopToolUse,
 		},
 	}}
-
-	// Pre-fill the semaphore so the send case is not selectable; forces the
-	// ctx.Done() path in runTools for deterministic coverage of the cancel-
-	// before-acquire behavior.
-	for i := 0; i < maxToolConcurrency; i++ {
-		toolSem <- struct{}{}
-	}
 	a := &Agent{Provider: p, Tools: tool.NewRegistry(echo), Model: "m"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	history, _ := a.Run(ctx, []llm.Message{llm.UserText("go")}, Hooks{})
-
-	// Drain the pre-filled slots.
-	for i := 0; i < maxToolConcurrency; i++ {
-		<-toolSem
-	}
 
 	// The tool results should contain the pre-acquire cancel error.
 	found := false

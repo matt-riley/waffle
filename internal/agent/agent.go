@@ -42,13 +42,18 @@ type Hooks struct {
 var ErrMaxIterations = errors.New("agent: too many iterations without completing")
 
 // maxToolConcurrency and toolSem provide a bounded global semaphore for
-// concurrent execution of tools and subagents (separate from gateway's
-// inbound MaxConcurrent semaphore for handlers). This bounds goroutine use
-// and prevents a blocking tool or deep subagent spawn (if depth bypassed)
-// from exhausting resources. Acquire before executing a tool dispatch.
+// concurrent execution of (non-subagent) tools (separate from gateway's
+// inbound MaxConcurrent semaphore for handlers). Subagents use a separate
+// subagentSem to avoid deadlock when subagents dispatch their own tools.
+//
+// This bounds goroutine use and prevents a blocking tool or deep subagent
+// spawn (if depth bypassed) from exhausting resources. Acquire before
+// executing a tool dispatch.
 const maxToolConcurrency = 32
+const maxSubagentConcurrency = 8
 
 var toolSem = make(chan struct{}, maxToolConcurrency)
+var subagentSem = make(chan struct{}, maxSubagentConcurrency)
 
 // Run advances the conversation until the model finishes its turn. history
 // must end with the user's message; the returned history includes every
@@ -110,12 +115,11 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 // runTools executes tool calls in parallel (independent by contract) and
 // returns results in request order, as the API requires.
 //
-// Concurrency is bounded by the process-global package-level toolSem
-// (see maxToolConcurrency) to avoid exhausting goroutines when many tools
-// are called or a tool/subagent blocks (depth limit in SubagentTool is
-// belt-and-suspenders). Slots are acquired in the dispatch loop *before*
-// spawning goroutines so that a large batch blocks the loop rather than
-// creating unbounded goroutines that contend on the semaphore.
+// Concurrency for regular tools is bounded by the process-global toolSem
+// (see maxToolConcurrency). Subagent dispatches use a separate subagentSem
+// (maxSubagentConcurrency) to prevent deadlock: a batch of subagents can
+// hold toolSem slots while their internal tool dispatches need slots too.
+// Slots are acquired in the dispatch loop *before* spawning goroutines.
 func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) []llm.ToolResult {
 	results := make([]llm.ToolResult, len(uses))
 	var wg sync.WaitGroup
@@ -130,23 +134,27 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 		if ctx.Err() != nil {
 			results[i] = llm.ToolResult{
 				ToolUseID: use.ID,
-				Content:   "canceled before acquiring execution slot",
+				Content:   "error: canceled before acquiring execution slot",
 				IsError:   true,
 			}
 			continue
 		}
+		sem := toolSem
+		if use.Name == "spawn_subagent" {
+			sem = subagentSem
+		}
 		select {
-		case toolSem <- struct{}{}:
+		case sem <- struct{}{}:
 			wg.Add(1)
-			go func(i int, use llm.ToolUse) {
+			go func(i int, use llm.ToolUse, sem chan struct{}) {
 				defer wg.Done()
-				defer func() { <-toolSem }()
+				defer func() { <-sem }()
 				results[i] = a.runOne(ctx, use)
-			}(i, use)
+			}(i, use, sem)
 		case <-ctx.Done():
 			results[i] = llm.ToolResult{
 				ToolUseID: use.ID,
-				Content:   "canceled before acquiring execution slot",
+				Content:   "error: canceled before acquiring execution slot",
 				IsError:   true,
 			}
 		}
