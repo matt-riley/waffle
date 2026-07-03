@@ -251,7 +251,9 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 		t.Errorf("main context too small")
 	}
 	// The first msg in main context should be the injected summary note.
-	if mainReq.Messages[0].Role != llm.RoleUser || !strings.Contains(mainReq.Messages[0].Text(), "Summary of earlier") {
+	// (RoleAssistant + explicit label per review feedback to reduce
+	// prompt-injection risk from model-generated content.)
+	if mainReq.Messages[0].Role != llm.RoleAssistant || !strings.Contains(mainReq.Messages[0].Text(), "CONTEXT SUMMARY") {
 		t.Errorf("first main msg not summary: %+v", mainReq.Messages[0])
 	}
 }
