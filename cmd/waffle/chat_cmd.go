@@ -20,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
+	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -310,11 +311,7 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 
 func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool) (*chat, func(), error) {
 	cleanup := func() {}
-	ws, err := memory.Open(memory.DefaultAgent)
-	if err != nil {
-		return nil, cleanup, err
-	}
-	skills, err := skill.Discover(ws.SkillsDir())
+	ws, skills, err := loadWorkspace()
 	if err != nil {
 		return nil, cleanup, err
 	}
@@ -368,17 +365,30 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		return nil, cleanup, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", cfg.Provider.Name)
 	}
 
-	// Memory tools always execute on the host — they are waffle's own
-	// state, not something a sandbox should reach.
-	hostTools := tool.NewRegistry(
+	var closers []func()
+	cleanup = func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+
+	// Host tools execute on the host regardless of sandbox mode — memory
+	// is waffle's own state, and learning writes to the workspace.
+	hostToolList := []tool.Tool{
 		memory.RememberTool{WS: ws},
 		memory.RecallTool{Sessions: sessions},
-	)
+	}
+	if cfg.Agent.Learn {
+		hostToolList = append(hostToolList, memory.DistillTool{WS: ws})
+	}
+	hostTools := tool.NewRegistry(hostToolList...)
 
-	var toolbox tool.Toolbox
+	// The execution toolbox: builtins on the host, or proxied to a docker
+	// sandbox.
+	var execTools tool.Toolbox
 	switch cfg.Sandbox.Mode {
 	case "host", "":
-		toolbox = tool.Combine(tool.Builtins(), hostTools)
+		execTools = tool.Builtins()
 	case "docker":
 		home, err := config.Home()
 		if err != nil {
@@ -393,12 +403,41 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
 		}
-		cleanup = func() { _ = executor.Close() }
-		toolbox = tool.Combine(executor, hostTools)
+		closers = append(closers, func() { _ = executor.Close() })
+		execTools = executor
 	default:
 		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q (want \"host\" or \"docker\")", cfg.Sandbox.Mode)
 	}
-	toolbox = tool.Restrict(toolbox, tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
+
+	boxes := []tool.Toolbox{execTools, hostTools}
+
+	// MCP servers contribute their tools (the long tail).
+	for _, s := range cfg.MCP {
+		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args})
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
+		}
+		closers = append(closers, func() { _ = client.Close() })
+		tb, err := client.Toolbox(ctx)
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("mcp %q tools: %w", s.Name, err)
+		}
+		boxes = append(boxes, tb)
+	}
+
+	// Subagents get the execution + MCP tools, but not the ability to
+	// spawn further subagents (their toolbox omits spawn_subagent).
+	if cfg.Agent.Subagents {
+		subTools := tool.Restrict(tool.Combine(boxes...),
+			tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
+		boxes = append(boxes, tool.NewRegistry(agent.SubagentTool{
+			Provider: provider, Tools: subTools, Model: cfg.Provider.Model,
+			MaxTokens: cfg.Provider.MaxTokens, Redact: redact,
+		}))
+	}
+
+	toolbox := tool.Restrict(tool.Combine(boxes...),
+		tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
 
 	sys, err := systemPrompt(ws, skills)
 	if err != nil {

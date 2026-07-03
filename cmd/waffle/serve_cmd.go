@@ -17,10 +17,9 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
-	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
-	"github.com/matt-riley/waffle/internal/skill"
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
@@ -36,11 +35,7 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 
-	ws, err := memory.Open(memory.DefaultAgent)
-	if err != nil {
-		return err
-	}
-	skills, err := skill.Discover(ws.SkillsDir())
+	ws, skills, err := loadWorkspace()
 	if err != nil {
 		return err
 	}
@@ -82,8 +77,44 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		Adapters: adapters,
 		Log:      log,
 	}
+
+	// Scheduler: fire cron jobs while the gateway runs, delivering results
+	// through the same channel adapters.
+	sched := &schedule.Scheduler{
+		Store: schedule.NewStore(st),
+		Runner: &schedule.Runner{
+			Agent:     a,
+			Sessions:  sessions,
+			Deliverer: adapterDeliverer(adapters),
+			Log:       log,
+		},
+		Log: log,
+	}
+	go func() {
+		if err := sched.Run(ctx); err != nil {
+			log.Error("scheduler stopped", "err", err)
+		}
+	}()
+
 	log.Info("waffle gateway starting", "channels", len(adapters))
 	return gw.Run(ctx)
+}
+
+// adapterDeliverer routes a job's "channel:chat_id" target to the matching
+// channel adapter.
+type adapterDeliverer []channel.Adapter
+
+func (ads adapterDeliverer) Deliver(ctx context.Context, target, text string) error {
+	name, chatID, ok := schedule.ParseTarget(target)
+	if !ok {
+		return fmt.Errorf("bad delivery target %q (want channel:chat_id)", target)
+	}
+	for _, a := range ads {
+		if a.Name() == name {
+			return a.Send(ctx, chatID, text)
+		}
+	}
+	return fmt.Errorf("no channel %q for delivery", name)
 }
 
 // brokerUpstreams assembles the LLM upstreams the broker can front, using

@@ -19,12 +19,36 @@ import (
 
 // Config is the root of config.toml.
 type Config struct {
-	Gateway  Gateway  `toml:"gateway"`
-	Provider Provider `toml:"provider"`
-	Channel  Channels `toml:"channel"`
-	Sandbox  Sandbox  `toml:"sandbox"`
-	Broker   Broker   `toml:"broker"`
-	Log      Log      `toml:"log"`
+	Gateway  Gateway     `toml:"gateway"`
+	Provider Provider    `toml:"provider"`
+	Channel  Channels    `toml:"channel"`
+	Sandbox  Sandbox     `toml:"sandbox"`
+	Broker   Broker      `toml:"broker"`
+	MCP      []MCPServer `toml:"mcp"`
+	Agent    Agent       `toml:"agent"`
+	Repo     Repo        `toml:"repo"`
+	Log      Log         `toml:"log"`
+}
+
+// MCPServer is one Model Context Protocol server run over stdio.
+type MCPServer struct {
+	Name    string   `toml:"name"`
+	Command string   `toml:"command"`
+	Args    []string `toml:"args"`
+}
+
+// Agent tunes agent behavior.
+type Agent struct {
+	// Subagents enables the spawn_subagent tool.
+	Subagents bool `toml:"subagents"`
+	// Learn enables the distill_skill tool (the learning loop).
+	Learn bool `toml:"learn"`
+}
+
+// Repo configures the self-development loop's view of waffle's own source.
+type Repo struct {
+	// Dir is a local checkout of waffle used by `waffle upgrade`.
+	Dir string `toml:"dir"`
 }
 
 // Sandbox names the trust boundary for tool execution (docs/plan.md,
@@ -107,7 +131,8 @@ func Default() Config {
 			Image:   "debian:stable-slim",
 			Network: "none",
 		},
-		Log: Log{Level: "info"},
+		Agent: Agent{Subagents: true, Learn: true},
+		Log:   Log{Level: "info"},
 	}
 }
 

@@ -294,7 +294,9 @@ Key dependencies (all pure Go where possible): `modernc.org/sqlite`,
 ## Roadmap
 
 Each phase ends with something you actually use daily; nothing depends on a
-later phase to be useful.
+later phase to be useful. **All seven phases are implemented** — the status
+line in [README.md](../README.md) tracks what's landed; the notes below are
+the original plan, kept as the record of intent.
 
 **Phase 0 — Skeleton (small).** Go module, `cmd/waffle`, config loading
 (`~/.waffle/config.toml`), SQLite store + migrations, CI (build, test,

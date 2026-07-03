@@ -64,6 +64,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return sandboxCmd(ctx, args[1:], stdout, stderr)
 	case "ws":
 		return wsCmd(ctx, args[1:], stdout, stderr)
+	case "cron":
+		return cronCmd(ctx, args[1:], stdout, stderr)
+	case "doctor":
+		return doctorCmd(ctx, stdout)
+	case "upgrade":
+		return upgradeCmd(ctx, args[1:], stdout, stderr)
+	case "rollback":
+		return rollbackCmd(stdout)
 	case "git-credential":
 		op := ""
 		if len(args) > 1 {
@@ -90,8 +98,12 @@ Commands:
   serve     run the gateway (channels from config.toml)
   pair      approve your accounts on connected channels
   ws        manage repo workspaces (open/ls/idle/close)
+  cron      manage scheduled jobs (add/ls/run/rm)
   session   list past sessions
   secret    manage the encrypted secret store
+  doctor    run self-checks
+  upgrade   rebuild waffle from source and swap in the new binary
+  rollback  restore the previous binary
   version   print version
   help      show this help
 
