@@ -257,3 +257,39 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 		t.Errorf("first main msg not summary: %+v", mainReq.Messages[0])
 	}
 }
+
+// TestRunToolSemaphoreBounds exercises the pre-acquire cancellation path
+// (addresses review feedback on missing coverage for the bounded toolSem
+// behavior including ctx.Done before acquire).
+func TestRunToolSemaphoreBounds(t *testing.T) {
+	echo := &echoTool{}
+	// One tool-use response; the canceled ctx will cause runTools to return
+	// a canceled result. The subsequent Complete will fail (out of responses),
+	// which is fine -- we inspect the partial history.
+	p := &fakeProvider{responses: []llm.Response{
+		{
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"hi"}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+		},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(echo), Model: "m"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	history, _ := a.Run(ctx, []llm.Message{llm.UserText("go")}, Hooks{})
+	// The tool results should contain the pre-acquire cancel error.
+	found := false
+	for _, h := range history {
+		for _, b := range h.Blocks {
+			if b.ToolResult != nil && b.ToolResult.IsError && strings.Contains(b.ToolResult.Content, "canceled before acquiring") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("did not find canceled-before-acquire error result in history: %+v", history)
+	}
+}

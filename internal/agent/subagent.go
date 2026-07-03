@@ -24,9 +24,10 @@ type SubagentTool struct {
 	Model     string
 	MaxTokens int
 	Redact    func(string) string
-	// Depth guards against runaway recursion; a subagent's toolbox should
-	// omit spawn_subagent (enforced by Restrict in buildAgent), but this is
-	// the belt-and-suspenders bound. Execution slots are also bounded.
+	// Depth guards against runaway recursion; a subagent's toolbox is
+	// constructed in buildAgent without including SubagentTool (Restrict
+	// only applies allow/deny policy to the tools that *are* present).
+	// This is the belt-and-suspenders bound. Execution slots are also bounded.
 	Depth int
 }
 

@@ -204,9 +204,14 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message) string {
 	}
 	// Flatten to text: avoids sending hundreds of Message structs for the
 	// summary request.
-	var b strings.Builder
+	// We build the capped input preferring the *most recent* turns from the
+	// old prefix (end of prefix), so the summary stays relevant. We stop
+	// once we reach the size limit.
 	const maxSummaryInput = 32 * 1024
-	for _, m := range prefix {
+	var lines []string
+	size := 0
+	for i := len(prefix) - 1; i >= 0; i-- {
+		m := prefix[i]
 		t := m.Text()
 		for _, bl := range m.Blocks {
 			if bl.Type == llm.BlockToolResult && bl.ToolResult != nil {
@@ -214,16 +219,15 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message) string {
 			}
 		}
 		if t != "" {
-			fmt.Fprintf(&b, "%s: %s\n", m.Role, t)
-		}
-		if b.Len() > maxSummaryInput {
-			break
+			line := fmt.Sprintf("%s: %s\n", m.Role, t)
+			if size+len(line) > maxSummaryInput {
+				break
+			}
+			lines = append([]string{line}, lines...) // keep chronological order
+			size += len(line)
 		}
 	}
-	input := b.String()
-	if len(input) > maxSummaryInput {
-		input = input[len(input)-maxSummaryInput:]
-	}
+	input := strings.Join(lines, "")
 	flat := llm.UserText("Prior turns (summarize these):\n" + input)
 	prompt := llm.UserText("Summarize the prior conversation turns above in 2-3 sentences for context. Focus on key facts, decisions, work done and anything unfinished. Reply with only the summary.")
 	resp, err := a.Provider.Complete(ctx, llm.Request{
