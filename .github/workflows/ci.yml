@@ -17,13 +17,16 @@ jobs:
       vet: true
       test: true
       cancel-in-progress: true
+      concurrency-suffix: ci
 
   lint:
     uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@main
     with:
       cancel-in-progress: true
+      concurrency-suffix: lint
 
   security:
     uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@main
     with:
       cancel-in-progress: true
+      concurrency-suffix: security
