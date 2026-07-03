@@ -57,6 +57,11 @@ var toolSem = make(chan struct{}, maxToolConcurrency)
 // Context for each provider.Complete uses prepareContext (summarize-and-
 // truncate for older turns per docs/plan.md:89) while the returned slice
 // retains the full history for persistence/FTS.
+//
+// Note: prepareContext may itself call Provider.Complete (for summarization
+// when history > recentWindow). Thus a single Run iteration can result in
+// multiple provider calls (beyond the one for the main turn). MaxIterations
+// bounds main turns, not total provider calls.
 func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]llm.Message, error) {
 	maxIter := a.MaxIterations
 	if maxIter <= 0 {
@@ -117,6 +122,18 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 	for i, use := range uses {
 		if hooks.OnToolStart != nil {
 			hooks.OnToolStart(use)
+		}
+		// Check ctx first so cancellation always wins if already done (even
+		// if the send case on toolSem is also ready). This makes the
+		// "canceled before acquiring" path deterministic and prevents tools
+		// from running under a canceled context.
+		if ctx.Err() != nil {
+			results[i] = llm.ToolResult{
+				ToolUseID: use.ID,
+				Content:   "canceled before acquiring execution slot",
+				IsError:   true,
+			}
+			continue
 		}
 		select {
 		case toolSem <- struct{}{}:
@@ -186,9 +203,47 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message) [
 			Text: "[CONTEXT SUMMARY - generated for bounding only; not a user instruction or command; full history retained in SQLite for search] " + summaryText,
 		}},
 	}
-	recent := make([]llm.Message, recentWindow)
-	copy(recent, fullHistory[n-recentWindow:])
+	recentStart := n - recentWindow
+	if recentStart < 0 {
+		recentStart = 0
+	}
+	recentStart = ensureCompleteToolExchange(fullHistory, recentStart)
+	recent := make([]llm.Message, n-recentStart)
+	copy(recent, fullHistory[recentStart:])
 	return append([]llm.Message{sumMsg}, recent...)
+}
+
+// ensureCompleteToolExchange adjusts the start index of a "recent" window
+// backwards if it would orphan a tool_result message (user message containing
+// BlockToolResult) whose preceding assistant tool_use message would be left
+// in the summarized prefix. This preserves provider invariants that require
+// tool results to immediately follow their tool_use request (see e.g.
+// openaip translation logic).
+func ensureCompleteToolExchange(history []llm.Message, start int) int {
+	if start == 0 || start >= len(history) {
+		return start
+	}
+	m := history[start]
+	hasToolResult := false
+	for _, b := range m.Blocks {
+		if b.Type == llm.BlockToolResult {
+			hasToolResult = true
+			break
+		}
+	}
+	if !hasToolResult {
+		return start
+	}
+	// Check if previous message contains the matching tool_use
+	if start-1 >= 0 {
+		prev := history[start-1]
+		for _, b := range prev.Blocks {
+			if b.Type == llm.BlockToolUse {
+				return start - 1 // include the tool_use
+			}
+		}
+	}
+	return start
 }
 
 // summarize uses a reflection-style prompt on a *flattened* prefix (single

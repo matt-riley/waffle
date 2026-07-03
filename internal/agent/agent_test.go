@@ -242,10 +242,11 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 		t.Errorf("summarize request msgs=%d want 2 (flat+prompt)", len(sumReq.Messages))
 	}
 
-	// Main request uses summary + recent window (<=21)
+	// Main request uses summary + recent window (may be +1 or +2 if we
+	// pulled in a preceding tool_use to avoid orphaning a tool_result).
 	mainReq := p.requests[1]
-	if len(mainReq.Messages) > recentWindow+1 {
-		t.Errorf("main context msgs=%d exceeds window+1", len(mainReq.Messages))
+	if len(mainReq.Messages) > recentWindow+2 {
+		t.Errorf("main context msgs=%d exceeds window+2", len(mainReq.Messages))
 	}
 	if len(mainReq.Messages) < 2 {
 		t.Errorf("main context too small")
