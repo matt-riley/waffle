@@ -113,6 +113,30 @@ func TestUnknownUpstream(t *testing.T) {
 	}
 }
 
+func TestMintReplacesExistingSessionToken(t *testing.T) {
+	b := New(nil, nil)
+	first := b.Mint(context.Background(), "sess")
+	second := b.Mint(context.Background(), "sess")
+	if first == second {
+		t.Fatalf("Mint returned the same token twice: %q", first)
+	}
+	if got := b.session(first); got != "" {
+		t.Fatalf("first token still resolves to session %q after replacement", got)
+	}
+	if got := b.session(second); got != "sess" {
+		t.Fatalf("second token resolves to %q, want sess", got)
+	}
+}
+
+func TestRevokeSessionInvalidatesAllSessionTokens(t *testing.T) {
+	b := New(nil, nil)
+	token := b.Mint(context.Background(), "sess")
+	b.RevokeSession("sess")
+	if got := b.session(token); got != "" {
+		t.Fatalf("token still resolves to session %q after RevokeSession", got)
+	}
+}
+
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))

@@ -51,8 +51,9 @@ type Broker struct {
 	// `waffle git-credential` inside workspace containers.
 	GitCredential GitCredentialFunc
 
-	mu     sync.Mutex
-	tokens map[string]string // token → session id
+	mu       sync.Mutex
+	tokens   map[string]string // token → session id
+	sessions map[string]string // session id → current token
 }
 
 // New builds a broker over the given upstreams; st may be nil to skip
@@ -61,6 +62,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 	b := &Broker{
 		upstreams: map[string]*httputil.ReverseProxy{},
 		tokens:    map[string]string{},
+		sessions:  map[string]string{},
 	}
 	if st != nil {
 		b.audit = st.DB
@@ -95,7 +97,11 @@ func (b *Broker) Mint(ctx context.Context, sessionID string) string {
 	}
 	token := "wk_" + hex.EncodeToString(raw[:])
 	b.mu.Lock()
+	if old := b.sessions[sessionID]; old != "" {
+		delete(b.tokens, old)
+	}
 	b.tokens[token] = sessionID
+	b.sessions[sessionID] = token
 	b.mu.Unlock()
 	b.record(ctx, token, sessionID, "mint", "")
 	return token
@@ -104,7 +110,20 @@ func (b *Broker) Mint(ctx context.Context, sessionID string) string {
 // Revoke invalidates a token (session ended).
 func (b *Broker) Revoke(token string) {
 	b.mu.Lock()
+	if sessionID := b.tokens[token]; sessionID != "" && b.sessions[sessionID] == token {
+		delete(b.sessions, sessionID)
+	}
 	delete(b.tokens, token)
+	b.mu.Unlock()
+}
+
+// RevokeSession invalidates the current token for sessionID, if any.
+func (b *Broker) RevokeSession(sessionID string) {
+	b.mu.Lock()
+	if token := b.sessions[sessionID]; token != "" {
+		delete(b.tokens, token)
+		delete(b.sessions, sessionID)
+	}
 	b.mu.Unlock()
 }
 

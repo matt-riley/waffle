@@ -58,8 +58,9 @@ type Manager struct {
 	// bridge.
 	Network string
 	// BrokerURL as reachable from inside containers, plus a token minter.
-	BrokerURL string
-	MintToken func(ctx context.Context, sessionID string) string
+	BrokerURL     string
+	MintToken     func(ctx context.Context, sessionID string) string
+	RevokeSession func(sessionID string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
 }
@@ -136,10 +137,12 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		token = m.MintToken(ctx, sess.ID)
 	}
 	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
 	client, err := sandbox.NewClient(m.queueDir(ws.ID))
 	if err != nil {
+		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
 
@@ -147,6 +150,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		_ = client.Close()
 		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
 		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
 
@@ -261,6 +265,7 @@ func (m *Manager) Idle(ctx context.Context, id string) error {
 	if err := m.Runtime.StopContainer(ctx, ws.Container); err != nil {
 		return err
 	}
+	m.revokeSession(ws.SessionID)
 	return m.setStatus(ctx, id, StatusIdle)
 }
 
@@ -356,7 +361,14 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 	if err := m.Runtime.RemoveVolume(ctx, ws.Volume); err != nil {
 		return report, err
 	}
+	m.revokeSession(ws.SessionID)
 	return report, m.setStatus(ctx, id, StatusClosed)
+}
+
+func (m *Manager) revokeSession(sessionID string) {
+	if m.RevokeSession != nil {
+		m.RevokeSession(sessionID)
+	}
 }
 
 func (m *Manager) setStatus(ctx context.Context, id, status string) error {

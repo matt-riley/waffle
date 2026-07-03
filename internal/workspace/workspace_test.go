@@ -77,6 +77,28 @@ type fakeRuntime struct {
 	startErr error
 }
 
+type revocationTracker struct {
+	mu       sync.Mutex
+	sessions []string
+}
+
+func (r *revocationTracker) revoke(sessionID string) {
+	r.mu.Lock()
+	r.sessions = append(r.sessions, sessionID)
+	r.mu.Unlock()
+}
+
+func (r *revocationTracker) seen(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, got := range r.sessions {
+		if got == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func newFakeRuntime(tools *scriptedBash) *fakeRuntime {
 	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}}
 }
@@ -407,6 +429,46 @@ func TestCloseAbortsWhenIdleWorkspaceCannotResume(t *testing.T) {
 	}
 	if got, err := mgr.Get(ctx, ws.ID); err != nil || got.Status == StatusClosed {
 		t.Fatalf("workspace after failed close = %+v, %v", got, err)
+	}
+}
+
+func TestIdleRevokesWorkspaceSessionToken(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	revoke := &revocationTracker{}
+	mgr.RevokeSession = revoke.revoke
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck // switching to idle
+
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !revoke.seen(ws.SessionID) {
+		t.Fatalf("session %s was not revoked on idle", ws.SessionID)
+	}
+}
+
+func TestCloseRevokesWorkspaceSessionToken(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	revoke := &revocationTracker{}
+	mgr.RevokeSession = revoke.revoke
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck // manager reconnects in Close
+
+	if _, err := mgr.Close(ctx, ws.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if !revoke.seen(ws.SessionID) {
+		t.Fatalf("session %s was not revoked on close", ws.SessionID)
 	}
 }
 

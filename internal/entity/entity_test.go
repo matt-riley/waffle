@@ -3,7 +3,9 @@ package entity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/session"
@@ -88,5 +90,54 @@ func TestGroupForCreatesOnceAndBindsSession(t *testing.T) {
 	other, err := s.GroupFor(ctx, "telegram", "chat-2")
 	if err != nil || other.SessionID == g1.SessionID {
 		t.Errorf("distinct chats share a session: %+v vs %+v (%v)", other, g1, err)
+	}
+}
+
+func TestPairIsIdempotentUnderConcurrentFirstContact(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	s.db.SetMaxOpenConns(2)
+
+	for attempt := 0; attempt < 200; attempt++ {
+		start := make(chan struct{})
+		results := make(chan string, 2)
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				p, err := s.Pair(ctx, "telegram", fmt.Sprintf("race-%d", attempt), "Matt", "chat-race")
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- p.Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		close(errs)
+
+		var gotErrs []error
+		for err := range errs {
+			gotErrs = append(gotErrs, err)
+		}
+		if len(gotErrs) != 0 {
+			t.Fatalf("Pair returned errors under concurrent first contact: %v", gotErrs)
+		}
+
+		var codes []string
+		for code := range results {
+			codes = append(codes, code)
+		}
+		if len(codes) != 2 {
+			t.Fatalf("got %d pairing codes, want 2", len(codes))
+		}
+		if codes[0] != codes[1] {
+			t.Fatalf("concurrent Pair returned different codes: %q vs %q", codes[0], codes[1])
+		}
 	}
 }

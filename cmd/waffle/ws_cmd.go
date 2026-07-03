@@ -125,6 +125,7 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	}
 	if b != nil {
 		mgr.MintToken = func(ctx context.Context, sessionID string) string { return b.Mint(ctx, sessionID) }
+		mgr.RevokeSession = b.RevokeSession
 	}
 	return mgr
 }

@@ -96,10 +96,13 @@ func newPairingCode() string {
 // Re-messaging returns the same code rather than minting endlessly.
 func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatID string) (*Pairing, error) {
 	var p Pairing
-	err := s.db.QueryRowContext(ctx, `
+	read := func() error {
+		return s.db.QueryRowContext(ctx, `
 		SELECT code, channel, external_id, sender_name, chat_id FROM pairings
 		WHERE channel = ? AND external_id = ?`, channel, externalID).
-		Scan(&p.Code, &p.Channel, &p.ExternalID, &p.SenderName, &p.ChatID)
+			Scan(&p.Code, &p.Channel, &p.ExternalID, &p.SenderName, &p.ChatID)
+	}
+	err := read()
 	if err == nil {
 		return &p, nil
 	}
@@ -111,6 +114,9 @@ func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatI
 		INSERT INTO pairings (code, channel, external_id, sender_name, chat_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		p.Code, p.Channel, p.ExternalID, p.SenderName, p.ChatID, now()); err != nil {
+		if err := read(); err == nil {
+			return &p, nil
+		}
 		return nil, fmt.Errorf("create pairing: %w", err)
 	}
 	return &p, nil
