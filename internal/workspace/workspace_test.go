@@ -542,8 +542,8 @@ func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
 			}
 		}
 	}
-	if success < 1 {
-		t.Errorf("expected at least one successful concurrent Open, got %d", success)
+	if success != 2 {
+		t.Errorf("expected both concurrent Open calls to succeed (resume winner on UNIQUE), got %d successes", success)
 	}
 	// If the INSERT-fail resume path was taken, we still end up with one workspace.
 	if list, err := mgr.List(ctx); err != nil || len(list) != 1 {

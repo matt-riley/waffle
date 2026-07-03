@@ -69,6 +69,9 @@ type Manager struct {
 	// ensureOnce ensures the active-repo index is created only once per
 	// Manager (process lifetime) to avoid repeated DDL in hot path.
 	ensureOnce sync.Once
+	// ensureErr holds any error from the one-time index creation so that
+	// subsequent calls continue to surface the failure.
+	ensureErr error
 }
 
 // NewManager wires a Manager with defaults.
@@ -120,16 +123,15 @@ func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // It runs only once per Manager lifetime (see ensureOnce) to avoid repeated
 // DDL on every Open; new DBs get it from migrations.
 func (m *Manager) ensureActiveRepoIndex(ctx context.Context) error {
-	var err error
 	m.ensureOnce.Do(func() {
 		if _, e := m.DB.ExecContext(ctx, `
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
 			ON workspaces(repo) WHERE status != 'closed'
 		`); e != nil {
-			err = fmt.Errorf("ensure active repo index: %w", e)
+			m.ensureErr = fmt.Errorf("ensure active repo index: %w", e)
 		}
 	})
-	return err
+	return m.ensureErr
 }
 
 // Open creates a workspace for repoArg: container + volume + session, repo
@@ -303,8 +305,10 @@ func isUniqueConstraintError(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "unique constraint failed") ||
-		strings.Contains(s, "constraint failed")
+	// Only treat as the expected race if it's a UNIQUE violation on the
+	// workspaces.repo partial index (not other constraints like CHECK or FK).
+	return strings.Contains(s, "unique constraint failed") &&
+		(strings.Contains(s, "workspaces.repo") || strings.Contains(s, "idx_workspaces_repo_active"))
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
