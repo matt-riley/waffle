@@ -17,7 +17,7 @@ import (
 func New(prefix string) (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", err // crypto/rand failing is not a recoverable state
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
 	return prefix + hex.EncodeToString(b[:]), nil
 }
@@ -27,7 +27,7 @@ func New(prefix string) (string, error) {
 func NewSession() (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", err // crypto/rand failing is not a recoverable state
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
 	return time.Now().UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:]), nil
 }
@@ -42,7 +42,7 @@ func NewBytes(n int) (string, error) {
 	}
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		return "", err // crypto/rand failing is not a recoverable state
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }
@@ -53,7 +53,7 @@ func NewPairingCode() (string, error) {
 	const pairingAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", err // crypto/rand failing is not a recoverable state
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
 	for i := range b {
 		b[i] = pairingAlphabet[int(b[i])%len(pairingAlphabet)]
