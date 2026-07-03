@@ -82,7 +82,6 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			if ctx.Err() != nil {
 				return nil
 			}
-			consecutive++
 			// Exponential backoff with jitter for long-poll robustness.
 			// 1s, 2s, 4s, 8s, 16s, 32s cap + up to 1s jitter (crypto random).
 			d := time.Duration(1<<min(consecutive, 5)) * time.Second
@@ -92,6 +91,7 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			if consecutive > 3 {
 				slog.Default().Error("telegram getUpdates persistent errors, backing off", "consecutive", consecutive, "backoff", d, "err", err)
 			}
+			consecutive++
 			select {
 			case <-time.After(d):
 				continue
@@ -147,7 +147,7 @@ func (a *Adapter) getUpdates(ctx context.Context, offset int64) ([]update, error
 			return updates, nil
 		}
 		if ctx.Err() != nil {
-			return nil, err
+			return nil, ctx.Err()
 		}
 		// brief retry delay inside getUpdates
 		select {
