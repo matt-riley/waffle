@@ -432,6 +432,35 @@ func TestCloseAbortsWhenIdleWorkspaceCannotResume(t *testing.T) {
 	}
 }
 
+// TestCloseRestoresIdleOnRefusal exercises the restore-to-idle path for
+// an originally-idle workspace when safety check refuses (addresses review
+// feedback that this new behavior lacked coverage).
+func TestCloseRestoresIdleOnRefusal(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{outputs: map[string]string{
+		"cd /work/repo && git status --porcelain": " M file\n",
+	}})
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should refuse and restore to idle (not leave open)
+	_, err = mgr.Close(ctx, ws.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "unsaved work") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil || got.Status != StatusIdle {
+		t.Fatalf("after refuse for idle ws, status=%v err=%v (want idle)", got.Status, err)
+	}
+}
+
 func TestIdleRevokesWorkspaceSessionToken(t *testing.T) {
 	ctx := context.Background()
 	mgr, _ := newTestManager(t, &scriptedBash{})
@@ -469,6 +498,56 @@ func TestCloseRevokesWorkspaceSessionToken(t *testing.T) {
 	}
 	if !revoke.seen(ws.SessionID) {
 		t.Fatalf("session %s was not revoked on close", ws.SessionID)
+	}
+}
+
+// TestOpenConcurrentRaceResumesWinner exercises the "resume the winner on
+// unique-index insert failure" path that protects against duplicate
+// workspaces during concurrent Open (addresses review request for
+// deterministic coverage of the race fix).
+func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{}}
+	mgr, _ := newTestManager(t, tools)
+
+	var wg sync.WaitGroup
+	results := make([]struct {
+		ws  *Workspace
+		err error
+	}, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+			results[i].err = err
+			if client != nil {
+				client.Close() //nolint:errcheck // test cleanup
+			}
+			results[i].ws = ws
+		}(i)
+	}
+	wg.Wait()
+
+	success := 0
+	var id string
+	for _, r := range results {
+		if r.err == nil && r.ws != nil {
+			success++
+			if id == "" {
+				id = r.ws.ID
+			} else if id != r.ws.ID {
+				t.Errorf("concurrent opens produced different workspaces: %s vs %s", id, r.ws.ID)
+			}
+		}
+	}
+	if success != 2 {
+		t.Errorf("expected both concurrent Open calls to succeed (resume winner on UNIQUE), got %d successes", success)
+	}
+	// If the INSERT-fail resume path was taken, we still end up with one workspace.
+	if list, err := mgr.List(ctx); err != nil || len(list) != 1 {
+		t.Errorf("after concurrent open, workspaces = %d (want 1), err=%v", len(list), err)
 	}
 }
 

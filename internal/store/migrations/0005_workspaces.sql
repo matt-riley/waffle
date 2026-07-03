@@ -12,3 +12,8 @@ CREATE TABLE workspaces (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 ) STRICT;
+
+-- Partial unique index to prevent duplicate active workspaces for the same repo.
+-- Applied at migration time for new DBs; ensureActiveRepoIndex is fallback for old DBs.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
+ON workspaces(repo) WHERE status != 'closed';

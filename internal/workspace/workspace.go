@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/sandbox"
@@ -64,6 +65,13 @@ type Manager struct {
 	RevokeSession func(sessionID string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
+
+	// ensureOnce ensures the active-repo index is created only once per
+	// Manager (process lifetime) to avoid repeated DDL in hot path.
+	ensureOnce sync.Once
+	// ensureErr holds any error from the one-time index creation so that
+	// subsequent calls continue to surface the failure.
+	ensureErr error
 }
 
 // NewManager wires a Manager with defaults.
@@ -109,12 +117,32 @@ func newWSID() string {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// ensureActiveRepoIndex installs (idempotently) a partial UNIQUE index so
+// that concurrent Open calls for the same repo cannot both succeed in
+// inserting a non-closed row. This fixes the TOCTOU in check-then-create.
+// It runs only once per Manager lifetime (see ensureOnce) to avoid repeated
+// DDL on every Open; new DBs get it from migrations.
+func (m *Manager) ensureActiveRepoIndex(ctx context.Context) error {
+	m.ensureOnce.Do(func() {
+		if _, e := m.DB.ExecContext(ctx, `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_repo_active
+			ON workspaces(repo) WHERE status != 'closed'
+		`); e != nil {
+			m.ensureErr = fmt.Errorf("ensure active repo index: %w", e)
+		}
+	})
+	return m.ensureErr
+}
+
 // Open creates a workspace for repoArg: container + volume + session, repo
 // cloned inside via the broker-backed credential helper. If a workspace
 // for the repo already exists (open or idle), it is resumed instead.
 func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbox.Client, error) {
 	repo, url, err := normalizeRepo(repoArg)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := m.ensureActiveRepoIndex(ctx); err != nil {
 		return nil, nil, err
 	}
 	if existing, err := m.ForRepo(ctx, repo); err == nil {
@@ -173,6 +201,20 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now()); err != nil {
+		// Concurrent Open raced us (or other insert error); clean up our
+		// side effects.
+		_ = client.Close()
+		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		m.revokeSession(ws.SessionID)
+		if isUniqueConstraintError(err) {
+			// Expected race on the active-repo index: resume the winner.
+			if existing, err2 := m.ForRepo(ctx, repo); err2 == nil {
+				return m.Resume(ctx, existing.ID)
+			}
+		}
+		// Real DB error (disk full, locked, schema, etc.) or no winner found:
+		// return original error after cleanup.
 		return nil, nil, err
 	}
 	return ws, client, nil
@@ -235,21 +277,52 @@ func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd st
 	return strings.TrimSpace(out), nil
 }
 
-// bashOut runs a best-effort command and returns "" on failure.
-func (m *Manager) bashOut(ctx context.Context, client *sandbox.Client, cmd string) string {
-	out, _ := m.bashOutput(ctx, client, cmd)
-	return out
-}
-
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+// isMissingFileError reports whether err represents an expected
+// "file not found" during best-effort container inspection (e.g. no
+// .devcontainer.json). Other errors are real failures (permissions,
+// I/O, etc).
+func isMissingFileError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Strict match for expected "file not found" from cat/exec in the
+	// container (e.g. no .devcontainer.json). Broad "not found" can
+	// hide real errors like "command not found" or permission denied.
+	return strings.Contains(msg, "no such file or directory") ||
+		(strings.Contains(msg, "cat:") && strings.Contains(msg, "no such file or directory"))
+}
+
+// isUniqueConstraintError reports whether err is the expected SQLite
+// UNIQUE constraint violation from our partial active-repo index (used
+// to detect concurrent Open races and resume the winner).
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Only treat as the expected race if it's a UNIQUE violation on the
+	// workspaces.repo partial index (not other constraints like CHECK or FK).
+	return strings.Contains(s, "unique constraint failed") &&
+		(strings.Contains(s, "workspaces.repo") || strings.Contains(s, "idx_workspaces_repo_active"))
+}
+
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
-// repo and returns its "image", or "".
+// repo and returns its "image", or "". It now uses bashOutput so that
+// "no such file" (ENOENT) can be distinguished from other errors.
 func (m *Manager) devcontainerImage(ctx context.Context, client *sandbox.Client, ws *Workspace) string {
-	raw := m.bashOut(ctx, client, "cat /work/repo/.devcontainer/devcontainer.json 2>/dev/null")
-	if raw == "" {
+	raw, err := m.bashOutput(ctx, client, "cat /work/repo/.devcontainer/devcontainer.json")
+	if err != nil {
+		// expected "no .devcontainer" vs unexpected exec error
+		if isMissingFileError(err) {
+			return ""
+		}
+		// other error (e.g. permission, container problem): treat as no image
+		// (best-effort path; would log at debug if logger were attached)
 		return ""
 	}
 	var dc struct {
@@ -334,9 +407,10 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 	}
 
 	report := &CloseReport{}
+	wasIdle := ws.Status == StatusIdle
 	if !force {
 		var client *sandbox.Client
-		if ws.Status == StatusIdle {
+		if wasIdle {
 			resumed, resumedClient, err := m.Resume(ctx, id)
 			if err != nil {
 				return report, fmt.Errorf("resume workspace for safety check: %w", err)
@@ -356,9 +430,19 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 		}
 		_ = client.Close()
 		if err != nil {
+			if wasIdle {
+				if idleErr := m.Idle(ctx, id); idleErr != nil {
+					return report, fmt.Errorf("inspect workspace before close: %w (also failed to restore idle: %v)", err, idleErr)
+				}
+			}
 			return report, fmt.Errorf("inspect workspace before close: %w", err)
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
+			if wasIdle {
+				if idleErr := m.Idle(ctx, id); idleErr != nil {
+					return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard; also failed to restore idle: %v)", id, idleErr)
+				}
+			}
 			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}
 	}
