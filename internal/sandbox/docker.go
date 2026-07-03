@@ -85,7 +85,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 		client:    client,
 		container: name,
 		defs:      tool.Builtins().Defs(),
-		Timeout:   11 * time.Minute, // > bash's 10-minute cap
+		Timeout:   DefaultToolTimeout, // > bash's 10-minute cap; dead-runner detection is faster
 	}, nil
 }
 
