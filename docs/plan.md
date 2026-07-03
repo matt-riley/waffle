@@ -103,12 +103,91 @@ gateway, not trusted to the sandbox.
 
 ### Sandboxing & IPC
 
-Owner-primary sessions execute tools in-process on the host. All other
-sessions get a Docker container whose only shared state is a pair of SQLite
-files per session: `inbound.db` (host writes, agent reads) and `outbound.db`
-(agent writes, host reads). One writer per file — no sockets, no races, and
-the delivery poller survives container crashes. Containers see only their
-mounted workspace and the provider proxy; never keys, never the host FS.
+The agent loop always runs on the host — that keeps one loop implementation
+and keeps memory, skills, and session history host-side. What varies per
+session is the **executor**: where its `bash`/`read`/`write`/`edit` tool
+calls actually run.
+
+- `host` executor: in-process, owner-primary sessions only.
+- `docker` executor: a container per session. Because Go builds a static
+  binary, the *same* `waffle` binary is bind-mounted read-only into any
+  image and started as `waffle runner`.
+
+Host and runner communicate nanoclaw-style, through a pair of SQLite files
+per session on a shared mount: `inbound.db` (host writes exec requests,
+runner reads) and `outbound.db` (runner writes results/output, host reads).
+One writer per file — no sockets, no exec-attach fragility, results survive
+container or gateway restarts, and a stopped container resumes exactly where
+it left off. Containers see only their workspace volume, the queue mount,
+and the host's proxy endpoints — never secrets, never the host filesystem.
+
+### Repo workspaces ("work on this repo")
+
+Saying *"work on matt-riley/foo"* (or `/repo matt-riley/foo`) turns into a
+first-class object, the **workspace**: a container + named volume dedicated
+to one repository, with a session bound to it.
+
+Lifecycle:
+
+1. **Open.** The gateway picks the image — if the repo has a
+   `.devcontainer/devcontainer.json`, use that image; else a per-repo or
+   global default dev image (git + language toolchains). It creates a named
+   volume, starts the container with the `waffle runner` bind-mount, and
+   clones the repo using a broker-minted short-lived token (see secret
+   management). The token is used once by the runner and never stored.
+2. **Work.** The session's tools execute in the container. Git pushes use
+   the `waffle` binary itself as the repo's `credential.helper`: on demand it
+   asks the host broker for a fresh token scoped to that one repository, so
+   the container never holds a durable credential. Network egress is
+   policy-controlled per workspace (none / allowlist via host egress proxy /
+   full).
+3. **Idle.** After a configurable idle timeout the container *stops* but the
+   volume persists — "pick up where we left off tomorrow" is a container
+   start, not a re-clone.
+4. **Close.** On explicit close or TTL expiry, waffle verifies the branch is
+   pushed (warns if not), then removes container + volume.
+
+Workspaces are just sessions, so everything composes: several can run in
+parallel, a subagent can be pointed at one, and a cron job can open one
+("every Monday, update deps in repo X and open a PR"). `waffle ws list`
+shows open workspaces, their repos, branches, and dirty state.
+
+### Secret management
+
+Layered, with one rule throughout: **raw secrets exist only in the host
+store; everything else gets short-lived, scoped derivatives.**
+
+- **Store.** `internal/secret` defines a `Store` interface. Default backend:
+  an age-encrypted file `~/.waffle/secrets.age` whose key lives in the OS
+  keychain (Keychain / libsecret via `go-keyring`), with a passphrase
+  fallback for headless boxes. Env-var backend for CI; external backends
+  (`op` / Vault) can come later behind the same interface. Managed with
+  `waffle secret set|rm|ls` (values never echoed).
+- **References, not values.** Config carries `secret://` URIs
+  (`token = "secret://telegram/bot-token"`); resolution happens at use, in
+  the gateway. Secrets never appear in config, SQLite, or logs.
+- **Broker.** A host-side credential broker (part of the gateway, sibling of
+  the provider proxy) is the only component that reads the store on behalf
+  of sessions. It authenticates callers with per-session `wk_` tokens and
+  applies the session's policy. It has three faces:
+  - *LLM:* the provider proxy — injects the real API key upstream
+    (unchanged from the base plan).
+  - *Git:* mints short-lived, least-privilege repo credentials — a GitHub
+    App installation token or fine-grained PAT scoped to the single repo,
+    ~1 h TTL — for workspace clone/push.
+  - *HTTP:* an egress proxy that injects `Authorization` headers for
+    allowlisted hosts, so a sandboxed tool can call an API it is entitled
+    to without ever seeing the key (nanoclaw's Agent Vault pattern).
+- **Redaction.** The gateway keeps a digest set of all stored secret values
+  and scrubs matches from tool output, model context, logs, and traces
+  (`[redacted:github/pat]`) — protects against the "cat ~/.netrc into the
+  transcript" class of leak even on the host executor.
+- **Audit.** Every broker grant is a SQLite row: session, secret name,
+  scope, TTL, timestamp.
+
+Threat model in one line: a fully compromised session (prompt injection,
+malicious repo code) can spend its own scoped tokens until they expire, but
+cannot read another repo, another session's secrets, or any raw key.
 
 ### Skills & memory (from hermes-agent)
 
@@ -138,14 +217,16 @@ sessions, so "email me a Monday summary of my starred repos" is one row.
 ## Repository layout
 
 ```
-cmd/waffle/            main; subcommands: serve, chat, agent, skill, cron
-internal/gateway/      control plane: wiring, provider proxy, HTTP admin
+cmd/waffle/            main; subcommands: serve, chat, runner, ws, secret, cron
+internal/gateway/      control plane: wiring, broker (proxy/git/egress), admin
 internal/entity/       user/channel-group/agent-group/session model
 internal/channel/      Adapter interface; cli/, telegram/, discord/ ...
 internal/agent/        the loop: context assembly, streaming, tool dispatch
 internal/llm/          canonical types; anthropic/, openai/, gemini/
 internal/tool/         Tool interface, builtins, MCP client, policy
-internal/sandbox/      exec backends: host, docker; sqlite queue IPC
+internal/sandbox/      executors: host, docker; runner; sqlite queue IPC
+internal/workspace/    repo workspaces: lifecycle, devcontainer, git helper
+internal/secret/       Store iface; age+keyring backend; redaction; audit
 internal/skill/        SKILL.md discovery, indexing, learning loop
 internal/memory/       FTS5 store, curation, reflection/summarization
 internal/schedule/     cron persistence + runner
@@ -165,7 +246,9 @@ later phase to be useful.
 
 **Phase 0 — Skeleton (small).** Go module, `cmd/waffle`, config loading
 (`~/.waffle/config.toml`), SQLite store + migrations, CI (build, test,
-`golangci-lint`), OTel wiring.
+`golangci-lint`), OTel wiring; `internal/secret` Store interface with the
+age+keyring backend and `waffle secret` CLI (needed before the first
+provider key is configured).
 
 **Phase 1 — The loop (the heart).** `internal/llm` canonical types +
 Anthropic and openai-compatible providers; agent loop with streaming; host
@@ -181,15 +264,22 @@ it remembers you between sessions.*
 channel `Adapter` interface, Telegram adapter, pairing codes,
 `waffle serve`. *Milestone: message your agent from your phone.*
 
-**Phase 4 — Isolation.** Docker sandbox backend, SQLite queue-pair IPC,
-per-session tool policies, provider proxy with scoped tokens, group-chat
+**Phase 4 — Isolation & the broker.** Docker executor + `waffle runner`,
+SQLite queue-pair IPC, per-session tool policies, credential broker
+(provider proxy + `wk_` session tokens), secret redaction filter, group-chat
 support. *Milestone: safe to add a group chat or a second user.*
 
-**Phase 5 — Automation.** Cron scheduler with channel delivery; subagents
-(parallel sandboxed sessions reporting back to a parent); MCP client.
-*Milestone: unattended recurring jobs.*
+**Phase 5 — Repo workspaces.** `internal/workspace` lifecycle
+(open/idle/close), devcontainer image selection, broker-minted git
+credentials + `waffle` as in-container credential helper, egress policy,
+`waffle ws` CLI and `/repo` command. *Milestone: "work on repo X" from any
+channel spins up a container and ends in a pushed branch.*
 
-**Phase 6 — The learning loop.** Post-task skill distillation, in-use skill
+**Phase 6 — Automation.** Cron scheduler with channel delivery; subagents
+(parallel sandboxed sessions reporting back to a parent); MCP client.
+*Milestone: unattended recurring jobs, including scheduled repo work.*
+
+**Phase 7 — The learning loop.** Post-task skill distillation, in-use skill
 refinement, memory-curation nudges; optional weave-router deployment docs
 for smart model routing; second channel (Discord) if wanted.
 
@@ -204,6 +294,14 @@ for smart model routing; second channel (Discord) if wanted.
 - **Buy routing, build the loop:** smart model routing stays out of tree
   (use workweave/router as an endpoint); the agent loop, memory, and skills
   are the parts worth owning.
+- **Loop on host, tools in sandbox:** waffle deliberately diverges from
+  nanoclaw here (nanoclaw runs the whole agent in the container). One loop
+  implementation, memory/skills stay host-side, and containers need nothing
+  but the bind-mounted runner — at the cost of tool traffic transiting the
+  host, which is acceptable for a single-user system.
+- **GitHub App over PAT for repo credentials:** installation tokens are
+  natively short-lived and repo-scoped, which is exactly the broker's
+  contract. A fine-grained PAT is the fallback for the first iteration.
 
 ## Explicitly out of scope (for now)
 
