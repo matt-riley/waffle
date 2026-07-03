@@ -292,6 +292,16 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 		return nil, fmt.Errorf("openai: read stream: %w", err)
 	}
 
+	if hitCap {
+		// Do not emit tool_use blocks on truncation (args may be invalid JSON
+		// or incomplete, causing downstream unmarshal/exec errors in agent).
+		// Override stop reason so caller does not treat as tool request.
+		toolCalls = map[int]*wireToolCall{}
+		if resp.StopReason == llm.StopToolUse {
+			resp.StopReason = llm.StopEndTurn
+		}
+	}
+
 	if text.Len() > 0 {
 		resp.Message.Blocks = append(resp.Message.Blocks, llm.Block{Type: llm.BlockText, Text: text.String()})
 	}

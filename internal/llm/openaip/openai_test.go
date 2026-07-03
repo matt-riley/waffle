@@ -197,17 +197,12 @@ func TestCompleteSizeCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete tool: %v", err)
 	}
-	if resp2.StopReason != llm.StopToolUse {
-		t.Fatalf("stop=%q", resp2.StopReason)
+	if resp2.StopReason != llm.StopEndTurn {
+		t.Fatalf("expected non-tool stop reason on truncation, got %q", resp2.StopReason)
 	}
 	uses := resp2.ToolUses()
-	if len(uses) != 1 {
-		t.Fatalf("tool uses=%d", len(uses))
-	}
-	arg := string(uses[0].Input)
-	// With cap=5, first arg chunk is 6 bytes `{"a":"` so we take [:5] = `{"a":`
-	if arg != `{"a":` || len(arg) != 5 {
-		t.Errorf("tool arg should be capped to first 5 bytes, got %q (len=%d)", arg, len(arg))
+	if len(uses) != 0 {
+		t.Fatalf("expected no tool uses on truncation (to avoid bad JSON input), got %d", len(uses))
 	}
 	// Warning block present.
 	foundW := false
