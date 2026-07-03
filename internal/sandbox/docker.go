@@ -2,8 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
 )
@@ -64,11 +63,11 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 		opts.Network = "none"
 	}
 
-	var suffix [4]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
+	suffix, err := id.NewBytes(4)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: new id: %w", err)
 	}
-	name := "waffle-sb-" + hex.EncodeToString(suffix[:])
+	name := "waffle-sb-" + suffix
 
 	args := dockerRunArgs(name, opts)
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()

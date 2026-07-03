@@ -124,7 +124,7 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 		mgr.DefaultImage = cfg.Sandbox.Image
 	}
 	if b != nil {
-		mgr.MintToken = func(ctx context.Context, sessionID string) string { return b.Mint(ctx, sessionID) }
+		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return b.Mint(ctx, sessionID) }
 		mgr.RevokeSession = b.RevokeSession
 	}
 	return mgr

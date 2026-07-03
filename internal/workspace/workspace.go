@@ -7,9 +7,7 @@ package workspace
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -61,7 +60,7 @@ type Manager struct {
 	Network string
 	// BrokerURL as reachable from inside containers, plus a token minter.
 	BrokerURL     string
-	MintToken     func(ctx context.Context, sessionID string) string
+	MintToken     func(ctx context.Context, sessionID string) (string, error)
 	RevokeSession func(sessionID string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
@@ -107,14 +106,6 @@ func normalizeRepo(arg string) (repo, url string, err error) {
 	return "", "", fmt.Errorf("can't parse repo %q (want owner/name or an https URL)", arg)
 }
 
-func newWSID() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
-	}
-	return "ws-" + hex.EncodeToString(b[:])
-}
-
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // ensureActiveRepoIndex installs (idempotently) a partial UNIQUE index so
@@ -153,8 +144,12 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	if err != nil {
 		return nil, nil, err
 	}
+	wsID, err := id.New("ws-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("new workspace id: %w", err)
+	}
 	ws := &Workspace{
-		ID:        newWSID(),
+		ID:        wsID,
 		Repo:      repo,
 		URL:       url,
 		Image:     m.DefaultImage,
@@ -166,7 +161,10 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 
 	token := ""
 	if m.MintToken != nil {
-		token = m.MintToken(ctx, sess.ID)
+		token, err = m.MintToken(ctx, sess.ID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mint token for workspace: %w", err)
+		}
 	}
 	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
 		m.revokeSession(sess.ID)
@@ -361,7 +359,10 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 
 	if m.MintToken != nil {
-		token := m.MintToken(ctx, ws.SessionID)
+		token, err := m.MintToken(ctx, ws.SessionID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mint token for resume: %w", err)
+		}
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
 			return nil, nil, fmt.Errorf("replace workspace container: %w", err)
 		}

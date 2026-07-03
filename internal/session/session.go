@@ -5,15 +5,14 @@ package session
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -40,19 +39,15 @@ type Session struct {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-func newID() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable state
-	}
-	return time.Now().UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:])
-}
-
 // Create starts a new session.
 func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
-	sess := &Session{ID: newID(), Title: title}
+	idstr, err := id.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("new session id: %w", err)
+	}
+	sess := &Session{ID: idstr, Title: title}
 	ts := now()
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)`,
 		sess.ID, sess.Title, ts, ts)
 	if err != nil {
