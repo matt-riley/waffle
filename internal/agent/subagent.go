@@ -13,8 +13,10 @@ import (
 // final answer (docs/plan.md, "subagents ... reporting back to a parent").
 // The subagent shares the parent's provider, model, and toolbox but starts
 // with a clean history, so it doesn't inherit or pollute the conversation.
-// The gateway/agent loop dispatches tool calls in parallel, so several
-// subagents in one turn run concurrently.
+//
+// Tool dispatch (including subagent spawning) is concurrent via goroutines
+// but bounded by agent's toolSem (independent by contract, see Tool docs).
+// Depth is belt-and-suspenders; sub-toolbox normally omits spawn_subagent.
 type SubagentTool struct {
 	Provider  llm.Provider
 	Tools     tool.Toolbox
@@ -22,7 +24,8 @@ type SubagentTool struct {
 	MaxTokens int
 	Redact    func(string) string
 	// Depth guards against runaway recursion; a subagent's toolbox should
-	// omit spawn_subagent, but this is the belt-and-suspenders bound.
+	// omit spawn_subagent (enforced by Restrict in buildAgent), but this is
+	// the belt-and-suspenders bound. Execution slots are also bounded.
 	Depth int
 }
 

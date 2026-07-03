@@ -12,6 +12,13 @@ import (
 )
 
 // Tool is one callable capability.
+//
+// Tools are independent by contract: Run must be safe to call concurrently
+// with other tool invocations (or the same tool), must not assume sequential
+// execution or exclusive access to shared resources, and must respect
+// context cancellation for cooperative cancellation. A tool that blocks
+// indefinitely is subject to outer timeouts and bounded execution pools
+// (see agent runTools). SubagentTool is a special case with its own depth guard.
 type Tool interface {
 	Def() llm.Tool
 	Run(ctx context.Context, input json.RawMessage) (string, error)
