@@ -32,7 +32,10 @@ func TestProxyInjectsRealKeyAndStripsToken(t *testing.T) {
 	front := httptest.NewServer(b)
 	defer front.Close()
 
-	token, _ := b.Mint(context.Background(), "sess-1")
+	token, err := b.Mint(context.Background(), "sess-1")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 	if !strings.HasPrefix(token, "wk_") {
 		t.Fatalf("token = %q", token)
 	}
@@ -81,7 +84,10 @@ func TestUnauthorizedAndRevoked(t *testing.T) {
 	}
 
 	// Revoked token.
-	token, _ := b.Mint(context.Background(), "sess")
+	token, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 	b.Revoke(token)
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -100,7 +106,10 @@ func TestUnknownUpstream(t *testing.T) {
 	front := httptest.NewServer(b)
 	defer front.Close()
 
-	token, _ := b.Mint(context.Background(), "sess")
+	token, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/nope/v1/x", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
@@ -115,8 +124,14 @@ func TestUnknownUpstream(t *testing.T) {
 
 func TestMintReplacesExistingSessionToken(t *testing.T) {
 	b := New(nil, nil)
-	first, _ := b.Mint(context.Background(), "sess")
-	second, _ := b.Mint(context.Background(), "sess")
+	first, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("first Mint: %v", err)
+	}
+	second, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("second Mint: %v", err)
+	}
 	if first == second {
 		t.Fatalf("Mint returned the same token twice: %q", first)
 	}
@@ -130,7 +145,10 @@ func TestMintReplacesExistingSessionToken(t *testing.T) {
 
 func TestRevokeSessionInvalidatesAllSessionTokens(t *testing.T) {
 	b := New(nil, nil)
-	token, _ := b.Mint(context.Background(), "sess")
+	token, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
 	b.RevokeSession("sess")
 	if got := b.session(token); got != "" {
 		t.Fatalf("token still resolves to session %q after RevokeSession", got)

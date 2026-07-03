@@ -8,6 +8,7 @@ package id
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -33,7 +34,12 @@ func NewSession() (string, error) {
 
 // NewBytes returns n random bytes encoded as lowercase hex (no prefix).
 // Suitable for sandbox dir suffixes (n=4) and broker wk_ tokens (n=16).
+// n must be > 0; otherwise an error is returned (instead of panicking on
+// make or returning empty).
 func NewBytes(n int) (string, error) {
+	if n <= 0 {
+		return "", fmt.Errorf("id: NewBytes requires n>0, got %d", n)
+	}
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", err // crypto/rand failing is not a recoverable state

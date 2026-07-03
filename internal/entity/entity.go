@@ -97,7 +97,7 @@ func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatI
 	}
 	code, err := id.NewPairingCode()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new pairing code: %w", err)
 	}
 	p = Pairing{Code: code, Channel: channel, ExternalID: externalID, SenderName: senderName, ChatID: chatID}
 	if _, err := s.db.ExecContext(ctx, `

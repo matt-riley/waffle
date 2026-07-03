@@ -65,7 +65,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 
 	suffix, err := id.NewBytes(4)
 	if err != nil {
-		return nil, err // crypto/rand failing is not a recoverable state
+		return nil, fmt.Errorf("sandbox: new id: %w", err)
 	}
 	name := "waffle-sb-" + suffix
 

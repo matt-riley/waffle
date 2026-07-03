@@ -395,7 +395,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		}
 		sandboxID, err := id.NewBytes(4)
 		if err != nil {
-			return nil, cleanup, err
+			return nil, cleanup, fmt.Errorf("new sandbox id: %w", err)
 		}
 		executor, err := sandbox.StartDocker(ctx, sandbox.DockerOpts{
 			Image:    cfg.Sandbox.Image,

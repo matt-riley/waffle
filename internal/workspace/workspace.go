@@ -118,7 +118,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	}
 	wsID, err := id.New("ws-")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("new workspace id: %w", err)
 	}
 	ws := &Workspace{
 		ID:        wsID,
@@ -135,7 +135,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	if m.MintToken != nil {
 		token, err = m.MintToken(ctx, sess.ID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("mint token for workspace: %w", err)
 		}
 	}
 	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
@@ -288,7 +288,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	if m.MintToken != nil {
 		token, err := m.MintToken(ctx, ws.SessionID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("mint token for resume: %w", err)
 		}
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
 			return nil, nil, fmt.Errorf("replace workspace container: %w", err)

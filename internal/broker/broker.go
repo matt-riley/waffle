@@ -92,7 +92,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 func (b *Broker) Mint(ctx context.Context, sessionID string) (string, error) {
 	raw, err := id.NewBytes(16)
 	if err != nil {
-		return "", err // crypto/rand failing is not a recoverable state
+		return "", fmt.Errorf("mint broker token: %w", err)
 	}
 	token := "wk_" + raw
 	b.mu.Lock()

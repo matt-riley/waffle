@@ -58,7 +58,7 @@ func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*J
 	}
 	jobID, err := id.New("job-")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new job id: %w", err)
 	}
 	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Enabled: true}
 	_, err = s.db.ExecContext(ctx, `

@@ -43,7 +43,7 @@ func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
 	idstr, err := id.NewSession()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new session id: %w", err)
 	}
 	sess := &Session{ID: idstr, Title: title}
 	ts := now()
