@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -196,5 +197,101 @@ func TestRunIterationGuard(t *testing.T) {
 	}
 	if len(p.requests) != 3 {
 		t.Errorf("provider called %d times, want 3", len(p.requests))
+	}
+}
+
+// TestRunSummarizeAndTruncate verifies that prepareContext injects a
+// summary for long histories (Issue 3) and keeps Messages bounded in
+// Complete calls, while full history is still returned.
+func TestRunSummarizeAndTruncate(t *testing.T) {
+	// Provide responses: first for the summarize() Complete inside
+	// prepare, second for the main agent Complete.
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("old work: planned then coded"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("ok with recent"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+
+	// Build history > recentWindow (20). Only last 20 +1 summary go to main.
+	longHist := make([]llm.Message, 25)
+	for i := 0; i < 25; i++ {
+		longHist[i] = llm.UserText(fmt.Sprintf("turn %d", i))
+	}
+	// The last must be the "user" that Run expects to start from; but
+	// since we pass many, Run will treat whole as prior+current? In
+	// practice caller appends the latest user. For test, append final.
+	hist := append(longHist, llm.UserText("current question"))
+
+	history, err := a.Run(context.Background(), hist, Hooks{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// returned keeps full + the assistant reply
+	if len(history) != len(hist)+1 {
+		t.Fatalf("returned history len=%d want %d+1 (full preserved)", len(history), len(hist))
+	}
+
+	// Two completes: 0=sum, 1=main
+	if len(p.requests) != 2 {
+		t.Fatalf("completes=%d want 2 (one for summarize, one main)", len(p.requests))
+	}
+
+	// The summarize call uses only 2 msgs (flattened + prompt) not full history.
+	sumReq := p.requests[0]
+	if len(sumReq.Messages) != 2 {
+		t.Errorf("summarize request msgs=%d want 2 (flat+prompt)", len(sumReq.Messages))
+	}
+
+	// Main request uses summary + recent window (may be +1 or +2 if we
+	// pulled in a preceding tool_use to avoid orphaning a tool_result).
+	mainReq := p.requests[1]
+	if len(mainReq.Messages) > recentWindow+2 {
+		t.Errorf("main context msgs=%d exceeds window+2", len(mainReq.Messages))
+	}
+	if len(mainReq.Messages) < 2 {
+		t.Errorf("main context too small")
+	}
+	// The first msg in main context should be the injected summary note.
+	// (RoleAssistant + explicit label per review feedback to reduce
+	// prompt-injection risk from model-generated content.)
+	if mainReq.Messages[0].Role != llm.RoleAssistant || !strings.Contains(mainReq.Messages[0].Text(), "CONTEXT SUMMARY") {
+		t.Errorf("first main msg not summary: %+v", mainReq.Messages[0])
+	}
+}
+
+// TestRunToolSemaphoreBounds exercises the pre-acquire cancellation path
+// (addresses review feedback on missing coverage for the bounded semaphore
+// behavior).
+func TestRunToolSemaphoreBounds(t *testing.T) {
+	echo := &echoTool{}
+	// One tool-use response; the canceled ctx will cause runTools to return
+	// a canceled result. The subsequent Complete will fail (out of responses),
+	// which is fine -- we inspect the partial history.
+	p := &fakeProvider{responses: []llm.Response{
+		{
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"hi"}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+		},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(echo), Model: "m"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	history, _ := a.Run(ctx, []llm.Message{llm.UserText("go")}, Hooks{})
+
+	// The tool results should contain the pre-acquire cancel error.
+	found := false
+	for _, h := range history {
+		for _, b := range h.Blocks {
+			if b.ToolResult != nil && strings.Contains(b.ToolResult.Content, "canceled before acquiring") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("did not find canceled-before-acquire result in history: %+v", history)
 	}
 }
