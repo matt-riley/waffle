@@ -236,7 +236,7 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		s.Log.Error("job failed", "job", j.ID, "err", err)
 	}
 	if err := s.Store.markRun(context.WithoutCancel(runCtx), j.ID, status); err != nil {
-		s.Log.Error("mark job run failed (audit)", "job", j.ID, "err", err)
+		s.Log.Error("mark job run failed", "job", j.ID, "err", err)
 	}
 }
 

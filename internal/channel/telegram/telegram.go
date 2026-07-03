@@ -7,11 +7,12 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"strconv"
 	"time"
@@ -83,9 +84,11 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			}
 			consecutive++
 			// Exponential backoff with jitter for long-poll robustness.
-			// 1s, 2s, 4s, 8s, 16s, 32s cap + up to 1s jitter.
+			// 1s, 2s, 4s, 8s, 16s, 32s cap + up to 1s jitter (crypto random).
 			d := time.Duration(1<<min(consecutive, 5)) * time.Second
-			d += time.Duration(rand.Int63n(int64(time.Second)))
+			if j, err := rand.Int(rand.Reader, big.NewInt(int64(time.Second))); err == nil {
+				d += time.Duration(j.Int64())
+			}
 			if consecutive > 3 {
 				slog.Default().Error("telegram getUpdates persistent errors, backing off", "consecutive", consecutive, "backoff", d, "err", err)
 			}
