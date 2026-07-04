@@ -91,12 +91,17 @@ func (g *Gateway) Run(ctx context.Context) error {
 				continue
 			}
 			handlers.Add(1)
+			// Detach from the shutdown context so that handlers already
+			// accepted can run to completion and persist their turn even
+			// after ctx is canceled.  Adapters are stopped by ctx; new
+			// messages are rejected above; only the drain path reaches here.
+			drainCtx := context.WithoutCancel(ctx)
 			go func(msg channel.Message) {
 				defer handlers.Done()
 				defer func() { <-sem }()
 				// Handle concurrently across conversations, serially within
 				// one (the per-group lock).
-				g.handle(ctx, msg)
+				g.handle(drainCtx, msg)
 			}(msg)
 		}
 	}

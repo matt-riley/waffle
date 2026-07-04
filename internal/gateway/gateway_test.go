@@ -189,6 +189,108 @@ func TestDistinctChatsGetDistinctSessions(t *testing.T) {
 	}
 }
 
+// slowProvider blocks until ready is closed, then replies like scriptProvider.
+// inFlight is closed when Complete is entered so callers can synchronize.
+type slowProvider struct {
+	inFlight chan struct{}
+	ready    chan struct{}
+}
+
+func (p *slowProvider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
+	close(p.inFlight)
+	<-p.ready
+	last := req.Messages[len(req.Messages)-1].Text()
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "echo: " + last}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+// TestGracefulShutdownPersistsTurn verifies that canceling the gateway context
+// while a turn is in-flight still results in that turn being fully executed and
+// persisted (i.e. the drain path uses a detached context, not the canceled one).
+func TestGracefulShutdownPersistsTurn(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	adapter := newFakeAdapter()
+
+	provider := &slowProvider{
+		inFlight: make(chan struct{}),
+		ready:    make(chan struct{}),
+	}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: provider, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gwDone := make(chan error, 1)
+	go func() { gwDone <- gw.Run(ctx) }()
+
+	bgCtx := context.Background()
+
+	// Pair the owner.
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner", SenderName: "O", Text: "hi"}
+	adapter.waitForReply(t, "c1", 1)
+	pending, err := entities.Pairings(bgCtx)
+	if err != nil || len(pending) == 0 {
+		t.Fatalf("Pairings: %v %v", pending, err)
+	}
+	if _, err := entities.Approve(bgCtx, pending[0].Code, "Matt"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Send a message that will block inside the LLM provider.
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner", SenderName: "O", Text: "in-flight message"}
+
+	// Wait until the handler is truly in-flight (inside Complete).
+	select {
+	case <-provider.inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler to enter Complete")
+	}
+
+	// Simulate SIGTERM: cancel the gateway context.
+	cancel()
+
+	// Unblock the LLM provider so the turn can complete.
+	close(provider.ready)
+
+	// The gateway must drain and return.
+	select {
+	case <-gwDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway did not drain after shutdown")
+	}
+
+	// The in-flight turn must have been persisted.
+	group, err := entities.GroupFor(bgCtx, "fake", "c1")
+	if err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	turns, err := sessions.Turns(bgCtx, group.SessionID)
+	if err != nil {
+		t.Fatalf("Turns: %v", err)
+	}
+	// Expect: user + assistant = 2 turns (the pairing message has no session).
+	if len(turns) != 2 {
+		t.Fatalf("expected 2 persisted turns, got %d", len(turns))
+	}
+	if turns[0].Text() != "in-flight message" {
+		t.Errorf("turns[0] = %q, want %q", turns[0].Text(), "in-flight message")
+	}
+	if turns[1].Text() != "echo: in-flight message" {
+		t.Errorf("turns[1] = %q, want %q", turns[1].Text(), "echo: in-flight message")
+	}
+}
+
 func TestCompletedConversationReleasesGroupLock(t *testing.T) {
 	gw, adapter, entities, _, cancel := newTestGateway(t)
 	defer cancel()
