@@ -62,11 +62,18 @@ type wireToolCall struct {
 }
 
 type wireRequest struct {
-	Model    string        `json:"model"`
-	Messages []wireMessage `json:"messages"`
-	Tools    []wireTool    `json:"tools,omitempty"`
-	Stream   bool          `json:"stream"`
-	MaxTok   int           `json:"max_tokens,omitempty"`
+	Model         string             `json:"model"`
+	Messages      []wireMessage      `json:"messages"`
+	Tools         []wireTool         `json:"tools,omitempty"`
+	Stream        bool               `json:"stream"`
+	StreamOptions *wireStreamOptions `json:"stream_options,omitempty"`
+	MaxTok        int                `json:"max_tokens,omitempty"`
+}
+
+// wireStreamOptions asks the backend to include a final usage-only chunk in
+// the stream; spec-compliant OpenAI endpoints omit usage entirely otherwise.
+type wireStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type wireTool struct {
@@ -137,6 +144,9 @@ func (p *Provider) client() *http.Client {
 
 func (p *Provider) toWire(req llm.Request) wireRequest {
 	w := wireRequest{Model: req.Model, Stream: true, MaxTok: req.MaxTokens}
+	if w.Stream {
+		w.StreamOptions = &wireStreamOptions{IncludeUsage: true}
+	}
 	if req.System != "" {
 		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: req.System})
 	}

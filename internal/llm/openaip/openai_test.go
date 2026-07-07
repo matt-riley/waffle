@@ -69,6 +69,36 @@ func TestCompleteText(t *testing.T) {
 	if body["stream"] != true {
 		t.Error("stream not set")
 	}
+	opts, ok := body["stream_options"].(map[string]any)
+	if !ok || opts["include_usage"] != true {
+		t.Errorf("stream_options = %v, want include_usage=true", body["stream_options"])
+	}
+}
+
+func TestUsageOnlyFinalChunk(t *testing.T) {
+	// Spec-compliant OpenAI backends send usage in a trailing chunk whose
+	// choices array is empty (when stream_options.include_usage is set).
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"role":"assistant","content":"Hi"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{llm.UserText("hi")}}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Message.Text() != "Hi" {
+		t.Errorf("text = %q", resp.Message.Text())
+	}
+	if resp.StopReason != llm.StopEndTurn {
+		t.Errorf("stop = %q", resp.StopReason)
+	}
+	if resp.Usage.InputTokens != 7 || resp.Usage.OutputTokens != 2 {
+		t.Errorf("usage = %+v, want input=7 output=2", resp.Usage)
+	}
 }
 
 func TestCompleteToolCall(t *testing.T) {

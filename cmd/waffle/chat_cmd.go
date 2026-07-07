@@ -99,6 +99,7 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			return scanner.Err()
 		}
 		line := strings.TrimSpace(scanner.Text())
+		cmd, args := splitCommand(line)
 		var message string
 		switch {
 		case line == "":
@@ -117,14 +118,14 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		case line == "/help":
 			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/repo <owner/repo>    work on a repo in a container workspace\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
 			continue
-		case strings.HasPrefix(line, "/skill"):
-			message, err = c.skillMessage(strings.TrimSpace(strings.TrimPrefix(line, "/skill")))
+		case cmd == "/skill":
+			message, err = c.skillMessage(args)
 			if err != nil {
 				fmt.Fprintf(stderr, "waffle: %v\n", err)
 				continue
 			}
-		case strings.HasPrefix(line, "/repo"):
-			if err := c.repoCommand(ctx, strings.TrimSpace(strings.TrimPrefix(line, "/repo")), stdout); err != nil {
+		case cmd == "/repo":
+			if err := c.repoCommand(ctx, args, stdout); err != nil {
 				fmt.Fprintf(stderr, "waffle: %v\n", err)
 			}
 			continue
@@ -139,6 +140,14 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			fmt.Fprintf(stderr, "\nwaffle: %v\n", err)
 		}
 	}
+}
+
+// splitCommand splits an input line into its leading word and the trimmed
+// remainder, so dispatch matches whole commands only — "/skills" is not
+// "/skill" and "/report" is not "/repo".
+func splitCommand(line string) (cmd, args string) {
+	cmd, args, _ = strings.Cut(line, " ")
+	return cmd, strings.TrimSpace(args)
 }
 
 // turn sends one user message through the agent and persists everything.
