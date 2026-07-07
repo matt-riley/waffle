@@ -90,7 +90,13 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		Log: log,
 	}
 	schedDone := make(chan error, 1)
-	go func() { schedDone <- sched.Run(ctx) }()
+	go func() {
+		serr := sched.Run(ctx)
+		if serr != nil {
+			log.Error("scheduler stopped", "err", serr)
+		}
+		schedDone <- serr
+	}()
 
 	log.Info("waffle gateway starting", "channels", len(adapters))
 	err = gw.Run(ctx)
@@ -99,9 +105,7 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	// deferred cleanup tears down the shared sandbox executor and MCP
 	// clients a running cron job may still be using.
 	stop()
-	if serr := <-schedDone; serr != nil {
-		log.Error("scheduler stopped", "err", serr)
-	}
+	<-schedDone
 	return err
 }
 
