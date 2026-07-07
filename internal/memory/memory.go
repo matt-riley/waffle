@@ -79,7 +79,7 @@ func (w Workspace) Append(note string) error {
 	if err != nil {
 		return err
 	}
-	line := fmt.Sprintf("- %s: %s\n", time.Now().Format("2006-01-02"), oneLine(note))
+	line := fmt.Sprintf("- %s: %s\n", time.Now().UTC().Format("2006-01-02"), oneLine(note))
 	if _, err := f.WriteString(line); err != nil {
 		f.Close() //nolint:errcheck // write already failed
 		return err
