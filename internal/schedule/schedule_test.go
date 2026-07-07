@@ -2,8 +2,12 @@ package schedule
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/llm"
@@ -100,6 +104,58 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	turns, _ := sessions.Turns(ctx, list[0].ID)
 	if len(turns) != 2 {
 		t.Errorf("turns = %d, want 2", len(turns))
+	}
+}
+
+func TestSchedulerReconcilesJobChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st := newTestStore(t)
+	jobs := NewStore(st)
+	sched := &Scheduler{
+		Store: jobs,
+		Runner: &Runner{
+			Agent:    &agent.Agent{Provider: echoProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+			Sessions: session.New(st),
+		},
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Reconcile: 10 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() { done <- sched.Run(ctx) }()
+
+	// A job added after Run has started is picked up by reconciliation.
+	j, err := jobs.Add(ctx, "later", "0 9 * * *", "summarize", "")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	waitFor(t, "job registered", func() bool {
+		return slices.Contains(sched.registeredIDs(), j.ID)
+	})
+
+	// Removing it drops the cron entry on a later pass.
+	if err := jobs.Remove(ctx, j.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	waitFor(t, "job deregistered", func() bool {
+		return !slices.Contains(sched.registeredIDs(), j.ID)
+	})
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+// waitFor polls cond until it holds or the test times out.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

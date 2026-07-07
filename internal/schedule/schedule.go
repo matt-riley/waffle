@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -183,41 +184,123 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 	return reply, nil
 }
 
+// DefaultReconcile is how often the scheduler re-lists jobs from the
+// store when Scheduler.Reconcile is unset.
+const DefaultReconcile = 30 * time.Second
+
 // Scheduler runs enabled jobs on their cron schedules until ctx ends.
 type Scheduler struct {
 	Store  *Store
 	Runner *Runner
 	Log    *slog.Logger
+	// Reconcile is how often the scheduler re-lists jobs and syncs the
+	// cron set, so adds/removals/edits made while serving take effect
+	// without a restart. Zero means DefaultReconcile.
+	Reconcile time.Duration
+
+	mu         sync.Mutex
+	registered map[string]registration // job id -> live cron entry
 }
 
-// Run loads jobs, schedules them, and blocks until ctx is done.
+// registration is one job's live cron entry plus the definition it was
+// registered with, so reconcile can detect edits.
+type registration struct {
+	entry cron.EntryID
+	job   Job
+}
+
+// Run loads jobs, schedules them, and blocks until ctx is done,
+// reconciling the cron set with the store every Reconcile interval.
+// Before returning it waits for any in-flight job to finish.
 func (s *Scheduler) Run(ctx context.Context) error {
 	if s.Log == nil {
 		s.Log = slog.Default()
 	}
+	interval := s.Reconcile
+	if interval <= 0 {
+		interval = DefaultReconcile
+	}
+	s.mu.Lock()
+	s.registered = make(map[string]registration)
+	s.mu.Unlock()
+
+	c := cron.New(cron.WithParser(parser))
+	if err := s.reconcile(ctx, c); err != nil {
+		return err
+	}
+	s.Log.Info("scheduler started", "jobs", len(s.registeredIDs()))
+	c.Start()
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			stopCtx := c.Stop()
+			<-stopCtx.Done()
+			return nil
+		case <-tick.C:
+			if err := s.reconcile(ctx, c); err != nil {
+				s.Log.Error("scheduler reconcile failed", "err", err)
+			}
+		}
+	}
+}
+
+// reconcile syncs the cron set with the store: it registers new enabled
+// jobs, drops deleted or disabled ones, and re-registers jobs whose
+// definition changed.
+func (s *Scheduler) reconcile(ctx context.Context, c *cron.Cron) error {
 	jobs, err := s.Store.List(ctx)
 	if err != nil {
 		return err
 	}
-	c := cron.New(cron.WithParser(parser))
-	scheduled := 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
 		if !j.Enabled {
 			continue
 		}
+		seen[j.ID] = true
+		if reg, ok := s.registered[j.ID]; ok {
+			if sameDefinition(reg.job, j) {
+				continue
+			}
+			c.Remove(reg.entry)
+			delete(s.registered, j.ID)
+		}
 		job := j
-		if _, err := c.AddFunc(job.Cron, func() { s.fire(ctx, job) }); err != nil {
+		entry, err := c.AddFunc(job.Cron, func() { s.fire(ctx, job) })
+		if err != nil {
 			s.Log.Error("skip job with bad cron", "job", job.ID, "err", err)
 			continue
 		}
-		scheduled++
+		s.registered[job.ID] = registration{entry: entry, job: job}
 	}
-	s.Log.Info("scheduler started", "jobs", scheduled)
-	c.Start()
-	<-ctx.Done()
-	stopCtx := c.Stop()
-	<-stopCtx.Done()
+	for id, reg := range s.registered {
+		if !seen[id] {
+			c.Remove(reg.entry)
+			delete(s.registered, id)
+		}
+	}
 	return nil
+}
+
+// sameDefinition reports whether two snapshots of a job would schedule
+// and execute identically (run bookkeeping like LastRun is ignored).
+func sameDefinition(a, b Job) bool {
+	return a.Cron == b.Cron && a.Name == b.Name && a.Prompt == b.Prompt && a.Deliver == b.Deliver
+}
+
+// registeredIDs returns the ids of jobs currently held by the cron set.
+func (s *Scheduler) registeredIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.registered))
+	for id := range s.registered {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (s *Scheduler) fire(ctx context.Context, j Job) {
