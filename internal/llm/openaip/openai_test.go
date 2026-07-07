@@ -245,3 +245,79 @@ func TestCompleteSizeCap(t *testing.T) {
 		t.Error("expected warning block for capped tool args")
 	}
 }
+
+func TestTextCapDoesNotDropToolCall(t *testing.T) {
+	orig := maxAccumulatedBytes
+	maxAccumulatedBytes = 8
+	defer func() { maxAccumulatedBytes = orig }()
+
+	// Text nearly exhausts (and overflows) its budget, but a small complete
+	// tool call must still survive with StopToolUse: text and tool call
+	// arguments spend separate budgets.
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"content":"1234567890"}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"a\":1}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.StopReason != llm.StopToolUse {
+		t.Fatalf("stop = %q, want %q (complete tool call must survive text cap)", resp.StopReason, llm.StopToolUse)
+	}
+	uses := resp.ToolUses()
+	if len(uses) != 1 {
+		t.Fatalf("tool uses = %d, want 1", len(uses))
+	}
+	if uses[0].ID != "c1" || uses[0].Name != "bash" || string(uses[0].Input) != `{"a":1}` {
+		t.Errorf("tool use = %+v input=%s", uses[0], uses[0].Input)
+	}
+	// Text was still truncated and the warning block appended.
+	full := resp.Message.Text()
+	if !strings.Contains(full, "12345678") || strings.Contains(full, "90") {
+		t.Errorf("text = %q, want truncated to 8 bytes", full)
+	}
+	if !strings.Contains(full, "truncated") {
+		t.Errorf("expected truncation warning, got %q", full)
+	}
+}
+
+func TestCompleteToolCallKeptWhenAnotherTruncated(t *testing.T) {
+	orig := maxAccumulatedBytes
+	maxAccumulatedBytes = 10
+	defer func() { maxAccumulatedBytes = orig }()
+
+	// First tool call completes within budget; the second overflows it.
+	// The complete call must be emitted (StopToolUse kept) and the
+	// truncated one dropped rather than emitted as corrupt JSON.
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"bash","arguments":"{\"a\":1}"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c1","function":{"name":"bash","arguments":"{\"b\":\"123456789\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.StopReason != llm.StopToolUse {
+		t.Fatalf("stop = %q, want %q (complete call exists)", resp.StopReason, llm.StopToolUse)
+	}
+	uses := resp.ToolUses()
+	if len(uses) != 1 {
+		t.Fatalf("tool uses = %d, want 1 (truncated call dropped)", len(uses))
+	}
+	if uses[0].ID != "c0" || string(uses[0].Input) != `{"a":1}` {
+		t.Errorf("tool use = %+v input=%s", uses[0], uses[0].Input)
+	}
+	full := resp.Message.Text()
+	if !strings.Contains(full, "truncated") {
+		t.Errorf("expected truncation warning, got %q", full)
+	}
+}

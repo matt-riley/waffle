@@ -22,7 +22,15 @@ import (
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// ErrWorkspaceNotFound is returned by lookups (Get, ForRepo) when no
+// matching workspace exists. Callers must distinguish it from transient
+// DB errors (e.g. SQLITE_BUSY) so they don't treat a flaky read as
+// "no workspace" and churn duplicate containers/volumes.
+var ErrWorkspaceNotFound = errors.New("workspace not found")
 
 // Workspace is one repo workspace.
 type Workspace struct {
@@ -136,8 +144,14 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	if err := m.ensureActiveRepoIndex(ctx); err != nil {
 		return nil, nil, err
 	}
-	if existing, err := m.ForRepo(ctx, repo); err == nil {
+	switch existing, err := m.ForRepo(ctx, repo); {
+	case err == nil:
 		return m.Resume(ctx, existing.ID)
+	case !errors.Is(err, ErrWorkspaceNotFound):
+		// A transient DB error (e.g. SQLITE_BUSY) is not "no workspace";
+		// creating a fresh one here would hit the partial unique index or
+		// churn a duplicate container/volume.
+		return nil, nil, fmt.Errorf("look up workspace for %s: %w", repo, err)
 	}
 
 	sess, err := m.Sessions.Create(ctx, "workspace "+repo)
@@ -295,18 +309,21 @@ func isMissingFileError(err error) bool {
 		(strings.Contains(msg, "cat:") && strings.Contains(msg, "no such file or directory"))
 }
 
-// isUniqueConstraintError reports whether err is the expected SQLite
-// UNIQUE constraint violation from our partial active-repo index (used
-// to detect concurrent Open races and resume the winner).
+// isUniqueConstraintError reports whether err is a SQLite UNIQUE
+// constraint violation (used to detect concurrent Open races on the
+// partial active-repo index and resume the winner). It checks the
+// driver's typed error code first (SQLITE_CONSTRAINT_UNIQUE) so we
+// don't depend on driver error-message wording, with a message
+// substring check only as a fallback for wrapped or non-typed errors.
 func isUniqueConstraintError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	// Only treat as the expected race if it's a UNIQUE violation on the
-	// workspaces.repo partial index (not other constraints like CHECK or FK).
-	return strings.Contains(s, "unique constraint failed") &&
-		(strings.Contains(s, "workspaces.repo") || strings.Contains(s, "idx_workspaces_repo_active"))
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		return se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unique constraint failed")
 }
 
 // devcontainerImage reads .devcontainer/devcontainer.json from the cloned
@@ -512,7 +529,7 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
 		&ws.SessionID, &ws.Status, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("workspace not found")
+		return nil, ErrWorkspaceNotFound
 	}
 	if err != nil {
 		return nil, err

@@ -20,8 +20,10 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
-// maxAccumulatedBytes caps text + tool call argument accumulation in readStream
-// to prevent unbounded memory growth from verbose or malicious streams.
+// maxAccumulatedBytes caps text and tool call argument accumulation in
+// readStream to prevent unbounded memory growth from verbose or malicious
+// streams. Text and tool call arguments are budgeted separately (each up to
+// this cap) so that verbose text cannot starve a legitimate tool call.
 // It can be lowered in tests. The default is 2 MiB; Complete may tighten it
 // based on req.MaxTokens.
 var maxAccumulatedBytes = 2 * 1024 * 1024
@@ -211,8 +213,15 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 	resp := &llm.Response{Message: llm.Message{Role: llm.RoleAssistant}, StopReason: llm.StopOther}
 	var text strings.Builder
 	toolCalls := map[int]*wireToolCall{}
-	hitCap := false
-	currentSize := 0
+	// truncatedCalls tracks tool calls whose arguments were cut off by the
+	// byte cap; they must not be emitted (their args would be corrupt JSON).
+	truncatedCalls := map[int]bool{}
+	// Text and tool call arguments spend separate budgets so verbose text
+	// cannot starve a legitimate tool call of room for its arguments.
+	hitTextCap := false
+	hitToolCap := false
+	textSize := 0
+	toolSize := 0
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -240,22 +249,22 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 		choice := chunk.Choices[0]
 
 		if choice.Delta.Content != "" {
-			if !hitCap {
+			if !hitTextCap {
 				d := choice.Delta.Content
-				room := maxBytes - currentSize
+				room := maxBytes - textSize
 				if len(d) > room {
 					if room > 0 {
 						d = d[:room]
 						text.WriteString(d)
-						currentSize += len(d)
+						textSize += len(d)
 						if onEvent != nil {
 							onEvent(llm.Event{Type: llm.EventTextDelta, Text: d})
 						}
 					}
-					hitCap = true
+					hitTextCap = true
 				} else if room > 0 {
 					text.WriteString(d)
-					currentSize += len(d)
+					textSize += len(d)
 					if onEvent != nil {
 						onEvent(llm.Event{Type: llm.EventTextDelta, Text: d})
 					}
@@ -274,19 +283,26 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 			if tc.Function.Name != "" {
 				acc.Function.Name = tc.Function.Name
 			}
-			if tc.Function.Arguments != "" && !hitCap {
+			if tc.Function.Arguments != "" {
+				if hitToolCap {
+					// Args arrived after the cap and were skipped: this
+					// call's arguments are incomplete.
+					truncatedCalls[tc.Index] = true
+					continue
+				}
 				arg := tc.Function.Arguments
-				room := maxBytes - currentSize
+				room := maxBytes - toolSize
 				if len(arg) > room {
 					if room > 0 {
 						arg = arg[:room]
 						acc.Function.Arguments += arg
-						currentSize += len(arg)
+						toolSize += len(arg)
 					}
-					hitCap = true
+					hitToolCap = true
+					truncatedCalls[tc.Index] = true
 				} else {
 					acc.Function.Arguments += arg
-					currentSize += len(arg)
+					toolSize += len(arg)
 				}
 			}
 		}
@@ -303,12 +319,18 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 		return nil, fmt.Errorf("openai: read stream: %w", err)
 	}
 
-	if hitCap {
-		// Do not emit tool_use blocks on truncation (args may be invalid JSON
-		// or incomplete, causing downstream unmarshal/exec errors in agent).
-		// Override stop reason so caller does not treat as tool request.
-		toolCalls = map[int]*wireToolCall{}
-		if resp.StopReason == llm.StopToolUse {
+	hitCap := hitTextCap || hitToolCap
+	if hitToolCap {
+		// Drop only the tool calls whose arguments were truncated (their args
+		// may be invalid JSON, causing downstream unmarshal/exec errors in
+		// agent). Complete tool calls are preserved so a legitimate call is
+		// not silently discarded. Only when no complete call remains do we
+		// override the stop reason so the caller does not treat this as a
+		// tool request.
+		for i := range truncatedCalls {
+			delete(toolCalls, i)
+		}
+		if len(toolCalls) == 0 && resp.StopReason == llm.StopToolUse {
 			resp.StopReason = llm.StopEndTurn
 		}
 	}

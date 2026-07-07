@@ -7,22 +7,53 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
-// runnerNoHealthWait is how long Exec will wait for a first runner heartbeat
-// before concluding the runner is missing/dead (avoids blocking full timeout).
+// runnerNoHealthWait is the minimum time one Exec call waits for a first
+// runner heartbeat before it may conclude the runner is missing/dead
+// (avoids blocking full timeout).
 const runnerNoHealthWait = 10 * time.Second
+
+// runnerStartupWait is the cold-start allowance for the first-ever runner
+// heartbeat, measured from client creation (for Docker sandboxes the client
+// is created right after `docker run`, so this approximates container
+// start). A cold container can take well over runnerNoHealthWait to boot
+// the in-container runner, so a first tool call must not declare it dead on
+// an Exec-relative window alone; a live runner heartbeats within seconds of
+// booting, so no heartbeat by this bound means it is genuinely missing.
+const runnerStartupWait = 60 * time.Second
 
 // runnerHealthGrace is the staleness threshold for the runner heartbeat after
 // which we declare it dead (a live runner heartbeats in bg even during long
 // tool execution).
 const runnerHealthGrace = 30 * time.Second
 
+// runnerProbeTimeout caps one lastHealth query. It sits above the queue's
+// busy_timeout (5s, see openQueueDB) so that a probe issued under lock
+// contention on the shared mount still gets a genuine answer instead of
+// always timing out — a probe failure says nothing about runner liveness.
+const runnerProbeTimeout = 6 * time.Second
+
 // Client is the host side of the queue pair: it writes exec requests to
 // inbound.db and polls outbound.db for results.
 type Client struct {
 	inbound  *sql.DB // writer
 	outbound *sql.DB // reader
+
+	// startedAt anchors the cold-start allowance for the first heartbeat;
+	// set when the client is created (≈ container start for Docker).
+	startedAt time.Time
+
+	// Detection windows, defaulted from the constants above in NewClient;
+	// fields so tests can shrink them and stay fast.
+	noHealthWait    time.Duration // min per-Exec wait before "no heartbeat" counts
+	startupWait     time.Duration // cold-start allowance from startedAt for the first heartbeat
+	healthGrace     time.Duration // heartbeat staleness threshold
+	probeTimeout    time.Duration // per-lastHealth-query cap
+	probeFailWindow time.Duration // consecutive probe-failure budget before presumed dead
 }
 
 // NewClient opens the host side of the queue in dir, creating inbound.db.
@@ -39,7 +70,16 @@ func NewClient(dir string) (*Client, error) {
 		_ = in.Close()
 		return nil, err
 	}
-	return &Client{inbound: in, outbound: out}, nil
+	return &Client{
+		inbound:         in,
+		outbound:        out,
+		startedAt:       time.Now(),
+		noHealthWait:    runnerNoHealthWait,
+		startupWait:     runnerStartupWait,
+		healthGrace:     runnerHealthGrace,
+		probeTimeout:    runnerProbeTimeout,
+		probeFailWindow: runnerHealthGrace,
+	}, nil
 }
 
 // Close releases the queue handles (the runner is told to stop separately;
@@ -70,6 +110,7 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	start := time.Now()
+	var probeFailSince time.Time // start of the current consecutive-probe-failure streak
 	for {
 		// Use a short per-poll deadline so a wedged query (rare, e.g. under
 		// lock contention on the shared mount) does not block the select.
@@ -83,23 +124,42 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 		if qerr == nil {
 			return content, isError, nil
 		}
-		if !errors.Is(qerr, sql.ErrNoRows) && !errors.Is(qerr, context.DeadlineExceeded) && !errors.Is(qerr, context.Canceled) {
+		if !errors.Is(qerr, sql.ErrNoRows) && !errors.Is(qerr, context.DeadlineExceeded) && !errors.Is(qerr, context.Canceled) && !isBusyErr(qerr) {
 			return "", false, fmt.Errorf("sandbox: poll result: %w", qerr)
 		}
 		select {
 		case <-ticker.C:
 			// Heartbeat-based dead-runner detection (independent of ctx).
-			waited := time.Since(start)
 			h, herr := c.lastHealth(ctx)
-			if herr == nil {
-				if !h.IsZero() {
-					if stale := time.Since(h); stale > runnerHealthGrace {
-						c.attemptShutdown(ctx)
-						return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no heartbeat for %s)", name, stale.Round(time.Second))
-					}
-				} else if waited > runnerNoHealthWait {
+			switch {
+			case herr != nil:
+				// The probe itself failed — typically lock contention on
+				// the shared mount, which says nothing about runner
+				// liveness. Don't let that disable detection: past a
+				// budget of consecutive failures, presume the runner dead
+				// instead of blocking until the full tool timeout.
+				if probeFailSince.IsZero() {
+					probeFailSince = time.Now()
+				} else if down := time.Since(probeFailSince); down > c.probeFailWindow {
 					c.attemptShutdown(ctx)
-					return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no runner heartbeat seen)", name)
+					return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (health probe failing for %s: %v)", name, down.Round(time.Second), herr)
+				}
+			case !h.IsZero():
+				probeFailSince = time.Time{}
+				if stale := time.Since(h); stale > c.healthGrace {
+					c.attemptShutdown(ctx)
+					return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no heartbeat for %s)", name, stale.Round(time.Second))
+				}
+			default:
+				// No heartbeat yet. A cold container may still be booting
+				// the runner, so the window is anchored to container/runner
+				// start (startedAt), not just this Exec call: declare the
+				// runner missing only once both the per-call minimum and
+				// the overall cold-start allowance have passed.
+				probeFailSince = time.Time{}
+				if time.Since(start) > c.noHealthWait && time.Since(c.startedAt) > c.startupWait {
+					c.attemptShutdown(ctx)
+					return "", false, fmt.Errorf("sandbox: waiting for %s: runner appears dead (no runner heartbeat seen %s after start)", name, time.Since(c.startedAt).Round(time.Second))
 				}
 			}
 		case <-ctx.Done():
@@ -109,11 +169,22 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 	}
 }
 
+// isBusyErr reports whether err is SQLite's transient SQLITE_BUSY
+// ("database is locked"), which lock contention on the shared mount can
+// surface instead of a context deadline. It is a retryable condition, not
+// a transport failure; the heartbeat detector decides whether to give up.
+func isBusyErr(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
 // lastHealth returns the timestamp of the most recent runner heartbeat row
-// (or zero time if none present). It uses a short internal timeout to avoid
-// blocking on SQLite locks beyond the per-poll deadline.
+// (or zero time if none present). Its internal timeout (probeTimeout) is
+// deliberately above the queue busy_timeout so contention usually yields a
+// genuine answer; persistent failures are handled by the caller's
+// probe-failure budget rather than by skipping detection.
 func (c *Client) lastHealth(ctx context.Context) (time.Time, error) {
-	hctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	hctx, cancel := context.WithTimeout(ctx, c.probeTimeout)
 	defer cancel()
 	var ts string
 	err := c.outbound.QueryRowContext(hctx,

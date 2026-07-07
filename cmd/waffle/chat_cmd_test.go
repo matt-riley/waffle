@@ -3,13 +3,18 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/secret"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/store"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -68,6 +73,85 @@ func TestBareSkillAndRepoStillGiveUsage(t *testing.T) {
 	}
 	if err := c.repoCommand(context.Background(), "", io.Discard); err == nil || !strings.Contains(err.Error(), "usage: /repo") {
 		t.Errorf("repoCommand(\"\") err = %v, want usage error", err)
+	}
+}
+
+func newTestSessions(t *testing.T) (*session.Store, *store.Store) {
+	t.Helper()
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	return session.New(st), st
+}
+
+func TestSwitchToWorkspaceSessionKeepsStateOnTurnsError(t *testing.T) {
+	ctx := context.Background()
+	sessions, st := newTestSessions(t)
+
+	current, err := sessions.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The workspace session exists but its history won't load: a corrupt
+	// turn makes Turns fail, standing in for any transient load error.
+	wsSess, err := sessions.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.DB.ExecContext(ctx, `
+		INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		VALUES (?, 1, 'user', 'not json', '', ?)`,
+		wsSess.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert corrupt turn: %v", err)
+	}
+
+	c := &chat{
+		sessions:  sessions,
+		current:   current,
+		history:   []llm.Message{llm.UserText("hello"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "hi"}}}},
+		persisted: 2,
+	}
+	if err := c.switchToWorkspaceSession(ctx, wsSess.ID); err == nil {
+		t.Fatal("switchToWorkspaceSession = nil, want error")
+	}
+	if c.current.ID != current.ID {
+		t.Errorf("current = %s, want %s (unchanged)", c.current.ID, current.ID)
+	}
+	if len(c.history) != 2 || c.persisted != 2 {
+		t.Errorf("history = %d turns, persisted = %d, want both unchanged at 2", len(c.history), c.persisted)
+	}
+}
+
+func TestSwitchToWorkspaceSessionLoadsHistory(t *testing.T) {
+	ctx := context.Background()
+	sessions, _ := newTestSessions(t)
+
+	current, err := sessions.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wsSess, err := sessions.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sessions.AppendTurn(ctx, wsSess.ID, llm.UserText("earlier workspace turn")); err != nil {
+		t.Fatalf("AppendTurn: %v", err)
+	}
+
+	c := &chat{sessions: sessions, current: current, history: []llm.Message{llm.UserText("old")}, persisted: 1}
+	if err := c.switchToWorkspaceSession(ctx, wsSess.ID); err != nil {
+		t.Fatalf("switchToWorkspaceSession: %v", err)
+	}
+	if c.current.ID != wsSess.ID {
+		t.Errorf("current = %s, want %s", c.current.ID, wsSess.ID)
+	}
+	if len(c.history) != 1 || c.history[0].Text() != "earlier workspace turn" {
+		t.Errorf("history = %+v, want the workspace session's turn", c.history)
+	}
+	if c.persisted != len(c.history) {
+		t.Errorf("persisted = %d, want %d", c.persisted, len(c.history))
 	}
 }
 

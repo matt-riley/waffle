@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -242,6 +243,10 @@ func TestClientExecDetectsDeadRunnerEarly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close() //nolint:errcheck
+	// Shrink the detection windows so the test stays fast (defaults are
+	// 10s per call / 60s cold-start allowance).
+	client.noHealthWait = 300 * time.Millisecond
+	client.startupWait = 1 * time.Second
 
 	// No runner started; with heartbeat detection we should fail fast
 	// rather than block for the whole ctx.
@@ -257,11 +262,150 @@ func TestClientExecDetectsDeadRunnerEarly(t *testing.T) {
 	if !strings.Contains(err.Error(), "runner appears dead") {
 		t.Fatalf("expected 'runner appears dead' error, got: %v", err)
 	}
-	// Should detect within ~10s + margin, not wait anywhere near 30s.
-	if elapsed > 15*time.Second {
+	// Should detect shortly after the startup window, not wait for ctx.
+	if elapsed > 10*time.Second {
 		t.Fatalf("took too long to detect dead runner: %s", elapsed)
 	}
-	if elapsed < 8*time.Second {
-		t.Fatalf("detected too fast (before no-health wait): %s", elapsed)
+	if elapsed < client.startupWait {
+		t.Fatalf("detected too fast (before cold-start allowance): %s", elapsed)
+	}
+}
+
+// TestExecToleratesColdStartFirstHeartbeat is a regression test for the
+// cold-container false positive: the runner's first heartbeat only appears
+// well after the per-Exec no-health window, but the container (client) has
+// only just started, so Exec must keep polling instead of declaring death.
+func TestExecToleratesColdStartFirstHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+	// Tiny per-Exec window (the old, buggy trigger) but a generous
+	// cold-start allowance anchored to client/container start.
+	client.noHealthWait = 200 * time.Millisecond
+	client.startupWait = 10 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	type result struct {
+		out     string
+		isError bool
+		err     error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		out, isError, err := client.Exec(ctx, "upper", json.RawMessage(`{"s":"cold"}`))
+		resCh <- result{out, isError, err}
+	}()
+
+	// Let Exec sit well past noHealthWait with no runner heartbeat at all;
+	// the old Exec-relative logic would have declared the runner dead here.
+	time.Sleep(700 * time.Millisecond)
+	select {
+	case r := <-resCh:
+		t.Fatalf("Exec returned before the runner started: %q, isError=%v, err=%v", r.out, r.isError, r.err)
+	default:
+	}
+
+	// The "container" finishes booting: the runner comes up and serves the
+	// pending request.
+	startRunner(t, dir)
+	select {
+	case r := <-resCh:
+		if r.err != nil || r.isError || r.out != "COLD" {
+			t.Fatalf("Exec after cold start = %q, isError=%v, err=%v", r.out, r.isError, r.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Exec did not complete after runner started")
+	}
+}
+
+// TestExecPersistentProbeFailuresFailFast covers the contended-queue case
+// where the health probe can never run: a dead runner must still be
+// detected — past the probe-failure budget Exec fails fast instead of
+// blocking until ctx or the full tool timeout. probeTimeout of 1ns makes
+// every probe fail deterministically with a deadline error, like sustained
+// busy_timeout contention would.
+func TestExecPersistentProbeFailuresFailFast(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+	client.probeTimeout = 1 * time.Nanosecond
+	client.probeFailWindow = 500 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, _, err = client.Exec(ctx, "anything", json.RawMessage(`{}`))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error from dead runner under probe failures")
+	}
+	if !strings.Contains(err.Error(), "runner appears dead") || !strings.Contains(err.Error(), "health probe failing") {
+		t.Fatalf("expected probe-failure dead-runner error, got: %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("probe failures disabled dead-runner detection: took %s", elapsed)
+	}
+}
+
+// TestExecDetectsDeadRunnerAfterTransientLockContention holds a real
+// exclusive lock on outbound.db for a while (every probe and result poll
+// errors, as under busy_timeout contention), then releases it. Probe
+// errors during the contended stretch must not permanently disable
+// dead-runner detection: once the lock clears, the missing runner is
+// detected and Exec returns instead of blocking until ctx.
+func TestExecDetectsDeadRunnerAfterTransientLockContention(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+	client.noHealthWait = 100 * time.Millisecond
+	client.startupWait = 200 * time.Millisecond
+	client.probeTimeout = 100 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	locker, err := sql.Open("sqlite", "file:"+dir+"/"+outboundFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close() //nolint:errcheck
+	conn, err := locker.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("BEGIN EXCLUSIVE: %v", err)
+	}
+	release := time.AfterFunc(1500*time.Millisecond, func() {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+	})
+	defer release.Stop()
+
+	start := time.Now()
+	_, _, err = client.Exec(ctx, "anything", json.RawMessage(`{}`))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error from dead runner")
+	}
+	if !strings.Contains(err.Error(), "runner appears dead") {
+		t.Fatalf("expected 'runner appears dead' error, got: %v", err)
+	}
+	// Detection should land shortly after the lock is released (a few
+	// busy_timeout-bounded queries at most), nowhere near the 60s ctx.
+	if elapsed > 20*time.Second {
+		t.Fatalf("probe failures disabled dead-runner detection: took %s", elapsed)
 	}
 }

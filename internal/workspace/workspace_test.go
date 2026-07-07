@@ -551,6 +551,119 @@ func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
 	}
 }
 
+func TestForRepoReturnsNotFoundSentinel(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+
+	if _, err := mgr.ForRepo(ctx, "matt-riley/none"); !errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("ForRepo on empty DB = %v, want ErrWorkspaceNotFound", err)
+	}
+	if _, err := mgr.Get(ctx, "ws-none"); !errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("Get on empty DB = %v, want ErrWorkspaceNotFound", err)
+	}
+}
+
+// TestOpenLookupErrorDoesNotCreateWorkspace covers issue #16: a lookup
+// error that is NOT "workspace not found" (e.g. transient SQLITE_BUSY)
+// must abort Open rather than fall through to creating a duplicate
+// session/container/volume.
+func TestOpenLookupErrorDoesNotCreateWorkspace(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+
+	// Run the one-time index DDL first so the injected failure below only
+	// affects the ForRepo lookup inside Open.
+	if err := mgr.ensureActiveRepoIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Inject a non-not-found lookup failure: ForRepo now errors with
+	// "no such table", standing in for any transient DB error.
+	if _, err := mgr.DB.ExecContext(ctx, `DROP TABLE workspaces`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err == nil || errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("Open with failing lookup err = %v, want a lookup error", err)
+	}
+	if !strings.Contains(err.Error(), "look up workspace") {
+		t.Errorf("err = %v, want it to identify the lookup failure", err)
+	}
+	rt.mu.Lock()
+	starts := len(rt.opts)
+	events := strings.Join(rt.events, "\n")
+	rt.mu.Unlock()
+	if starts != 0 || strings.Contains(events, "start-workspace") {
+		t.Errorf("Open created container(s) despite lookup failure; events:\n%s", events)
+	}
+}
+
+// TestIsUniqueConstraintErrorRealDriver forces real constraint violations
+// through modernc.org/sqlite and checks the structural detection (issue
+// #26): UNIQUE violations match, other constraints don't.
+func TestIsUniqueConstraintErrorRealDriver(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+
+	sess, err := mgr.Sessions.Create(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, repo, status string) error {
+		_, err := mgr.DB.ExecContext(ctx, `
+			INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
+			VALUES (?, ?, 'https://x/y.git', 'img', 'c', 'v', ?, ?, ?, ?)`,
+			id, repo, sess.ID, status, now(), now())
+		return err
+	}
+	if err := insert("ws-one", "matt-riley/waffle", StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second active workspace for the same repo violates the partial
+	// unique index idx_workspaces_repo_active.
+	uniqueErr := insert("ws-two", "matt-riley/waffle", StatusOpen)
+	if uniqueErr == nil {
+		t.Fatal("second active insert for the same repo succeeded, want UNIQUE violation")
+	}
+	if !isUniqueConstraintError(uniqueErr) {
+		t.Errorf("isUniqueConstraintError(%v) = false, want true", uniqueErr)
+	}
+	// Detection must survive wrapping (errors.As unwraps).
+	if !isUniqueConstraintError(fmt.Errorf("insert workspace: %w", uniqueErr)) {
+		t.Errorf("wrapped unique error not detected: %v", uniqueErr)
+	}
+
+	// A CHECK violation from the same driver must NOT match.
+	checkErr := insert("ws-three", "matt-riley/other", "bogus")
+	if checkErr == nil {
+		t.Fatal("insert with bogus status succeeded, want CHECK violation")
+	}
+	if isUniqueConstraintError(checkErr) {
+		t.Errorf("isUniqueConstraintError(%v) = true for CHECK violation, want false", checkErr)
+	}
+}
+
+func TestIsUniqueConstraintErrorFallback(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		// Non-typed errors fall back to a case-insensitive substring
+		// check without requiring the column/index name.
+		{errors.New("UNIQUE constraint failed: workspaces.repo"), true},
+		{errors.New("unique constraint failed"), true},
+		{errors.New("CHECK constraint failed: status"), false},
+		{errors.New("database is locked"), false},
+	}
+	for _, c := range cases {
+		if got := isUniqueConstraintError(c.err); got != c.want {
+			t.Errorf("isUniqueConstraintError(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
 func TestNormalizeRepo(t *testing.T) {
 	cases := []struct {
 		in, repo, url string
