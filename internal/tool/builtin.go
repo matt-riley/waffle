@@ -145,7 +145,10 @@ func (WriteFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 	if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
+	// 0o600 keeps newly created files private; agents are routinely asked to
+	// write secrets. os.WriteFile applies the mode only on create, so
+	// overwriting an existing file keeps its current permissions.
+	if err := os.WriteFile(in.Path, []byte(in.Content), 0o600); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil

@@ -65,6 +65,44 @@ func TestFileTools(t *testing.T) {
 	}
 }
 
+func TestWriteFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+
+	// New files default to 0o600 (filtered by umask), so group/other bits
+	// must never be set.
+	path := filepath.Join(dir, "new.txt")
+	if _, err := run(t, WriteFile{}, fmt.Sprintf(`{"path":%q,"content":"secret"}`, path)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("new file perm = %o, want no group/other bits", perm)
+	}
+
+	// Overwriting keeps the existing mode.
+	existing := filepath.Join(dir, "existing.txt")
+	if err := os.WriteFile(existing, []byte("old"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	want, err := os.Stat(existing)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if _, err := run(t, WriteFile{}, fmt.Sprintf(`{"path":%q,"content":"new"}`, existing)); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err := os.Stat(existing)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("overwrite changed perm from %o to %o", want.Mode().Perm(), got.Mode().Perm())
+	}
+}
+
 func TestFetch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "fetched body")
