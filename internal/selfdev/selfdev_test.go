@@ -2,8 +2,10 @@ package selfdev
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -23,6 +25,32 @@ func TestDoctorPasses(t *testing.T) {
 	for _, c := range checks {
 		if !c.OK {
 			t.Errorf("check %q failed: %s", c.Name, c.Info)
+		}
+	}
+}
+
+func TestUpgradeRejectsOptionRefs(t *testing.T) {
+	// repoDir is an empty temp dir, not a git repo: if the ref reached git
+	// the error would be git's, so a validation error proves the ref was
+	// rejected before any git command ran.
+	for _, ref := range []string{"--help", "-c", "-"} {
+		_, err := Upgrade(context.Background(), t.TempDir(), ref, io.Discard)
+		if err == nil {
+			t.Fatalf("Upgrade(ref=%q): want error, got nil", ref)
+		}
+		if !strings.Contains(err.Error(), "may not start with '-'") {
+			t.Errorf("Upgrade(ref=%q) error = %q, want ref validation error", ref, err)
+		}
+	}
+}
+
+func TestValidateRef(t *testing.T) {
+	if err := validateRef(""); err == nil {
+		t.Error("validateRef(\"\"): want error, got nil")
+	}
+	for _, ref := range []string{"main", "v1.2.3", "abc123", "feature/x"} {
+		if err := validateRef(ref); err != nil {
+			t.Errorf("validateRef(%q) = %v, want nil", ref, err)
 		}
 	}
 }

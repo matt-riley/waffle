@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -108,7 +109,13 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 	}
 
 	if ref != "" {
-		if err := run(ctx, repoDir, stderr, "git", "checkout", ref); err != nil {
+		if err := validateRef(ref); err != nil {
+			return "", err
+		}
+		// Trailing "--" marks end of pathspecs; with the ref already
+		// validated it is belt-and-braces against option injection and
+		// does not change checkout semantics for a branch/tag/sha.
+		if err := run(ctx, repoDir, stderr, "git", "checkout", ref, "--"); err != nil {
 			return "", fmt.Errorf("checkout %s: %w", ref, err)
 		}
 	}
@@ -162,6 +169,19 @@ func Rollback() (string, error) {
 		return "", err
 	}
 	return self, nil
+}
+
+// validateRef rejects refs git would parse as options ("--help", "-c"),
+// which would otherwise be injected into the checkout argv and, via the
+// build-and-swap that follows, escalate toward code execution.
+func validateRef(ref string) error {
+	if ref == "" {
+		return errors.New("empty git ref")
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("invalid git ref %q: refs may not start with '-'", ref)
+	}
+	return nil
 }
 
 func run(ctx context.Context, dir string, stderr io.Writer, name string, args ...string) error {
