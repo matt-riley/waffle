@@ -266,13 +266,26 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 
 	// Continue the workspace's own session.
 	c.finish(ctx, stdout)
-	sess := &session.Session{ID: ws.SessionID}
-	if turns, err := c.sessions.Turns(ctx, ws.SessionID); err == nil {
-		c.history = session.Repair(turns)
-		c.persisted = len(c.history)
+	if err := c.switchToWorkspaceSession(ctx, ws.SessionID); err != nil {
+		return err
 	}
-	c.current = sess
 	fmt.Fprintf(stdout, "(workspace %s: %s at /work/repo, image %s — session %s)\n", ws.ID, ws.Repo, ws.Image, ws.SessionID)
+	return nil
+}
+
+// switchToWorkspaceSession swaps the chat onto the workspace's session.
+// State is mutated only after the history loads: if Turns fails, the
+// current session, history, and persisted index all stay as they were, so
+// the next turn keeps feeding and persisting the same session instead of
+// writing orphaned turns keyed off another session's history.
+func (c *chat) switchToWorkspaceSession(ctx context.Context, sessionID string) error {
+	turns, err := c.sessions.Turns(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("load workspace session %s (staying on session %s): %w", sessionID, c.current.ID, err)
+	}
+	c.history = session.Repair(turns)
+	c.persisted = len(c.history)
+	c.current = &session.Session{ID: sessionID}
 	return nil
 }
 
