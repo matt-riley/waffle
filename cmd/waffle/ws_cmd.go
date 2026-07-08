@@ -127,6 +127,7 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	if b != nil {
 		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return b.Mint(ctx, sessionID) }
 		mgr.RevokeSession = b.RevokeSession
+		mgr.BindGitScope = b.BindGitRepo
 	}
 	return mgr
 }
@@ -156,13 +157,7 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	b := broker.New(st, brokerUpstreams(cfg))
 	// Scope git credentials to the repo the requesting session opened.
 	mgr := newWorkspaceManager(cfg, st, nil)
-	b.GitCredential = gitCredentialFromSecrets(func(ctx context.Context, sessionID string) (string, error) {
-		ws, err := mgr.ForSession(ctx, sessionID)
-		if err != nil {
-			return "", err
-		}
-		return ws.Repo, nil
-	})
+	b.GitCredential = gitCredentialFromSecrets(repoScopeResolver(b, mgr))
 	go func() {
 		if err := b.ServeListener(ctx, ln); err != nil {
 			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
@@ -172,6 +167,25 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	// Containers reach the host through the host-gateway alias set up by
 	// the runtime (--add-host waffle-host:host-gateway).
 	return b, "http://waffle-host:" + port, nil
+}
+
+// repoScopeResolver resolves a session to the repo its git credentials are
+// scoped to. It checks the broker's in-memory binding first — set at
+// workspace-open time, this covers the initial `git clone`, which runs before
+// the durable workspaces row is written — then falls back to the workspaces
+// table, which covers resumed and steady-state sessions (and survives a broker
+// restart). A session with neither is unbound and gets no credential.
+func repoScopeResolver(b *broker.Broker, mgr *workspace.Manager) func(ctx context.Context, sessionID string) (string, error) {
+	return func(ctx context.Context, sessionID string) (string, error) {
+		if repo, ok := b.GitRepoScope(sessionID); ok {
+			return repo, nil
+		}
+		ws, err := mgr.ForSession(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		return ws.Repo, nil
+	}
 }
 
 // gitCredentialFromSecrets serves the stored fine-grained PAT

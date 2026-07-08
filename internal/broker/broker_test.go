@@ -164,3 +164,31 @@ func openStore(t *testing.T) *store.Store {
 	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
 	return st
 }
+
+func TestGitRepoScopeBindReadRevoke(t *testing.T) {
+	ctx := context.Background()
+	b := New(nil, nil)
+
+	if _, ok := b.GitRepoScope("s1"); ok {
+		t.Fatal("unbound session reports a scope")
+	}
+
+	b.BindGitRepo("s1", "owner/A")
+	if repo, ok := b.GitRepoScope("s1"); !ok || repo != "owner/A" {
+		t.Fatalf("GitRepoScope after bind = (%q, %v), want (owner/A, true)", repo, ok)
+	}
+
+	// A token re-mint (resume) must not drop the binding.
+	if _, err := b.Mint(ctx, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.GitRepoScope("s1"); !ok {
+		t.Fatal("binding lost after re-mint")
+	}
+
+	// Ending the session clears the binding.
+	b.RevokeSession("s1")
+	if _, ok := b.GitRepoScope("s1"); ok {
+		t.Fatal("binding survived RevokeSession")
+	}
+}

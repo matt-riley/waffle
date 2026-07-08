@@ -173,6 +173,12 @@ func TestValidateContiguous(t *testing.T) {
 	if err := validateContiguous(mk(1, 2, 2, 3)); err == nil {
 		t.Error("duplicate version accepted")
 	}
+	// A leading gap (missing 0001) must be rejected, not silently accepted.
+	if err := validateContiguous(mk(2, 3, 4)); err == nil {
+		t.Error("leading gap {2,3,4} accepted, want error")
+	} else if !strings.Contains(err.Error(), "start at version 1") {
+		t.Errorf("leading-gap error = %q, want it to mention starting at version 1", err)
+	}
 }
 
 func TestPendingSkipsApplied(t *testing.T) {

@@ -117,6 +117,10 @@ func loadMigrations() ([]migration, error) {
 // always a packaging mistake — catch it at load time rather than discovering
 // the omission later as a runtime "no such table".
 func validateContiguous(ms []migration) error {
+	if len(ms) > 0 && ms[0].version != 1 {
+		return fmt.Errorf(
+			"embedded migrations must start at version 1, first is %d", ms[0].version)
+	}
 	for i := 1; i < len(ms); i++ {
 		if ms[i].version == ms[i-1].version {
 			return fmt.Errorf("duplicate migration version %d", ms[i].version)

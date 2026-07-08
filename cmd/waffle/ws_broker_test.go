@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -83,5 +84,47 @@ func TestStartWorkspaceBrokerBindsFreeAddress(t *testing.T) {
 	}
 	if want := "http://waffle-host:" + port; url != want {
 		t.Errorf("url = %q, want %q", url, want)
+	}
+}
+
+// TestRepoScopeResolverPrefersBrokerBinding is the regression for the review
+// finding: during the initial `git clone` the workspaces row does not exist
+// yet, so the resolver must answer from the broker's mint-time binding. It
+// then falls back to the workspaces table for resumed/steady-state sessions.
+func TestRepoScopeResolverPrefersBrokerBinding(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close() //nolint:errcheck // test teardown
+
+	b := broker.New(st, nil)
+	mgr := newWorkspaceManager(config.Config{}, st, nil)
+	resolve := repoScopeResolver(b, mgr)
+
+	// (1) In-memory binding, no workspaces row yet (the clone window).
+	b.BindGitRepo("s-cloning", "owner/A")
+	if repo, err := resolve(ctx, "s-cloning"); err != nil || repo != "owner/A" {
+		t.Fatalf("clone-window resolve = (%q, %v), want (owner/A, nil)", repo, err)
+	}
+
+	// (2) No binding, but a durable workspaces row (resumed session).
+	if _, err := st.DB.ExecContext(ctx,
+		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s-resumed', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.ExecContext(ctx, `
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
+		VALUES ('ws-1', 'owner/B', 'u', 'img', 'c', 'v', 's-resumed', 'open', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if repo, err := resolve(ctx, "s-resumed"); err != nil || repo != "owner/B" {
+		t.Fatalf("db-fallback resolve = (%q, %v), want (owner/B, nil)", repo, err)
+	}
+
+	// (3) Neither: unbound session is refused.
+	if _, err := resolve(ctx, "s-unknown"); err == nil {
+		t.Fatal("unbound session resolved without error")
 	}
 }
