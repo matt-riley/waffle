@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,7 +202,7 @@ func TestMigrateAppliesOutOfOrder(t *testing.T) {
 	}
 	defer s.Close() //nolint:errcheck // test teardown
 
-	// Simulate branch A: versions 100, 101, 102 applied (skipping 101's peer).
+	// Simulate branch A: versions 100 and 102 applied, leaving a hole at 101.
 	branchA := []migration{
 		{version: 100, name: "a", sql: `CREATE TABLE t100 (x INTEGER)`},
 		{version: 102, name: "c", sql: `CREATE TABLE t102 (x INTEGER)`},
@@ -209,7 +211,14 @@ func TestMigrateAppliesOutOfOrder(t *testing.T) {
 		t.Fatalf("apply branch A: %v", err)
 	}
 
-	// Branch B merges later, introducing the lower-numbered 101.
+	// Branch B merges later, introducing the lower-numbered 101. Capture the
+	// default logger: applying a migration below the current max must emit the
+	// out-of-order warning that forms the operator audit trail.
+	var logs bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prevLogger)
+
 	branchB := []migration{
 		{version: 100, name: "a", sql: `CREATE TABLE t100 (x INTEGER)`},
 		{version: 101, name: "b", sql: `CREATE TABLE t101 (x INTEGER)`},
@@ -217,6 +226,10 @@ func TestMigrateAppliesOutOfOrder(t *testing.T) {
 	}
 	if err := migrateWith(ctx, s.DB, branchB); err != nil {
 		t.Fatalf("apply branch B: %v", err)
+	}
+
+	if out := logs.String(); !strings.Contains(out, "out of order") || !strings.Contains(out, "version=101") {
+		t.Errorf("out-of-order warning not emitted for 101; logs:\n%s", out)
 	}
 
 	// 101 must now be recorded and its table must exist.

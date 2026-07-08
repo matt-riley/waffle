@@ -188,7 +188,7 @@ func appliedVersions(ctx context.Context, db *sql.DB) (set map[int]bool, max int
 	for rows.Next() {
 		var v int
 		if err := rows.Scan(&v); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("scan applied migration version: %w", err)
 		}
 		set[v] = true
 		if v > max {
