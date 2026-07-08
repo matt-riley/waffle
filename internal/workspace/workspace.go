@@ -501,6 +501,16 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 		FROM workspaces WHERE repo = ? AND status != 'closed'`, repo))
 }
 
+// ForSession finds the non-closed workspace bound to a session, or
+// ErrWorkspaceNotFound. Used by the broker's git-credential face to scope a
+// session's credentials to exactly the repo it opened (docs/plan.md: a
+// compromised session "cannot read another repo").
+func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
+	return m.scanOne(m.DB.QueryRowContext(ctx, `
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
+}
+
 // List returns all workspaces, newest first.
 func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
 	rows, err := m.DB.QueryContext(ctx, `

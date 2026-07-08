@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -150,5 +151,170 @@ func TestLoadMigrationsSortedAndUnique(t *testing.T) {
 		if ms[i].version <= ms[i-1].version {
 			t.Errorf("migrations out of order: %d then %d", ms[i-1].version, ms[i].version)
 		}
+	}
+}
+
+func TestValidateContiguous(t *testing.T) {
+	mk := func(vs ...int) []migration {
+		ms := make([]migration, len(vs))
+		for i, v := range vs {
+			ms[i] = migration{version: v, name: "x"}
+		}
+		return ms
+	}
+	if err := validateContiguous(mk(1, 2, 3, 4, 5, 6)); err != nil {
+		t.Errorf("contiguous set rejected: %v", err)
+	}
+	if err := validateContiguous(mk(1, 2, 4)); err == nil {
+		t.Error("gap {1,2,4} accepted, want error naming missing 3")
+	} else if !strings.Contains(err.Error(), "3") {
+		t.Errorf("gap error = %q, want it to name missing version 3", err)
+	}
+	if err := validateContiguous(mk(1, 2, 2, 3)); err == nil {
+		t.Error("duplicate version accepted")
+	}
+}
+
+func TestPendingSkipsApplied(t *testing.T) {
+	ms := []migration{{version: 1}, {version: 2}, {version: 3}, {version: 4}}
+	got := pending(ms, map[int]bool{1: true, 2: true, 4: true})
+	if len(got) != 1 || got[0].version != 3 {
+		t.Fatalf("pending = %+v, want only version 3", got)
+	}
+}
+
+// TestMigrateAppliesOutOfOrder reproduces the branch-merge hazard: a lower
+// migration lands after a higher one already ran. It must still be applied and
+// recorded — the old MAX(version) rule skipped it forever.
+func TestMigrateAppliesOutOfOrder(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	// Simulate branch A: versions 100, 101, 102 applied (skipping 101's peer).
+	branchA := []migration{
+		{version: 100, name: "a", sql: `CREATE TABLE t100 (x INTEGER)`},
+		{version: 102, name: "c", sql: `CREATE TABLE t102 (x INTEGER)`},
+	}
+	if err := migrateWith(ctx, s.DB, branchA); err != nil {
+		t.Fatalf("apply branch A: %v", err)
+	}
+
+	// Branch B merges later, introducing the lower-numbered 101.
+	branchB := []migration{
+		{version: 100, name: "a", sql: `CREATE TABLE t100 (x INTEGER)`},
+		{version: 101, name: "b", sql: `CREATE TABLE t101 (x INTEGER)`},
+		{version: 102, name: "c", sql: `CREATE TABLE t102 (x INTEGER)`},
+	}
+	if err := migrateWith(ctx, s.DB, branchB); err != nil {
+		t.Fatalf("apply branch B: %v", err)
+	}
+
+	// 101 must now be recorded and its table must exist.
+	var n int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 101`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("version 101 recorded %d times, want 1", n)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO t101 (x) VALUES (1)`); err != nil {
+		t.Errorf("out-of-order migration 101 not applied: %v", err)
+	}
+
+	// Re-running is a no-op (idempotent).
+	if err := migrateWith(ctx, s.DB, branchB); err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+}
+
+// TestFTSSurvivesSessionDelete exercises the 0007 sync triggers: a cascaded
+// turns delete must leave no orphaned rows in the external-content FTS index.
+func TestFTSSurvivesSessionDelete(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		 VALUES ('s1', 0, 'user', '[]', 'alpaca picnic', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	// The term is findable before deletion.
+	var before int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'alpaca'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if before != 1 {
+		t.Fatalf("pre-delete FTS match = %d, want 1", before)
+	}
+
+	// Cascade the delete through sessions.
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE id = 's1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	var after int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'alpaca'`).Scan(&after); err != nil {
+		t.Fatalf("FTS query after delete (index likely corrupt): %v", err)
+	}
+	if after != 0 {
+		t.Errorf("post-delete FTS match = %d, want 0 (orphaned index row)", after)
+	}
+	// FTS5 integrity check must pass for an external-content table.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO turns_fts (turns_fts, rank) VALUES ('integrity-check', 1)`); err != nil {
+		t.Errorf("FTS integrity check failed: %v", err)
+	}
+}
+
+func TestFTSSurvivesTurnUpdate(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		 VALUES ('s1', 0, 'user', '[]', 'original text', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE turns SET text = 'replacement text' WHERE session_id = 's1' AND seq = 0`); err != nil {
+		t.Fatal(err)
+	}
+	var oldHits, newHits int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'original'`).Scan(&oldHits); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'replacement'`).Scan(&newHits); err != nil {
+		t.Fatal(err)
+	}
+	if oldHits != 0 {
+		t.Errorf("stale term still indexed after update: %d hits", oldHits)
+	}
+	if newHits != 1 {
+		t.Errorf("new term not indexed after update: %d hits", newHits)
 	}
 }

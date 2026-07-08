@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
@@ -137,30 +138,61 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	if listen == "" {
 		return nil, "", fmt.Errorf("workspaces need the credential broker: set [broker] listen in config.toml (e.g. \"127.0.0.1:8421\")")
 	}
-	b := broker.New(st, brokerUpstreams(cfg))
-	b.GitCredential = gitCredentialFromSecrets()
-	go func() {
-		if err := b.Serve(ctx, listen); err != nil {
-			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
-		}
-	}()
-
 	_, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return nil, "", fmt.Errorf("bad [broker] listen %q: %w", listen, err)
 	}
+	// Bind synchronously: if `waffle serve` already holds this address the
+	// bind fails here, before any container/volume is created — rather than
+	// failing in a background goroutine while the workspace proceeds against
+	// a broker URL nothing in this process is serving (#48).
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"credential broker cannot bind %s: %w\nis `waffle serve` already running? work on the repo through the gateway (/repo) instead",
+			listen, err)
+	}
+
+	b := broker.New(st, brokerUpstreams(cfg))
+	// Scope git credentials to the repo the requesting session opened.
+	mgr := newWorkspaceManager(cfg, st, nil)
+	b.GitCredential = gitCredentialFromSecrets(func(ctx context.Context, sessionID string) (string, error) {
+		ws, err := mgr.ForSession(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		return ws.Repo, nil
+	})
+	go func() {
+		if err := b.ServeListener(ctx, ln); err != nil {
+			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
+		}
+	}()
+
 	// Containers reach the host through the host-gateway alias set up by
 	// the runtime (--add-host waffle-host:host-gateway).
 	return b, "http://waffle-host:" + port, nil
 }
 
 // gitCredentialFromSecrets serves the stored fine-grained PAT
-// (secret://github/token, or GITHUB_TOKEN). A GitHub App minting
-// short-lived installation tokens replaces this behind the same signature.
-func gitCredentialFromSecrets() broker.GitCredentialFunc {
+// (secret://github/token, or GITHUB_TOKEN), scoped to the repo the requesting
+// session opened. repoForSession resolves a session to its bound repo;
+// deny-by-default when a session has no workspace binding or requests a repo
+// other than its own — a compromised session must not be able to pull
+// another repo's credential (docs/plan.md threat model). A GitHub App minting
+// short-lived installation tokens replaces the PAT behind the same signature
+// (#40) and narrows the credential at GitHub's side too.
+func gitCredentialFromSecrets(repoForSession func(ctx context.Context, sessionID string) (string, error)) broker.GitCredentialFunc {
 	return func(ctx context.Context, sessionID, host, path string) (string, string, error) {
 		if host != "github.com" {
 			return "", "", fmt.Errorf("no credentials for host %q", host)
+		}
+		boundRepo, err := repoForSession(ctx, sessionID)
+		if err != nil {
+			return "", "", fmt.Errorf("session is not bound to a repo workspace; refusing git credentials: %w", err)
+		}
+		if canonRepoPath(path) != canonRepoPath(boundRepo) {
+			return "", "", fmt.Errorf("session is scoped to %q; refusing credentials for %q", boundRepo, path)
 		}
 		token, err := resolveSecretValue("secret://github/token", "GITHUB_TOKEN")
 		if err != nil {
@@ -171,4 +203,15 @@ func gitCredentialFromSecrets() broker.GitCredentialFunc {
 		}
 		return "x-access-token", token, nil
 	}
+}
+
+// canonRepoPath normalizes an owner/repo identifier for scope comparison:
+// git's credential path arrives as "owner/repo.git" (optionally slash-
+// wrapped), while the stored binding is "owner/repo". GitHub treats owner and
+// repo case-insensitively, so fold case to avoid a trivial "Owner/Repo"
+// bypass.
+func canonRepoPath(p string) string {
+	p = strings.Trim(p, "/")
+	p = strings.TrimSuffix(p, ".git")
+	return strings.ToLower(p)
 }

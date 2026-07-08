@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -196,10 +197,23 @@ func ParseGitCredential(r io.Reader) map[string]string {
 	return attrs
 }
 
-// Serve runs the broker's HTTP listener until ctx ends.
+// Serve binds listen and runs the broker's HTTP face until ctx ends. The
+// bind happens synchronously, so a caller that must know the address is
+// actually held (e.g. before handing a container a broker URL) gets the
+// "address already in use" error here rather than in a background goroutine.
 func (b *Broker) Serve(ctx context.Context, listen string) error {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	return b.ServeListener(ctx, ln)
+}
+
+// ServeListener runs the broker's HTTP face on an already-bound listener
+// until ctx ends. Use this when the bind must be attempted (and its failure
+// observed) before starting other work.
+func (b *Broker) ServeListener(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
-		Addr:              listen,
 		Handler:           b,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -209,7 +223,7 @@ func (b *Broker) Serve(ctx context.Context, listen string) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	err := srv.ListenAndServe()
+	err := srv.Serve(ln)
 	if err == http.ErrServerClosed {
 		return nil
 	}
