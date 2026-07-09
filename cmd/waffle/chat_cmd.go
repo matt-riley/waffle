@@ -434,6 +434,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 			Network:  cfg.Sandbox.Network,
 			WorkDir:  cfg.Sandbox.WorkDir,
 			QueueDir: filepath.Join(home, "sandboxes", sandboxID),
+			SelfPath: cfg.Sandbox.RunnerBinary,
 		})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)

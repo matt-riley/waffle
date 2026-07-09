@@ -80,3 +80,19 @@ func TestCopyFile(t *testing.T) {
 		t.Error("dst not executable")
 	}
 }
+
+func TestSandboxRunnerCheck(t *testing.T) {
+	// A configured, existing runner binary passes and is named in the info.
+	f := filepath.Join(t.TempDir(), "waffle-linux")
+	if err := os.WriteFile(f, []byte("binary"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if info, err := sandboxRunnerCheck(f); err != nil || !strings.Contains(info, f) {
+		t.Errorf("existing runner_binary: info=%q err=%v", info, err)
+	}
+
+	// A configured but missing runner binary fails.
+	if _, err := sandboxRunnerCheck(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Error("missing runner_binary accepted, want error")
+	}
+}

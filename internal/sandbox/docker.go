@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,6 +15,34 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
 )
+
+// hostGOOS is the OS the waffle process runs on. A package var so tests can
+// simulate a non-linux host without cross-compiling.
+var hostGOOS = runtime.GOOS
+
+// ResolveRunnerBinary returns the path to bind-mount as the container's
+// `waffle runner` entrypoint. If explicit is set (from [sandbox]
+// runner_binary) it is used verbatim. Otherwise the running binary is used —
+// but only on a linux host: on any other OS the running binary is a non-linux
+// executable that dies with "exec format error" the instant the container
+// starts, which surfaces ~10s later as a misleading "runner appears dead"
+// timeout. Refuse up front with an actionable message instead (#42).
+func ResolveRunnerBinary(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if hostGOOS != "linux" {
+		return "", fmt.Errorf(
+			"sandbox: the running waffle binary is %s/%s, but the container needs a linux/%s binary; "+
+				"set [sandbox] runner_binary to a linux build (e.g. GOOS=linux GOARCH=%s go build -o waffle-linux ./cmd/waffle)",
+			hostGOOS, runtime.GOARCH, runtime.GOARCH, runtime.GOARCH)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("sandbox: locate waffle binary: %w", err)
+	}
+	return self, nil
+}
 
 // DockerOpts configures one sandbox container.
 type DockerOpts struct {
@@ -49,13 +78,11 @@ type DockerExecutor struct {
 
 // StartDocker launches the sandbox container and connects the queue.
 func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) {
-	if opts.SelfPath == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("sandbox: locate waffle binary: %w", err)
-		}
-		opts.SelfPath = self
+	selfPath, err := ResolveRunnerBinary(opts.SelfPath)
+	if err != nil {
+		return nil, err
 	}
+	opts.SelfPath = selfPath
 	if opts.Image == "" {
 		opts.Image = "debian:stable-slim"
 	}

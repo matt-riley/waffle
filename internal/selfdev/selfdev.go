@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -85,7 +86,16 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		add("secret store", nil, "no identity configured (skipped)")
 	}
 
-	_ = cfg
+	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
+	// container entrypoint. On a non-linux host that must be an explicitly
+	// configured linux build; otherwise every sandbox/workspace dies on start
+	// with a misleading "runner appears dead" timeout (#42). Catch it here.
+	if cfg.Sandbox.Mode == "docker" {
+		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
+		add("sandbox runner", err, info)
+	} else {
+		add("sandbox runner", nil, "host mode (skipped)")
+	}
 	allOK := true
 	for _, c := range checks {
 		if !c.OK {
@@ -93,6 +103,24 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		}
 	}
 	return checks, allOK, nil
+}
+
+// sandboxRunnerCheck validates the docker-mode runner binary without starting
+// a container. On a non-linux host a runner_binary must be configured and
+// exist; on linux the running binary is used and needs no config.
+func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
+	if runnerBinary != "" {
+		if _, err := os.Stat(runnerBinary); err != nil {
+			return "", fmt.Errorf("configured [sandbox] runner_binary %q is not accessible: %w", runnerBinary, err)
+		}
+		return "runner_binary " + runnerBinary, nil
+	}
+	if runtime.GOOS != "linux" {
+		return "", fmt.Errorf(
+			"docker mode on %s needs a linux runner: set [sandbox] runner_binary to a linux build of waffle",
+			runtime.GOOS)
+	}
+	return "using the running binary (linux host)", nil
 }
 
 // Upgrade builds waffle from repoDir at ref, runs doctor against the new

@@ -60,6 +60,11 @@ type Sandbox struct {
 	// Image for docker mode; any image works — the waffle binary is
 	// bind-mounted in.
 	Image string `toml:"image"`
+	// RunnerBinary is a linux build of waffle to bind-mount as the
+	// container's `waffle runner` entrypoint. Required for docker mode on a
+	// non-linux host, where the running binary is the wrong executable
+	// format; empty uses the running binary (correct only on linux).
+	RunnerBinary string `toml:"runner_binary"`
 	// Network for docker mode: "none" (default) or "bridge".
 	Network string `toml:"network"`
 	// WorkDir on the host is mounted read-write at /work in the sandbox.

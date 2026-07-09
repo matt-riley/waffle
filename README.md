@@ -27,7 +27,10 @@ What's here, by capability:
   via the bind-mounted `waffle runner` over a single-writer SQLite queue
   pair; host-enforced tool allow/deny policy; the credential broker fronts
   provider APIs (and git) with per-session `wk_` tokens so raw keys never
-  leave the host.
+  leave the host. Docker mode bind-mounts a **linux** build of `waffle` as
+  the container entrypoint, so on a non-linux host set `[sandbox]
+  runner_binary` to a linux build (`GOOS=linux go build -o waffle-linux
+  ./cmd/waffle`); `waffle doctor` fails fast if it's missing.
 - **Repo workspaces** — `waffle ws open owner/repo` / `/repo` clones into a
   dedicated container + volume (devcontainer image when present), git auth
   via `waffle git-credential` to the broker, idle keeps the volume, close

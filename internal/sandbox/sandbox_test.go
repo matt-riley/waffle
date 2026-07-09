@@ -409,3 +409,46 @@ func TestExecDetectsDeadRunnerAfterTransientLockContention(t *testing.T) {
 		t.Fatalf("probe failures disabled dead-runner detection: took %s", elapsed)
 	}
 }
+
+func TestResolveRunnerBinaryExplicitWins(t *testing.T) {
+	// An explicit runner binary is honored regardless of host OS.
+	restore := hostGOOS
+	hostGOOS = "darwin"
+	defer func() { hostGOOS = restore }()
+
+	got, err := ResolveRunnerBinary("/opt/waffle-linux")
+	if err != nil {
+		t.Fatalf("explicit runner binary rejected: %v", err)
+	}
+	if got != "/opt/waffle-linux" {
+		t.Errorf("got %q, want /opt/waffle-linux", got)
+	}
+}
+
+func TestResolveRunnerBinaryRefusesNonLinuxWithoutConfig(t *testing.T) {
+	restore := hostGOOS
+	hostGOOS = "darwin"
+	defer func() { hostGOOS = restore }()
+
+	_, err := ResolveRunnerBinary("")
+	if err == nil {
+		t.Fatal("want refusal on a non-linux host with no runner_binary")
+	}
+	if !strings.Contains(err.Error(), "runner_binary") || !strings.Contains(err.Error(), "linux") {
+		t.Errorf("error should name runner_binary and linux; got: %v", err)
+	}
+}
+
+func TestResolveRunnerBinaryUsesSelfOnLinux(t *testing.T) {
+	restore := hostGOOS
+	hostGOOS = "linux"
+	defer func() { hostGOOS = restore }()
+
+	got, err := ResolveRunnerBinary("")
+	if err != nil {
+		t.Fatalf("linux host rejected: %v", err)
+	}
+	if got == "" {
+		t.Error("want the running binary path, got empty")
+	}
+}
