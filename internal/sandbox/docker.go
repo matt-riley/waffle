@@ -39,8 +39,8 @@ func ResolveRunnerBinary(explicit string) (string, error) {
 		return "", fmt.Errorf(
 			"sandbox: the running waffle binary is built for %s, but docker mode bind-mounts a linux "+
 				"binary as the container entrypoint; set [sandbox] runner_binary to an absolute path to a "+
-				"linux build whose GOARCH matches your container image "+
-				"(e.g. GOOS=linux GOARCH=<image arch> go build -o /abs/path/waffle-linux ./cmd/waffle)",
+				"static linux build whose GOARCH matches your container image "+
+				"(e.g. CGO_ENABLED=0 GOOS=linux GOARCH=<image arch> go build -o /abs/path/waffle-linux ./cmd/waffle)",
 			hostGOOS)
 	}
 	self, err := os.Executable()

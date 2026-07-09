@@ -76,7 +76,7 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		if err != nil {
 			return err
 		}
-		runner, cleanup, err := buildCronRunner(ctx, cfg, st, stderr)
+		runner, cleanup, err := buildCronRunner(ctx, cfg, st)
 		if err != nil {
 			return err
 		}
