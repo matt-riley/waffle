@@ -97,7 +97,7 @@ func rollbackCmd(stdout io.Writer) error {
 // the scheduler runs jobs under in `waffle serve` (restricted — host bash
 // denied by default), rather than previewing them with the owner's main tier.
 // cleanup stops any sandbox the agent started.
-func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store, stderr io.Writer) (*schedule.Runner, func(), error) {
+func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store) (*schedule.Runner, func(), error) {
 	sessions := session.New(st)
 	ws, skills, err := loadWorkspace()
 	if err != nil {

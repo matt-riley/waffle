@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"path/filepath"
 	"testing"
 
@@ -79,7 +78,7 @@ func TestBuildCronRunnerUsesCronTier(t *testing.T) {
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = false
 
-	runner, cleanup, err := buildCronRunner(ctx, cfg, st, io.Discard)
+	runner, cleanup, err := buildCronRunner(ctx, cfg, st)
 	if err != nil {
 		t.Fatalf("buildCronRunner: %v", err)
 	}
