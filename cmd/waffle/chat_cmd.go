@@ -348,7 +348,7 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 	}
 	sessions := session.New(st)
 
-	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions)
+	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupMain)
 	if err != nil {
 		return nil, cleanup, err
 	}
@@ -373,10 +373,14 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 	return c, cleanup, nil
 }
 
-// buildAgent assembles the agent. The returned cleanup stops any sandbox
+// buildAgent assembles the agent for an agent group (docs/plan.md trust
+// tiering): the group's resolved policy decides where tools run (host vs
+// docker) and which tools it may use. The returned cleanup stops any sandbox
 // container; call it when done (it is never nil).
-func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (*agent.Agent, func(), error) {
+func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group string) (*agent.Agent, func(), error) {
 	cleanup := func() {}
+	pol := cfg.AgentPolicy(group)
+	toolPolicy := tool.Policy{Allow: pol.Allow, Deny: pol.Deny}
 	apiKey, redact, err := resolveAPIKey(cfg.Provider)
 	if err != nil {
 		return nil, cleanup, err
@@ -417,7 +421,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 	// The execution toolbox: builtins on the host, or proxied to a docker
 	// sandbox.
 	var execTools tool.Toolbox
-	switch cfg.Sandbox.Mode {
+	switch pol.Mode {
 	case "host", "":
 		execTools = tool.Builtins()
 	case "docker":
@@ -434,6 +438,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 			Network:  cfg.Sandbox.Network,
 			WorkDir:  cfg.Sandbox.WorkDir,
 			QueueDir: filepath.Join(home, "sandboxes", sandboxID),
+			SelfPath: cfg.Sandbox.RunnerBinary,
 		})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
@@ -441,7 +446,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		closers = append(closers, func() { _ = executor.Close() })
 		execTools = executor
 	default:
-		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q (want \"host\" or \"docker\")", cfg.Sandbox.Mode)
+		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q for agent group %q (want \"host\" or \"docker\")", pol.Mode, group)
 	}
 
 	boxes := []tool.Toolbox{execTools, hostTools}
@@ -463,16 +468,14 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 	// Subagents get the execution + MCP tools, but not the ability to
 	// spawn further subagents (their toolbox omits spawn_subagent).
 	if cfg.Agent.Subagents {
-		subTools := tool.Restrict(tool.Combine(boxes...),
-			tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
+		subTools := tool.Restrict(tool.Combine(boxes...), toolPolicy)
 		boxes = append(boxes, tool.NewRegistry(agent.SubagentTool{
 			Provider: provider, Tools: subTools, Model: cfg.Provider.Model,
 			MaxTokens: cfg.Provider.MaxTokens, Redact: redact,
 		}))
 	}
 
-	toolbox := tool.Restrict(tool.Combine(boxes...),
-		tool.Policy{Allow: cfg.Sandbox.Allow, Deny: cfg.Sandbox.Deny})
+	toolbox := tool.Restrict(tool.Combine(boxes...), toolPolicy)
 
 	sys, err := systemPrompt(ws, skills)
 	if err != nil {

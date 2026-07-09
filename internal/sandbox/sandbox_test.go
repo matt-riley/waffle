@@ -409,3 +409,85 @@ func TestExecDetectsDeadRunnerAfterTransientLockContention(t *testing.T) {
 		t.Fatalf("probe failures disabled dead-runner detection: took %s", elapsed)
 	}
 }
+
+func TestResolveRunnerBinaryExplicitWins(t *testing.T) {
+	// An explicit, valid runner binary is honored regardless of host OS.
+	restore := hostGOOS
+	hostGOOS = "darwin"
+	defer func() { hostGOOS = restore }()
+
+	bin := filepath.Join(t.TempDir(), "waffle-linux")
+	if err := os.WriteFile(bin, []byte("elf"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	got, err := ResolveRunnerBinary(bin)
+	if err != nil {
+		t.Fatalf("explicit runner binary rejected: %v", err)
+	}
+	if got != bin {
+		t.Errorf("got %q, want %q", got, bin)
+	}
+}
+
+func TestResolveRunnerBinaryRejectsBadExplicitPath(t *testing.T) {
+	// A relative path (docker would read it as a named volume) is refused, on
+	// any host OS, before it ever reaches docker.
+	restore := hostGOOS
+	hostGOOS = "linux"
+	defer func() { hostGOOS = restore }()
+
+	if _, err := ResolveRunnerBinary("waffle-linux"); err == nil {
+		t.Error("relative runner_binary accepted, want error")
+	}
+	if _, err := ResolveRunnerBinary(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Error("missing absolute runner_binary accepted, want error")
+	}
+}
+
+func TestValidateRunnerBinary(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "waffle-linux")
+	if err := os.WriteFile(file, []byte("x"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := ValidateRunnerBinary(file); err != nil {
+		t.Errorf("valid absolute file rejected: %v", err)
+	}
+	if err := ValidateRunnerBinary("waffle-linux"); err == nil {
+		t.Error("relative path accepted")
+	}
+	if err := ValidateRunnerBinary(dir); err == nil {
+		t.Error("directory accepted, want file")
+	}
+	if err := ValidateRunnerBinary(filepath.Join(dir, "nope")); err == nil {
+		t.Error("missing file accepted")
+	}
+}
+
+func TestResolveRunnerBinaryRefusesNonLinuxWithoutConfig(t *testing.T) {
+	restore := hostGOOS
+	hostGOOS = "darwin"
+	defer func() { hostGOOS = restore }()
+
+	_, err := ResolveRunnerBinary("")
+	if err == nil {
+		t.Fatal("want refusal on a non-linux host with no runner_binary")
+	}
+	if !strings.Contains(err.Error(), "runner_binary") || !strings.Contains(err.Error(), "linux") {
+		t.Errorf("error should name runner_binary and linux; got: %v", err)
+	}
+}
+
+func TestResolveRunnerBinaryUsesSelfOnLinux(t *testing.T) {
+	restore := hostGOOS
+	hostGOOS = "linux"
+	defer func() { hostGOOS = restore }()
+
+	got, err := ResolveRunnerBinary("")
+	if err != nil {
+		t.Fatalf("linux host rejected: %v", err)
+	}
+	if got == "" {
+		t.Error("want the running binary path, got empty")
+	}
+}

@@ -27,7 +27,13 @@ What's here, by capability:
   via the bind-mounted `waffle runner` over a single-writer SQLite queue
   pair; host-enforced tool allow/deny policy; the credential broker fronts
   provider APIs (and git) with per-session `wk_` tokens so raw keys never
-  leave the host.
+  leave the host. Docker mode bind-mounts a **linux** build of `waffle` as
+  the container entrypoint, so on a non-linux host set
+  `[sandbox] runner_binary` to an **absolute path** to a linux build whose
+  `GOARCH` matches your container image — which may differ from the host's,
+  e.g. an arm64 host running amd64 images (`GOOS=linux GOARCH=<image arch> go
+  build -o /abs/path/waffle-linux ./cmd/waffle`); `waffle doctor` fails fast
+  if it's missing or not an absolute path.
 - **Repo workspaces** — `waffle ws open owner/repo` / `/repo` clones into a
   dedicated container + volume (devcontainer image when present), git auth
   via `waffle git-credential` to the broker, idle keeps the volume, close
@@ -35,6 +41,12 @@ What's here, by capability:
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
   `spawn_subagent` delegates parallel work; MCP servers add their tools.
+- **Trust tiering** — agent groups carry their own sandbox mode and tool
+  policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
+  The owner's interactive sessions run on the `main` tier; unattended
+  scheduled jobs run on the `cron` tier, which **denies host `bash` by
+  default** — set `[agent.group.cron]` to override. The gateway and
+  scheduler run as separate agents so a cron prompt can't reach host shell.
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.

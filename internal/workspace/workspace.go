@@ -66,6 +66,9 @@ type Manager struct {
 	// Network for workspace containers; cloning needs egress, so default
 	// bridge.
 	Network string
+	// RunnerBinary is a linux build of waffle to bind-mount as the
+	// container entrypoint; empty uses the running binary (linux hosts only).
+	RunnerBinary string
 	// BrokerURL as reachable from inside containers, plus a token minter.
 	BrokerURL     string
 	MintToken     func(ctx context.Context, sessionID string) (string, error)
@@ -252,6 +255,7 @@ func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
 		Network:   m.Network,
 		BrokerURL: m.BrokerURL,
 		Token:     token,
+		SelfPath:  m.RunnerBinary,
 	}
 }
 

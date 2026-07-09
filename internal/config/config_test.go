@@ -65,3 +65,113 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestAgentPolicyDefaults(t *testing.T) {
+	cfg := Default() // Sandbox.Mode = "host", no groups
+
+	main := cfg.AgentPolicy(GroupMain)
+	if main.Mode != "host" {
+		t.Errorf("main mode = %q, want host", main.Mode)
+	}
+	if len(main.Deny) != 0 {
+		t.Errorf("main deny = %v, want none", main.Deny)
+	}
+
+	// The unattended cron tier denies host bash by default, even with no
+	// [agent.group.cron] configured.
+	cron := cfg.AgentPolicy(GroupCron)
+	if cron.Mode != "host" {
+		t.Errorf("cron mode = %q, want host (inherits [sandbox])", cron.Mode)
+	}
+	if !contains(cron.Deny, "bash") {
+		t.Errorf("cron deny = %v, want it to include bash", cron.Deny)
+	}
+
+	// An unknown group falls back to the global sandbox policy (no bash deny).
+	other := cfg.AgentPolicy("adhoc")
+	if contains(other.Deny, "bash") {
+		t.Errorf("unknown group denied bash unexpectedly: %v", other.Deny)
+	}
+}
+
+func TestAgentPolicyExplicitGroupWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+mode = "host"
+
+[agent.group.cron]
+sandbox = "docker"
+[agent.group.cron.tools]
+deny = ["fetch"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cron := cfg.AgentPolicy(GroupCron)
+	if cron.Mode != "docker" {
+		t.Errorf("cron mode = %q, want docker (explicit)", cron.Mode)
+	}
+	// An explicit tool policy replaces the default: bash is no longer force-
+	// denied, but the operator's own deny (fetch) applies.
+	if !contains(cron.Deny, "fetch") {
+		t.Errorf("cron deny = %v, want fetch", cron.Deny)
+	}
+	if contains(cron.Deny, "bash") {
+		t.Errorf("explicit cron policy should not carry the default bash deny: %v", cron.Deny)
+	}
+}
+
+// TestAgentPolicyCronSandboxOnlyKeepsBashDeny guards the regression where
+// configuring [agent.group.cron] just to set the sandbox mode (no tool policy)
+// silently dropped the default bash deny and re-enabled host shell.
+func TestAgentPolicyCronSandboxOnlyKeepsBashDeny(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+mode = "host"
+
+[agent.group.cron]
+sandbox = "host"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cron := cfg.AgentPolicy(GroupCron)
+	if !contains(cron.Deny, "bash") {
+		t.Errorf("cron with only a sandbox override dropped the default bash deny: %v", cron.Deny)
+	}
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUsesDocker(t *testing.T) {
+	// Global host mode, no groups -> no docker.
+	cfg := Default()
+	if cfg.UsesDocker() {
+		t.Error("default (host) reports docker in use")
+	}
+
+	// A group opting into docker while global stays host must be detected,
+	// so doctor's runner check still fires (#33 tiering + #42 guard).
+	cfg.Agent.Groups = map[string]AgentGroup{"cron": {Sandbox: "docker"}}
+	if !cfg.UsesDocker() {
+		t.Error("group sandbox=docker not detected while global mode is host")
+	}
+
+	// Global docker mode alone is enough.
+	cfg2 := Default()
+	cfg2.Sandbox.Mode = "docker"
+	if !cfg2.UsesDocker() {
+		t.Error("global docker mode not detected")
+	}
+}

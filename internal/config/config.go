@@ -43,6 +43,113 @@ type Agent struct {
 	Subagents bool `toml:"subagents"`
 	// Learn enables the distill_skill tool (the learning loop).
 	Learn bool `toml:"learn"`
+	// Groups carries per-agent-group trust posture (docs/plan.md, design
+	// principle 4: "risky contexts — repo workspaces, scheduled jobs — run
+	// in sandboxes with explicit tool policies"). Keyed by group name, e.g.
+	// [agent.group.main], [agent.group.cron]. Unlisted groups fall back to
+	// documented defaults (see Config.AgentPolicy).
+	Groups map[string]AgentGroup `toml:"group"`
+}
+
+// AgentGroup is one agent group's trust posture: where its tools run and
+// which tools it may use. It is owner-authored host config, so a group's
+// explicit tool policy is authoritative for that group — it replaces the
+// global [sandbox] allow/deny rather than intersecting it (an operator can,
+// for example, opt a group back into a tool the global policy omits).
+// Untrusted, repo-supplied policy that may only *tighten* is a separate
+// concern (#53).
+type AgentGroup struct {
+	// Sandbox is "host" or "docker"; empty inherits [sandbox].mode.
+	Sandbox string `toml:"sandbox"`
+	// Tools filters the toolset for sessions in this group.
+	Tools ToolPolicy `toml:"tools"`
+}
+
+// ToolPolicy is an allow/deny tool filter expressed in config.
+type ToolPolicy struct {
+	Allow []string `toml:"allow"`
+	Deny  []string `toml:"deny"`
+}
+
+// GroupCron is the reserved group name for scheduled (cron) sessions, the
+// plan's canonical "risky context": unattended and often driven by external
+// content. GroupMain is the owner's interactive sessions.
+const (
+	GroupMain = "main"
+	GroupCron = "cron"
+)
+
+// AgentPolicy resolves the effective sandbox mode and tool policy for a group.
+// An explicit [agent.group.<name>] wins. Otherwise the global [sandbox]
+// applies, except that the unattended cron group defaults to denying host
+// `bash` — the plan tiers scheduled jobs below the owner's interactive
+// sessions, and inheriting host shell unattended is exactly the hole that
+// default closes. A group's explicit *tool policy* replaces the global
+// allow/deny (it is authoritative for that group — not intersected or
+// unioned), and only such an explicit cron tool policy opts out of the
+// default bash deny. Merely configuring a group's sandbox mode (or adding an
+// [agent.group.cron] section with no tool policy) does NOT drop the safety
+// default — otherwise setting `sandbox` for cron would silently re-enable
+// host shell for unattended jobs.
+func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
+	r := ResolvedAgentPolicy{
+		Mode:  c.Sandbox.Mode,
+		Allow: c.Sandbox.Allow,
+		Deny:  c.Sandbox.Deny,
+	}
+	if r.Mode == "" {
+		r.Mode = "host"
+	}
+	g, ok := c.Agent.Groups[group]
+	explicitTools := ok && (len(g.Tools.Allow) > 0 || len(g.Tools.Deny) > 0)
+	if ok {
+		if g.Sandbox != "" {
+			r.Mode = g.Sandbox
+		}
+		if explicitTools {
+			r.Allow = g.Tools.Allow
+			r.Deny = g.Tools.Deny
+		}
+	}
+	// The unattended cron tier denies host bash by default; only an explicit
+	// cron tool policy opts out of that safety default.
+	if group == GroupCron && !explicitTools {
+		r.Deny = appendUnique(r.Deny, "bash")
+	}
+	return r
+}
+
+// ResolvedAgentPolicy is the effective execution posture for a group.
+type ResolvedAgentPolicy struct {
+	Mode  string // "host" or "docker"
+	Allow []string
+	Deny  []string
+}
+
+// UsesDocker reports whether any tier runs tools in docker: the global
+// [sandbox] mode, or any [agent.group.*] that opts into it. Groups without an
+// explicit sandbox inherit the global mode, so those two sources cover every
+// resolved policy. Used by `waffle doctor` to decide whether the runner-binary
+// check applies even when the global mode is host.
+func (c Config) UsesDocker() bool {
+	if c.Sandbox.Mode == "docker" {
+		return true
+	}
+	for _, g := range c.Agent.Groups {
+		if g.Sandbox == "docker" {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(append([]string(nil), s...), v)
 }
 
 // Repo configures the self-development loop's view of waffle's own source.
@@ -60,6 +167,11 @@ type Sandbox struct {
 	// Image for docker mode; any image works — the waffle binary is
 	// bind-mounted in.
 	Image string `toml:"image"`
+	// RunnerBinary is a linux build of waffle to bind-mount as the
+	// container's `waffle runner` entrypoint. Required for docker mode on a
+	// non-linux host, where the running binary is the wrong executable
+	// format; empty uses the running binary (correct only on linux).
+	RunnerBinary string `toml:"runner_binary"`
 	// Network for docker mode: "none" (default) or "bridge".
 	Network string `toml:"network"`
 	// WorkDir on the host is mounted read-write at /work in the sandbox.

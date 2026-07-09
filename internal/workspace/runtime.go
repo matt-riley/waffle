@@ -3,9 +3,10 @@ package workspace
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/matt-riley/waffle/internal/sandbox"
 )
 
 // ContainerOpts describes one workspace container. Unlike phase-4 sandbox
@@ -44,13 +45,14 @@ func (DockerRuntime) docker(ctx context.Context, args ...string) error {
 }
 
 func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) error {
-	if opts.SelfPath == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		opts.SelfPath = self
+	// Resolve (and validate) the runner binary before creating the volume, so
+	// a non-linux host without a configured runner_binary fails fast instead
+	// of leaving an orphaned volume behind a dead container (#42).
+	selfPath, err := sandbox.ResolveRunnerBinary(opts.SelfPath)
+	if err != nil {
+		return err
 	}
+	opts.SelfPath = selfPath
 	if err := d.docker(ctx, "volume", "create", opts.Volume); err != nil {
 		return err
 	}

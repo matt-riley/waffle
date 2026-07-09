@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,6 +16,71 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
 )
+
+// hostGOOS is the OS the waffle process runs on. A package var so tests can
+// simulate a non-linux host without cross-compiling.
+var hostGOOS = runtime.GOOS
+
+// ResolveRunnerBinary returns the path to bind-mount as the container's
+// `waffle runner` entrypoint. If explicit is set (from [sandbox]
+// runner_binary) it is validated and used. Otherwise the running binary is
+// used — but only on a linux host: on any other OS the running binary is a
+// non-linux executable that dies with "exec format error" the instant the
+// container starts, which surfaces ~10s later as a misleading "runner appears
+// dead" timeout. Refuse up front with an actionable message instead (#42).
+func ResolveRunnerBinary(explicit string) (string, error) {
+	if explicit != "" {
+		if err := ValidateRunnerBinary(explicit); err != nil {
+			return "", err
+		}
+		return explicit, nil
+	}
+	if hostGOOS != "linux" {
+		return "", fmt.Errorf(
+			"sandbox: the running waffle binary is built for %s, but docker mode bind-mounts a linux "+
+				"binary as the container entrypoint; set [sandbox] runner_binary to an absolute path to a "+
+				"linux build whose GOARCH matches your container image "+
+				"(e.g. GOOS=linux GOARCH=<image arch> go build -o /abs/path/waffle-linux ./cmd/waffle)",
+			hostGOOS)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("sandbox: locate waffle binary: %w", err)
+	}
+	// os.Executable is not guaranteed absolute; a relative path would make
+	// docker read the -v mount source as a named volume. Canonicalize to an
+	// absolute, symlink-resolved path (best effort) so the bind mount points
+	// at the real file.
+	if abs, err := filepath.Abs(self); err == nil {
+		self = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		self = resolved
+	}
+	return self, nil
+}
+
+// ValidateRunnerBinary checks an explicit runner binary is usable as a docker
+// bind-mount source before any docker call: it must be an absolute path (a
+// bare name like "waffle-linux" is silently read as a named volume, not a
+// file) to an existing regular file. It does not verify the binary is a linux
+// executable of the right arch — that only shows up at container start — so
+// the arch note in ResolveRunnerBinary/README still matters.
+func ValidateRunnerBinary(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf(
+			"sandbox: [sandbox] runner_binary %q must be an absolute path "+
+				"(docker reads a bare name as a named volume, not a file)", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("sandbox: [sandbox] runner_binary %q is not accessible: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("sandbox: [sandbox] runner_binary %q is not a regular file", path)
+	}
+	return nil
+}
 
 // DockerOpts configures one sandbox container.
 type DockerOpts struct {
@@ -49,13 +116,11 @@ type DockerExecutor struct {
 
 // StartDocker launches the sandbox container and connects the queue.
 func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) {
-	if opts.SelfPath == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("sandbox: locate waffle binary: %w", err)
-		}
-		opts.SelfPath = self
+	selfPath, err := ResolveRunnerBinary(opts.SelfPath)
+	if err != nil {
+		return nil, err
 	}
+	opts.SelfPath = selfPath
 	if opts.Image == "" {
 		opts.Image = "debian:stable-slim"
 	}

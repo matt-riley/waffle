@@ -38,12 +38,23 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions)
+	// Trust tiering (docs/plan.md, design principle 4): the owner's
+	// interactive channel sessions run on the "main" tier, while unattended
+	// scheduled jobs run on the restricted "cron" tier — which by default
+	// denies host bash. The gateway and scheduler no longer share one agent.
+	mainAgent, mainCleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupMain)
 	if err != nil {
-		cleanup()
+		mainCleanup()
 		return err
 	}
-	defer cleanup()
+	defer mainCleanup()
+
+	cronAgent, cronCleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron)
+	if err != nil {
+		cronCleanup()
+		return err
+	}
+	defer cronCleanup()
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	if cfg.Broker.Listen != "" {
@@ -70,7 +81,7 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	}
 
 	gw := &gateway.Gateway{
-		Agent:    a,
+		Agent:    mainAgent,
 		Entities: entities,
 		Sessions: sessions,
 		Adapters: adapters,
@@ -78,11 +89,11 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	}
 
 	// Scheduler: fire cron jobs while the gateway runs, delivering results
-	// through the same channel adapters.
+	// through the same channel adapters. Runs on the restricted cron agent.
 	sched := &schedule.Scheduler{
 		Store: schedule.NewStore(st),
 		Runner: &schedule.Runner{
-			Agent:     a,
+			Agent:     cronAgent,
 			Sessions:  sessions,
 			Deliverer: adapterDeliverer(adapters),
 			Log:       log,

@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -85,7 +86,22 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		add("secret store", nil, "no identity configured (skipped)")
 	}
 
-	_ = cfg
+	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
+	// container entrypoint. On a non-linux host that must be an explicitly
+	// configured linux build; otherwise the sandbox dies on start with a
+	// misleading "runner appears dead" timeout (#42). This gates on
+	// cfg.UsesDocker(): the global [sandbox] mode is docker, or any
+	// [agent.group.*] opts into docker while the global mode stays host (#33).
+	// Repo workspaces always use docker regardless of mode, but they are not
+	// gated here — `ws open` resolves the same runner binary at use time via
+	// sandbox.ResolveRunnerBinary, so it fails fast with the same error; doctor
+	// can't know ahead of time whether the operator will open one.
+	if cfg.UsesDocker() {
+		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
+		add("sandbox runner", err, info)
+	} else {
+		add("sandbox runner", nil, "host mode (skipped)")
+	}
 	allOK := true
 	for _, c := range checks {
 		if !c.OK {
@@ -93,6 +109,21 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		}
 	}
 	return checks, allOK, nil
+}
+
+// sandboxRunnerCheck validates the docker-mode runner binary without starting
+// a container, by exercising the exact same resolution StartDocker and the
+// workspace runtime use — so doctor can't report OK on a setup that would fail
+// fast at startup, and the two can't drift apart.
+func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
+	resolved, err := sandbox.ResolveRunnerBinary(runnerBinary)
+	if err != nil {
+		return "", err
+	}
+	if runnerBinary != "" {
+		return "runner_binary " + resolved, nil
+	}
+	return "using the running binary (" + resolved + ")", nil
 }
 
 // Upgrade builds waffle from repoDir at ref, runs doctor against the new
