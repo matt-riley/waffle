@@ -38,6 +38,12 @@ What's here, by capability:
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
   `spawn_subagent` delegates parallel work; MCP servers add their tools.
+- **Trust tiering** — agent groups carry their own sandbox mode and tool
+  policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
+  The owner's interactive sessions run on the `main` tier; unattended
+  scheduled jobs run on the `cron` tier, which **denies host `bash` by
+  default** — set `[agent.group.cron]` to override. The gateway and
+  scheduler run as separate agents so a cron prompt can't reach host shell.
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.

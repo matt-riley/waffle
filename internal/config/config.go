@@ -43,6 +43,83 @@ type Agent struct {
 	Subagents bool `toml:"subagents"`
 	// Learn enables the distill_skill tool (the learning loop).
 	Learn bool `toml:"learn"`
+	// Groups carries per-agent-group trust posture (docs/plan.md, design
+	// principle 4: "risky contexts — repo workspaces, scheduled jobs — run
+	// in sandboxes with explicit tool policies"). Keyed by group name, e.g.
+	// [agent.group.main], [agent.group.cron]. Unlisted groups fall back to
+	// documented defaults (see Config.AgentPolicy).
+	Groups map[string]AgentGroup `toml:"group"`
+}
+
+// AgentGroup is one agent group's trust posture: where its tools run and
+// which tools it may use. It tightens — never loosens — what the host allows.
+type AgentGroup struct {
+	// Sandbox is "host" or "docker"; empty inherits [sandbox].mode.
+	Sandbox string `toml:"sandbox"`
+	// Tools filters the toolset for sessions in this group.
+	Tools ToolPolicy `toml:"tools"`
+}
+
+// ToolPolicy is an allow/deny tool filter expressed in config.
+type ToolPolicy struct {
+	Allow []string `toml:"allow"`
+	Deny  []string `toml:"deny"`
+}
+
+// GroupCron is the reserved group name for scheduled (cron) sessions, the
+// plan's canonical "risky context": unattended and often driven by external
+// content. GroupMain is the owner's interactive sessions.
+const (
+	GroupMain = "main"
+	GroupCron = "cron"
+)
+
+// AgentPolicy resolves the effective sandbox mode and tool policy for a group.
+// An explicit [agent.group.<name>] wins. Otherwise the global [sandbox]
+// applies, except that the unattended cron group defaults to denying host
+// `bash` — the plan tiers scheduled jobs below the owner's interactive
+// sessions, and inheriting host shell unattended is exactly the hole that
+// default closes. A group's explicit tool policy replaces the global one
+// (groups tighten deliberately).
+func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
+	r := ResolvedAgentPolicy{
+		Mode:  c.Sandbox.Mode,
+		Allow: c.Sandbox.Allow,
+		Deny:  c.Sandbox.Deny,
+	}
+	if r.Mode == "" {
+		r.Mode = "host"
+	}
+	if g, ok := c.Agent.Groups[group]; ok {
+		if g.Sandbox != "" {
+			r.Mode = g.Sandbox
+		}
+		if len(g.Tools.Allow) > 0 || len(g.Tools.Deny) > 0 {
+			r.Allow = g.Tools.Allow
+			r.Deny = g.Tools.Deny
+		}
+		return r
+	}
+	if group == GroupCron {
+		r.Deny = appendUnique(r.Deny, "bash")
+	}
+	return r
+}
+
+// ResolvedAgentPolicy is the effective execution posture for a group.
+type ResolvedAgentPolicy struct {
+	Mode  string // "host" or "docker"
+	Allow []string
+	Deny  []string
+}
+
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(append([]string(nil), s...), v)
 }
 
 // Repo configures the self-development loop's view of waffle's own source.

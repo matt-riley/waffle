@@ -100,7 +100,7 @@ func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store, st
 	if err != nil {
 		return nil, func() {}, err
 	}
-	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions)
+	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupMain)
 	if err != nil {
 		return nil, cleanup, err
 	}

@@ -65,3 +65,69 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestAgentPolicyDefaults(t *testing.T) {
+	cfg := Default() // Sandbox.Mode = "host", no groups
+
+	main := cfg.AgentPolicy(GroupMain)
+	if main.Mode != "host" {
+		t.Errorf("main mode = %q, want host", main.Mode)
+	}
+	if len(main.Deny) != 0 {
+		t.Errorf("main deny = %v, want none", main.Deny)
+	}
+
+	// The unattended cron tier denies host bash by default, even with no
+	// [agent.group.cron] configured.
+	cron := cfg.AgentPolicy(GroupCron)
+	if cron.Mode != "host" {
+		t.Errorf("cron mode = %q, want host (inherits [sandbox])", cron.Mode)
+	}
+	if !contains(cron.Deny, "bash") {
+		t.Errorf("cron deny = %v, want it to include bash", cron.Deny)
+	}
+
+	// An unknown group falls back to the global sandbox policy (no bash deny).
+	other := cfg.AgentPolicy("adhoc")
+	if contains(other.Deny, "bash") {
+		t.Errorf("unknown group denied bash unexpectedly: %v", other.Deny)
+	}
+}
+
+func TestAgentPolicyExplicitGroupWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+mode = "host"
+
+[agent.group.cron]
+sandbox = "docker"
+[agent.group.cron.tools]
+deny = ["fetch"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cron := cfg.AgentPolicy(GroupCron)
+	if cron.Mode != "docker" {
+		t.Errorf("cron mode = %q, want docker (explicit)", cron.Mode)
+	}
+	// An explicit tool policy replaces the default: bash is no longer force-
+	// denied, but the operator's own deny (fetch) applies.
+	if !contains(cron.Deny, "fetch") {
+		t.Errorf("cron deny = %v, want fetch", cron.Deny)
+	}
+	if contains(cron.Deny, "bash") {
+		t.Errorf("explicit cron policy should not carry the default bash deny: %v", cron.Deny)
+	}
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
