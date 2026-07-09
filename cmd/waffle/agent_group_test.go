@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -57,6 +58,36 @@ func TestBuildAgentCronTierExcludesBash(t *testing.T) {
 	for _, d := range cronDefs {
 		if d.Name == "bash" {
 			t.Error("cron agent exposes bash; the unattended tier must deny host shell by default")
+		}
+	}
+}
+
+// TestBuildCronRunnerUsesCronTier guards the wiring: `waffle cron run` must
+// build its agent on the restricted cron tier (no host bash), matching what
+// the scheduler runs under `waffle serve` — not the owner's main tier.
+func TestBuildCronRunnerUsesCronTier(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close() //nolint:errcheck // test teardown
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+
+	runner, cleanup, err := buildCronRunner(ctx, cfg, st, io.Discard)
+	if err != nil {
+		t.Fatalf("buildCronRunner: %v", err)
+	}
+	defer cleanup()
+
+	for _, d := range runner.Agent.Tools.Defs() {
+		if d.Name == "bash" {
+			t.Error("cron runner exposes host bash; manual `cron run` must match the restricted scheduled tier")
 		}
 	}
 }
