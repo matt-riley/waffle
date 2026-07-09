@@ -52,7 +52,12 @@ type Agent struct {
 }
 
 // AgentGroup is one agent group's trust posture: where its tools run and
-// which tools it may use. It tightens — never loosens — what the host allows.
+// which tools it may use. It is owner-authored host config, so a group's
+// explicit tool policy is authoritative for that group — it replaces the
+// global [sandbox] allow/deny rather than intersecting it (an operator can,
+// for example, opt a group back into a tool the global policy omits).
+// Untrusted, repo-supplied policy that may only *tighten* is a separate
+// concern (#53).
 type AgentGroup struct {
 	// Sandbox is "host" or "docker"; empty inherits [sandbox].mode.
 	Sandbox string `toml:"sandbox"`
@@ -79,8 +84,9 @@ const (
 // applies, except that the unattended cron group defaults to denying host
 // `bash` — the plan tiers scheduled jobs below the owner's interactive
 // sessions, and inheriting host shell unattended is exactly the hole that
-// default closes. A group's explicit tool policy replaces the global one
-// (groups tighten deliberately).
+// default closes. A group's explicit tool policy *replaces* the global
+// allow/deny (it is authoritative for that group — not intersected or
+// unioned), so an explicit cron policy also drops the default bash deny.
 func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	r := ResolvedAgentPolicy{
 		Mode:  c.Sandbox.Mode,
@@ -111,6 +117,23 @@ type ResolvedAgentPolicy struct {
 	Mode  string // "host" or "docker"
 	Allow []string
 	Deny  []string
+}
+
+// UsesDocker reports whether any tier runs tools in docker: the global
+// [sandbox] mode, or any [agent.group.*] that opts into it. Groups without an
+// explicit sandbox inherit the global mode, so those two sources cover every
+// resolved policy. Used by `waffle doctor` to decide whether the runner-binary
+// check applies even when the global mode is host.
+func (c Config) UsesDocker() bool {
+	if c.Sandbox.Mode == "docker" {
+		return true
+	}
+	for _, g := range c.Agent.Groups {
+		if g.Sandbox == "docker" {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(s []string, v string) []string {

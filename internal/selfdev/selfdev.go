@@ -90,8 +90,10 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
 	// container entrypoint. On a non-linux host that must be an explicitly
 	// configured linux build; otherwise every sandbox/workspace dies on start
-	// with a misleading "runner appears dead" timeout (#42). Catch it here.
-	if cfg.Sandbox.Mode == "docker" {
+	// with a misleading "runner appears dead" timeout (#42). This applies when
+	// the global [sandbox] mode is docker *or* any [agent.group.*] opts into
+	// docker while the global mode stays host (#33 trust tiering).
+	if cfg.UsesDocker() {
 		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
 		add("sandbox runner", err, info)
 	} else {

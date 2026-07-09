@@ -131,3 +131,25 @@ func contains(s []string, v string) bool {
 	}
 	return false
 }
+
+func TestUsesDocker(t *testing.T) {
+	// Global host mode, no groups -> no docker.
+	cfg := Default()
+	if cfg.UsesDocker() {
+		t.Error("default (host) reports docker in use")
+	}
+
+	// A group opting into docker while global stays host must be detected,
+	// so doctor's runner check still fires (#33 tiering + #42 guard).
+	cfg.Agent.Groups = map[string]AgentGroup{"cron": {Sandbox: "docker"}}
+	if !cfg.UsesDocker() {
+		t.Error("group sandbox=docker not detected while global mode is host")
+	}
+
+	// Global docker mode alone is enough.
+	cfg2 := Default()
+	cfg2.Sandbox.Mode = "docker"
+	if !cfg2.UsesDocker() {
+		t.Error("global docker mode not detected")
+	}
+}

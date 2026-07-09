@@ -66,8 +66,8 @@ func ValidateRunnerBinary(path string) error {
 	if err != nil {
 		return fmt.Errorf("sandbox: [sandbox] runner_binary %q is not accessible: %w", path, err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("sandbox: [sandbox] runner_binary %q is a directory, want a file", path)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("sandbox: [sandbox] runner_binary %q is not a regular file", path)
 	}
 	return nil
 }
