@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -106,18 +107,19 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 }
 
 // sandboxRunnerCheck validates the docker-mode runner binary without starting
-// a container. On a non-linux host a runner_binary must be configured and
-// exist; on linux the running binary is used and needs no config.
+// a container. A configured runner_binary must be an absolute path to an
+// existing file (the same host-side check StartDocker applies); on a non-linux
+// host one is required; on linux the running binary is used and needs no config.
 func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
 	if runnerBinary != "" {
-		if _, err := os.Stat(runnerBinary); err != nil {
-			return "", fmt.Errorf("configured [sandbox] runner_binary %q is not accessible: %w", runnerBinary, err)
+		if err := sandbox.ValidateRunnerBinary(runnerBinary); err != nil {
+			return "", err
 		}
 		return "runner_binary " + runnerBinary, nil
 	}
 	if runtime.GOOS != "linux" {
 		return "", fmt.Errorf(
-			"docker mode on %s needs a linux runner: set [sandbox] runner_binary to a linux build of waffle",
+			"docker mode on %s needs a linux runner: set [sandbox] runner_binary to an absolute path to a linux build of waffle",
 			runtime.GOOS)
 	}
 	return "using the running binary (linux host)", nil

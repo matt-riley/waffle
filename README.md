@@ -29,8 +29,11 @@ What's here, by capability:
   provider APIs (and git) with per-session `wk_` tokens so raw keys never
   leave the host. Docker mode bind-mounts a **linux** build of `waffle` as
   the container entrypoint, so on a non-linux host set `[sandbox]
-  runner_binary` to a linux build (`GOOS=linux go build -o waffle-linux
-  ./cmd/waffle`); `waffle doctor` fails fast if it's missing.
+  runner_binary` to an **absolute path** to a linux build whose `GOARCH`
+  matches your container image — which may differ from the host's, e.g. an
+  arm64 host running amd64 images (`GOOS=linux GOARCH=<image arch> go build
+  -o /abs/path/waffle-linux ./cmd/waffle`); `waffle doctor` fails fast if
+  it's missing or not an absolute path.
 - **Repo workspaces** — `waffle ws open owner/repo` / `/repo` clones into a
   dedicated container + volume (devcontainer image when present), git auth
   via `waffle git-credential` to the broker, idle keeps the volume, close
