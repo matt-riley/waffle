@@ -84,9 +84,13 @@ const (
 // applies, except that the unattended cron group defaults to denying host
 // `bash` — the plan tiers scheduled jobs below the owner's interactive
 // sessions, and inheriting host shell unattended is exactly the hole that
-// default closes. A group's explicit tool policy *replaces* the global
+// default closes. A group's explicit *tool policy* replaces the global
 // allow/deny (it is authoritative for that group — not intersected or
-// unioned), so an explicit cron policy also drops the default bash deny.
+// unioned), and only such an explicit cron tool policy opts out of the
+// default bash deny. Merely configuring a group's sandbox mode (or adding an
+// [agent.group.cron] section with no tool policy) does NOT drop the safety
+// default — otherwise setting `sandbox` for cron would silently re-enable
+// host shell for unattended jobs.
 func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	r := ResolvedAgentPolicy{
 		Mode:  c.Sandbox.Mode,
@@ -96,17 +100,20 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	if r.Mode == "" {
 		r.Mode = "host"
 	}
-	if g, ok := c.Agent.Groups[group]; ok {
+	g, ok := c.Agent.Groups[group]
+	explicitTools := ok && (len(g.Tools.Allow) > 0 || len(g.Tools.Deny) > 0)
+	if ok {
 		if g.Sandbox != "" {
 			r.Mode = g.Sandbox
 		}
-		if len(g.Tools.Allow) > 0 || len(g.Tools.Deny) > 0 {
+		if explicitTools {
 			r.Allow = g.Tools.Allow
 			r.Deny = g.Tools.Deny
 		}
-		return r
 	}
-	if group == GroupCron {
+	// The unattended cron tier denies host bash by default; only an explicit
+	// cron tool policy opts out of that safety default.
+	if group == GroupCron && !explicitTools {
 		r.Deny = appendUnique(r.Deny, "bash")
 	}
 	return r

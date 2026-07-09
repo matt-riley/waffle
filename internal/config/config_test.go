@@ -123,6 +123,28 @@ deny = ["fetch"]
 	}
 }
 
+// TestAgentPolicyCronSandboxOnlyKeepsBashDeny guards the regression where
+// configuring [agent.group.cron] just to set the sandbox mode (no tool policy)
+// silently dropped the default bash deny and re-enabled host shell.
+func TestAgentPolicyCronSandboxOnlyKeepsBashDeny(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+mode = "host"
+
+[agent.group.cron]
+sandbox = "host"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cron := cfg.AgentPolicy(GroupCron)
+	if !contains(cron.Deny, "bash") {
+		t.Errorf("cron with only a sandbox override dropped the default bash deny: %v", cron.Deny)
+	}
+}
+
 func contains(s []string, v string) bool {
 	for _, x := range s {
 		if x == v {
