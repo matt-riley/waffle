@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -109,22 +108,18 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 }
 
 // sandboxRunnerCheck validates the docker-mode runner binary without starting
-// a container. A configured runner_binary must be an absolute path to an
-// existing file (the same host-side check StartDocker applies); on a non-linux
-// host one is required; on linux the running binary is used and needs no config.
+// a container, by exercising the exact same resolution StartDocker and the
+// workspace runtime use — so doctor can't report OK on a setup that would fail
+// fast at startup, and the two can't drift apart.
 func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
+	resolved, err := sandbox.ResolveRunnerBinary(runnerBinary)
+	if err != nil {
+		return "", err
+	}
 	if runnerBinary != "" {
-		if err := sandbox.ValidateRunnerBinary(runnerBinary); err != nil {
-			return "", err
-		}
-		return "runner_binary " + runnerBinary, nil
+		return "runner_binary " + resolved, nil
 	}
-	if runtime.GOOS != "linux" {
-		return "", fmt.Errorf(
-			"docker mode on %s needs a linux runner: set [sandbox] runner_binary to an absolute path to a linux build of waffle",
-			runtime.GOOS)
-	}
-	return "using the running binary (linux host)", nil
+	return "using the running binary (" + resolved + ")", nil
 }
 
 // Upgrade builds waffle from repoDir at ref, runs doctor against the new

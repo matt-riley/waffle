@@ -47,6 +47,16 @@ func ResolveRunnerBinary(explicit string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("sandbox: locate waffle binary: %w", err)
 	}
+	// os.Executable is not guaranteed absolute; a relative path would make
+	// docker read the -v mount source as a named volume. Canonicalize to an
+	// absolute, symlink-resolved path (best effort) so the bind mount points
+	// at the real file.
+	if abs, err := filepath.Abs(self); err == nil {
+		self = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		self = resolved
+	}
 	return self, nil
 }
 
