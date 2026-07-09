@@ -1,6 +1,6 @@
 module github.com/matt-riley/waffle
 
-go 1.25.11
+go 1.25.12
 
 require (
 	filippo.io/age v1.3.1

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -54,6 +55,7 @@ type Broker struct {
 	mu       sync.Mutex
 	tokens   map[string]string // token → session id
 	sessions map[string]string // session id → current token
+	gitScope map[string]string // session id → bound repo (owner/name)
 }
 
 // New builds a broker over the given upstreams; st may be nil to skip
@@ -63,6 +65,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		upstreams: map[string]*httputil.ReverseProxy{},
 		tokens:    map[string]string{},
 		sessions:  map[string]string{},
+		gitScope:  map[string]string{},
 	}
 	if st != nil {
 		b.audit = st.DB
@@ -112,6 +115,7 @@ func (b *Broker) Revoke(token string) {
 	b.mu.Lock()
 	if sessionID := b.tokens[token]; sessionID != "" && b.sessions[sessionID] == token {
 		delete(b.sessions, sessionID)
+		delete(b.gitScope, sessionID)
 	}
 	delete(b.tokens, token)
 	b.mu.Unlock()
@@ -124,7 +128,28 @@ func (b *Broker) RevokeSession(sessionID string) {
 		delete(b.tokens, token)
 		delete(b.sessions, sessionID)
 	}
+	delete(b.gitScope, sessionID)
 	b.mu.Unlock()
+}
+
+// BindGitRepo records the repo a session is entitled to, so the git-credential
+// face can refuse any other repo. Set at workspace-open time — before the
+// initial clone runs — because the durable workspaces row is only written
+// after the clone succeeds; without this the first credential request during
+// `git clone` would find no binding and be refused. Survives a token re-mint
+// (resume); cleared when the session is revoked.
+func (b *Broker) BindGitRepo(sessionID, repo string) {
+	b.mu.Lock()
+	b.gitScope[sessionID] = repo
+	b.mu.Unlock()
+}
+
+// GitRepoScope returns the repo bound to sessionID, and whether one is set.
+func (b *Broker) GitRepoScope(sessionID string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	repo, ok := b.gitScope[sessionID]
+	return repo, ok
 }
 
 // session resolves a bearer token to its session, or "".
@@ -196,10 +221,23 @@ func ParseGitCredential(r io.Reader) map[string]string {
 	return attrs
 }
 
-// Serve runs the broker's HTTP listener until ctx ends.
+// Serve binds listen and runs the broker's HTTP face until ctx ends. The
+// bind happens synchronously, so a caller that must know the address is
+// actually held (e.g. before handing a container a broker URL) gets the
+// "address already in use" error here rather than in a background goroutine.
 func (b *Broker) Serve(ctx context.Context, listen string) error {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	return b.ServeListener(ctx, ln)
+}
+
+// ServeListener runs the broker's HTTP face on an already-bound listener
+// until ctx ends. Use this when the bind must be attempted (and its failure
+// observed) before starting other work.
+func (b *Broker) ServeListener(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
-		Addr:              listen,
 		Handler:           b,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -209,7 +247,7 @@ func (b *Broker) Serve(ctx context.Context, listen string) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	err := srv.ListenAndServe()
+	err := srv.Serve(ln)
 	if err == http.ErrServerClosed {
 		return nil
 	}

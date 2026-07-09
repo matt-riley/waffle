@@ -70,6 +70,11 @@ type Manager struct {
 	BrokerURL     string
 	MintToken     func(ctx context.Context, sessionID string) (string, error)
 	RevokeSession func(sessionID string)
+	// BindGitScope records, before the initial clone, which repo a session's
+	// git credentials are scoped to. The workspaces row is written only after
+	// the clone succeeds, so the broker needs this earlier binding to avoid
+	// refusing the clone's own credential request.
+	BindGitScope func(sessionID, repo string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
 
@@ -179,6 +184,12 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		if err != nil {
 			return nil, nil, fmt.Errorf("mint token for workspace: %w", err)
 		}
+	}
+	// Scope git credentials to this repo before the clone runs; the durable
+	// workspaces row is written only after setup succeeds (revoked on any
+	// failure below via revokeSession, which also clears this binding).
+	if m.BindGitScope != nil {
+		m.BindGitScope(sess.ID, repo)
 	}
 	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
 		m.revokeSession(sess.ID)
@@ -499,6 +510,16 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
 		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
 		FROM workspaces WHERE repo = ? AND status != 'closed'`, repo))
+}
+
+// ForSession finds the non-closed workspace bound to a session, or
+// ErrWorkspaceNotFound. Used by the broker's git-credential face to scope a
+// session's credentials to exactly the repo it opened (docs/plan.md: a
+// compromised session "cannot read another repo").
+func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
+	return m.scanOne(m.DB.QueryRowContext(ctx, `
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
 }
 
 // List returns all workspaces, newest first.
