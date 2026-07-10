@@ -9,6 +9,43 @@ import (
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
+func TestParseWorkspaceCloseArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantID    string
+		wantForce bool
+		wantErr   string
+	}{
+		{name: "one id", args: []string{"a"}, wantID: "a"},
+		{name: "force after id", args: []string{"a", "--force"}, wantID: "a", wantForce: true},
+		{name: "force before id", args: []string{"--force", "a"}, wantID: "a", wantForce: true},
+		{name: "duplicate force", args: []string{"a", "--force", "--force"}, wantID: "a", wantForce: true},
+		{name: "no id", args: nil, wantErr: "usage: waffle ws close <id> [--force]"},
+		{name: "force without id", args: []string{"--force"}, wantErr: "usage: waffle ws close <id> [--force]"},
+		{name: "extra id", args: []string{"a", "b"}, wantErr: "expected one workspace id, got \"a\" and \"b\""},
+		{name: "unknown flag", args: []string{"a", "--froce"}, wantErr: "unknown flag \"--froce\""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, force, err := parseWorkspaceCloseArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseWorkspaceCloseArgs(%q) error = %v, want %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseWorkspaceCloseArgs(%q): %v", tt.args, err)
+			}
+			if id != tt.wantID || force != tt.wantForce {
+				t.Errorf("parseWorkspaceCloseArgs(%q) = (%q, %t), want (%q, %t)", tt.args, id, force, tt.wantID, tt.wantForce)
+			}
+		})
+	}
+}
+
 // TestGitCredentialScopesToBoundRepo verifies the broker's git-credential
 // func refuses any repo other than the one the requesting session opened,
 // and denies sessions with no workspace binding (#32).

@@ -20,6 +20,15 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		wsUsage(stderr)
 		return errUsage
 	}
+	var closeID string
+	var closeForce bool
+	if args[0] == "close" {
+		var err error
+		closeID, closeForce, err = parseWorkspaceCloseArgs(args[1:])
+		if err != nil {
+			return err
+		}
+	}
 
 	cfg, st, err := openConfigAndStore(ctx)
 	if err != nil {
@@ -74,27 +83,15 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "close":
-		force := false
-		id := ""
-		for _, a := range args[1:] {
-			if a == "--force" {
-				force = true
-			} else {
-				id = a
-			}
-		}
-		if id == "" {
-			return fmt.Errorf("usage: waffle ws close <id> [--force]")
-		}
 		mgr := newWorkspaceManager(cfg, st, nil)
-		report, err := mgr.Close(ctx, id, force)
+		report, err := mgr.Close(ctx, closeID, closeForce)
 		if err != nil {
 			if report != nil && (report.Dirty != "" || report.Unpushed != "") {
 				fmt.Fprintf(stderr, "dirty files:\n%s\nunpushed commits:\n%s\n", report.Dirty, report.Unpushed)
 			}
 			return err
 		}
-		fmt.Fprintf(stdout, "workspace %s closed\n", id)
+		fmt.Fprintf(stdout, "workspace %s closed\n", closeID)
 		return nil
 
 	case "help", "-h", "--help":
@@ -104,6 +101,25 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		wsUsage(stderr)
 		return fmt.Errorf("unknown ws command %q", args[0])
 	}
+}
+
+func parseWorkspaceCloseArgs(args []string) (id string, force bool, err error) {
+	for _, arg := range args {
+		switch {
+		case arg == "--force":
+			force = true
+		case strings.HasPrefix(arg, "-"):
+			return "", false, fmt.Errorf("unknown flag %q\nusage: waffle ws close <id> [--force]", arg)
+		case id != "":
+			return "", false, fmt.Errorf("expected one workspace id, got %q and %q\nusage: waffle ws close <id> [--force]", id, arg)
+		default:
+			id = arg
+		}
+	}
+	if id == "" {
+		return "", false, fmt.Errorf("usage: waffle ws close <id> [--force]")
+	}
+	return id, force, nil
 }
 
 func wsUsage(w io.Writer) {
