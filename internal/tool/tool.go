@@ -66,7 +66,7 @@ func (r *Registry) Run(ctx context.Context, name string, input json.RawMessage) 
 
 // Builtins returns the standard host toolset.
 func Builtins() *Registry {
-	return NewRegistry(Bash{}, ReadFile{}, WriteFile{}, EditFile{}, Fetch{})
+	return NewRegistry(Bash{}, ReadFile{}, WriteFile{}, EditFile{}, Fetch{}, Search{})
 }
 
 // OutputLimit is the maximum size (bytes) for tool output returned to the

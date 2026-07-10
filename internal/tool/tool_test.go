@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -118,11 +119,63 @@ func TestFetch(t *testing.T) {
 	}
 }
 
+func TestSearch(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package test\nfunc Target() {}\nTarget\n")
+	write("notes.txt", "Target\n")
+	write(".git/config", "Target\n")
+	write("binary.bin", "\x00Target\n")
+
+	out, err := run(t, Search{}, fmt.Sprintf(`{"pattern":"Target","path":%q,"glob":"*.go"}`, dir))
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !strings.Contains(out, "a.go:2: func Target() {}") || !strings.Contains(out, "a.go:3: Target") {
+		t.Errorf("search output = %q", out)
+	}
+	if strings.Contains(out, "notes.txt") || strings.Contains(out, ".git") || strings.Contains(out, "binary.bin") {
+		t.Errorf("search included excluded file: %q", out)
+	}
+
+	out, err = run(t, Search{}, fmt.Sprintf(`{"pattern":"Target","path":%q,"glob":"a.go","max_results":2}`, dir))
+	if err != nil || strings.Contains(out, "results capped") {
+		t.Errorf("exact result cap output = %q, %v", out, err)
+	}
+	write("more.go", "Target\n")
+	out, err = run(t, Search{}, fmt.Sprintf(`{"pattern":"Target","path":%q,"glob":"*.go","max_results":2}`, dir))
+	if err != nil || !strings.Contains(out, "results capped at 2") {
+		t.Errorf("capped result output = %q, %v", out, err)
+	}
+
+	if _, err := run(t, Search{}, fmt.Sprintf(`{"pattern":"[","path":%q}`, dir)); err == nil || !strings.Contains(err.Error(), "invalid pattern") {
+		t.Errorf("invalid regexp error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (Search{}).Run(ctx, json.RawMessage(fmt.Sprintf(`{"pattern":"Target","path":%q}`, dir))); err == nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled search error = %v", err)
+	}
+}
+
 func TestRegistry(t *testing.T) {
 	r := Builtins()
 	defs := r.Defs()
-	if len(defs) != 5 {
+	if len(defs) != 6 {
 		t.Fatalf("builtins = %d", len(defs))
+	}
+	if defs[5].Name != "search" {
+		t.Errorf("last builtin = %q, want search", defs[5].Name)
 	}
 	for _, d := range defs {
 		var schema map[string]any
