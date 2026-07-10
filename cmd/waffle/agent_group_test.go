@@ -61,6 +61,51 @@ func TestBuildAgentCronTierExcludesBash(t *testing.T) {
 	}
 }
 
+func TestConfiguredGatewayGroupBuildsRegistryEntry(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close() //nolint:errcheck // test teardown
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Agent.Groups = map[string]config.AgentGroup{
+		"restricted": {Tools: config.ToolPolicy{Deny: []string{"bash"}}},
+	}
+
+	agents, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st))
+	if err != nil {
+		t.Fatalf("build gateway agents: %v", err)
+	}
+	defer cleanup()
+
+	if agents["restricted"] == nil {
+		t.Fatal("restricted group is missing from the gateway registry")
+	}
+	if agents[config.GroupMain] == nil {
+		t.Fatal("main group is missing from the gateway registry")
+	}
+
+	for _, d := range agents["restricted"].Tools.Defs() {
+		if d.Name == "bash" {
+			t.Error("restricted gateway group exposes bash")
+		}
+	}
+	mainHasBash := false
+	for _, d := range agents[config.GroupMain].Tools.Defs() {
+		if d.Name == "bash" {
+			mainHasBash = true
+		}
+	}
+	if !mainHasBash {
+		t.Error("main gateway group is missing bash")
+	}
+}
+
 // TestBuildCronRunnerUsesCronTier guards the wiring: `waffle cron run` must
 // build its agent on the restricted cron tier (no host bash), matching what
 // the scheduler runs under `waffle serve` — not the owner's main tier.

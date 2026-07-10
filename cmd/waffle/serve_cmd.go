@@ -8,17 +8,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 
+	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/channel/telegram"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
+	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/skill"
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
@@ -38,23 +42,12 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// Trust tiering (docs/plan.md, design principle 4): the owner's
-	// interactive channel sessions run on the "main" tier, while unattended
-	// scheduled jobs run on the restricted "cron" tier — which by default
-	// denies host bash. The gateway and scheduler no longer share one agent.
-	mainAgent, mainCleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupMain)
+	agents, cronAgent, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
 	if err != nil {
-		mainCleanup()
+		cleanup()
 		return err
 	}
-	defer mainCleanup()
-
-	cronAgent, cronCleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron)
-	if err != nil {
-		cronCleanup()
-		return err
-	}
-	defer cronCleanup()
+	defer cleanup()
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	if cfg.Broker.Listen != "" {
@@ -81,7 +74,8 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	}
 
 	gw := &gateway.Gateway{
-		Agent:    mainAgent,
+		Agent:    agents[config.GroupMain],
+		Agents:   agents,
 		Entities: entities,
 		Sessions: sessions,
 		Adapters: adapters,
@@ -118,6 +112,52 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	stop()
 	<-schedDone
 	return err
+}
+
+// buildGatewayAgents constructs every agent tier the gateway can route to,
+// together with the cron agent used by the scheduler. The cleanup callback
+// closes successfully and partially-built agents in reverse build order.
+func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (map[string]*agent.Agent, *agent.Agent, func(), error) {
+	agents := make(map[string]*agent.Agent)
+	var cleanups []func()
+	cleanup := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+
+	build := func(group string) (*agent.Agent, error) {
+		a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, group)
+		cleanups = append(cleanups, closer)
+		if err != nil {
+			return nil, err
+		}
+		agents[group] = a
+		return a, nil
+	}
+
+	if _, err := build(config.GroupMain); err != nil {
+		return nil, nil, cleanup, err
+	}
+	cronAgent, err := build(config.GroupCron)
+	if err != nil {
+		return nil, nil, cleanup, err
+	}
+
+	groups := make([]string, 0, len(cfg.Agent.Groups))
+	for group := range cfg.Agent.Groups {
+		if group != config.GroupMain && group != config.GroupCron {
+			groups = append(groups, group)
+		}
+	}
+	sort.Strings(groups)
+	for _, group := range groups {
+		if _, err := build(group); err != nil {
+			return nil, nil, cleanup, err
+		}
+	}
+
+	return agents, cronAgent, cleanup, nil
 }
 
 // adapterDeliverer routes a job's "channel:chat_id" target to the matching
