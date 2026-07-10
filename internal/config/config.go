@@ -10,6 +10,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,9 @@ type Gateway struct {
 	// Listen is the bind address. Loopback by default: exposing the
 	// gateway remotely is a deliberate, explicit decision.
 	Listen string `toml:"listen"`
+	// StatusListen is the unauthenticated local run-status API. It must stay
+	// loopback-only to avoid exposing session metadata and usage remotely.
+	StatusListen string `toml:"status_listen"`
 }
 
 // Log configures logging.
@@ -228,7 +232,7 @@ type Log struct {
 // Default returns the configuration waffle runs with when no file exists.
 func Default() Config {
 	return Config{
-		Gateway: Gateway{Listen: "127.0.0.1:8420"},
+		Gateway: Gateway{Listen: "127.0.0.1:8420", StatusListen: "127.0.0.1:8422"},
 		Provider: Provider{
 			Name:      "anthropic",
 			Model:     "claude-opus-4-8",
@@ -296,5 +300,20 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("unknown keys in %s: %s", path, strings.Join(keys, ", "))
 	}
+	if err := validateLoopbackListen(cfg.Gateway.StatusListen); err != nil {
+		return Config{}, fmt.Errorf("gateway.status_listen: %w", err)
+	}
 	return cfg, nil
+}
+
+func validateLoopbackListen(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", listen, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("must bind a loopback address, got %q", listen)
+	}
+	return nil
 }

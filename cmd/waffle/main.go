@@ -56,6 +56,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return sessionCmd(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return serveCmd(ctx, stderr)
+	case "status":
+		return statusCmd(ctx, args[1:], stdout, stderr)
 	case "pair":
 		return pairCmd(ctx, args[1:], stdout, stderr)
 	case "runner":
@@ -96,6 +98,7 @@ Usage:
 Commands:
   chat      interactive terminal session (-c continues the last session)
   serve     run the gateway (channels from config.toml)
+  status    show active and recent gateway runs
   pair      approve your accounts on connected channels
   ws        manage repo workspaces (open/ls/idle/close)
   cron      manage scheduled jobs (add/ls/run/rm)

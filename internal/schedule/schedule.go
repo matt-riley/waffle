@@ -19,6 +19,7 @@ import (
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -149,6 +150,9 @@ type Runner struct {
 	Sessions  *session.Store
 	Deliverer Deliverer
 	Log       *slog.Logger
+
+	// Observability records cron agent runs when configured.
+	Observability *observability.Service
 }
 
 // Run executes one job now: fresh session, agent turn, deliver the reply.
@@ -161,7 +165,44 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 	if err := r.Sessions.AppendTurn(ctx, sess.ID, history[0]); err != nil {
 		return "", err
 	}
-	out, runErr := r.Agent.Run(ctx, history, agent.Hooks{})
+	log := r.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	log = log.With("session_id", sess.ID, "job_id", j.ID)
+	log.Info("cron run started")
+
+	var runID string
+	if r.Observability != nil {
+		var err error
+		runID, err = id.New("run-")
+		if err != nil {
+			log.Error("new observability run id", "err", err)
+		} else if err := r.Observability.Start(ctx, runID, sess.ID, "cron", "job"); err != nil {
+			log.Error("start observability run", "err", err)
+			runID = ""
+		}
+	}
+	outcome := "error"
+	defer func() {
+		if runID == "" {
+			return
+		}
+		if err := r.Observability.Finish(context.WithoutCancel(ctx), runID, outcome); err != nil {
+			log.Error("finish observability run", "err", err)
+		}
+	}()
+
+	out, runErr := r.Agent.Run(ctx, history, agent.Hooks{
+		OnUsage: func(usage llm.Usage) {
+			if runID == "" {
+				return
+			}
+			if err := r.Observability.RecordUsage(ctx, runID, usage); err != nil {
+				log.Error("record observability usage", "err", err)
+			}
+		},
+	})
 	for _, m := range out[1:] {
 		_ = r.Sessions.AppendTurn(ctx, sess.ID, m)
 	}
@@ -181,6 +222,7 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 			return reply, fmt.Errorf("deliver: %w", err)
 		}
 	}
+	outcome = "ok"
 	return reply, nil
 }
 

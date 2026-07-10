@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
@@ -156,6 +159,43 @@ func TestGatewayUsesPersistedAgentGroup(t *testing.T) {
 	}
 	if reply != "restricted: hello" {
 		t.Fatalf("reply = %q, want restricted provider reply", reply)
+	}
+}
+
+func TestGatewayRecordsSessionRunAndLogsSessionID(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	group, err := entities.GroupFor(ctx, "fake", "chat-1")
+	if err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	var logs bytes.Buffer
+	gw := &Gateway{
+		Agent:         &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities:      entities,
+		Sessions:      sessions,
+		Observability: observability.New(st, nil),
+		Log:           slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+
+	if _, err := gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "chat-1", Text: "hello"}); err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	snapshot, err := gw.Observability.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snapshot.Recent) != 1 || snapshot.Recent[0].SessionID != group.SessionID || snapshot.Recent[0].Source != "gateway" || snapshot.Recent[0].Outcome != "ok" {
+		t.Fatalf("recent runs = %+v", snapshot.Recent)
+	}
+	if !strings.Contains(logs.String(), "session_id="+group.SessionID) {
+		t.Errorf("logs missing session_id: %s", logs.String())
 	}
 }
 

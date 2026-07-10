@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
@@ -26,6 +28,14 @@ import (
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
+	return serveCmdWithAdapterFactory(ctx, stderr, configuredAdapters)
+}
+
+type adapterFactory func(config.Config) ([]channel.Adapter, error)
+
+// serveCmdWithAdapterFactory runs the serve command with an explicit adapter
+// factory so command lifecycle tests can use an in-memory channel.
+func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -34,6 +44,25 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		return err
 	}
 	defer st.Close() //nolint:errcheck // process is exiting
+
+	statusListener, err := net.Listen("tcp", cfg.Gateway.StatusListen)
+	if err != nil {
+		return fmt.Errorf("status listener cannot bind %s: %w", cfg.Gateway.StatusListen, err)
+	}
+	obs := observability.New(st, nil)
+	statusDone := make(chan error, 1)
+	go func() {
+		if err := observability.ServeListener(ctx, statusListener, obs); err != nil {
+			slog.New(slog.NewTextHandler(stderr, nil)).Error("status listener stopped", "err", err)
+			statusDone <- err
+			return
+		}
+		statusDone <- nil
+	}()
+	defer func() {
+		stop()
+		<-statusDone
+	}()
 
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
@@ -61,25 +90,19 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		log.Info("credential broker up", "listen", cfg.Broker.Listen, "upstreams", len(upstreams))
 	}
 
-	var adapters []channel.Adapter
-	if cfg.Channel.Telegram.Enabled {
-		token, err := resolveSecretValue(cfg.Channel.Telegram.Token, "TELEGRAM_BOT_TOKEN")
-		if err != nil {
-			return fmt.Errorf("telegram: %w", err)
-		}
-		if token == "" {
-			return errors.New("telegram enabled but no token: store one with `waffle secret set telegram/bot-token` or set TELEGRAM_BOT_TOKEN")
-		}
-		adapters = append(adapters, telegram.New(token, cfg.Channel.Telegram.BaseURL))
+	adapters, err := makeAdapters(cfg)
+	if err != nil {
+		return err
 	}
 
 	gw := &gateway.Gateway{
-		Agent:    agents[config.GroupMain],
-		Agents:   agents,
-		Entities: entities,
-		Sessions: sessions,
-		Adapters: adapters,
-		Log:      log,
+		Agent:         agents[config.GroupMain],
+		Agents:        agents,
+		Entities:      entities,
+		Sessions:      sessions,
+		Adapters:      adapters,
+		Log:           log,
+		Observability: obs,
 	}
 
 	// Scheduler: fire cron jobs while the gateway runs, delivering results
@@ -87,10 +110,11 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	sched := &schedule.Scheduler{
 		Store: schedule.NewStore(st),
 		Runner: &schedule.Runner{
-			Agent:     cronAgent,
-			Sessions:  sessions,
-			Deliverer: adapterDeliverer(adapters),
-			Log:       log,
+			Agent:         cronAgent,
+			Sessions:      sessions,
+			Deliverer:     adapterDeliverer(adapters),
+			Log:           log,
+			Observability: obs,
 		},
 		Log: log,
 	}
@@ -112,6 +136,21 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	stop()
 	<-schedDone
 	return err
+}
+
+func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
+	var adapters []channel.Adapter
+	if cfg.Channel.Telegram.Enabled {
+		token, err := resolveSecretValue(cfg.Channel.Telegram.Token, "TELEGRAM_BOT_TOKEN")
+		if err != nil {
+			return nil, fmt.Errorf("telegram: %w", err)
+		}
+		if token == "" {
+			return nil, errors.New("telegram enabled but no token: store one with `waffle secret set telegram/bot-token` or set TELEGRAM_BOT_TOKEN")
+		}
+		adapters = append(adapters, telegram.New(token, cfg.Channel.Telegram.BaseURL))
+	}
+	return adapters, nil
 }
 
 // buildGatewayAgents constructs every agent tier the gateway can route to,
