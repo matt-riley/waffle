@@ -16,8 +16,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/llm/anthropicp"
+	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
@@ -28,6 +32,68 @@ type Check struct {
 	Name string
 	OK   bool
 	Info string
+}
+
+var providerProbeTimeout = 5 * time.Second
+
+// providerCheck verifies that the configured provider accepts one small,
+// authenticated completion. It has no tools or persistence side effects.
+func providerCheck(ctx context.Context, p config.Provider) (string, error) {
+	env, err := providerEnvName(p.Name)
+	if err != nil {
+		return "", err
+	}
+	key, err := secret.ResolveRef(p.APIKey, env)
+	if err != nil {
+		return "", err
+	}
+	if key == "" && secret.IsRef(p.APIKey) {
+		return "", fmt.Errorf("api_key is %q but no secret store is available: run `waffle secret init`, or set %s", p.APIKey, env)
+	}
+	if key == "" {
+		return "no API key configured (skipped)", nil
+	}
+	provider, err := doctorProvider(p, key)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
+	defer cancel()
+	_, err = provider.Complete(ctx, llm.Request{
+		Model:     p.Model,
+		MaxTokens: 1,
+		Messages:  []llm.Message{llm.UserText("health check")},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	return "authenticated completion", nil
+}
+
+func providerEnvName(name string) (string, error) {
+	switch name {
+	case "anthropic", "":
+		return "ANTHROPIC_API_KEY", nil
+	case "openai":
+		return "OPENAI_API_KEY", nil
+	default:
+		return "", fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", name)
+	}
+}
+
+func doctorProvider(p config.Provider, key string) (llm.Provider, error) {
+	switch p.Name {
+	case "anthropic", "":
+		return anthropicp.New(key, p.BaseURL), nil
+	case "openai":
+		baseURL := p.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.openai.com/v1"
+		}
+		return openaip.New(key, baseURL), nil
+	default:
+		return nil, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", p.Name)
+	}
 }
 
 // Doctor runs waffle's self-checks: config parses, the database migrates
@@ -49,6 +115,12 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	}
 	cfg, err := config.Load(cfgPath)
 	add("config parses", err, cfgPath)
+	if _, statErr := os.Stat(cfgPath); errors.Is(statErr, os.ErrNotExist) {
+		// Config.Load supplies defaults when no file exists. Its default
+		// secret reference is a template, not an operator-configured key, so
+		// doctor should report the provider as unconfigured rather than fail.
+		cfg.Provider.APIKey = ""
+	}
 
 	// Migrate a consistent snapshot of the real DB (or a fresh one if there
 	// is none yet) so a bad migration is caught without risking live data.
@@ -85,6 +157,12 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	} else {
 		add("secret store", nil, "no identity configured (skipped)")
 	}
+
+	// A one-token authenticated completion exercises the provider path that
+	// chat and upgrade ultimately depend on. Missing credentials are an
+	// intentional unconfigured state; all other probe failures block doctor.
+	info, err := providerCheck(ctx, cfg.Provider)
+	add("provider reachable", err, info)
 
 	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
 	// container entrypoint. On a non-linux host that must be an explicitly
