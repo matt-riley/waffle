@@ -1,6 +1,7 @@
 # build output
 /waffle
 /dist/
+/.worktrees/
 
 # local state that must never be committed
 *.age
