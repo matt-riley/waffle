@@ -23,6 +23,11 @@ What's here, by capability:
 - **Gateway** — `waffle serve` with a Telegram adapter. Single-owner:
   unknown senders get a pairing code redeemable only via `waffle pair
   approve` on the host.
+- **Run status** — `waffle status` reads the gateway's local-only status
+  endpoint and prints active/recent runs plus token and runtime totals. The
+  endpoint follows `[gateway] status_listen`, which defaults to
+  `127.0.0.1:8422`; keep it loopback-only. Start `waffle serve` before using
+  the command.
 - **Isolation** — `[sandbox] mode = "docker"` runs tools inside any image
   via the bind-mounted `waffle runner` over a single-writer SQLite queue
   pair; host-enforced tool allow/deny policy; the credential broker fronts
