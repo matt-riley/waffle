@@ -23,6 +23,22 @@ func TestDefaultSandboxImageIncludesWorkspaceTools(t *testing.T) {
 	}
 }
 
+func TestSandboxResourceLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[sandbox]\nmemory = \"3g\"\ncpus = 1.5\npids = 256\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Sandbox.Memory != "3g" || cfg.Sandbox.CPUs != 1.5 || cfg.Sandbox.PIDs != 256 {
+		t.Errorf("Sandbox = %+v, want configured resource limits", cfg.Sandbox)
+	}
+	writeFile(t, path, "[sandbox]\nmemory = \"banana\"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted invalid sandbox memory")
+	}
+}
+
 func TestLoadOverridesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[gateway]\nlisten = \"127.0.0.1:9999\"\n")

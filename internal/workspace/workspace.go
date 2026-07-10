@@ -69,6 +69,10 @@ type Manager struct {
 	// RunnerBinary is a linux build of waffle to bind-mount as the
 	// container entrypoint; empty uses the running binary (linux hosts only).
 	RunnerBinary string
+	Memory       string
+	CPUs         float64
+	PIDs         int
+	Disk         string
 	// BrokerURL as reachable from inside containers, plus a token minter.
 	BrokerURL     string
 	MintToken     func(ctx context.Context, sessionID string) (string, error)
@@ -256,6 +260,10 @@ func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
 		BrokerURL: m.BrokerURL,
 		Token:     token,
 		SelfPath:  m.RunnerBinary,
+		Memory:    m.Memory,
+		CPUs:      m.CPUs,
+		PIDs:      m.PIDs,
+		Disk:      m.Disk,
 	}
 }
 

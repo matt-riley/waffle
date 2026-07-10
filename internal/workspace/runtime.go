@@ -21,6 +21,10 @@ type ContainerOpts struct {
 	BrokerURL string
 	Token     string
 	SelfPath  string // waffle binary to bind-mount
+	Memory    string
+	CPUs      float64
+	PIDs      int
+	Disk      string
 }
 
 // Runtime abstracts the container engine so the lifecycle logic is
@@ -56,15 +60,28 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 	if err := d.docker(ctx, "volume", "create", opts.Volume); err != nil {
 		return err
 	}
-	return d.docker(ctx, workspaceRunArgs(opts)...)
+	if err := d.docker(ctx, workspaceRunArgs(opts)...); err != nil {
+		if opts.Disk != "" && strings.Contains(strings.ToLower(err.Error()), "storage-opt") && strings.Contains(strings.ToLower(err.Error()), "not supported") {
+			opts.Disk = ""
+			return d.docker(ctx, workspaceRunArgs(opts)...)
+		}
+		return err
+	}
+	return nil
 }
 
 // workspaceRunArgs builds the docker run invocation; separated for testing.
 func workspaceRunArgs(opts ContainerOpts) []string {
+	memory, cpus, pids := sandbox.DockerLimits(opts.Memory, opts.CPUs, opts.PIDs)
 	args := []string{
 		"run", "-d",
 		"--name", opts.Name,
 		"--network", opts.Network,
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--cpus", fmt.Sprintf("%g", cpus),
+		"--pids-limit", fmt.Sprintf("%d", pids),
+		"--security-opt", "no-new-privileges",
 		"-v", opts.SelfPath + ":/usr/local/bin/waffle:ro",
 		"-v", opts.QueueDir + ":/waffle/queue",
 		"-v", opts.Volume + ":/work",
@@ -76,6 +93,9 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 			"-e", "WAFFLE_BROKER="+opts.BrokerURL,
 			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
 		)
+	}
+	if opts.Disk != "" {
+		args = append(args, "--storage-opt", "size="+opts.Disk)
 	}
 	return append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
 }

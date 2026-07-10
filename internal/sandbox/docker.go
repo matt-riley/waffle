@@ -95,6 +95,11 @@ type DockerOpts struct {
 	WorkDir string
 	// Network is the docker network mode: "none" (default) or "bridge".
 	Network string
+	// Resource limits protect the host from runaway sandbox workloads.
+	Memory string
+	CPUs   float64
+	PIDs   int
+	Disk   string
 	// BrokerURL and Token, when set, are exported into the container as
 	// WAFFLE_BROKER / WAFFLE_SESSION_TOKEN so in-sandbox tools can reach
 	// the host-side credential broker — never a raw key.
@@ -103,6 +108,12 @@ type DockerOpts struct {
 	// SelfPath overrides the waffle binary to mount (default: this one).
 	SelfPath string
 }
+
+const (
+	DefaultMemoryLimit = "2g"
+	DefaultCPULimit    = 2.0
+	DefaultPIDLimit    = 512
+)
 
 // DockerExecutor is a tool.Toolbox whose tools execute inside a container.
 type DockerExecutor struct {
@@ -137,7 +148,13 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	args := dockerRunArgs(name, opts)
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: docker run: %w\n%s", err, strings.TrimSpace(string(out)))
+		if opts.Disk != "" && storageOptUnsupported(string(out)) {
+			opts.Disk = ""
+			out, err = exec.CommandContext(ctx, "docker", dockerRunArgs(name, opts)...).CombinedOutput()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: docker run: %w\n%s", err, strings.TrimSpace(string(out)))
+		}
 	}
 
 	client, err := NewClient(opts.QueueDir)
@@ -153,17 +170,31 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	}, nil
 }
 
+func storageOptUnsupported(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "storage-opt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "unsupported"))
+}
+
 // dockerRunArgs builds the docker run invocation; separated for testing.
 func dockerRunArgs(name string, opts DockerOpts) []string {
+	memory, cpus, pids := DockerLimits(opts.Memory, opts.CPUs, opts.PIDs)
 	args := []string{
 		"run", "-d", "--rm",
 		"--name", name,
 		"--network", opts.Network,
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--cpus", fmt.Sprintf("%g", cpus),
+		"--pids-limit", fmt.Sprintf("%d", pids),
+		"--security-opt", "no-new-privileges",
 		"-v", opts.SelfPath + ":/usr/local/bin/waffle:ro",
 		"-v", opts.QueueDir + ":/waffle/queue",
 	}
 	if opts.WorkDir != "" {
 		args = append(args, "-v", opts.WorkDir+":/work", "-w", "/work")
+	}
+	if opts.Disk != "" {
+		args = append(args, "--storage-opt", "size="+opts.Disk)
 	}
 	if opts.BrokerURL != "" {
 		args = append(args,
@@ -173,6 +204,20 @@ func dockerRunArgs(name string, opts DockerOpts) []string {
 		)
 	}
 	return append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
+}
+
+// DockerLimits fills in the conservative defaults shared by sandbox and workspace containers.
+func DockerLimits(memory string, cpus float64, pids int) (string, float64, int) {
+	if memory == "" {
+		memory = DefaultMemoryLimit
+	}
+	if cpus <= 0 {
+		cpus = DefaultCPULimit
+	}
+	if pids <= 0 {
+		pids = DefaultPIDLimit
+	}
+	return memory, cpus, pids
 }
 
 // Defs implements tool.Toolbox: the sandbox serves the builtin toolset.

@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -175,6 +176,11 @@ type Sandbox struct {
 	RunnerBinary string `toml:"runner_binary"`
 	// Network for docker mode: "none" (default) or "bridge".
 	Network string `toml:"network"`
+	// Memory, CPUs, and PIDs cap each docker container's host impact.
+	Memory string  `toml:"memory"`
+	CPUs   float64 `toml:"cpus"`
+	PIDs   int     `toml:"pids"`
+	Disk   string  `toml:"disk"`
 	// WorkDir on the host is mounted read-write at /work in the sandbox.
 	WorkDir string `toml:"work_dir"`
 	// Allow/Deny filter tools by name (empty allow = everything).
@@ -246,6 +252,9 @@ func Default() Config {
 			Mode:    "host",
 			Image:   "buildpack-deps:bookworm-scm",
 			Network: "none",
+			Memory:  "2g",
+			CPUs:    2,
+			PIDs:    512,
 		},
 		Agent: Agent{Subagents: true, Learn: true},
 		Log:   Log{Level: "info"},
@@ -303,7 +312,28 @@ func Load(path string) (Config, error) {
 	if err := validateLoopbackListen(cfg.Gateway.StatusListen); err != nil {
 		return Config{}, fmt.Errorf("gateway.status_listen: %w", err)
 	}
+	if err := validateSandboxResources(cfg.Sandbox); err != nil {
+		return Config{}, fmt.Errorf("sandbox resources: %w", err)
+	}
 	return cfg, nil
+}
+
+var memoryLimitRE = regexp.MustCompile(`(?i)^[1-9][0-9]*(b|k|m|g|t|kb|mb|gb|tb)$`)
+
+func validateSandboxResources(s Sandbox) error {
+	if !memoryLimitRE.MatchString(s.Memory) {
+		return fmt.Errorf("memory must be a positive Docker size such as 2g, got %q", s.Memory)
+	}
+	if s.Disk != "" && !memoryLimitRE.MatchString(s.Disk) {
+		return fmt.Errorf("disk must be a positive Docker size such as 10g, got %q", s.Disk)
+	}
+	if s.CPUs <= 0 {
+		return fmt.Errorf("cpus must be positive, got %g", s.CPUs)
+	}
+	if s.PIDs <= 0 {
+		return fmt.Errorf("pids must be positive, got %d", s.PIDs)
+	}
+	return nil
 }
 
 func validateLoopbackListen(listen string) error {

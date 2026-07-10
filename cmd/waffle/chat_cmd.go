@@ -436,6 +436,10 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		executor, err := sandbox.StartDocker(ctx, sandbox.DockerOpts{
 			Image:    cfg.Sandbox.Image,
 			Network:  cfg.Sandbox.Network,
+			Memory:   cfg.Sandbox.Memory,
+			CPUs:     cfg.Sandbox.CPUs,
+			PIDs:     cfg.Sandbox.PIDs,
+			Disk:     cfg.Sandbox.Disk,
 			WorkDir:  cfg.Sandbox.WorkDir,
 			QueueDir: filepath.Join(home, "sandboxes", sandboxID),
 			SelfPath: cfg.Sandbox.RunnerBinary,

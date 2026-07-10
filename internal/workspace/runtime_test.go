@@ -17,6 +17,11 @@ func TestWorkspaceRunArgsUseAbsoluteBinaryPath(t *testing.T) {
 		Token:     "wk_abc",
 	})
 	joined := strings.Join(args, " ")
+	for _, want := range []string{"--memory 2g", "--memory-swap 2g", "--cpus 2", "--pids-limit 512", "--security-opt no-new-privileges"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("workspace run args missing %q:\n%s", want, joined)
+		}
+	}
 	if !strings.Contains(joined, "buildpack-deps:bookworm-scm /usr/local/bin/waffle runner --queue /waffle/queue") {
 		t.Fatalf("workspace run args do not use absolute binary path:\n%s", joined)
 	}

@@ -177,6 +177,11 @@ func TestDockerRunArgs(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"--network none",
+		"--memory 2g",
+		"--memory-swap 2g",
+		"--cpus 2",
+		"--pids-limit 512",
+		"--security-opt no-new-privileges",
 		"-v /usr/local/bin/waffle:/usr/local/bin/waffle:ro",
 		"-v /home/u/.waffle/sandboxes/x:/waffle/queue",
 		"-v /home/u/project:/work",

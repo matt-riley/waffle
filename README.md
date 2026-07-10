@@ -43,6 +43,13 @@ What's here, by capability:
   ```
 
   `waffle doctor` fails fast if the path is missing or not absolute.
+
+  Each sandbox and workspace container is limited by default to `2g` memory,
+  two CPUs, and 512 processes, with `no-new-privileges`. Override these with
+  `[sandbox] memory`, `cpus`, and `pids`. `[sandbox] disk` requests a
+  per-container storage size when the Docker storage driver supports it;
+  unsupported drivers fall back without a disk quota, so use workspace
+  lifecycle cleanup and volume monitoring there.
 - **Repo workspaces** — `waffle ws open owner/repo` / `/repo` clones into a
   dedicated container + volume (devcontainer image when present), git auth
   via `waffle git-credential` to the broker, idle keeps the volume, close
