@@ -36,6 +36,7 @@ type Hooks struct {
 	OnText      func(delta string)
 	OnToolStart func(use llm.ToolUse)
 	OnToolDone  func(use llm.ToolUse, result llm.ToolResult)
+	OnUsage     func(usage llm.Usage)
 }
 
 // ErrMaxIterations is returned when a Run hits the iteration guard.
@@ -72,12 +73,20 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	if maxIter <= 0 {
 		maxIter = 50
 	}
+	var usage llm.Usage
+	observeUsage := func(callUsage llm.Usage) {
+		usage.InputTokens += callUsage.InputTokens
+		usage.OutputTokens += callUsage.OutputTokens
+		if hooks.OnUsage != nil {
+			hooks.OnUsage(usage)
+		}
+	}
 
 	for i := 0; i < maxIter; i++ {
 		// Pre-Complete step: summarize old turns + recent window. This
 		// bounds prompt size independent of total session length (only
 		// MaxIterations + provider MaxTokens were bounds before).
-		messages, extraSystem := a.prepareContext(ctx, history)
+		messages, extraSystem := a.prepareContext(ctx, history, observeUsage)
 		system := a.System
 		if extraSystem != "" {
 			if system != "" {
@@ -100,6 +109,7 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		if err != nil {
 			return history, err
 		}
+		observeUsage(resp.Usage)
 		history = append(history, resp.Message)
 
 		if resp.StopReason == llm.StopRefusal {
@@ -204,13 +214,13 @@ const recentWindow = 20
 // RoleAssistant message) satisfies provider invariants that require the first
 // message to be user role and messages to alternate. The returned slice is a
 // copy; the caller's history remains the full transcript.
-func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message) ([]llm.Message, string) {
+func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, onUsage func(llm.Usage)) ([]llm.Message, string) {
 	n := len(fullHistory)
 	if n <= recentWindow {
 		return append([]llm.Message(nil), fullHistory...), ""
 	}
 	prefix := fullHistory[:n-recentWindow]
-	summaryText := a.summarize(ctx, prefix)
+	summaryText := a.summarize(ctx, prefix, onUsage)
 
 	// Carry as extra system text so it never lands at messages[0]. System
 	// text is provider-controlled and immune to prompt injection from
@@ -281,7 +291,7 @@ func ensureCompleteToolExchange(history []llm.Message, start int) int {
 //
 // The flattened input is capped to avoid blowing out the summarizer's own
 // prompt (addresses risk of huge tool results etc.).
-func (a *Agent) summarize(ctx context.Context, prefix []llm.Message) string {
+func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage func(llm.Usage)) string {
 	if len(prefix) == 0 || a.Provider == nil {
 		return "(no prior context)"
 	}
@@ -320,6 +330,9 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message) string {
 	}, nil)
 	if err != nil {
 		return fmt.Sprintf("(summarization error: %v)", err)
+	}
+	if onUsage != nil {
+		onUsage(resp.Usage)
 	}
 	s := strings.TrimSpace(resp.Message.Text())
 	if s == "" {

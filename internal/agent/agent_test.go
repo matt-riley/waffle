@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -128,6 +129,36 @@ func TestRunToolLoop(t *testing.T) {
 	}
 	if !strings.Contains(results.Blocks[0].ToolResult.Content, `"a"`) {
 		t.Errorf("result content = %q", results.Blocks[0].ToolResult.Content)
+	}
+}
+
+func TestRunReportsCumulativeUsageAfterEachProviderResponse(t *testing.T) {
+	p := &fakeProvider{responses: []llm.Response{
+		{
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"a"}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+			Usage:      llm.Usage{InputTokens: 3, OutputTokens: 5},
+		},
+		{
+			Message:    assistantText("done"),
+			StopReason: llm.StopEndTurn,
+			Usage:      llm.Usage{InputTokens: 7, OutputTokens: 11},
+		},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(&echoTool{}), Model: "m"}
+
+	var observations []llm.Usage
+	_, err := a.Run(context.Background(), []llm.Message{llm.UserText("go")}, Hooks{
+		OnUsage: func(usage llm.Usage) { observations = append(observations, usage) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []llm.Usage{{InputTokens: 3, OutputTokens: 5}, {InputTokens: 10, OutputTokens: 16}}
+	if !slices.Equal(observations, want) {
+		t.Errorf("usage observations = %#v, want %#v", observations, want)
 	}
 }
 

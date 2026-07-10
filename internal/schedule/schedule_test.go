@@ -1,16 +1,19 @@
 package schedule
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
@@ -104,6 +107,33 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	turns, _ := sessions.Turns(ctx, list[0].ID)
 	if len(turns) != 2 {
 		t.Errorf("turns = %d, want 2", len(turns))
+	}
+}
+
+func TestRunnerRecordsCronRunAndLogsSessionAndJobIDs(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	var logs bytes.Buffer
+	runner := &Runner{
+		Agent:         &agent.Agent{Provider: echoProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Sessions:      session.New(st),
+		Observability: observability.New(st, nil),
+		Log:           slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	job := Job{ID: "job-123", Name: "test", Prompt: "check the thing"}
+
+	if _, err := runner.Run(ctx, job); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	snapshot, err := runner.Observability.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snapshot.Recent) != 1 || snapshot.Recent[0].Source != "cron" || snapshot.Recent[0].Outcome != "ok" || snapshot.Recent[0].SessionID == "" {
+		t.Fatalf("recent runs = %+v", snapshot.Recent)
+	}
+	if !strings.Contains(logs.String(), "session_id="+snapshot.Recent[0].SessionID) || !strings.Contains(logs.String(), "job_id="+job.ID) {
+		t.Errorf("logs missing run context: %s", logs.String())
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/entity"
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 )
 
@@ -27,6 +29,9 @@ type Gateway struct {
 	Sessions *session.Store
 	Adapters []channel.Adapter
 	Log      *slog.Logger
+
+	// Observability records gateway agent runs when configured.
+	Observability *observability.Service
 
 	// MaxConcurrent bounds in-flight message handlers so a flooding
 	// channel can't spawn unbounded goroutines. Zero means the default.
@@ -222,11 +227,46 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	persisted := len(history)
 
 	history = append(history, llm.UserText(msg.Text))
+	log := g.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	log = log.With("session_id", group.SessionID)
+	log.Info("gateway run started")
+
+	var runID string
+	if g.Observability != nil {
+		var err error
+		runID, err = id.New("run-")
+		if err != nil {
+			log.Error("new observability run id", "err", err)
+		} else if err := g.Observability.Start(ctx, runID, group.SessionID, "gateway", "agent"); err != nil {
+			log.Error("start observability run", "err", err)
+			runID = ""
+		}
+	}
 	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{
 		OnToolStart: func(use llm.ToolUse) {
-			g.Log.Info("tool", "channel", msg.Channel, "chat", msg.ChatID, "name", use.Name)
+			log.Info("tool", "channel", msg.Channel, "chat", msg.ChatID, "name", use.Name)
+		},
+		OnUsage: func(usage llm.Usage) {
+			if runID == "" {
+				return
+			}
+			if err := g.Observability.RecordUsage(ctx, runID, usage); err != nil {
+				log.Error("record observability usage", "err", err)
+			}
 		},
 	})
+	if runID != "" {
+		outcome := "ok"
+		if runErr != nil {
+			outcome = "error"
+		}
+		if err := g.Observability.Finish(context.WithoutCancel(ctx), runID, outcome); err != nil {
+			log.Error("finish observability run", "err", err)
+		}
+	}
 
 	for ; persisted < len(newHistory); persisted++ {
 		if err := g.Sessions.AppendTurn(ctx, group.SessionID, newHistory[persisted]); err != nil {
