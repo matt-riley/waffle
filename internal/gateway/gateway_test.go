@@ -84,6 +84,17 @@ func (scriptProvider) Complete(ctx context.Context, req llm.Request, onEvent llm
 	}, nil
 }
 
+// namedProvider identifies the agent group that produced a response.
+type namedProvider string
+
+func (p namedProvider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
+	last := req.Messages[len(req.Messages)-1].Text()
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: string(p) + ": " + last}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
 func newTestGateway(t *testing.T) (*Gateway, *fakeAdapter, *entity.Store, *session.Store, context.CancelFunc) {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
@@ -103,6 +114,76 @@ func newTestGateway(t *testing.T) (*Gateway, *fakeAdapter, *entity.Store, *sessi
 	ctx, cancel := context.WithCancel(context.Background())
 	go gw.Run(ctx) //nolint:errcheck // stopped via cancel
 	return gw, adapter, entities, sessions, cancel
+}
+
+func TestGatewayUsesPersistedAgentGroup(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	st, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat"); err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	if _, err := st.DB.ExecContext(ctx, `UPDATE channel_groups SET agent_group = 'restricted' WHERE channel = 'fake' AND chat_id = 'restricted-chat'`); err != nil {
+		t.Fatalf("bind restricted group: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	st, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	sessions = session.New(st)
+	entities = entity.New(st, sessions)
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: namedProvider("main"), Tools: tool.NewRegistry(), Model: "m"},
+		Agents:   map[string]*agent.Agent{"restricted": {Provider: namedProvider("restricted"), Tools: tool.NewRegistry(), Model: "m"}},
+		Entities: entities,
+		Sessions: sessions,
+	}
+
+	reply, err := gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "restricted-chat", Text: "hello"})
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if reply != "restricted: hello" {
+		t.Fatalf("reply = %q, want restricted provider reply", reply)
+	}
+}
+
+func TestGatewayRejectsUnavailablePersistedAgentGroup(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat"); err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	if _, err := st.DB.ExecContext(ctx, `UPDATE channel_groups SET agent_group = 'restricted' WHERE channel = 'fake' AND chat_id = 'restricted-chat'`); err != nil {
+		t.Fatalf("bind restricted group: %v", err)
+	}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: namedProvider("main"), Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+	}
+
+	_, err = gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "restricted-chat", Text: "hello"})
+	if err == nil || err.Error() != "gateway: no agent configured for group restricted" {
+		t.Fatalf("converse error = %v, want unavailable restricted group error", err)
+	}
 }
 
 func TestUnknownSenderGetsPairingCodeOnly(t *testing.T) {

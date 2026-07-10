@@ -20,7 +20,9 @@ import (
 
 // Gateway wires adapters to the agent runtime.
 type Gateway struct {
+	// Agent remains the main group fallback for existing callers.
 	Agent    *agent.Agent
+	Agents   map[string]*agent.Agent
 	Entities *entity.Store
 	Sessions *session.Store
 	Adapters []channel.Adapter
@@ -32,6 +34,16 @@ type Gateway struct {
 
 	mu     sync.Mutex
 	groups map[string]*groupLock // active per-conversation serialization
+}
+
+func (g *Gateway) agentFor(group string) (*agent.Agent, error) {
+	if selected := g.Agents[group]; selected != nil {
+		return selected, nil
+	}
+	if group == "main" && g.Agent != nil {
+		return g.Agent, nil
+	}
+	return nil, fmt.Errorf("gateway: no agent configured for group %s", group)
 }
 
 type groupLock struct {
@@ -173,8 +185,10 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 	if err != nil {
 		log.Error("agent run", "err", err)
 		detail := fmt.Sprintf("%v", err)
-		if g.Agent != nil && g.Agent.Redact != nil {
-			detail = g.Agent.Redact(detail)
+		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID); groupErr == nil {
+			if selected, agentErr := g.agentFor(group.AgentGroup); agentErr == nil && selected.Redact != nil {
+				detail = selected.Redact(detail)
+			}
 		}
 		// Keep short to avoid channel limits and excessive internal detail.
 		if len(detail) > 200 {
@@ -196,6 +210,10 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	if err != nil {
 		return "", err
 	}
+	selected, err := g.agentFor(group.AgentGroup)
+	if err != nil {
+		return "", err
+	}
 	history, err := g.Sessions.Turns(ctx, group.SessionID)
 	if err != nil {
 		return "", err
@@ -204,7 +222,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	persisted := len(history)
 
 	history = append(history, llm.UserText(msg.Text))
-	newHistory, runErr := g.Agent.Run(ctx, history, agent.Hooks{
+	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{
 		OnToolStart: func(use llm.ToolUse) {
 			g.Log.Info("tool", "channel", msg.Channel, "chat", msg.ChatID, "name", use.Name)
 		},
