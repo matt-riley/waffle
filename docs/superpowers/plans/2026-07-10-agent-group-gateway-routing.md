@@ -46,9 +46,9 @@
 - Consumes: `Gateway.Agents` from Task 1.
 - Produces: a server gateway with `main` and every `[agent.group.<name>]` built once.
 
-- [ ] Write `TestConfiguredGatewayGroupBuildsDistinctRestrictedAgent`: a configured group that denies `bash` omits it, while `main` retains it.
-- [ ] Run `go test ./cmd/waffle -run TestConfiguredGatewayGroupBuildsDistinctRestrictedAgent -count=1`; expect failure because serve only builds main and cron.
-- [ ] Build `main`, then each non-main configured group; retain cleanup callbacks and invoke them in reverse order. Keep cron as the scheduler agent and include it in the gateway registry if configured.
+- [ ] Extract the server's group-agent construction into a testable helper returning an agent map and one cleanup callback. Write `TestConfiguredGatewayGroupBuildsRegistryEntry`: a configured group appears in that registry and its toolbox omits denied `bash`, while main retains it.
+- [ ] Run `go test ./cmd/waffle -run TestConfiguredGatewayGroupBuildsRegistryEntry -count=1`; expect failure because serve constructs only main and cron locally.
+- [ ] Build `main`, cron, and every non-main configured group through the helper; retain cleanup callbacks and invoke them in reverse order. Pass the map to the gateway and retain cron as the scheduler agent.
 - [ ] Run `go test ./cmd/waffle -run 'Test(AgentGroup|ConfiguredGatewayGroup)' -count=1`; expect pass.
 
 ### Task 3: Verify and close the issue
