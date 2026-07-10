@@ -13,6 +13,8 @@ import (
 	"github.com/matt-riley/waffle/internal/observability"
 )
 
+const statusRequestTimeout = 2 * time.Second
+
 // statusCmd prints the local gateway's current and recently completed runs.
 func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) != 0 {
@@ -28,7 +30,8 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	return statusCmdWithClient(ctx, "http://"+cfg.Gateway.StatusListen, http.DefaultClient, stdout)
+	client := &http.Client{Timeout: statusRequestTimeout}
+	return statusCmdWithClient(ctx, "http://"+cfg.Gateway.StatusListen, client, stdout)
 }
 
 // statusCmdWithClient fetches and renders a status snapshot. Its endpoint and
