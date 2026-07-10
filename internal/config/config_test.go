@@ -39,6 +39,21 @@ func TestLoadOverridesDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultStatusListenerIsLoopback(t *testing.T) {
+	if got := Default().Gateway.StatusListen; got != "127.0.0.1:8422" {
+		t.Errorf("Gateway.StatusListen = %q, want 127.0.0.1:8422", got)
+	}
+}
+
+func TestLoadRejectsNonLoopbackStatusListener(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[gateway]\nstatus_listen = \"0.0.0.0:8422\"\n")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted non-loopback status listener, want error")
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[gateway]\nlisten = \"x\"\nlistne_typo = true\n")

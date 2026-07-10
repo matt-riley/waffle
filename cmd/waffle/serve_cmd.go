@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
@@ -34,6 +36,25 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		return err
 	}
 	defer st.Close() //nolint:errcheck // process is exiting
+
+	statusListener, err := net.Listen("tcp", cfg.Gateway.StatusListen)
+	if err != nil {
+		return fmt.Errorf("status listener cannot bind %s: %w", cfg.Gateway.StatusListen, err)
+	}
+	obs := observability.New(st, nil)
+	statusDone := make(chan error, 1)
+	go func() {
+		if err := observability.ServeListener(ctx, statusListener, obs); err != nil {
+			slog.New(slog.NewTextHandler(stderr, nil)).Error("status listener stopped", "err", err)
+			statusDone <- err
+			return
+		}
+		statusDone <- nil
+	}()
+	defer func() {
+		stop()
+		<-statusDone
+	}()
 
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
@@ -74,12 +95,13 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	}
 
 	gw := &gateway.Gateway{
-		Agent:    agents[config.GroupMain],
-		Agents:   agents,
-		Entities: entities,
-		Sessions: sessions,
-		Adapters: adapters,
-		Log:      log,
+		Agent:         agents[config.GroupMain],
+		Agents:        agents,
+		Entities:      entities,
+		Sessions:      sessions,
+		Adapters:      adapters,
+		Log:           log,
+		Observability: obs,
 	}
 
 	// Scheduler: fire cron jobs while the gateway runs, delivering results
@@ -87,10 +109,11 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	sched := &schedule.Scheduler{
 		Store: schedule.NewStore(st),
 		Runner: &schedule.Runner{
-			Agent:     cronAgent,
-			Sessions:  sessions,
-			Deliverer: adapterDeliverer(adapters),
-			Log:       log,
+			Agent:         cronAgent,
+			Sessions:      sessions,
+			Deliverer:     adapterDeliverer(adapters),
+			Log:           log,
+			Observability: obs,
 		},
 		Log: log,
 	}

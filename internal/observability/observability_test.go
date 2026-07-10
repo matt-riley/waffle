@@ -2,6 +2,9 @@ package observability
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +12,30 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
 )
+
+func TestStatusHandlerReturnsSnapshotJSONWithEmptyArrays(t *testing.T) {
+	ctx, svc, _ := testService(t)
+
+	recorder := httptest.NewRecorder()
+	NewHandler(svc).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil).WithContext(ctx))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	var snapshot Snapshot
+	if err := json.NewDecoder(recorder.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode status JSON: %v", err)
+	}
+	if snapshot.Active == nil || snapshot.Recent == nil || snapshot.RetryQueue == nil {
+		t.Fatalf("status JSON arrays must not be nil: %+v", snapshot)
+	}
+	if len(snapshot.Active) != 0 || len(snapshot.Recent) != 0 || len(snapshot.RetryQueue) != 0 {
+		t.Errorf("status JSON = %+v, want empty snapshot", snapshot)
+	}
+}
 
 func TestRecordUsageDoesNotDoubleCountDuplicateCumulativeObservation(t *testing.T) {
 	ctx, svc, clock := testService(t)
