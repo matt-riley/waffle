@@ -44,7 +44,10 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 
 	case "add":
 		// waffle cron add <name> <cron(5 fields)> <prompt...> [--deliver channel:chat]
-		fields, deliver := splitDeliver(args[1:])
+		fields, deliver, err := splitDeliver(args[1:])
+		if err != nil {
+			return err
+		}
 		if len(fields) < 7 {
 			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat]")
 		}
@@ -119,16 +122,22 @@ func orNone(s string) string {
 	return s
 }
 
-func splitDeliver(args []string) (fields []string, deliver string) {
+func splitDeliver(args []string) (fields []string, deliver string, err error) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--deliver" && i+1 < len(args) {
+		if args[i] == "--deliver" {
+			if i+1 == len(args) {
+				return nil, "", fmt.Errorf("--deliver requires a value (channel:chat_id, e.g. telegram:900)")
+			}
 			deliver = args[i+1]
+			if _, _, ok := schedule.ParseTarget(deliver); !ok {
+				return nil, "", fmt.Errorf("bad delivery target %q (want channel:chat_id)", deliver)
+			}
 			i++
 			continue
 		}
 		fields = append(fields, args[i])
 	}
-	return fields, deliver
+	return fields, deliver, nil
 }
 
 func joinFields(fields []string) string {
