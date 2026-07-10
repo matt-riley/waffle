@@ -28,6 +28,14 @@ import (
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
+	return serveCmdWithAdapterFactory(ctx, stderr, configuredAdapters)
+}
+
+type adapterFactory func(config.Config) ([]channel.Adapter, error)
+
+// serveCmdWithAdapterFactory runs the serve command with an explicit adapter
+// factory so command lifecycle tests can use an in-memory channel.
+func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -82,16 +90,9 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 		log.Info("credential broker up", "listen", cfg.Broker.Listen, "upstreams", len(upstreams))
 	}
 
-	var adapters []channel.Adapter
-	if cfg.Channel.Telegram.Enabled {
-		token, err := resolveSecretValue(cfg.Channel.Telegram.Token, "TELEGRAM_BOT_TOKEN")
-		if err != nil {
-			return fmt.Errorf("telegram: %w", err)
-		}
-		if token == "" {
-			return errors.New("telegram enabled but no token: store one with `waffle secret set telegram/bot-token` or set TELEGRAM_BOT_TOKEN")
-		}
-		adapters = append(adapters, telegram.New(token, cfg.Channel.Telegram.BaseURL))
+	adapters, err := makeAdapters(cfg)
+	if err != nil {
+		return err
 	}
 
 	gw := &gateway.Gateway{
@@ -135,6 +136,21 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 	stop()
 	<-schedDone
 	return err
+}
+
+func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
+	var adapters []channel.Adapter
+	if cfg.Channel.Telegram.Enabled {
+		token, err := resolveSecretValue(cfg.Channel.Telegram.Token, "TELEGRAM_BOT_TOKEN")
+		if err != nil {
+			return nil, fmt.Errorf("telegram: %w", err)
+		}
+		if token == "" {
+			return nil, errors.New("telegram enabled but no token: store one with `waffle secret set telegram/bot-token` or set TELEGRAM_BOT_TOKEN")
+		}
+		adapters = append(adapters, telegram.New(token, cfg.Channel.Telegram.BaseURL))
+	}
+	return adapters, nil
 }
 
 // buildGatewayAgents constructs every agent tier the gateway can route to,
