@@ -471,7 +471,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		if execution == "sandbox" {
 			return nil, cleanup, fmt.Errorf("mcp %q: sandbox execution is not available; refusing to launch it", s.Name)
 		}
-		if pol.Mode == "docker" && !(s.Execution == "host" && slices.Contains(s.Groups, group)) {
+		if pol.Mode == "docker" && (s.Execution != "host" || !slices.Contains(s.Groups, group)) {
 			return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
 		}
 		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})

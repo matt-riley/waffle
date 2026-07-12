@@ -25,7 +25,7 @@ type manifest struct {
 
 // Create writes a new, never-overwritten directory backup.
 func Create(ctx context.Context, dst string, withIdentity bool, identity string) error {
-	if filepath.IsAbs(dst) == false {
+	if !filepath.IsAbs(dst) {
 		return errors.New("backup destination must be an absolute path")
 	}
 	if _, err := os.Stat(dst); err == nil {
@@ -136,7 +136,7 @@ func Restore(ctx context.Context, src string) error {
 	if err != nil {
 		return fmt.Errorf("create restore staging area: %w", err)
 	}
-	defer os.RemoveAll(stage)
+	defer os.RemoveAll(stage) //nolint:errcheck // temp dir
 	if p := filepath.Join(src, "waffle.db"); exists(p) {
 		cp := filepath.Join(stage, "waffle.db")
 		if err := copyFile(p, cp, 0o600); err != nil {
@@ -194,7 +194,7 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer in.Close() //nolint:errcheck // read-only
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}

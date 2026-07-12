@@ -103,7 +103,7 @@ func (s *Store) List(ctx context.Context, session string) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // read-only cursor
 	var out []Row
 	for rows.Next() {
 		var r Row
