@@ -12,6 +12,7 @@ import (
 type WorkPacket struct {
 	Task               string   `json:"task"`
 	Role               string   `json:"role,omitempty"`
+	Profile            string   `json:"profile,omitempty"` // named agent profile (#71)
 	ContextRefs        []string `json:"context_refs,omitempty"`
 	OwnedPaths         []string `json:"owned_paths,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`

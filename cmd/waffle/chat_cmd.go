@@ -556,9 +556,12 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		// attach a thin wrapper that loads working set from the active session.
 		sub.Spill = spillStore
 		boxes = append(boxes, tool.NewRegistry(workingSetSubagent{
-			inner: sub,
-			store: wsStore,
-			spill: spillStore,
+			inner:      sub,
+			store:      wsStore,
+			spill:      spillStore,
+			sessions:   sessions,
+			cfg:        cfg,
+			parentDeny: append([]string{}, toolPolicy.Deny...),
 		}))
 	}
 
@@ -578,14 +581,15 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		}
 	}
 	return &agent.Agent{
-		Provider:  provider,
-		Tools:     toolbox,
-		System:    sys,
-		Model:     model,
-		MaxTokens: cfg.Provider.MaxTokens,
-		Redact:    redact,
-		Spill:     spillStore,
-		Usage:     usagepkg.New(&store.Store{DB: sessions.DB()}),
+		Provider:     provider,
+		Tools:        toolbox,
+		System:       sys,
+		Model:        model,
+		UtilityModel: cfg.Provider.UtilityModel,
+		MaxTokens:    cfg.Provider.MaxTokens,
+		Redact:       redact,
+		Spill:        spillStore,
+		Usage:        usagepkg.New(&store.Store{DB: sessions.DB()}),
 		Limits: func() usagepkg.Limits {
 			l := cfg.LimitsFor(group)
 			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
@@ -593,11 +597,16 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	}, cleanup, nil
 }
 
-// workingSetSubagent wraps SubagentTool to inject a live working-set broadcast (#68).
+// workingSetSubagent wraps SubagentTool to inject a live working-set broadcast (#68)
+// and named child profiles from config (#71).
 type workingSetSubagent struct {
-	inner agent.SubagentTool
-	store *workset.Store
-	spill *spill.Store
+	inner    agent.SubagentTool
+	store    *workset.Store
+	spill    *spill.Store
+	sessions *session.Store
+	cfg      config.Config
+	// parentDeny lists tools the parent cannot use — children cannot re-enable them.
+	parentDeny []string
 }
 
 func (w workingSetSubagent) Def() llm.Tool { return w.inner.Def() }
@@ -605,15 +614,55 @@ func (w workingSetSubagent) Def() llm.Tool { return w.inner.Def() }
 func (w workingSetSubagent) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	t := w.inner
 	t.Spill = w.spill
+	t.Profiles = childProfilesFromConfig(w.cfg, w.parentDeny)
 	if w.store != nil {
 		if sid := session.IDFromContext(ctx); sid != "" {
+			// Snapshot at dispatch so parallel spawns share the same view (#68).
 			if entries, err := w.store.List(ctx, sid); err == nil && len(entries) > 0 {
 				t.WorkingSetBroadcast = workset.Render(entries)
 				t.BroadcastWorkingSet = true
 			}
 		}
 	}
+	if w.sessions != nil {
+		t.NewChildSession = func(ctx context.Context, title string) (string, error) {
+			s, err := w.sessions.Create(ctx, title)
+			if err != nil {
+				return "", err
+			}
+			return s.ID, nil
+		}
+		t.Persist = func(ctx context.Context, parentSession, childSession string, packet agent.WorkPacket, handoff agent.Handoff) error {
+			return session.PersistSubagentHandoff(ctx, w.sessions.DB(), parentSession, childSession, packet, handoff)
+		}
+	}
 	return t.Run(ctx, input)
+}
+
+func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]agent.ChildProfile {
+	if len(cfg.Agent.Profiles) == 0 {
+		return nil
+	}
+	out := make(map[string]agent.ChildProfile, len(cfg.Agent.Profiles))
+	for name, p := range cfg.Agent.Profiles {
+		if name == "" || name == "main" {
+			continue
+		}
+		pol := tool.Policy{Allow: p.Tools.Allow, Deny: append(append([]string{}, p.Tools.Deny...), parentDeny...)}
+		sys := p.System
+		if strings.HasPrefix(sys, "@") || strings.HasSuffix(sys, ".md") {
+			if loaded, err := loadProfileSystem(sys); err == nil {
+				sys = loaded
+			}
+		}
+		out[name] = agent.ChildProfile{
+			Name:   name,
+			System: sys,
+			Model:  p.Model,
+			Tools:  pol,
+		}
+	}
+	return out
 }
 
 func loadProfileSystem(s string) (string, error) {
