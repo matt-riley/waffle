@@ -2,6 +2,8 @@
 
 Source snapshot: `docs/acceptance-audit/issues.json`
 
+Issue #72 is represented in the source snapshot but has no checkbox or explicit completion criterion, so it has no criterion row in this matrix.
+
 | ID | Criterion | Status | Implementation/artifact | Automated evidence | Manual/gated evidence | Current verification |
 |---|---|---|---|---|---|---|
 | #8.1 | Make the injected summary a `RoleUser` message (the labeling text already defends against prompt injection), **or** carry it as extra `System` text on the `Request` instead of as a message. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
@@ -414,7 +416,6 @@ Source snapshot: `docs/acceptance-audit/issues.json`
 | #71.36 | Example config includes at least `main`, `researcher`, and `reviewer` profiles. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #71.37 | Docs explain the relationship between profiles, #33 agent-group trust tiering, #53 repo policy files, #66 action-level policy, and #68 subagent working-set broadcast. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #71.38 | Docs include a migration note: existing users get `main`; no config changes required. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
-| #72.1 | The open issues cross-reference each other heavily — several are hard prerequisites for others, and a few security-sensitive features must **not** ship until their guardrails land. This meta issue is the map: what unblocks what, and a suggested delivery sequence so work isn't done out of order (or, worse, shipped unsafely).<br><br>Derived from the cross-link sections of the (now fully specified) issues; every dependency below is stated in the linked issues themselves. Not a milestone — a routing table. Correct as of the backlog audit against `main` @ `cde1b22` (2026-07-08). | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #77.1 | MCP servers are filtered by group/tool policy **before** processes are launched. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #77.2 | A server with no callable tools in the resolved group is not started. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #77.3 | Docker/sandboxed groups cannot silently launch host MCP processes without an explicit, auditable opt-in. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
