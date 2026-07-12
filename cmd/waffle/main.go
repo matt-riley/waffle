@@ -34,6 +34,13 @@ func resolveVersion(stamped string) string {
 		return stamped
 	}
 	bi, ok := debug.ReadBuildInfo()
+	return resolveVersionInfo(stamped, bi, ok)
+}
+
+func resolveVersionInfo(stamped string, bi *debug.BuildInfo, ok bool) string {
+	if stamped != "" && stamped != "dev" {
+		return stamped
+	}
 	if !ok {
 		return stamped
 	}

@@ -3,9 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
+
+func TestResolveVersionFromControlledBuildInfo(t *testing.T) {
+	bi := &debug.BuildInfo{Main: debug.Module{Version: "v9.8.7"}}
+	if got := resolveVersionInfo("dev", bi, true); got != "v9.8.7" {
+		t.Fatalf("resolveVersionInfo = %q, want v9.8.7", got)
+	}
+	bi.Settings = []debug.BuildSetting{{Key: "vcs.revision", Value: "1234567890abcdef"}}
+	if got := resolveVersionInfo("dev", bi, true); got != "1234567" {
+		t.Fatalf("resolveVersionInfo VCS = %q, want 1234567", got)
+	}
+}
 
 func TestResolveVersionPrefersStamped(t *testing.T) {
 	if got := resolveVersion("v1.2.3"); got != "v1.2.3" {
