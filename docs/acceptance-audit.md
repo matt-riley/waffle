@@ -2,8 +2,6 @@
 
 Source snapshot: `docs/acceptance-audit/issues.json`
 
-Issue #72 is represented in the source snapshot but has no checkbox or explicit completion criterion, so it has no criterion row in this matrix.
-
 | ID | Criterion | Status | Implementation/artifact | Automated evidence | Manual/gated evidence | Current verification |
 |---|---|---|---|---|---|---|
 | #8.1 | Make the injected summary a `RoleUser` message (the labeling text already defends against prompt injection), **or** carry it as extra `System` text on the `Request` instead of as a message. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
@@ -445,3 +443,5 @@ Issue #72 is represented in the source snapshot but has no checkbox or explicit 
 | #79.9 | Absence/failure of code intelligence degrades cleanly to the current `search`/`read` workflow; it cannot prevent an otherwise valid workspace from running unless explicitly configured as required by the host. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #79.10 | One deterministic agent eval (#63) demonstrates reduced broad-file loading for a caller-sensitive Go change while still verifying against current source. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
 | #79.11 | `docs/plan.md` records the architectural decision: structural code intelligence belongs behind MCP/workspace tooling, not in Waffle’s core storage/runtime. | partial | unreviewed | unreviewed | unreviewed | unreviewed |
+
+Issue #72 is represented in the source snapshot but has no checkbox or explicit completion criterion, so it has no criterion row in this matrix.
