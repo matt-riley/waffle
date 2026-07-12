@@ -29,6 +29,12 @@ WAFFLE_SANDBOX_DOCKER_SECONDS=120 \
   go test -tags=sandbox_docker ./internal/sandbox \
   -run DockerBindMount -count=1 -timeout 10m -v
 
+# PID-limit containment (issue #46). This starts a fork workload only inside
+# a disposable container capped at 32 PIDs, observes that it cannot exceed the
+# cgroup limit, and always force-removes the container during cleanup.
+go test -tags=sandbox_docker ./internal/sandbox \
+  -run '^TestDockerPIDLimitContainsForkBomb$' -count=1 -timeout 2m -v
+
 # Doctor includes:
 #   - sandbox queue round-trip (host FS Client+Runner ping)
 #   - sandbox docker round-trip (daemon + container + bind-mount write/read)
@@ -55,6 +61,10 @@ status) with the result. Expected evidence is:
 - without Docker, both tests explicitly skip with `docker not in PATH` or
   `docker daemon unavailable`. This is an infrastructure gate, not positive
   Docker Desktop evidence.
+
+`TestDockerPIDLimitContainsForkBomb` has the same deterministic Docker gate.
+A skip proves only that the host cannot run the acceptance test; a pass records
+the maximum process count observed and the limit read back from Docker.
 
 The requested stress duration begins only after the first container heartbeat;
 the request workers and heartbeat observer share that one fresh deadline.
