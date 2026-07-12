@@ -9,8 +9,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/instance"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
+
+func TestWorkspaceOpenRefusesLiveServeBeforeMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	lease, err := instance.Default(filepath.Join(home, "serve.lock")).Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	var stdout, stderr bytes.Buffer
+	err = run(context.Background(), []string{"ws", "open", "owner/repo"}, strings.NewReader(""), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("ws open succeeded while serve owner lock was held")
+	}
+	for _, want := range []string{"waffle serve", "gateway", "/repo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(home, "waffle.db")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused ws open mutated database: %v", statErr)
+	}
+}
 
 // TestWorkspaceCloseParseFailureStopsBeforeStoreMutation exercises the command
 // boundary (run -> wsCmd), not just the parser. A rejected invocation returns

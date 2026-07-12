@@ -22,6 +22,17 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 		wsUsage(stderr)
 		return errUsage
 	}
+	if args[0] == "open" {
+		// Parse before checking process ownership so malformed invocations have
+		// no filesystem side effects. Then refuse before opening the SQLite store
+		// or starting Docker: broker tokens belong to the serve process (#48).
+		if _, _, parseErr := parseWorkspaceOpenArgs(args[1:]); parseErr != nil {
+			return parseErr
+		}
+		if lockErr := refuseWorkspaceOpenWhileServing(); lockErr != nil {
+			return lockErr
+		}
+	}
 	var closeID string
 	var closeForce bool
 	if args[0] == "close" {

@@ -192,6 +192,13 @@ Workspace Docker volumes are disposable and are not backed up. Push repository
 work before `waffle ws close`; the repository is the source of truth and close
 refuses unpushed work.
 
+`waffle serve` is the single owner of background work and in-memory broker
+tokens. It records its PID and a heartbeat in `~/.waffle/serve.lock`; a second
+`serve` refuses to start, and `waffle ws open` refuses before changing the
+database or starting Docker while that owner is live. Use the gateway `/repo`
+command instead. A stale lock is reclaimed automatically once its heartbeat is
+old and its PID is no longer alive; do not delete a lock owned by a live PID.
+
 Point it elsewhere in `~/.waffle/config.toml` — any OpenAI-compatible
 endpoint (OpenRouter, Ollama, a running workweave/router) works:
 

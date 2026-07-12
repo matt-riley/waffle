@@ -1,17 +1,40 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/config"
 )
+
+func TestServeRefusesLiveOwnerBeforeDatabaseMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	lease, err := acquireServeOwner(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	err = serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		t.Fatal("adapter factory called while owner lock held")
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "serve owner lock is held") {
+		t.Fatalf("second serve = %v, want held-owner refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, "waffle.db")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused second serve mutated database: %v", statErr)
+	}
+}
 
 func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	t.Setenv("WAFFLE_HOME", t.TempDir())

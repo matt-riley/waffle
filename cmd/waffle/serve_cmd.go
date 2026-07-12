@@ -47,6 +47,15 @@ type adapterFactory func(config.Config) ([]channel.Adapter, error)
 func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) (err error) {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	owner, err := acquireServeOwner(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := owner.Release(); err == nil {
+			err = releaseErr
+		}
+	}()
 
 	cfg, st, err := openConfigAndStore(ctx)
 	if err != nil {
