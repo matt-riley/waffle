@@ -48,10 +48,16 @@ status) with the result. Expected evidence is:
   and no observed heartbeat gap over four seconds (the two-second runner
   heartbeat interval ×2);
 - `TestDockerBindMountKillMidWriteIntegrity` shows a real `docker kill` and
-  both `inbound.db` and `outbound.db` return `ok` from `PRAGMA integrity_check`;
+  both `inbound.db` and `outbound.db` return `ok` from `PRAGMA integrity_check`.
+  The test first holds an exclusive outbound lock, waits for the containerized
+  tool to write a bind-mounted marker (proving tool completion and a blocked
+  result INSERT), verifies no result committed, and only then kills Docker;
 - without Docker, both tests explicitly skip with `docker not in PATH` or
   `docker daemon unavailable`. This is an infrastructure gate, not positive
   Docker Desktop evidence.
+
+The requested stress duration begins only after the first container heartbeat;
+the request workers and heartbeat observer share that one fresh deadline.
 
 ## Support statement
 

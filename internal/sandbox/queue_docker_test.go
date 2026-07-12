@@ -37,7 +37,11 @@ func TestDockerBindMountContainerRunnerStress(t *testing.T) {
 	duration := dockerStressDuration(t)
 	t.Logf("Docker=%s host=%s/%s duration=%s", h.version, runtime.GOOS, runtime.GOARCH, duration)
 
-	ctx, cancel := context.WithTimeout(context.Background(), duration+45*time.Second)
+	// Readiness is complete when startDockerQueueHarness returns. Anchor one
+	// fresh deadline here and share it across request and heartbeat loops so
+	// image pull/build/startup time never consumes the requested stress window.
+	deadline := time.Now().Add(duration)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline.Add(45*time.Second))
 	defer cancel()
 	var completed atomic.Int64
 	errCh := make(chan error, 16)
@@ -47,7 +51,7 @@ func TestDockerBindMountContainerRunnerStress(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for seq := 0; time.Since(h.client.startedAt) < duration; seq++ {
+			for seq := 0; time.Now().Before(deadline); seq++ {
 				useID := fmt.Sprintf("docker-%d-%d", worker, seq)
 				input, _ := json.Marshal(map[string]string{"path": fmt.Sprintf("/tmp/%s", useID), "content": useID})
 				out, isErr, err := h.client.Exec(ctx, useID, "write_file", input)
@@ -63,7 +67,7 @@ func TestDockerBindMountContainerRunnerStress(t *testing.T) {
 	// Observe the heartbeat row while load crosses the host/container mount.
 	var heartbeatTimes []time.Time
 	lastSeen := time.Time{}
-	for time.Since(h.client.startedAt) < duration {
+	for time.Now().Before(deadline) {
 		ts, err := h.client.lastHealth(ctx)
 		if err != nil {
 			t.Fatalf("heartbeat probe under stress: %v", err)
@@ -110,22 +114,65 @@ func TestDockerBindMountKillMidWriteIntegrity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	// Keep host inserts and container result writes active, then SIGKILL the
-	// actual runner container without allowing SQLite/process cleanup.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 500; i++ {
-			input, _ := json.Marshal(map[string]string{"path": fmt.Sprintf("/tmp/kill-%d", i), "content": strings.Repeat("x", 4096)})
-			_, _, _ = h.client.Exec(ctx, fmt.Sprintf("kill-%d", i), "write_file", input)
+	// Hold the outbound writer lock before enqueueing. The marker is written by
+	// the containerized tool itself on the shared mount; once visible, Runner
+	// has completed the tool and its next operation is the outbound result
+	// INSERT, which is blocked by this lock. This proves the kill occurs at the
+	// relevant SQLite write boundary instead of relying on workload timing.
+	lockConn, err := h.client.outbound.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockConn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
+		_ = lockConn.Close()
+		t.Fatalf("lock outbound before crash: %v", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
 		}
+		_ = lockConn.Close()
 	}()
-	time.Sleep(750 * time.Millisecond)
+	marker := filepath.Join(h.dir, "runner-at-result-write")
+	input, _ := json.Marshal(map[string]string{"path": "/waffle/queue/runner-at-result-write", "content": strings.Repeat("x", 4096)})
+	insertResult, err := h.client.inbound.ExecContext(ctx,
+		`INSERT INTO requests (tool_use_id, tool, input, created_at) VALUES (?, ?, ?, ?)`,
+		"kill-at-write", "write_file", string(input), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := insertResult.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(markerDeadline) {
+			logs, _ := exec.Command("docker", "logs", h.name).CombinedOutput()
+			t.Fatalf("container tool never reached result-write marker: %s", logs)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// The exclusive lock makes a committed result impossible at this point.
+	var committed int
+	if err := lockConn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM results WHERE request_id = ?`, requestID).Scan(&committed); err != nil {
+		t.Fatal(err)
+	}
+	if committed != 0 {
+		t.Fatalf("result committed before synchronized kill: %d", committed)
+	}
 	if out, err := exec.CommandContext(ctx, "docker", "kill", h.name).CombinedOutput(); err != nil {
 		t.Fatalf("docker kill runner: %v (%s)", err, out)
 	}
-	cancel()
-	<-done
+	if _, err := lockConn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatalf("release outbound crash lock: %v", err)
+	}
+	locked = false
 	_ = h.client.Close()
 
 	for _, item := range []struct{ name, schema string }{{inboundFile, inboundSchema}, {outboundFile, outboundSchema}} {
