@@ -28,6 +28,7 @@ type Candidate struct {
 	Name        string     `json:"name,omitempty"`
 	Description string     `json:"description,omitempty"`
 	Body        string     `json:"body"`
+	Diff        string     `json:"diff,omitempty"`
 	Provenance  Provenance `json:"provenance"`
 	Status      string     `json:"status"` // pending, applied, denied
 	CreatedAt   time.Time  `json:"created_at"`
@@ -89,6 +90,7 @@ func (g *Gate) submit(c Candidate, apply func() error) (Candidate, error) {
 		return c, err
 	}
 	if g.Mode == "notify" && g.Notify != nil {
+		c.Diff = "+ " + c.Body
 		g.Notify(c)
 	}
 	return c, nil

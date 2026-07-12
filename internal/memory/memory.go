@@ -368,8 +368,8 @@ func formatNoteLine(noteID string, day time.Time, pin bool, p Provenance, body, 
 	if supersedes != "" {
 		body = fmt.Sprintf("%s (supersedes #%s)", body, supersedes)
 	}
-	return fmt.Sprintf("- [id=%s] %s%s [trust=%s source=%s]: %s\n",
-		noteID, day.Format("2006-01-02"), pinMark, p.TrustClass, p.SourceID, body)
+	return fmt.Sprintf("- [id=%s] %s%s [trust=%s source=%s session=%s channel=%s untrusted=%t]: %s\n",
+		noteID, day.Format("2006-01-02"), pinMark, p.TrustClass, p.SourceID, p.SessionID, p.Channel, p.UntrustedContext, body)
 }
 
 func appendFileLine(path, line string) error {

@@ -118,8 +118,8 @@ func (w Workspace) writeSkillCandidate(c Candidate) error {
 		return fmt.Errorf("cannot overwrite active skill %q without validation", c.Name)
 	}
 	// status: inactive until waffle skills activate (#65).
-	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: inactive\nprovenance: %s\nsource_id: %s\ntrust_class: %s\n---\n\n%s\n",
-		c.Name, strconv.Quote(oneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, strings.TrimSpace(c.Body))
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: inactive\nprovenance: %s\nsource_id: %s\ntrust_class: %s\nsession_id: %s\nchannel: %s\nuntrusted_context: %t\n---\n\n%s\n",
+		c.Name, strconv.Quote(oneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, c.Provenance.SessionID, c.Provenance.Channel, c.Provenance.UntrustedContext, strings.TrimSpace(c.Body))
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return err
 	}

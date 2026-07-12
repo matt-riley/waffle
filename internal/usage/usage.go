@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -22,15 +23,24 @@ func New(st *store.Store) *Store { return &Store{db: st.DB} }
 func period(now time.Time, d time.Duration) string { return now.UTC().Truncate(d).Format(time.RFC3339) }
 
 func (s *Store) Add(ctx context.Context, session string, u llm.Usage) error {
+	return s.addAt(ctx, session, u, time.Now().UTC(), false)
+}
+
+func (s *Store) addAt(ctx context.Context, session string, u llm.Usage, now time.Time, hour bool) error {
 	if session == "" {
 		return nil
 	}
-
-	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
 		VALUES (?, 'day', ?, 1, ?, ?)
 		ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens`,
 		session, period(now, 24*time.Hour), u.InputTokens, u.OutputTokens)
+	if err != nil || !hour {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
+		VALUES (?, 'hour', ?, 1, ?, ?)
+		ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens`,
+		session, period(now, time.Hour), u.InputTokens, u.OutputTokens)
 	return err
 }
 
@@ -75,15 +85,42 @@ func (s *Store) Check(ctx context.Context, session string, l Limits, now time.Ti
 }
 
 func (s *Store) AddRequest(ctx context.Context, session string, u llm.Usage) error {
-	if err := s.Add(ctx, session, u); err != nil {
+	return s.AddRequestAt(ctx, session, u, time.Now().UTC())
+}
+
+// AddRequestAt records a request using a caller-supplied clock.
+func (s *Store) AddRequestAt(ctx context.Context, session string, u llm.Usage, now time.Time) error {
+	return s.addAt(ctx, session, u, now.UTC(), true)
+}
+
+// Alert delivers one notice when a configured budget reaches 80 percent.
+// A durable flag suppresses repeat notices for the same session and period.
+func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Time, deliver func(context.Context, string) error) error {
+	if session == "" || deliver == nil {
+		return nil
+	}
+	var used int
+	start := period(now, 24*time.Hour)
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, start).Scan(&used); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
-		VALUES (?, 'hour', ?, 1, ?, ?)
-		ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens`,
-		session, period(now, time.Hour), u.InputTokens, u.OutputTokens)
-	return err
+	if l.TokensPerDay <= 0 || used*100 < l.TokensPerDay*80 {
+		return nil
+	}
+	key := strings.Join([]string{"usage-alert", session, "day", start}, ":")
+	res, err := s.db.ExecContext(ctx, `INSERT INTO runtime_flags(name,value) VALUES(?, '1') ON CONFLICT(name) DO NOTHING`, key)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return err
+	}
+	if err := deliver(ctx, fmt.Sprintf("usage alert: session %s has used %d/%d daily tokens", session, used, l.TokensPerDay)); err != nil {
+		_, _ = s.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM runtime_flags WHERE name=?`, key)
+		return err
+	}
+	return nil
 }
 
 type Row struct {
