@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,58 @@ import (
 
 	"github.com/matt-riley/waffle/internal/store"
 )
+
+func TestGitCredentialDenialAuditNamesRequestedAndBoundRepo(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	b.GitCredential = func(context.Context, string, string, string) (string, string, error) {
+		return "", "", fmt.Errorf("repository outside session scope")
+	}
+	b.BindGitRepo("sess-a", "owner/A")
+	token, err := b.Mint(context.Background(), "sess-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/git-credential",
+		strings.NewReader("protocol=https\nhost=github.com\npath=owner/B.git\n"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var sessionID, action, detail string
+	if err := st.DB.QueryRow(`SELECT session, action, detail FROM broker_audit WHERE action='denied' ORDER BY id DESC LIMIT 1`).Scan(&sessionID, &action, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if sessionID != "sess-a" || action != "denied" || !strings.Contains(detail, "requested=owner/B.git") || !strings.Contains(detail, "bound=owner/A") {
+		t.Fatalf("denial audit session=%q action=%q detail=%q", sessionID, action, detail)
+	}
+
+	unboundToken, err := b.Mint(context.Background(), "sess-unbound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unboundReq, _ := http.NewRequest(http.MethodPost, front.URL+"/git-credential",
+		strings.NewReader("protocol=https\nhost=github.com\npath=owner/A\n"))
+	unboundReq.Header.Set("Authorization", "Bearer "+unboundToken)
+	unboundResp, err := http.DefaultClient.Do(unboundReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unboundResp.Body.Close()
+	if err := st.DB.QueryRow(`SELECT session, detail FROM broker_audit WHERE action='denied' ORDER BY id DESC LIMIT 1`).Scan(&sessionID, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if sessionID != "sess-unbound" || !strings.Contains(detail, "requested=owner/A") || !strings.Contains(detail, "bound=") {
+		t.Fatalf("unbound denial audit session=%q detail=%q", sessionID, detail)
+	}
+}
 
 func TestProxyInjectsRealKeyAndStripsToken(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

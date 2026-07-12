@@ -1,13 +1,35 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/workspace"
 )
+
+// TestWorkspaceCloseParseFailureStopsBeforeStoreMutation exercises the command
+// boundary (run -> wsCmd), not just the parser. A rejected invocation returns
+// an error (main maps that to exit 1) before WAFFLE_HOME or its database exists.
+func TestWorkspaceCloseParseFailureStopsBeforeStoreMutation(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "must-not-be-created")
+	t.Setenv("WAFFLE_HOME", home)
+	var stdout, stderr bytes.Buffer
+	err := run(context.Background(), []string{"ws", "close", "a", "b"}, strings.NewReader(""), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("run accepted ambiguous workspace close; main would exit zero")
+	}
+	if !strings.Contains(err.Error(), `got "a" and "b"`) {
+		t.Fatalf("error = %q, want both conflicting tokens", err)
+	}
+	if _, statErr := os.Stat(home); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("parse rejection mutated workspace state: stat %s = %v", home, statErr)
+	}
+}
 
 func TestParseWorkspaceCloseArgs(t *testing.T) {
 	tests := []struct {

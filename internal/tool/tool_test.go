@@ -14,6 +14,17 @@ import (
 	"testing"
 )
 
+type sequenceResolver struct {
+	answers [][]netip.Addr
+	calls   int
+}
+
+func (r *sequenceResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	answer := r.answers[r.calls]
+	r.calls++
+	return answer, nil
+}
+
 func run(t *testing.T, tl Tool, input string) (string, error) {
 	t.Helper()
 	return tl.Run(context.Background(), json.RawMessage(input))
@@ -161,6 +172,30 @@ func TestFetchRedirectToPrivateIsRefused(t *testing.T) {
 	_, err := run(t, Fetch{AllowPrivate: []string{allowSource}}, fmt.Sprintf(`{"url":%q}`, source.URL))
 	if err == nil || !strings.Contains(err.Error(), "private/link-local range") {
 		t.Fatalf("redirect error = %v", err)
+	}
+}
+
+func TestFetchRejectsDNSRebindAtDialTime(t *testing.T) {
+	var reached bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		fmt.Fprint(w, "must not be returned")
+	}))
+	defer srv.Close()
+	port := strings.Split(strings.TrimPrefix(srv.URL, "http://"), ":")[1]
+	resolver := &sequenceResolver{answers: [][]netip.Addr{
+		{netip.MustParseAddr("93.184.216.34")}, // initial policy/preflight resolution
+		{netip.MustParseAddr("127.0.0.1")},     // rebound answer used by DialContext
+	}}
+	if first, err := resolver.LookupNetIP(context.Background(), "ip", "rebind.test"); err != nil || first[0].IsLoopback() {
+		t.Fatalf("preflight answer = %v, %v; want public", first, err)
+	}
+	_, err := run(t, Fetch{Resolver: resolver}, fmt.Sprintf(`{"url":"http://rebind.test:%s/secret"}`, port))
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "allow_private") {
+		t.Fatalf("dial-time rebind error = %v", err)
+	}
+	if reached {
+		t.Fatal("DNS rebound request reached loopback and returned a partial body")
 	}
 }
 

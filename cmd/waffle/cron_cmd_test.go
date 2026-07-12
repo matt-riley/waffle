@@ -73,3 +73,29 @@ func TestCronAddRejectsMissingDeliverValueWithoutCreatingJob(t *testing.T) {
 		t.Fatalf("jobs = %+v, want no persisted jobs", jobs)
 	}
 }
+
+func TestCronAddPersistsDeliveryOutsidePrompt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	err := cronCmd(ctx, []string{"add", "standup", "0", "9", "*", "*", "1-5", "summarize", "the", "day", "--deliver", "telegram:900"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("cron add: %v", err)
+	}
+	db, err := store.Open(ctx, filepath.Join(home, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	jobs, err := schedule.NewStore(db).List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v, want one", jobs)
+	}
+	if jobs[0].Deliver != "telegram:900" || jobs[0].Prompt != "summarize the day" || strings.Contains(jobs[0].Prompt, "--deliver") {
+		t.Fatalf("stored job deliver=%q prompt=%q", jobs[0].Deliver, jobs[0].Prompt)
+	}
+}

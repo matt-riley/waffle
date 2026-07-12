@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -260,6 +261,46 @@ func TestMigrateAppliesOutOfOrder(t *testing.T) {
 	// Re-running is a no-op (idempotent).
 	if err := migrateWith(ctx, s.DB, branchB); err != nil {
 		t.Fatalf("re-run: %v", err)
+	}
+}
+
+// TestApplyOneRollsBackFailingMigration proves both halves of the migration
+// transaction roll back: neither schema objects nor the bookkeeping row may
+// survive a statement failure.
+func TestApplyOneRollsBackFailingMigration(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+		applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+
+	err = applyOne(ctx, db, migration{version: 77, name: "must_rollback", sql: `
+		CREATE TABLE should_rollback (id INTEGER PRIMARY KEY);
+		INSERT INTO table_that_does_not_exist (id) VALUES (1);`})
+	if err == nil {
+		t.Fatal("applyOne succeeded for a failing migration")
+	}
+	var objects int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'should_rollback'`).Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	if objects != 0 {
+		t.Fatalf("failing migration left %d schema objects, want 0", objects)
+	}
+	var records int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 77`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	if records != 0 {
+		t.Fatalf("failing migration left %d migration records, want 0", records)
 	}
 }
 

@@ -73,6 +73,39 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	_ = listener.Close()
 }
 
+// TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup models the
+// SIGTERM boundary after the gateway has stopped accepting work. Cleanup must
+// not run until the scheduler reports that cron.Stop drained its active job.
+func TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup(t *testing.T) {
+	stopCalled := make(chan struct{})
+	schedulerDrained := make(chan error, 1)
+	intakeDrained := make(chan struct{})
+	close(intakeDrained)
+	returned := make(chan struct{})
+
+	go func() {
+		waitForServeWorkers(func() { close(stopCalled) }, func() {}, schedulerDrained, intakeDrained)
+		close(returned)
+	}()
+
+	select {
+	case <-stopCalled:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not signal scheduler")
+	}
+	select {
+	case <-returned:
+		t.Fatal("shutdown returned before in-flight cron job drained; cleanup could close shared resources")
+	case <-time.After(50 * time.Millisecond):
+	}
+	schedulerDrained <- nil
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not return after scheduler drain")
+	}
+}
+
 type blockingAdapter struct{}
 
 func (blockingAdapter) Name() string { return "test" }

@@ -400,6 +400,9 @@ type Scheduler struct {
 	Reconcile time.Duration
 	Usage     *usage.Store
 	Health    *observability.Service
+	// Parser is optional and primarily permits deterministic scheduler tests;
+	// production uses the package's standard five-field parser.
+	Parser cron.ScheduleParser
 
 	mu         sync.Mutex
 	registered map[string]registration // job id -> live cron entry
@@ -427,7 +430,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.registered = make(map[string]registration)
 	s.mu.Unlock()
 
-	c := cron.New(cron.WithParser(parser))
+	cronParser := s.Parser
+	if cronParser == nil {
+		cronParser = parser
+	}
+	c := cron.New(cron.WithParser(cronParser))
 	if err := s.reconcile(ctx, c); err != nil {
 		return err
 	}

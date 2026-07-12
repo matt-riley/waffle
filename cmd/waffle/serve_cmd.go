@@ -268,11 +268,18 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	// Stop the scheduler and wait for its in-flight-job drain before the
 	// deferred cleanup tears down the shared sandbox executor and MCP
 	// clients a running cron job may still be using.
+	waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone)
+	return err
+}
+
+// waitForServeWorkers preserves shutdown ordering: stop accepting/scheduling,
+// then wait for cron.Stop's in-flight-job drain and intake before deferred
+// cleanup closes the shared sandbox executor and MCP clients.
+func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-chan error, intakeDone <-chan struct{}) {
 	stop()
 	lifecycleCancel()
 	<-schedDone
 	<-intakeDone
-	return err
 }
 
 func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, sessions *session.Store, memWS memory.Workspace, skills []skill.Skill, agents map[string]*agent.Agent, b *broker.Broker, deliver schedule.Deliverer, log *slog.Logger) {

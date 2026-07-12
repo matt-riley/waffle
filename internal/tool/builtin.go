@@ -231,7 +231,11 @@ type Fetch struct {
 	// to otherwise-protected addresses.
 	AllowPrivate []string
 	// Resolver is injectable for tests; nil uses the system resolver.
-	Resolver *net.Resolver
+	Resolver fetchResolver
+}
+
+type fetchResolver interface {
+	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
 }
 
 var fetchSchema = mustSchema(`{

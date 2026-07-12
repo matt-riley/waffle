@@ -344,7 +344,9 @@ func (b *Broker) serveGitCredential(w http.ResponseWriter, r *http.Request, toke
 	host, path := attrs["host"], attrs["path"]
 	user, pass, err := b.GitCredential(r.Context(), sessionID, host, path)
 	if err != nil {
-		b.record(r.Context(), token, sessionID, "denied", "git-credential "+host+"/"+path)
+		bound, _ := b.GitRepoScope(sessionID)
+		b.record(r.Context(), token, sessionID, "denied",
+			"git-credential host="+host+" requested="+path+" bound="+bound)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}

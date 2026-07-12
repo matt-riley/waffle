@@ -18,6 +18,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
+	"github.com/robfig/cron/v3"
 )
 
 func newTestStore(t *testing.T) *store.Store {
@@ -94,6 +95,21 @@ func (echoProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamF
 		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done: " + last}}},
 		StopReason: llm.StopEndTurn,
 	}, nil
+}
+
+type shutdownBlockingProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *shutdownBlockingProvider) Complete(ctx context.Context, _ llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	select {
+	case <-p.started:
+	default:
+		close(p.started)
+	}
+	<-p.release // deliberately ignore cancellation: accepted cron work drains
+	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}}, StopReason: llm.StopEndTurn}, nil
 }
 
 // captureDeliverer records deliveries.
@@ -332,6 +348,50 @@ func TestSchedulerReconcilesJobChanges(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Errorf("Run: %v", err)
+	}
+}
+
+func TestAcceptanceIssue10SchedulerCancellationDrainsInFlightJob(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	st := newTestStore(t)
+	jobs := NewStore(st)
+	j, err := jobs.Add(ctx, "shutdown", "0 9 * * *", "finish safely", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A seconds parser makes the real cron fire promptly without changing the
+	// production five-field parser.
+	if _, err := st.DB.ExecContext(ctx, `UPDATE jobs SET cron='*/1 * * * * *' WHERE id=?`, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	p := &shutdownBlockingProvider{started: make(chan struct{}), release: make(chan struct{})}
+	sched := &Scheduler{
+		Store:  jobs,
+		Runner: &Runner{Agent: &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}, Sessions: session.New(st)},
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Parser: cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow),
+	}
+	done := make(chan error, 1)
+	go func() { done <- sched.Run(ctx) }()
+	select {
+	case <-p.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cron job did not start")
+	}
+	cancel() // models SIGTERM
+	select {
+	case err := <-done:
+		t.Fatalf("Scheduler.Run returned before accepted cron work drained: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(p.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Scheduler.Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Scheduler.Run did not return after cron job drained")
 	}
 }
 
