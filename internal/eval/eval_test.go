@@ -129,3 +129,9 @@ func TestLiveRegistrySkippedWithoutOptIn(t *testing.T) {
 		t.Fatalf("live cases without provider: %d", len(got))
 	}
 }
+
+func TestCodeIntelFailureFallsBackToNativeSearchRead(t *testing.T) {
+	if err := evalCodeIntelFallback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

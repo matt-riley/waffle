@@ -406,7 +406,9 @@ transcript, and returns one fenced JSON `Handoff`. Unknown fields (including
 nested finding, verification, and proposal fields), unknown statuses,
 normalized duplicate paths, and trailing JSON are rejected. Each repeated
 collection is capped at 128 items; text fields are capped at 16 KiB and paths
-at 4 KiB. Malformed output receives at most one repair attempt.
+at 4 KiB. Repository paths use POSIX `/` separators only; backslashes,
+absolute paths, and cleaned paths that escape via `..` are rejected. Malformed
+output receives at most one repair attempt.
 
 The parent normalizes evidence before rendering or persistence: every
 requested verification command must have a matching result, Waffle-run checks

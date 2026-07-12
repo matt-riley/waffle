@@ -600,7 +600,70 @@ func evalCodeIntelSymbol(ctx context.Context) error {
 	if strings.Contains(out, "noise.go") {
 		return fmt.Errorf("find_symbol should not require loading noise.go content into result")
 	}
+	return evalCodeIntelFallback(ctx)
+}
+
+func evalCodeIntelFallback(ctx context.Context) error {
+	dir, err := os.MkdirTemp("", "eval-codeintel-fallback-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "current.go")
+	const source = "package p\nfunc CurrentSource() string { return \"live\" }\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		return err
+	}
+	failing := &failingCodeIntelTool{}
+	p := &llmtest.Script{Responses: []llm.Response{
+		ToolCallResponse("code_find_symbol", "ci", `{"name":"CurrentSource"}`),
+		ToolCallResponse("search", "search", fmt.Sprintf(`{"pattern":"CurrentSource","path":%q}`, dir)),
+		ToolCallResponse("read_file", "read", fmt.Sprintf(`{"path":%q}`, path)),
+		TextResponse("completed from current native source"),
+	}}
+	a := &agent.Agent{Provider: p, Tools: tool.NewRegistry(failing, tool.Search{}, tool.ReadFile{}), Model: "m", MaxIterations: 6}
+	history, err := a.Run(ctx, []llm.Message{llm.UserText("find CurrentSource and verify current source")}, agent.Hooks{})
+	if err != nil {
+		return fmt.Errorf("workspace run stopped after codeintel failure: %w", err)
+	}
+	if failing.calls != 1 {
+		return fmt.Errorf("codeintel failure calls=%d want 1", failing.calls)
+	}
+	var sawFailure, sawSearch, sawRead bool
+	for _, message := range history {
+		for _, block := range message.Blocks {
+			if block.ToolResult == nil {
+				continue
+			}
+			content := block.ToolResult.Content
+			switch block.ToolResult.ToolUseID {
+			case "ci":
+				sawFailure = block.ToolResult.IsError && strings.Contains(content, "unavailable")
+			case "search":
+				sawSearch = strings.Contains(content, "current.go") && strings.Contains(content, "CurrentSource")
+			case "read":
+				sawRead = strings.Contains(content, `return "live"`)
+			}
+		}
+	}
+	if !sawFailure || !sawSearch || !sawRead {
+		return fmt.Errorf("fallback evidence failure=%v search=%v read=%v", sawFailure, sawSearch, sawRead)
+	}
+	if !strings.Contains(history[len(history)-1].Text(), "completed") {
+		return fmt.Errorf("workspace run did not complete: %q", history[len(history)-1].Text())
+	}
 	return nil
+}
+
+type failingCodeIntelTool struct{ calls int }
+
+func (t *failingCodeIntelTool) Def() llm.Tool {
+	return llm.Tool{Name: "code_find_symbol", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t *failingCodeIntelTool) Run(context.Context, json.RawMessage) (string, error) {
+	t.calls++
+	return "", fmt.Errorf("code intelligence unavailable")
 }
 
 // RunAll executes cases and writes a report. Returns non-zero failure count.

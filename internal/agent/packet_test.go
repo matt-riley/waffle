@@ -141,6 +141,8 @@ func TestPacketRawLimitsAndOwnedPathValidation(t *testing.T) {
 		`{"task":"x","owned_paths":["../escape"]}`,
 		`{"task":"x","owned_paths":["/absolute"]}`,
 		`{"task":"x","owned_paths":["a/../../escape"]}`,
+		`{"task":"x","owned_paths":["C:\\\\repo\\\\file.go"]}`,
+		`{"task":"x","owned_paths":["pkg\\\\..\\\\secret.go"]}`,
 		`{"task":"x","owned_paths":["` + strings.Repeat("p", MaxHandoffPathBytes+1) + `"]}`,
 		`{"task":"x","context_refs":["` + strings.Repeat("r", MaxHandoffPathBytes+1) + `"]}`,
 	} {

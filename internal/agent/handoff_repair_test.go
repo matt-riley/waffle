@@ -63,7 +63,23 @@ func TestObservedVerificationDowngrades(t *testing.T) {
 	if !strings.Contains(out, "partial") && !strings.Contains(out, "fail") {
 		t.Fatalf("expected verification downgrade: %q", out)
 	}
+	if !strings.Contains(out, `"observed": true`) {
+		t.Fatalf("waffle-run verification not tagged observed: %q", out)
+	}
 	_ = failBash
+}
+
+func TestMalformedHandoffRepairFailureReturnsFailed(t *testing.T) {
+	p := &recordingProvider{onComplete: func(req llm.Request) llm.Response {
+		return llm.Response{StopReason: llm.StopEndTurn, Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "still malformed"}}}}
+	}}
+	out, err := (SubagentTool{Provider: p, Tools: tool.NewRegistry(), Model: "m"}).Run(context.Background(), json.RawMessage(`{"task":"t"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"status": "failed"`) || !strings.Contains(out, "repair failed") {
+		t.Fatalf("out=%q", out)
+	}
 }
 
 type failingBash struct{}

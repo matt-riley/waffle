@@ -301,6 +301,9 @@ func pathUnderOwned(path string, owned []string) bool {
 }
 
 func normalizeRelativePath(value string) (string, error) {
+	if strings.Contains(value, `\`) {
+		return "", fmt.Errorf("must use POSIX '/' separators; backslashes are not allowed")
+	}
 	value = filepath.ToSlash(strings.TrimSpace(value))
 	if value == "" || strings.HasPrefix(value, "/") || filepath.IsAbs(value) {
 		return "", fmt.Errorf("must be a non-empty relative path")
