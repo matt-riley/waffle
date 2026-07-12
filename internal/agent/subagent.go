@@ -89,11 +89,9 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		return "", fmt.Errorf("subagent depth limit reached")
 	}
 	var p WorkPacket
-	if err := json.Unmarshal(input, &p); err != nil {
+	p, err := ParseWorkPacket(input)
+	if err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
-	}
-	if strings.TrimSpace(p.Task) == "" {
-		return "", fmt.Errorf("task is required")
 	}
 
 	profileName := strings.TrimSpace(p.Profile)

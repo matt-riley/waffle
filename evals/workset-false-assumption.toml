@@ -1,0 +1,3 @@
+name = "workset-false-assumption"
+tier = "deterministic"
+description = "A model-authored false assumption can be corrected without retaining stale state."

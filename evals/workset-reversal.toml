@@ -1,0 +1,3 @@
+name = "workset-reversal"
+tier = "deterministic"
+description = "A replacement requirement removes the stale requirement from active context."

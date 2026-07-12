@@ -104,3 +104,17 @@ The issue close-out/support evidence is recorded at:
 - https://github.com/matt-riley/waffle/issues/29#issuecomment-4952865252
 
 Doctor always exercises the queue on the host filesystem when docker mode is configured. When the daemon is available it also probes container start and host↔container bind-mount write/read (the same mount class as `inbound.db`/`outbound.db`). Full multi-minute concurrent stress remains opt-in via the build tags above.
+# Gated MCP sandbox proof
+
+The #77 restricted-executor integration test requires a working Docker daemon
+and permission to pull `alpine:3.20`:
+
+```bash
+WAFFLE_TEST_DOCKER=1 go test ./internal/mcp -run TestDockerSandboxMCPExecution -count=1 -v
+```
+
+Expected evidence is a passing `TestDockerSandboxMCPExecution`. A daemon,
+network, image-pull, or container-start failure is an infrastructure failure;
+it must not be recorded as behavioral acceptance evidence until rerun in a
+Docker-capable environment. The deterministic environment-isolation and launch
+planning tests remain mandatory even when this gate is skipped.

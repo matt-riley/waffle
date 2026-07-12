@@ -78,3 +78,57 @@ func TestParseHandoffRejectsDuplicateChangedPaths(t *testing.T) {
 		t.Fatal("duplicate changed paths must fail handoff validation")
 	}
 }
+
+func TestParseHandoffStrictSchema(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"unknown top-level field", `{"status":"done","summary":"x","surprise":true}`},
+		{"unknown nested finding field", `{"status":"done","summary":"x","findings":[{"title":"t","surprise":true}]}`},
+		{"unknown nested verification field", `{"status":"done","summary":"x","verification":[{"command":"go test","status":"pass","surprise":true}]}`},
+		{"unknown nested proposal field", `{"status":"done","summary":"x","proposals":[{"op":"add","kind":"fact","body":"x","surprise":true}]}`},
+		{"unknown verification status", `{"status":"done","summary":"x","verification":[{"command":"go test","status":"maybe"}]}`},
+		{"unknown handoff status", `{"status":"complete","summary":"x"}`},
+		{"normalized duplicate path", `{"status":"done","summary":"x","files_changed":["./a.go","a.go"]}`},
+		{"oversized summary", `{"status":"done","summary":"` + strings.Repeat("x", MaxHandoffTextBytes+1) + `"}`},
+		{"oversized path", `{"status":"done","summary":"x","files_changed":["` + strings.Repeat("p", MaxHandoffPathBytes+1) + `"]}`},
+		{"oversized verification output", `{"status":"done","summary":"x","verification":[{"command":"go test","status":"pass","output":"` + strings.Repeat("x", MaxHandoffTextBytes+1) + `"}]}`},
+		{"oversized findings collection", `{"status":"done","summary":"x","findings":` + repeatedFindings(MaxHandoffItems+1) + `}`},
+		{"trailing JSON", `{"status":"done","summary":"x"} {"status":"done","summary":"y"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseHandoff("```json\n" + tc.body + "\n```"); err == nil {
+				t.Fatal("expected strict schema rejection")
+			}
+		})
+	}
+}
+
+func repeatedFindings(n int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"title":"x"}`)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+func TestParseWorkPacketRejectsUnknownAndOversizedFields(t *testing.T) {
+	for _, raw := range []string{
+		`{"task":"x","surprise":true}`,
+		`{"task":"` + strings.Repeat("x", MaxHandoffTextBytes+1) + `"}`,
+	} {
+		if _, err := ParseWorkPacket([]byte(raw)); err == nil {
+			t.Fatalf("expected packet rejection for %.40q", raw)
+		}
+	}
+	if p, err := ParseWorkPacket([]byte(`{"task":"legacy"}`)); err != nil || p.Task != "legacy" {
+		t.Fatalf("legacy packet: %+v %v", p, err)
+	}
+}

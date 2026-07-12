@@ -1,0 +1,3 @@
+name = "workset-retention"
+tier = "deterministic"
+description = "Working-set facts remain privileged when equivalent transcript context is absent."

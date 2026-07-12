@@ -9,6 +9,8 @@ import (
 	"github.com/matt-riley/waffle/internal/eval"
 )
 
+var evalRegistry = eval.Registry
+
 // evalCmd runs the zero-network eval harness (#63). Exits 1 on any failure
 // via main's os.Exit when this returns a non-nil error.
 //
@@ -37,7 +39,7 @@ func evalCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	}
 
 	started := time.Now().UTC()
-	cases := append([]eval.Case{}, eval.Registry()...)
+	cases := append([]eval.Case{}, evalRegistry()...)
 	cases = append(cases, eval.LiveRegistry()...)
 	report := eval.Run(ctx, cases)
 

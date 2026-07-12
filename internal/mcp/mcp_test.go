@@ -44,6 +44,32 @@ func writeFakeServer(t *testing.T) string {
 	return path
 }
 
+// TestDockerSandboxMCPExecution is the gated #77 integration proof. Run with:
+// WAFFLE_TEST_DOCKER=1 go test ./internal/mcp -run TestDockerSandboxMCPExecution -count=1 -v
+func TestDockerSandboxMCPExecution(t *testing.T) {
+	if os.Getenv("WAFFLE_TEST_DOCKER") != "1" {
+		t.Skip("set WAFFLE_TEST_DOCKER=1 to run Docker MCP sandbox integration")
+	}
+	server := Server{
+		Name:    "gated",
+		Command: "sh",
+		Args:    []string{"-c", `while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); case "$line" in *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id";; *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id";; esac; done`},
+	}
+	planned, opts := PlanLaunch(server, "sandbox", "docker", "", "alpine:3.20", "none")
+	client, err := ConnectRestricted(context.Background(), planned, opts)
+	if err != nil {
+		t.Fatalf("sandboxed MCP connect: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	box, err := client.Toolbox(context.Background())
+	if err != nil {
+		t.Fatalf("sandboxed MCP tools/list: %v", err)
+	}
+	if len(box.Defs()) != 0 {
+		t.Fatalf("unexpected tools: %v", box.Defs())
+	}
+}
+
 func TestConnectListAndCall(t *testing.T) {
 	path := writeFakeServer(t)
 	ctx := context.Background()

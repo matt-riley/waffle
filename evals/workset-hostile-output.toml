@@ -1,0 +1,3 @@
+name = "workset-hostile-output"
+tier = "deterministic"
+description = "Hostile tool output cannot mutate the working set when mutation authority is denied."

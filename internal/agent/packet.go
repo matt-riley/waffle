@@ -1,11 +1,22 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/workset"
+)
+
+// Handoff wire bounds keep a child result compact enough to persist and return
+// as a tool result. They apply to each text field and each repeated collection.
+const (
+	MaxHandoffTextBytes = 16 * 1024
+	MaxHandoffPathBytes = 4 * 1024
+	MaxHandoffItems     = 128
 )
 
 // WorkPacket is the typed subagent task contract (#78).
@@ -43,6 +54,53 @@ type VerificationResult struct {
 	Status   string `json:"status"`   // pass|fail|skipped
 	Observed bool   `json:"observed"` // waffle-executed vs child-reported
 	Output   string `json:"output,omitempty"`
+}
+
+// ParseWorkPacket strictly decodes the public spawn_subagent input. A task-only
+// legacy packet remains valid, while unknown fields and oversized input fail.
+func ParseWorkPacket(raw []byte) (WorkPacket, error) {
+	var p WorkPacket
+	if err := decodeStrictJSON(raw, &p); err != nil {
+		return WorkPacket{}, err
+	}
+	if strings.TrimSpace(p.Task) == "" {
+		return WorkPacket{}, fmt.Errorf("task is required")
+	}
+	for name, value := range map[string]string{"task": p.Task, "role": p.Role, "profile": p.Profile} {
+		if err := boundedText(name, value, MaxHandoffTextBytes); err != nil {
+			return WorkPacket{}, err
+		}
+	}
+	for name, values := range map[string][]string{
+		"context_refs": p.ContextRefs, "owned_paths": p.OwnedPaths,
+		"acceptance_criteria": p.AcceptanceCriteria, "verify_commands": p.VerifyCommands,
+	} {
+		if len(values) > MaxHandoffItems {
+			return WorkPacket{}, fmt.Errorf("%s exceeds %d item limit", name, MaxHandoffItems)
+		}
+		for _, value := range values {
+			if err := boundedText(name, value, MaxHandoffTextBytes); err != nil {
+				return WorkPacket{}, err
+			}
+		}
+	}
+	return p, nil
+}
+
+func decodeStrictJSON(raw []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 // FramePacket renders the packet for the child system/user prompt.
@@ -86,7 +144,7 @@ func ParseHandoff(text string) (Handoff, error) {
 		return Handoff{}, fmt.Errorf("no handoff JSON block")
 	}
 	var h Handoff
-	if err := json.Unmarshal([]byte(raw), &h); err != nil {
+	if err := decodeStrictJSON([]byte(raw), &h); err != nil {
 		return Handoff{}, err
 	}
 	switch h.Status {
@@ -97,14 +155,57 @@ func ParseHandoff(text string) (Handoff, error) {
 	if strings.TrimSpace(h.Summary) == "" {
 		return Handoff{}, fmt.Errorf("summary required")
 	}
+	if err := boundedText("summary", h.Summary, MaxHandoffTextBytes); err != nil {
+		return Handoff{}, err
+	}
+	if len(h.Findings) > MaxHandoffItems || len(h.FilesChanged) > MaxHandoffItems || len(h.Verification) > MaxHandoffItems || len(h.Proposals) > MaxHandoffItems || len(h.Reasons) > MaxHandoffItems {
+		return Handoff{}, fmt.Errorf("handoff collection exceeds %d item limit", MaxHandoffItems)
+	}
+	for _, f := range h.Findings {
+		if err := boundedText("finding title", f.Title, MaxHandoffTextBytes); err != nil {
+			return Handoff{}, err
+		}
+		if err := boundedText("finding detail", f.Detail, MaxHandoffTextBytes); err != nil {
+			return Handoff{}, err
+		}
+	}
 	seenPaths := make(map[string]struct{}, len(h.FilesChanged))
 	for _, path := range h.FilesChanged {
-		if _, ok := seenPaths[path]; ok {
+		if err := boundedText("changed path", path, MaxHandoffPathBytes); err != nil {
+			return Handoff{}, err
+		}
+		normalized := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(path, "./")))
+		if _, ok := seenPaths[normalized]; ok {
 			return Handoff{}, fmt.Errorf("duplicate changed path %q", path)
 		}
-		seenPaths[path] = struct{}{}
+		seenPaths[normalized] = struct{}{}
+	}
+	for _, v := range h.Verification {
+		if err := boundedText("verification command", v.Command, MaxHandoffTextBytes); err != nil {
+			return Handoff{}, err
+		}
+		if err := boundedText("verification output", v.Output, MaxHandoffTextBytes); err != nil {
+			return Handoff{}, err
+		}
+		switch v.Status {
+		case "pass", "fail", "skipped":
+		default:
+			return Handoff{}, fmt.Errorf("invalid verification status %q", v.Status)
+		}
+	}
+	for _, reason := range h.Reasons {
+		if err := boundedText("reason", reason, MaxHandoffTextBytes); err != nil {
+			return Handoff{}, err
+		}
 	}
 	return h, nil
+}
+
+func boundedText(name, value string, limit int) error {
+	if len(value) > limit {
+		return fmt.Errorf("%s exceeds %d byte limit", name, limit)
+	}
+	return nil
 }
 
 func extractJSONBlock(text string) string {

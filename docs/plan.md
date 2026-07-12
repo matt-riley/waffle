@@ -398,6 +398,23 @@ block (byte-identical to no broadcast). Child handoffs may include
 unchanged until the owner accepts via `workspace_update`. Children never
 receive `workspace_update` or nested `spawn_subagent`.
 
+### Typed subagent packets and handoffs (#78)
+
+`spawn_subagent` accepts a strict `WorkPacket` while retaining the legacy
+task-only shape. The child receives that framed packet, not the parent
+transcript, and returns one fenced JSON `Handoff`. Unknown fields (including
+nested finding, verification, and proposal fields), unknown statuses,
+normalized duplicate paths, and trailing JSON are rejected. Each repeated
+collection is capped at 128 items; text fields are capped at 16 KiB and paths
+at 4 KiB. Malformed output receives at most one repair attempt.
+
+The parent normalizes evidence before rendering or persistence: every
+requested verification command must have a matching result, Waffle-run checks
+are `observed` while child claims remain reported, out-of-scope paths require
+supervisor review, and read-only changes block the handoff. Proposals remain
+unapplied. This typed boundary deliberately does not introduce an in-tree
+workflow graph, planner/critic framework, or other workflow engine.
+
 ### Tool-output spill (#69)
 
 Tool results larger than `tool.OutputLimit` (48KiB) are **redacted first**,
