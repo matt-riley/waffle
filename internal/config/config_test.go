@@ -309,3 +309,43 @@ func TestUsesDocker(t *testing.T) {
 		t.Error("global docker mode not detected")
 	}
 }
+
+func TestCodeIntelMCPValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	// Host codeintel without allow_host_mcp fails.
+	writeFile(t, path, `
+[[mcp]]
+name = "codeintel"
+command = "/bin/true"
+execution = "host"
+tools = ["code_find_symbol"]
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected host codeintel rejection")
+	}
+	// Sandbox codeintel OK at config load (runtime may fall back).
+	writeFile(t, path, `
+[[mcp]]
+name = "codeintel"
+command = "/bin/true"
+execution = "sandbox"
+tools = ["code_find_symbol"]
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	// Secret env rejected.
+	writeFile(t, path, `
+[codeintel]
+allow_host_mcp = true
+[[mcp]]
+name = "codeintel"
+command = "/bin/true"
+execution = "host"
+tools = ["code_find_symbol"]
+env = ["GITHUB_TOKEN"]
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected secret env rejection")
+	}
+}

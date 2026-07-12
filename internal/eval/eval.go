@@ -9,7 +9,11 @@ import (
 	"io"
 	"strings"
 
+	"os"
+	"path/filepath"
+
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
 )
@@ -70,6 +74,7 @@ func Registry() []Case {
 		{Name: "working_set_render_isolated", Run: evalWorkingSetIsolated},
 		{Name: "handoff_downgrades_missing_verify", Run: evalHandoffVerify},
 		{Name: "untrusted_marker_present", Run: evalUntrustedMarker},
+		{Name: "codeintel_symbol_over_broad_read", Run: evalCodeIntelSymbol},
 	}
 }
 
@@ -177,6 +182,53 @@ func evalUntrustedMarker(ctx context.Context) error {
 	const marker = "UNTRUSTED EXTERNAL CONTENT"
 	if !strings.Contains("[UNTRUSTED EXTERNAL CONTENT — x]", marker) {
 		return fmt.Errorf("marker missing")
+	}
+	return nil
+}
+
+func evalCodeIntelSymbol(ctx context.Context) error {
+	// Deterministic offline eval (#79 / #63): structural find of Hello without
+	// loading every file into the model prompt — only the symbol location.
+	dir, err := os.MkdirTemp("", "eval-codeintel-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	src := "package p\n\nfunc Hello() {}\n\nfunc Other() { Hello() }\n"
+	path := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		return err
+	}
+	// Noise file the agent would otherwise grepread broadly.
+	if err := os.WriteFile(filepath.Join(dir, "noise.go"), []byte("package p\nfunc Noise() {}\n"), 0o600); err != nil {
+		return err
+	}
+	svc := codeintel.NewService(dir, "eval/repo", "main")
+	tb := codeintel.Toolbox(svc)
+	// Agent discovers tools by Defs.
+	found := false
+	for _, d := range tb.Defs() {
+		if d.Name == "code_find_symbol" {
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("code_find_symbol not discoverable")
+	}
+	out, err := tb.Run(ctx, "code_find_symbol", json.RawMessage(`{"name":"Hello"}`))
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(out, "Hello") || !strings.Contains(out, "a.go") {
+		return fmt.Errorf("symbol result missing Hello/a.go: %s", out)
+	}
+	if !strings.Contains(out, "text-fallback") && !strings.Contains(out, "source") {
+		return fmt.Errorf("missing source classification: %s", out)
+	}
+	// Broad-read baseline would need both files' text; structural path only
+	// returns locations — prove noise.go is not required in the tool output.
+	if strings.Contains(out, "noise.go") {
+		return fmt.Errorf("find_symbol should not require loading noise.go content into result")
 	}
 	return nil
 }

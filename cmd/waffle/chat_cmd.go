@@ -16,6 +16,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/broker"
+	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
@@ -467,6 +468,24 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	}
 	hostTools := tool.NewRegistry(hostToolList...)
 
+	// Optional code intelligence (#79): in-process text-fallback tools.
+	// Absence is fine — agent keeps search/read. MCP codeintel servers are
+	// validated at config load (sandbox + no secret env).
+	var codeTools tool.Toolbox
+	if cfg.CodeIntelEnabled() {
+		root := cfg.CodeIntel.Root
+		if root == "" {
+			root = cfg.Sandbox.WorkDir
+		}
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		svc := codeintel.NewService(root, "", "")
+		codeTools = codeintel.Toolbox(svc)
+	} else if cfg.CodeIntel.Required {
+		return nil, cleanup, fmt.Errorf("codeintel.required but codeintel.enabled is false")
+	}
+
 	// The execution toolbox: builtins on the host, or proxied to a docker
 	// sandbox.
 	var execTools tool.Toolbox
@@ -504,7 +523,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	}
 
 	boxes := []tool.Toolbox{execTools, hostTools}
-
+	// MCP before codeintel fallback so a real language server wins on name clash.
 	// MCP servers contribute their tools (the long tail).
 	for _, s := range cfg.MCP {
 		if !mcpServerInGroup(s, group) || !mcpServerPermitted(s, toolPolicy) {
@@ -515,11 +534,17 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			execution = "host"
 		}
 		if execution == "sandbox" {
+			// MCP-in-sandbox is not wired yet. Code-intelligence servers degrade
+			// to the in-process fallback (#79); other servers fail closed.
+			if strings.HasPrefix(strings.ToLower(s.Name), "codeintel") || mcpDeclaresCodeIntel(s.Tools) {
+				continue
+			}
 			return nil, cleanup, fmt.Errorf("mcp %q: sandbox execution is not available; refusing to launch it", s.Name)
 		}
 		if pol.Mode == "docker" && (s.Execution != "host" || !slices.Contains(s.Groups, group)) {
 			return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
 		}
+		// Env is already an allowlist; never pass the full process environment.
 		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
@@ -530,6 +555,9 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			return nil, cleanup, fmt.Errorf("mcp %q tools: %w", s.Name, err)
 		}
 		boxes = append(boxes, tb)
+	}
+	if codeTools != nil {
+		boxes = append(boxes, codeTools)
 	}
 
 	model := cfg.Provider.Model
@@ -703,6 +731,19 @@ func appendUniqueStrings(base []string, more ...string) []string {
 
 func mcpServerInGroup(s config.MCPServer, group string) bool {
 	return len(s.Groups) == 0 || slices.Contains(s.Groups, group)
+}
+
+func mcpDeclaresCodeIntel(tools []string) bool {
+	for _, t := range tools {
+		base := t
+		if i := strings.LastIndex(t, "__"); i >= 0 {
+			base = t[i+2:]
+		}
+		if codeintel.ApprovedCapability(base) {
+			return true
+		}
+	}
+	return false
 }
 
 // Declared tools allow a denied server to be skipped before its process is

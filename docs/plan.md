@@ -335,6 +335,17 @@ waffle already has three extension tiers that cover most "plugin" requests.
 
 Repo-versioned `WAFFLE.md`/`AGENT.md` (#53) and container lifecycle hooks (#54) are the supported repo extensibility path; issue-tracker intake (#51) is the third intake surface (with cron and chat).
 
+### Code intelligence (issue #79)
+
+Structural code tools (symbol find, references, callers, structure, blast
+radius, test suggestions) belong **behind MCP / workspace tooling**, not in
+waffle's SQLite core or an in-tree graph engine. The six-tool contract,
+provenance (`source` / `indexed_at` / `stale`), and isolation rules live in
+[docs/code-intelligence.md](code-intelligence.md). An in-process
+`go/parser` fallback (`internal/codeintel`) proves the shape offline;
+full accuracy is an optional sandboxed MCP bridge (e.g. gopls). Live source
+always wins over any cache. Absence degrades to `search` / `read_file`.
+
 ## Repository layout
 
 ```
@@ -350,6 +361,7 @@ internal/llm/          canonical types; anthropicp/, openaip/
                        (no gemini/ — OpenAI-compatible endpoint instead)
 internal/tool/         Tool interface, builtins, policy
 internal/mcp/          hand-rolled stdio JSON-RPC MCP client (no HTTP/SSE)
+internal/codeintel/    structural code tools (#79) + go/parser fallback
 internal/sandbox/      executors: host, docker; runner; sqlite queue IPC
 internal/workspace/    repo workspaces: lifecycle, devcontainer, git helper
 internal/broker/       credential broker (provider proxy, git, egress)

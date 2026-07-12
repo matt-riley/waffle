@@ -41,6 +41,31 @@ type Config struct {
 	Memory    Memory      `toml:"memory"`
 	// Intake is board-driven GitHub issue watchers under waffle serve (#51).
 	Intake Intake `toml:"intake"`
+	// CodeIntel configures optional structural-code tools (#79).
+	CodeIntel CodeIntel `toml:"codeintel"`
+}
+
+// CodeIntel configures discovery of the six code-intelligence tools (#79).
+type CodeIntel struct {
+	// Enabled registers in-process text-fallback tools when true (default true).
+	// Set false to omit them entirely (agent falls back to search/read).
+	Enabled *bool `toml:"enabled"`
+	// Root overrides the directory scanned by the fallback finder.
+	// Empty uses the sandbox work_dir or current workspace when available.
+	Root string `toml:"root"`
+	// AllowHostMCP permits codeintel MCP servers with execution=host.
+	// Default false — codeintel MCP should run sandboxed.
+	AllowHostMCP bool `toml:"allow_host_mcp"`
+	// Required fails agent build if no codeintel tools can be registered.
+	Required bool `toml:"required"`
+}
+
+// CodeIntelEnabled reports whether the in-process fallback should register.
+func (c Config) CodeIntelEnabled() bool {
+	if c.CodeIntel.Enabled == nil {
+		return true
+	}
+	return *c.CodeIntel.Enabled
 }
 
 // JobPolicy controls retries for unattended scheduled jobs. Durations use
@@ -606,6 +631,10 @@ func Load(path string) (Config, error) {
 		if s.Execution != "" && s.Execution != "host" && s.Execution != "sandbox" {
 			return Config{}, fmt.Errorf("mcp %q: execution must be \"host\" or \"sandbox\", got %q", s.Name, s.Execution)
 		}
+		// Code-intelligence MCP isolation (#79): no secret env; sandbox by default.
+		if err := validateCodeIntelMCP(s, cfg.CodeIntel.AllowHostMCP); err != nil {
+			return Config{}, err
+		}
 	}
 	if cfg.Workspace.Hooks.Timeout != "" {
 		if d, err := ParseDuration(cfg.Workspace.Hooks.Timeout); err != nil || d <= 0 {
@@ -703,6 +732,50 @@ func validateLoopbackListen(listen string) error {
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		return fmt.Errorf("must bind a loopback address, got %q", listen)
+	}
+	return nil
+}
+
+// codeIntelToolNames mirrors codeintel.ToolNames for config-time validation
+// without importing the codeintel package into config load.
+var codeIntelToolNames = map[string]bool{
+	"code_find_symbol":   true,
+	"code_references":    true,
+	"code_callers":       true,
+	"code_structure":     true,
+	"code_blast_radius":  true,
+	"code_suggest_tests": true,
+}
+
+func validateCodeIntelMCP(s MCPServer, allowHost bool) error {
+	exposes := false
+	for _, t := range s.Tools {
+		base := t
+		if i := strings.LastIndex(t, "__"); i >= 0 {
+			base = t[i+2:]
+		}
+		if codeIntelToolNames[base] {
+			exposes = true
+			break
+		}
+	}
+	// Name convention: servers named codeintel* are treated as codeintel even
+	// without declared tools (fail closed on secrets/host).
+	if !exposes && !strings.HasPrefix(strings.ToLower(s.Name), "codeintel") {
+		return nil
+	}
+	for _, e := range s.Env {
+		u := strings.ToUpper(e)
+		if strings.Contains(u, "TOKEN") || strings.Contains(u, "SECRET") ||
+			strings.Contains(u, "PASSWORD") || strings.Contains(u, "API_KEY") ||
+			u == "WAFFLE_AGE_IDENTITY" {
+			return fmt.Errorf("mcp %q: code-intelligence servers must not receive secret env %q", s.Name, e)
+		}
+	}
+	if s.Execution == "" || s.Execution == "host" {
+		if !allowHost {
+			return fmt.Errorf("mcp %q: code-intelligence requires execution=\"sandbox\" (or [codeintel] allow_host_mcp = true)", s.Name)
+		}
 	}
 	return nil
 }

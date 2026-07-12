@@ -1,84 +1,91 @@
 # Code intelligence (#79)
 
-waffle exposes six code-intelligence **tool contracts**. Implementations may
-come from an optional MCP server (preferred for full LSP accuracy) or from
-the in-process `internal/codeintel` Go fallback (`go/parser`, no types).
+Structural code tools belong **behind MCP / workspace tooling**, not in
+waffle's core storage or runtime. This document is the contract.
 
-## Tool contracts
+## Six tool contracts
 
-| Tool | Purpose | Key inputs | Output |
-|------|---------|------------|--------|
-| `code_find_definition` | Jump to declaration | `path`, `line`, `col` (1-based) | list of locations |
-| `code_find_references` | Find all references | `path`, `line`, `col` | list of locations |
-| `code_hover` | Signature / docs at point | `path`, `line`, `col` | markdown/text |
-| `code_workspace_symbols` | Fuzzy project-wide symbols | `query` | list of symbols |
-| `code_document_symbols` | Outline one file | `path` | list of symbols |
-| `code_diagnostics` | Problems for a file | `path` | list of diagnostics |
+| Tool | Purpose |
+|------|---------|
+| `code_find_symbol` | Definitions matching a name/kind |
+| `code_references` | References to a symbol or location |
+| `code_callers` | Direct callers where the backend can establish them (may be uncertain) |
+| `code_structure` | Symbols in a file or package |
+| `code_blast_radius` | Conservative affected files/packages/tests for a change |
+| `code_suggest_tests` | Focused verification targets with evidence |
 
-### Shared types
+### Result shape (`CodeLocation`)
 
 ```json
 {
-  "location": {
-    "path": "string",
-    "line": 1,
-    "col": 1,
-    "end_line": 1,
-    "end_col": 1,
-    "name": "string",
-    "kind": "func|method|type|var|const|…",
-    "detail": "string"
-  },
-  "symbol": {
-    "name": "string",
-    "kind": "string",
-    "location": { "...": "Location" }
-  },
-  "diagnostic": {
-    "location": { "...": "Location" },
-    "severity": "error|warning|info|hint",
-    "message": "string",
-    "source": "string"
-  }
+  "repo": "owner/name",
+  "ref": "main",
+  "path": "pkg/foo.go",
+  "start_line": 10,
+  "end_line": 20,
+  "symbol": "Foo",
+  "kind": "func",
+  "source": "live-lsp|cached-index|text-fallback",
+  "indexed_at": "2026-07-12T00:00:00Z",
+  "stale": false,
+  "uncertain": false,
+  "evidence": "optional note"
 }
 ```
 
-## Optional MCP server
+### Source authority and staleness
 
-Add an MCP server that implements the six tool names above:
+1. **Live checked-out source is always authoritative** over any index or cache.
+2. `source` must be set on every result: `live-lsp`, `cached-index`, or `text-fallback`.
+3. `cached-index` results **must** include `indexed_at`. If the file content hash
+   no longer matches, set `stale: true` or re-parse live (`text-fallback` / live-lsp).
+4. Agents must **read the current file spans** before editing; never trust
+   indexed snippets alone.
+5. Uncertain analyses (callers, blast radius without types) set `uncertain: true`
+   and an `evidence` string — never fabricate certainty.
 
-```toml
-[[mcp]]
-name = "codeintel"
-command = "/path/to/codeintel-mcp"
-args = ["serve"]
-execution = "host"
-groups = ["main"]
-tools = [
-  "code_find_definition",
-  "code_find_references",
-  "code_hover",
-  "code_workspace_symbols",
-  "code_document_symbols",
-  "code_diagnostics",
-]
-```
+## Agent discovery
 
-Suggested backends: a thin bridge over `gopls` (stdio LSP), scip indexes, or
-any language server that can answer definition/references/hover/symbols.
+When enabled (`[codeintel] enabled = true`, default on for host builds with a
+workspace root or always as the in-process fallback), waffle registers the six
+tools on the agent toolbox. Capabilities are explicit via tool defs; partial
+MCP implementations are fine — only declared tools appear.
 
-When both MCP and the Go fallback would register the same name, `tool.Combine`
-keeps the **first** registration. Register MCP before the fallback so LSP wins.
+If code intelligence is absent or fails, the agent continues with `search` /
+`read_file` / `bash`. Workspaces do **not** require codeintel unless the host
+opts in with a required MCP server.
 
-## In-process fallback
+## Sandbox / isolation
 
-`internal/codeintel.GoFallback` walks a root directory with `go/parser`:
+Code-intelligence MCP servers read arbitrary repo content and often run
+language tooling. They must **not** inherit the gateway's ambient environment
+or secrets:
 
-- **Workspace / document symbols** — funcs, methods, types, consts, vars
-- **Find definition** — same-file declaration by identifier name
-- **Find references** — name match under Root (not type-aware)
-- **Hover** — kind + name + location
-- **Diagnostics** — parse errors only
+- Prefer `execution = "sandbox"` (workspace-scoped).
+- `env` is an allowlist; secret-like names (`TOKEN`, `SECRET`, `API_KEY`,
+  `WAFFLE_AGE_IDENTITY`, …) are rejected for codeintel tool providers.
+- Host execution requires explicit `[codeintel] allow_host_mcp = true`.
 
-This is intentionally small: enough for local fixture tests and offline use,
-not a replacement for gopls.
+Repo policy (`WAFFLE.md`) may only **select host-approved capability IDs**
+from this list; it cannot name arbitrary executables or widen launch posture.
+
+## Reference implementation
+
+`internal/codeintel.Service` is the Go-first **text-fallback** backend
+(`go/parser`, not type-aware):
+
+- definitions / references / structure
+- conservative callers + blast radius (package/file level, `uncertain`)
+- test suggestions from `*_test.go` name hits
+- optional content-hash cache for staleness demos
+
+Full accuracy: configure an external MCP bridge over `gopls` (or similar)
+under the isolation rules above.
+
+## Agent usage convention
+
+For non-trivial edits when tools are present:
+
+1. `code_find_symbol` → 2. `code_references` / `code_callers` / `code_blast_radius`
+→ 3. read live source spans → 4. edit → 5. `code_suggest_tests` + focused verify
+→ 6. fall back to broader `search`/tests when structural data is absent.

@@ -140,3 +140,13 @@ func TestMtimeReload(t *testing.T) {
 		t.Fatalf("p2 = %#v", p2)
 	}
 }
+
+func TestFilterCodeIntelCaps(t *testing.T) {
+	approved := func(id string) bool {
+		return id == "code_find_symbol" || id == "code_blast_radius"
+	}
+	got := FilterCodeIntelCaps([]string{"code_find_symbol", "/bin/evil", "code_blast_radius", "nope"}, approved)
+	if len(got) != 2 || got[0] != "code_find_symbol" {
+		t.Fatalf("%v", got)
+	}
+}

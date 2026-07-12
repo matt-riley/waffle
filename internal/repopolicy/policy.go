@@ -25,6 +25,9 @@ type Policy struct {
 	Hooks       Hooks
 	IdleTimeout string // duration string; empty means no override
 	Egress      string // none | allowlist | full; empty means no override
+	// CodeIntelCaps are host-approved capability IDs the repo requests (#79).
+	// Unknown IDs are ignored (cannot name arbitrary executables).
+	CodeIntelCaps []string
 }
 
 // ToolFilter is a tighten-only tool request from the repo.
@@ -146,6 +149,8 @@ func parseFrontmatter(fm string, p *Policy) error {
 				p.Tools.Allow = append(p.Tools.Allow, item)
 			case "tools.deny":
 				p.Tools.Deny = append(p.Tools.Deny, item)
+			case "codeintel.capabilities":
+				p.CodeIntelCaps = append(p.CodeIntelCaps, item)
 			default:
 				return fmt.Errorf("unknown list key %q", listKey)
 			}
@@ -190,6 +195,12 @@ func parseFrontmatter(fm string, p *Policy) error {
 				p.Egress = value
 			default:
 				return fmt.Errorf("invalid egress %q", value)
+			}
+		case "codeintel.capabilities":
+			if value == "" {
+				listKey = "codeintel.capabilities"
+			} else {
+				p.CodeIntelCaps = splitCSV(value)
 			}
 		default:
 			// Nested "tools:" / "hooks:" section headers with empty values.
@@ -304,4 +315,18 @@ func contains(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// FilterCodeIntelCaps keeps only host-approved capability IDs (#79 / #53).
+// Repos cannot introduce new executables or unknown capabilities.
+func FilterCodeIntelCaps(requested []string, approved func(string) bool) []string {
+	var out []string
+	for _, id := range requested {
+		id = strings.TrimSpace(id)
+		if id == "" || approved == nil || !approved(id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
