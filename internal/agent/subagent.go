@@ -44,9 +44,14 @@ type SubagentTool struct {
 	Redact    func(string) string
 	Depth     int
 	// WorkingSetBroadcast is optional rendered parent working set (#68).
+	// When non-empty it is used as-is (frozen snapshot from the parent).
 	WorkingSetBroadcast string
 	BroadcastWorkingSet bool
-	Spill               *spill.Store
+	// WorkingSetSnapshot, when set and WorkingSetBroadcast is empty, is called
+	// once per Run to capture the parent set as of dispatch (#68). For parallel
+	// spawns, prefer a pre-frozen WorkingSetBroadcast so all children share one view.
+	WorkingSetSnapshot func(ctx context.Context) string
+	Spill              *spill.Store
 	// Profiles maps profile name → child posture (#71).
 	Profiles map[string]ChildProfile
 	// AllowedProfiles, when non-empty, is the only set the parent may
@@ -112,8 +117,12 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	if profile.System != "" {
 		sys = profile.System
 	}
-	if t.BroadcastWorkingSet && t.WorkingSetBroadcast != "" {
-		sys += "\n\n" + t.WorkingSetBroadcast
+	broadcast := t.WorkingSetBroadcast
+	if t.BroadcastWorkingSet && broadcast == "" && t.WorkingSetSnapshot != nil {
+		broadcast = t.WorkingSetSnapshot(ctx)
+	}
+	if t.BroadcastWorkingSet && broadcast != "" {
+		sys += "\n\n" + broadcast
 		sys += "\nThe working set above is read-only. To suggest changes, include proposals in your JSON handoff; they are NOT applied automatically."
 	}
 	sys += "\n\n" + FramePacket(p)

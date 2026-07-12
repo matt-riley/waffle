@@ -2,9 +2,11 @@ package spill
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
@@ -19,10 +21,20 @@ func TestSpillBoundaryAndExpand(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	s := &Store{DB: st.DB}
 
+	// Exactly OutputLimit runes → no spill.
 	short := strings.Repeat("a", tool.OutputLimit)
+	if utf8.RuneCountInString(short) != tool.OutputLimit {
+		t.Fatal("setup")
+	}
 	id, partial, err := s.Save(ctx, "sess", "bash", short)
 	if err != nil || id != "" || partial {
-		t.Fatalf("short: id=%q partial=%v err=%v", id, partial, err)
+		t.Fatalf("at limit: id=%q partial=%v err=%v", id, partial, err)
+	}
+	// One past OutputLimit → spill.
+	over := short + "Z"
+	id, partial, err = s.Save(ctx, "sess-boundary", "bash", over)
+	if err != nil || id == "" || partial {
+		t.Fatalf("over limit: id=%q partial=%v err=%v", id, partial, err)
 	}
 
 	// Unique mid-token for FTS (must exceed tool.OutputLimit runes).
@@ -39,9 +51,20 @@ func TestSpillBoundaryAndExpand(t *testing.T) {
 	if err != nil || !strings.Contains(hits, "UNIQUE_SPILL_TOKEN_XYZ") {
 		t.Fatalf("grep: %q %v", hits, err)
 	}
+	// No match pattern
+	nomatch, err := s.Expand(ctx, id, 0, 0, "NEVER_IN_SPILL_QQQ")
+	if err != nil || !strings.Contains(nomatch, "no matches") {
+		t.Fatalf("no match: %q %v", nomatch, err)
+	}
+	// Unknown id
 	if _, err := s.Expand(ctx, "missing", 0, 10, ""); err == nil {
 		t.Fatal("expected unknown id")
 	}
+	// Offset out of range
+	if _, err := s.Expand(ctx, id, len(big)+100, 10, ""); err == nil {
+		t.Fatal("expected OOR offset")
+	}
+	// FTS middle-of-output findable
 	fts, err := s.SearchFTS(ctx, "UNIQUE_SPILL_TOKEN_XYZ", 5)
 	if err != nil || len(fts) == 0 {
 		t.Fatalf("fts: %v %v", fts, err)
@@ -49,11 +72,63 @@ func TestSpillBoundaryAndExpand(t *testing.T) {
 	if err := s.DeleteSession(ctx, "sess"); err != nil {
 		t.Fatal(err)
 	}
+	// After delete, expand fails
+	if _, err := s.Expand(ctx, id, 0, 10, ""); err == nil {
+		t.Fatal("expand after DeleteSession should fail")
+	}
+}
+
+func TestSpillCapPartialMarker(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := &Store{DB: st.DB}
+	// Content larger than SpillCap.
+	huge := strings.Repeat("H", SpillCap+1000)
+	// Must also exceed OutputLimit (SpillCap is larger).
+	id, partial, err := s.Save(ctx, "sess", "bash", huge)
+	if err != nil || id == "" {
+		t.Fatalf("save: %q %v %v", id, partial, err)
+	}
+	if !partial {
+		t.Fatal("expected partial=true when over SpillCap")
+	}
+	m := Marker(id, true)
+	if !strings.Contains(m, "partial spill") || !strings.Contains(m, id) {
+		t.Fatal(m)
+	}
+	content, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != SpillCap {
+		t.Fatalf("stored len=%d want SpillCap=%d", len(content), SpillCap)
+	}
+}
+
+func TestExpandToolUnknownAndOOR(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	tl := ExpandTool{Store: &Store{DB: st.DB}}
+	if _, err := tl.Run(ctx, json.RawMessage(`{"id":"nope"}`)); err == nil {
+		t.Fatal("unknown id")
+	}
 }
 
 func TestMarker(t *testing.T) {
 	m := Marker("spill-abc", false)
 	if !strings.Contains(m, "spill-abc") || !strings.Contains(m, "expand_output") {
 		t.Fatal(m)
+	}
+	mp := Marker("spill-abc", true)
+	if !strings.Contains(mp, "partial") {
+		t.Fatal(mp)
 	}
 }

@@ -188,3 +188,22 @@ func TestApprovedCapability(t *testing.T) {
 		t.Fatal("repo must not approve arbitrary executables")
 	}
 }
+
+func TestToolboxWithCapsFilters(t *testing.T) {
+	svc := NewService(t.TempDir(), "", "")
+	// Repo requests include an unapproved executable-looking ID — ignored.
+	tb := ToolboxWithCaps(svc, []string{"code_find_symbol", "/bin/evil", "code_blast_radius", "nope"})
+	names := map[string]bool{}
+	for _, d := range tb.Defs() {
+		names[d.Name] = true
+	}
+	if !names["code_find_symbol"] || !names["code_blast_radius"] {
+		t.Fatalf("missing approved caps: %v", names)
+	}
+	if names["code_references"] || names["/bin/evil"] {
+		t.Fatalf("unapproved tools registered: %v", names)
+	}
+	if len(names) != 2 {
+		t.Fatalf("want 2 tools, got %v", names)
+	}
+}

@@ -1,6 +1,11 @@
 // Package tool defines waffle's native tools and their registry. Native Go
 // tools cover the basics; the long tail arrives via MCP in a later phase
 // (docs/plan.md, "Tools").
+//
+// Action-level bash denials (DenyPrefixes / Policy.CheckAction) use
+// quote-aware token matching. Shell indirection (eval, variables, $(),
+// aliases) is not expanded — prefix policy is not high-assurance isolation
+// (#66); combine with sandboxing.
 package tool
 
 import (
@@ -74,10 +79,26 @@ func BuiltinsWithFetch(allowPrivate []string) *Registry {
 	return NewRegistry(Bash{}, ReadFile{}, WriteFile{}, EditFile{}, Fetch{AllowPrivate: allowPrivate}, Search{})
 }
 
-// OutputLimit is the maximum size (bytes) for tool output returned to the
-// caller or written into the sandbox queue outbound row. Truncation keeps
-// head+tail so the interesting parts are preserved.
+// OutputLimit is the maximum size (bytes) for tool output presented to the
+// model after Agent.runOne spills (when configured) and truncates. Sandbox
+// outbound rows also use this limit. Truncation keeps head+tail so the
+// interesting parts are preserved.
 const OutputLimit = 48 * 1024
+
+// HostReturnCap is the maximum bytes a host-executed builtin may return so
+// Agent.runOne can spill full content before truncating to OutputLimit.
+// Matches spill.SpillCap (512KiB); avoids unbounded memory while keeping
+// enough payload for mid-run expand_output / FTS (#69).
+const HostReturnCap = 512 * 1024
+
+// capHostReturn bounds host builtin output to HostReturnCap without applying
+// OutputLimit head+tail truncation (that happens in Agent.runOne after spill).
+func capHostReturn(s string) string {
+	if len(s) <= HostReturnCap {
+		return s
+	}
+	return s[:HostReturnCap]
+}
 
 // Truncate caps tool output so a chatty command can't blow out the context
 // window or bloat the queue DB; it keeps the head and tail, which is where

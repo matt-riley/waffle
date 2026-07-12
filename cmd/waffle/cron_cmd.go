@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/schedule"
 )
 
@@ -44,29 +45,45 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 			if !j.NextRetry.IsZero() {
 				next = j.NextRetry.Format("2006-01-02 15:04:05")
 			}
-			fmt.Fprintf(stdout, "%s  %q  [%s] %s  deliver=%s  attempt=%d/%d  next-retry=%s  last=%s %s\n",
-				j.ID, j.Name, j.Cron, state, orNone(j.Deliver), j.Attempt, j.MaxAttempts, next, j.LastStatus, j.LastRun.Format("2006-01-02 15:04"))
+			prof := j.Profile
+			if prof == "" {
+				prof = "-"
+			}
+			fmt.Fprintf(stdout, "%s  %q  [%s] %s  deliver=%s  profile=%s  attempt=%d/%d  next-retry=%s  last=%s %s\n",
+				j.ID, j.Name, j.Cron, state, orNone(j.Deliver), prof, j.Attempt, j.MaxAttempts, next, j.LastStatus, j.LastRun.Format("2006-01-02 15:04"))
 			fmt.Fprintf(stdout, "    %s\n", j.Prompt)
 		}
 		return nil
 
 	case "add":
-		// waffle cron add <name> <cron(5 fields)> <prompt...> [--deliver channel:chat]
-		fields, deliver, err := splitDeliver(args[1:])
+		// waffle cron add <name> <cron(5 fields)> <prompt...> [--deliver channel:chat] [--profile name]
+		fields, deliver, profile, err := splitCronFlags(args[1:])
 		if err != nil {
 			return err
 		}
 		if len(fields) < 7 {
-			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat]")
+			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat] [--profile name]")
+		}
+		if profile != "" {
+			if !config.ValidProfileName(profile) && profile != "main" {
+				return fmt.Errorf("invalid profile name %q", profile)
+			}
+			if _, ok := cfg.Profile(profile); !ok {
+				return fmt.Errorf("unknown agent profile %q", profile)
+			}
 		}
 		name := fields[0]
 		cron := joinFields(fields[1:6])
 		prompt := joinFields(fields[6:])
-		j, err := jobs.Add(ctx, name, cron, prompt, deliver)
+		j, err := jobs.AddWithProfile(ctx, name, cron, prompt, deliver, profile)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "added %s %q [%s]\n", j.ID, j.Name, j.Cron)
+		fmt.Fprintf(stdout, "added %s %q [%s]", j.ID, j.Name, j.Cron)
+		if j.Profile != "" {
+			fmt.Fprintf(stdout, " profile=%s", j.Profile)
+		}
+		fmt.Fprintln(stdout)
 		return nil
 
 	case "rm":
@@ -113,13 +130,13 @@ func cronUsage(w io.Writer) {
 Jobs fire while `+"`waffle serve`"+` is running.
 
 Usage:
-  waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat_id]
+  waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat_id] [--profile name]
   waffle cron ls
   waffle cron run <id>     run a job now
   waffle cron rm <id>
 
 Example:
-  waffle cron add standup 0 9 * * 1-5 "Summarize my starred repos" --deliver telegram:900
+  waffle cron add standup 0 9 * * 1-5 "Summarize my starred repos" --deliver telegram:900 --profile researcher
 `)
 }
 
@@ -130,22 +147,35 @@ func orNone(s string) string {
 	return s
 }
 
-func splitDeliver(args []string) (fields []string, deliver string, err error) {
+func splitCronFlags(args []string) (fields []string, deliver, profile string, err error) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--deliver" {
+		switch args[i] {
+		case "--deliver":
 			if i+1 == len(args) {
-				return nil, "", fmt.Errorf("--deliver requires a value (channel:chat_id, e.g. telegram:900)")
+				return nil, "", "", fmt.Errorf("--deliver requires a value (channel:chat_id, e.g. telegram:900)")
 			}
 			deliver = args[i+1]
 			if _, _, ok := schedule.ParseTarget(deliver); !ok {
-				return nil, "", fmt.Errorf("bad delivery target %q (want channel:chat_id)", deliver)
+				return nil, "", "", fmt.Errorf("bad delivery target %q (want channel:chat_id)", deliver)
 			}
 			i++
-			continue
+		case "--profile":
+			if i+1 == len(args) {
+				return nil, "", "", fmt.Errorf("--profile requires a name")
+			}
+			profile = args[i+1]
+			i++
+		default:
+			fields = append(fields, args[i])
 		}
-		fields = append(fields, args[i])
 	}
-	return fields, deliver, nil
+	return fields, deliver, profile, nil
+}
+
+// splitDeliver remains for tests that only care about delivery.
+func splitDeliver(args []string) (fields []string, deliver string, err error) {
+	fields, deliver, _, err = splitCronFlags(args)
+	return fields, deliver, err
 }
 
 func joinFields(fields []string) string {

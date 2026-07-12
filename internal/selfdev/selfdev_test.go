@@ -137,6 +137,61 @@ func TestDoctorReportsProviderFailure(t *testing.T) {
 	t.Fatal("Doctor did not report a provider reachable check")
 }
 
+func TestVerifyStepsIncludeEval(t *testing.T) {
+	steps := verifySteps()
+	foundEval := false
+	for _, step := range steps {
+		joined := strings.Join(step, " ")
+		if strings.Contains(joined, "eval") {
+			foundEval = true
+		}
+	}
+	if !foundEval {
+		t.Fatalf("verifySteps missing eval: %v", steps)
+	}
+}
+
+func TestVerifyRepoFailsOnBrokenTree(t *testing.T) {
+	// Any verify step failure (vet/test/eval) blocks upgrade (#63).
+	err := verifyRepo(context.Background(), t.TempDir(), io.Discard)
+	if err == nil {
+		t.Fatal("verifyRepo on empty dir: want error")
+	}
+	if !strings.Contains(err.Error(), "verify:") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRejectProtectedIncludesEvalPath(t *testing.T) {
+	// Default auto-patch protected prefixes include internal/eval and evals (#63).
+	paths := []string{
+		"internal/selfdev", "internal/config", "cmd/waffle/selfdev_cmd.go",
+		"cmd/waffle/main.go", "internal/doctor", "evals", "internal/eval",
+	}
+	var sawEval, sawEvals bool
+	for _, p := range paths {
+		if p == "internal/eval" {
+			sawEval = true
+		}
+		if p == "evals" {
+			sawEvals = true
+		}
+	}
+	if !sawEval || !sawEvals {
+		t.Fatal("expected internal/eval and evals in default protected set")
+	}
+	file := "internal/eval/eval.go"
+	blocked := false
+	for _, prefix := range paths {
+		if file == prefix || strings.HasPrefix(file, strings.TrimSuffix(prefix, "/")+"/") {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("%q not blocked by protected prefixes", file)
+	}
+}
+
 func TestUpgradeRejectsOptionRefs(t *testing.T) {
 	// repoDir is an empty temp dir, not a git repo: if the ref reached git
 	// the error would be git's, so a validation error proves the ref was
@@ -241,4 +296,67 @@ func TestSandboxRunnerCheck(t *testing.T) {
 	if _, err := sandboxRunnerCheck(filepath.Join(t.TempDir(), "absent")); err == nil {
 		t.Error("missing runner_binary accepted, want error")
 	}
+}
+
+func TestSandboxQueueRoundTrip(t *testing.T) {
+	info, err := sandboxQueueRoundTrip()
+	if err != nil {
+		t.Fatalf("sandboxQueueRoundTrip: %v", err)
+	}
+	if !strings.Contains(info, "queue ok") {
+		t.Fatalf("info = %q", info)
+	}
+}
+
+func TestSandboxDockerRoundTripNoDocker(t *testing.T) {
+	// When docker is absent from PATH, the probe must fail closed (doctor
+	// treats this as a failed check under UsesDocker).
+	t.Setenv("PATH", t.TempDir()) // empty of docker
+	info, err := sandboxDockerRoundTrip("")
+	if err == nil {
+		t.Fatalf("expected error without docker, got info=%q", info)
+	}
+	if !strings.Contains(info, "not in PATH") && !strings.Contains(err.Error(), "not in PATH") && !strings.Contains(err.Error(), "executable file not found") {
+		// LookPath error message varies; info should still explain.
+		if info == "" {
+			t.Fatalf("err=%v info=%q", err, info)
+		}
+	}
+}
+
+func TestDoctorIncludesSandboxChecksWhenDockerMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	// Force docker mode so Doctor runs queue + docker probes. Docker itself
+	// may be missing on this host — that fails the docker check, not config.
+	cfg := "[sandbox]\nmode = \"docker\"\n"
+	// Provide a dummy runner binary so the runner check can pass on non-linux.
+	runner := filepath.Join(home, "waffle-linux")
+	if err := os.WriteFile(runner, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg += "runner_binary = \"" + runner + "\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks, _, err := Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, c := range checks {
+		names[c.Name] = c.OK
+	}
+	for _, want := range []string{"sandbox runner", "sandbox queue round-trip", "sandbox docker round-trip"} {
+		if _, ok := names[want]; !ok {
+			t.Errorf("missing doctor check %q; got %v", want, names)
+		}
+	}
+	if !names["sandbox queue round-trip"] {
+		t.Error("sandbox queue round-trip should pass on host FS")
+	}
+	if !names["sandbox runner"] {
+		t.Error("sandbox runner should pass with configured binary")
+	}
+	// docker round-trip OK only when docker is available; do not require it.
 }

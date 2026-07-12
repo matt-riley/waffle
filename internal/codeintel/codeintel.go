@@ -499,6 +499,42 @@ func Toolbox(svc *Service) tool.Toolbox {
 	)
 }
 
+// ToolboxWithCaps returns only the named host-approved capabilities (#79).
+// Unknown names are ignored (repos cannot introduce arbitrary tools/executables).
+// Empty allowed → empty toolbox (caller should treat as "no codeintel selection").
+func ToolboxWithCaps(svc *Service, allowed []string) tool.Toolbox {
+	if svc == nil {
+		svc = &Service{}
+	}
+	set := map[string]bool{}
+	for _, id := range allowed {
+		id = strings.TrimSpace(id)
+		if ApprovedCapability(id) {
+			set[id] = true
+		}
+	}
+	var tools []tool.Tool
+	if set["code_find_symbol"] {
+		tools = append(tools, findSymbolTool{svc})
+	}
+	if set["code_references"] {
+		tools = append(tools, referencesTool{svc})
+	}
+	if set["code_callers"] {
+		tools = append(tools, callersTool{svc})
+	}
+	if set["code_structure"] {
+		tools = append(tools, structureTool{svc})
+	}
+	if set["code_blast_radius"] {
+		tools = append(tools, blastTool{svc})
+	}
+	if set["code_suggest_tests"] {
+		tools = append(tools, suggestTestsTool{svc})
+	}
+	return tool.NewRegistry(tools...)
+}
+
 // CapabilitiesJSON describes which tools are available (partial OK).
 func CapabilitiesJSON(svc *Service) string {
 	caps := map[string]any{

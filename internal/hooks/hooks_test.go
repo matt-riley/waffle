@@ -62,12 +62,25 @@ func TestRunCapturesOutputAndFailure(t *testing.T) {
 }
 
 func TestRunTimeout(t *testing.T) {
-	ex := &fakeExec{delay: 200 * time.Millisecond}
-	res := Run(context.Background(), ex, Config{BeforeRun: "sleep 10", Timeout: 30 * time.Millisecond}, BeforeRun)
+	// Stubbed clock: cancel immediately so a long fakeExec delay never waits
+	// on a real timer (#54).
+	old := TimeoutFunc
+	t.Cleanup(func() { TimeoutFunc = old })
+	TimeoutFunc = func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+		c, cancel := context.WithCancel(parent)
+		if d > 0 {
+			cancel() // deadline already exceeded
+		}
+		return c, cancel
+	}
+
+	ex := &fakeExec{delay: time.Hour} // would hang if real clock were used
+	res := Run(context.Background(), ex, Config{BeforeRun: "sleep 10", Timeout: time.Millisecond}, BeforeRun)
 	if res.Err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !errors.Is(res.Err, context.DeadlineExceeded) && !strings.Contains(res.Err.Error(), "before_run") {
+	if !errors.Is(res.Err, context.DeadlineExceeded) && !errors.Is(res.Err, context.Canceled) &&
+		!strings.Contains(res.Err.Error(), "before_run") {
 		t.Fatalf("err = %v", res.Err)
 	}
 }

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,6 +39,10 @@ func TestPolicy(t *testing.T) {
 		{Policy{Allow: []string{"fetch"}}, "bash", false},
 		{Policy{Allow: []string{"bash"}}, "bash", true},
 		{Policy{Allow: []string{"bash"}, Deny: []string{"bash"}}, "bash", false}, // deny wins
+		// Deny overrides allow=["*"] (#71).
+		{Policy{Allow: []string{"*"}, Deny: []string{"bash"}}, "bash", false},
+		{Policy{Allow: []string{"*"}, Deny: []string{"bash"}}, "read_file", true},
+		{Policy{Allow: []string{"*"}}, "anything", true},
 	}
 	for _, c := range cases {
 		if got := c.p.Permits(c.name); got != c.want {
@@ -77,10 +82,28 @@ func TestDenyPrefixes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "rm -rf") || !strings.Contains(err.Error(), "safer") {
 		t.Fatalf("want prefix denial with guidance, got %v", err)
 	}
+	// Quote-aware prefix match.
+	_, err = r.Run(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf \"/tmp/foo bar\""}`))
+	if err == nil || !strings.Contains(err.Error(), "rm -rf") {
+		t.Fatalf("want quoted path denial, got %v", err)
+	}
 	// Non-matching command is allowed (may still fail for other reasons).
 	out, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"echo ok"}`))
 	if err != nil || !strings.Contains(out, "ok") {
 		t.Fatalf("echo = %q %v", out, err)
+	}
+}
+
+func TestCheckActionDeny(t *testing.T) {
+	tb := NewRegistry(Bash{})
+	r := Restrict(tb, Policy{
+		CheckAction: func(ctx context.Context, name string, input json.RawMessage) error {
+			return fmt.Errorf("bash call denied by policy rule %q — use safer cleanup", "no-rm")
+		},
+	})
+	_, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
+	if err == nil || !strings.Contains(err.Error(), "no-rm") || !strings.Contains(err.Error(), "safer") {
+		t.Fatalf("want CheckAction denial with guidance, got %v", err)
 	}
 }
 

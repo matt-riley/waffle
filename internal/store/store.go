@@ -95,6 +95,9 @@ func loadMigrations() ([]migration, error) {
 	ms := make([]migration, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
 		num, rest, ok := strings.Cut(strings.TrimSuffix(name, ".sql"), "_")
 		if !ok {
 			return nil, fmt.Errorf("migration %q: want NNNN_name.sql", name)
@@ -106,6 +109,10 @@ func loadMigrations() ([]migration, error) {
 		body, err := migrationFS.ReadFile("migrations/" + name)
 		if err != nil {
 			return nil, err
+		}
+		// Skip files marked superseded (concurrent renumbers leave placeholders).
+		if strings.HasPrefix(strings.TrimSpace(string(body)), "-- SUPERSEDED") {
+			continue
 		}
 		ms = append(ms, migration{version: version, name: rest, sql: string(body)})
 	}

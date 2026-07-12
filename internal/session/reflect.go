@@ -62,13 +62,18 @@ type IdleReflector struct {
 	// Provider returns a provider + model for reflection (may be nil to skip).
 	Provider func() (llm.Provider, string)
 	// After is how long a session must be idle before reflection (reflect_after).
+	// Zero or negative disables RunOnce (callers should not start the loop).
 	After time.Duration
 	// Every is the poll interval (reflect_every).
 	Every time.Duration
 	// Now is optional clock for tests.
 	Now func() time.Time
-	// OnError is optional.
+	// OnError is optional; failures are logged and never panic.
 	OnError func(error)
+	// TryLockSession, when set, serializes reflection with gateway message
+	// handling for the session's channel group. ok=false means skip this tick
+	// (conversation busy). unlock must be called when done.
+	TryLockSession func(ctx context.Context, sessionID string) (unlock func(), ok bool)
 }
 
 func (r *IdleReflector) now() time.Time {
@@ -79,54 +84,71 @@ func (r *IdleReflector) now() time.Time {
 }
 
 // RunOnce finds idle sessions needing summaries and reflects them.
+// After <= 0 disables idle reflection entirely (reflect_after = "0").
 func (r *IdleReflector) RunOnce(ctx context.Context) (int, error) {
 	if r.Sessions == nil || r.Provider == nil {
 		return 0, nil
 	}
-	after := r.After
-	if after <= 0 {
-		after = 30 * time.Minute
+	if r.After <= 0 {
+		return 0, nil
 	}
 	provider, model := r.Provider()
 	if provider == nil {
 		return 0, nil
 	}
-	cutoff := r.now().UTC().Add(-after)
+	cutoff := r.now().UTC().Add(-r.After)
 	ids, err := r.Sessions.ListIdleForReflection(ctx, cutoff, 20)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	for _, id := range ids {
-		hist, err := r.Sessions.Turns(ctx, id)
-		if err != nil {
+		if wrote, err := r.reflectOne(ctx, id, provider, model); err != nil {
 			if r.OnError != nil {
 				r.OnError(err)
 			}
 			continue
+		} else if wrote {
+			n++
 		}
-		if len(hist) < 2 {
-			continue
-		}
-		summary, err := Reflect(ctx, provider, hist, ReflectOptions{Model: model})
-		if err != nil {
-			if r.OnError != nil {
-				r.OnError(err)
-			}
-			continue
-		}
-		if summary == "" {
-			continue
-		}
-		if err := r.Sessions.SetSummary(ctx, id, summary); err != nil {
-			if r.OnError != nil {
-				r.OnError(err)
-			}
-			continue
-		}
-		n++
 	}
 	return n, nil
+}
+
+func (r *IdleReflector) reflectOne(ctx context.Context, id string, provider llm.Provider, model string) (bool, error) {
+	if r.TryLockSession != nil {
+		unlock, ok := r.TryLockSession(ctx, id)
+		if !ok {
+			return false, nil
+		}
+		defer unlock()
+	}
+	// Re-check under lock: at most once per quiet period (#59).
+	sess, err := r.Sessions.Get(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(sess.Summary) != "" {
+		return false, nil
+	}
+	hist, err := r.Sessions.Turns(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if len(hist) < 2 {
+		return false, nil
+	}
+	summary, err := Reflect(ctx, provider, hist, ReflectOptions{Model: model})
+	if err != nil {
+		return false, err
+	}
+	if summary == "" {
+		return false, nil
+	}
+	if err := r.Sessions.SetSummary(ctx, id, summary); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Loop ticks Every until ctx is done.

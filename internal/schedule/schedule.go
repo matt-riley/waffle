@@ -27,11 +27,13 @@ import (
 
 // Job is one scheduled task.
 type Job struct {
-	ID           string
-	Name         string
-	Cron         string
-	Prompt       string
-	Deliver      string // "channel:chat_id" or "" for log-only
+	ID      string
+	Name    string
+	Cron    string
+	Prompt  string
+	Deliver string // "channel:chat_id" or "" for log-only
+	// Profile is an optional named agent profile (#71). Empty uses the cron tier default.
+	Profile      string
 	Enabled      bool
 	LastRun      time.Time
 	LastStatus   string
@@ -90,6 +92,11 @@ var parser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cr
 
 // Add validates the cron expression and stores a job.
 func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*Job, error) {
+	return s.AddWithProfile(ctx, name, spec, prompt, deliver, "")
+}
+
+// AddWithProfile is Add with an optional named agent profile (#71).
+func (s *Store) AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (*Job, error) {
 	if _, err := parser.Parse(spec); err != nil {
 		return nil, fmt.Errorf("invalid cron %q: %w", spec, err)
 	}
@@ -97,10 +104,10 @@ func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*J
 	if err != nil {
 		return nil, fmt.Errorf("new job id: %w", err)
 	}
-	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Enabled: true}
+	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Profile: profile, Enabled: true}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at, max_attempts, base_backoff, max_backoff, stall_timeout)
-		VALUES (?, ?, ?, ?, ?, 1, ?, 1, '10s', '10m', '5m')`, j.ID, name, spec, prompt, deliver, now())
+		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at, max_attempts, base_backoff, max_backoff, stall_timeout, profile)
+		VALUES (?, ?, ?, ?, ?, 1, ?, 1, '10s', '10m', '5m', ?)`, j.ID, name, spec, prompt, deliver, now(), profile)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +129,7 @@ func (s *Store) Remove(ctx context.Context, id string) error {
 // List returns all jobs.
 func (s *Store) List(ctx context.Context) (out []Job, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout, profile
 		FROM jobs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -145,7 +152,7 @@ func (s *Store) List(ctx context.Context) (out []Job, err error) {
 // Get loads one job.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	return scanJob(s.db.QueryRowContext(ctx, `
-		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout, profile
 		FROM jobs WHERE id = ?`, id))
 }
 
@@ -172,7 +179,7 @@ func scanJob(row rowScanner) (*Job, error) {
 	var j Job
 	var enabled int
 	var lastRun, created, nextRetry, base, max, stall string
-	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.Prompt, &j.Deliver, &enabled, &lastRun, &j.LastStatus, &created, &j.Attempt, &nextRetry, &j.MaxAttempts, &base, &max, &stall)
+	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.Prompt, &j.Deliver, &enabled, &lastRun, &j.LastStatus, &created, &j.Attempt, &nextRetry, &j.MaxAttempts, &base, &max, &stall, &j.Profile)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("job not found")
 	}
@@ -217,6 +224,13 @@ type Runner struct {
 	Deliverer Deliverer
 	Log       *slog.Logger
 
+	// AgentsByProfile maps named agent profiles to pre-built agents (#71).
+	// When a job sets Profile and this map is non-nil, the matching agent is
+	// used; an unknown profile errors rather than falling back to Agent.
+	// When the map is nil, Profile is ignored and Agent is always used
+	// (tests and partial wiring).
+	AgentsByProfile map[string]*agent.Agent
+
 	// Observability records cron agent runs when configured.
 	Observability *observability.Service
 }
@@ -229,6 +243,20 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 // RunAttempt executes one numbered attempt. Retries add context to the
 // prompt while the first attempt remains byte-for-byte compatible.
 func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, error) {
+	a := r.Agent
+	if j.Profile != "" {
+		if r.AgentsByProfile != nil {
+			if p, ok := r.AgentsByProfile[j.Profile]; ok && p != nil {
+				a = p
+			} else {
+				return "", fmt.Errorf("cron: unknown profile %q", j.Profile)
+			}
+		}
+	}
+	if a == nil {
+		return "", fmt.Errorf("cron: no agent configured")
+	}
+
 	policy := RetryPolicy{MaxAttempts: j.MaxAttempts, BaseBackoff: j.BaseBackoff, MaxBackoff: j.MaxBackoff, StallTimeout: j.StallTimeout}.normalized()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -278,6 +306,9 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		log = slog.Default()
 	}
 	log = log.With("session_id", sess.ID, "job_id", j.ID)
+	if j.Profile != "" {
+		log = log.With("profile", j.Profile)
+	}
 	log.Info("cron run started")
 
 	var runID string
@@ -302,7 +333,7 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	}()
 
 	runCtx = agent.WithSession(runCtx, sess.ID)
-	out, runErr := r.Agent.Run(runCtx, history, agent.Hooks{
+	out, runErr := a.Run(runCtx, history, agent.Hooks{
 		OnText:      func(string) { pulse() },
 		OnToolStart: func(llm.ToolUse) { pulse() },
 		OnToolDone:  func(llm.ToolUse, llm.ToolResult) { pulse() },
@@ -327,12 +358,12 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	}
 
 	// Reflect cron sessions when the job completes (#59).
-	if r.Sessions != nil && r.Agent != nil && r.Agent.Provider != nil {
-		model := r.Agent.Model
-		if r.Agent.UtilityModel != "" {
-			model = r.Agent.UtilityModel
+	if r.Sessions != nil && a.Provider != nil {
+		model := a.Model
+		if a.UtilityModel != "" {
+			model = a.UtilityModel
 		}
-		if summary, err := session.Reflect(ctx, r.Agent.Provider, out, session.ReflectOptions{Model: model}); err == nil && summary != "" {
+		if summary, err := session.Reflect(ctx, a.Provider, out, session.ReflectOptions{Model: model}); err == nil && summary != "" {
 			_ = r.Sessions.SetSummary(ctx, sess.ID, summary)
 		}
 	}
@@ -464,7 +495,7 @@ func (s *Scheduler) reconcile(ctx context.Context, c *cron.Cron) error {
 // sameDefinition reports whether two snapshots of a job would schedule
 // and execute identically (run bookkeeping like LastRun is ignored).
 func sameDefinition(a, b Job) bool {
-	return a.Cron == b.Cron && a.Name == b.Name && a.Prompt == b.Prompt && a.Deliver == b.Deliver
+	return a.Cron == b.Cron && a.Name == b.Name && a.Prompt == b.Prompt && a.Deliver == b.Deliver && a.Profile == b.Profile
 }
 
 // registeredIDs returns the ids of jobs currently held by the cron set.

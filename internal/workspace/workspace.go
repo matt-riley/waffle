@@ -98,6 +98,15 @@ type Manager struct {
 	// Hooks are host-configured lifecycle commands (#54). Merged with
 	// repo-declared hooks from WAFFLE.md when present.
 	Hooks hooks.Config
+	// IdleTimeout is the host idle duration; repo policy may only shorten it (#53).
+	IdleTimeout time.Duration
+	// PolicyCache reloads host-side WAFFLE.md by mtime when Root is set (#53).
+	// Container workspaces load policy via cat /work/repo; this is for tests
+	// and host-path binds.
+	PolicyCache *repopolicy.Cache
+	// lastPolicy is the most recently applied repo policy for this manager
+	// (inspectable in tests; chat/intake also receive the Policy return value).
+	lastPolicy *repopolicy.Policy
 
 	// ensureOnce ensures the active-repo index is created only once per
 	// Manager (process lifetime) to avoid repeated DDL in hot path.
@@ -242,6 +251,39 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		}
 	}
 
+	// Repo policy: present-but-unparsable is fatal at open (#53). Applies
+	// tighten-only egress/idle/hooks before after_create runs.
+	prevEgress := m.Egress
+	if _, err := m.loadAndApplyRepoPolicy(ctx, client); err != nil {
+		_ = client.Close()
+		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		m.revokeSession(sess.ID)
+		return nil, nil, err
+	}
+	// If policy tightened egress after the clone, restart the container so
+	// the running network posture matches (clone may have needed bridge).
+	if egressNetwork(prevEgress) != egressNetwork(m.Egress) {
+		_ = client.Close()
+		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+			_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+			m.revokeSession(sess.ID)
+			return nil, nil, fmt.Errorf("restart for policy egress: %w", err)
+		}
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+			_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+			m.revokeSession(sess.ID)
+			return nil, nil, fmt.Errorf("restart for policy egress: %w", err)
+		}
+		client, err = m.newClient(ws)
+		if err != nil {
+			_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+			_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+			m.revokeSession(sess.ID)
+			return nil, nil, err
+		}
+	}
+
 	// after_create hooks run inside the container; failure marks the
 	// workspace failed and refuses to hand it out as usable (#54).
 	if res, err := m.runHook(ctx, client, hooks.AfterCreate, ws.ID, ws.SessionID); err != nil {
@@ -277,6 +319,16 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		return nil, nil, err
 	}
 	return ws, client, nil
+}
+
+// egressNetwork is the docker network mode implied by an egress posture.
+func egressNetwork(egress string) string {
+	switch egress {
+	case "full":
+		return "bridge"
+	default: // "", "none", "allowlist"
+		return "none"
+	}
 }
 
 func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
@@ -341,18 +393,91 @@ func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) 
 	return nil
 }
 
+// loadAndApplyRepoPolicy reads WAFFLE.md/AGENT.md from the container (or
+// PolicyCache when set), fails on unparsable content, and tightens manager
+// egress/idle/hooks (#53). Absent policy leaves manager settings unchanged.
+func (m *Manager) loadAndApplyRepoPolicy(ctx context.Context, client *sandbox.Client) (*repopolicy.Policy, error) {
+	if m.PolicyCache != nil {
+		p, err := m.PolicyCache.Get()
+		if err != nil {
+			return nil, fmt.Errorf("repo policy: %w", err)
+		}
+		if p != nil {
+			m.applyPolicy(p)
+		}
+		return p, nil
+	}
+	if client == nil {
+		return nil, nil
+	}
+	raw, err := m.bashOutput(ctx, client, "cat /work/repo/WAFFLE.md 2>/dev/null || cat /work/repo/AGENT.md 2>/dev/null || true")
+	if err != nil {
+		return nil, nil // best-effort read; missing file is fine
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	p, err := repopolicy.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("repo policy: %w", err)
+	}
+	m.applyPolicy(p)
+	return p, nil
+}
+
+// applyPolicy tightens host egress/idle and merges hooks from repo policy.
+// Tool allow/deny is applied by chat/intake callers (they own the tool policy).
+func (m *Manager) applyPolicy(p *repopolicy.Policy) {
+	if p == nil {
+		return
+	}
+	m.lastPolicy = p
+	if p.Egress != "" {
+		m.Egress = repopolicy.TightenEgress(m.Egress, p.Egress)
+	}
+	if p.IdleTimeout != "" {
+		if d, err := time.ParseDuration(p.IdleTimeout); err == nil {
+			m.IdleTimeout = repopolicy.TightenIdle(m.IdleTimeout, d)
+		}
+	}
+	repo := hooks.Config{
+		AfterCreate:  p.Hooks.AfterCreate,
+		BeforeRun:    p.Hooks.BeforeRun,
+		AfterRun:     p.Hooks.AfterRun,
+		BeforeRemove: p.Hooks.BeforeRemove,
+	}
+	if p.Hooks.Timeout != "" {
+		if d, err := time.ParseDuration(p.Hooks.Timeout); err == nil {
+			repo.Timeout = d
+		}
+	}
+	m.Hooks = hooks.Merge(m.Hooks, repo)
+}
+
+// LastPolicy returns the most recently applied repo policy, if any.
+func (m *Manager) LastPolicy() *repopolicy.Policy { return m.lastPolicy }
+
+// LoadRepoPolicy is the public entry for chat /repo and intake to load policy
+// from an open workspace client (or PolicyCache).
+func (m *Manager) LoadRepoPolicy(ctx context.Context, client *sandbox.Client) (*repopolicy.Policy, error) {
+	return m.loadAndApplyRepoPolicy(ctx, client)
+}
+
 // hookConfig merges host hooks with a repo-declared WAFFLE.md/AGENT.md, if readable
-// from the container at /work/repo.
+// from the container at /work/repo. After loadAndApplyRepoPolicy, m.Hooks already
+// includes repo hooks; still re-read so Resume/Close paths stay current.
 func (m *Manager) hookConfig(ctx context.Context, client *sandbox.Client) hooks.Config {
 	cfg := m.Hooks
+	if client == nil {
+		return cfg
+	}
 	raw, err := m.bashOutput(ctx, client, "cat /work/repo/WAFFLE.md 2>/dev/null || cat /work/repo/AGENT.md 2>/dev/null || true")
 	if err != nil || strings.TrimSpace(raw) == "" {
 		return cfg
 	}
 	p, err := repopolicy.Parse(raw)
 	if err != nil {
-		// Present-but-unparsable policy is fatal at open for sessions that
-		// load policy; for hooks merge we skip invalid repo hooks only.
+		// Open already failed on unparsable; at hook time keep host hooks only.
 		return cfg
 	}
 	repo := hooks.Config{
@@ -539,6 +664,12 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 	client, err := m.newClient(ws)
 	if err != nil {
+		return nil, nil, err
+	}
+	// Re-load repo policy on resume so mtime changes apply without serve
+	// restart (#53). Unparsable remains fatal.
+	if _, err := m.loadAndApplyRepoPolicy(ctx, client); err != nil {
+		_ = client.Close()
 		return nil, nil, err
 	}
 	if err := m.Touch(ctx, id); err != nil {

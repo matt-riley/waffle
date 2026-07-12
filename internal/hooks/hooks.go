@@ -69,6 +69,10 @@ type Result struct {
 	Err    error
 }
 
+// TimeoutFunc creates a child context that cancels after d. Defaults to
+// context.WithTimeout; tests may override for deterministic deadline simulation.
+var TimeoutFunc = context.WithTimeout
+
 // Executor runs a shell command inside the workspace container.
 type Executor interface {
 	// ExecBash runs cmd with a timeout and returns combined output.
@@ -83,7 +87,7 @@ func Run(ctx context.Context, ex Executor, cfg Config, p Point) Result {
 		return Result{Point: p}
 	}
 	timeout := cfg.TimeoutOrDefault()
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	runCtx, cancel := TimeoutFunc(ctx, timeout)
 	defer cancel()
 	out, isError, err := ex.ExecBash(runCtx, cmd, timeout)
 	res := Result{Point: p, Output: out}

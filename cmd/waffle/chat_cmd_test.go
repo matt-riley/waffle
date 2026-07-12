@@ -15,6 +15,7 @@ import (
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -209,5 +210,29 @@ func TestResolveAPIKeyRedactsEnvFallbackWithStore(t *testing.T) {
 	want := "Authorization: Bearer [redacted:openai/api-key]"
 	if got != want {
 		t.Fatalf("redact = %q, want %q", got, want)
+	}
+}
+
+func TestApplyCodeIntelCapsFiltersUnapproved(t *testing.T) {
+	// Empty requested → no extra denies.
+	pol := applyCodeIntelCaps(tool.Policy{}, nil)
+	if len(pol.Deny) != 0 {
+		t.Fatalf("empty caps should not deny: %v", pol.Deny)
+	}
+	// Repo selects two approved IDs + an executable-looking unknown → deny the rest.
+	pol = applyCodeIntelCaps(tool.Policy{}, []string{"code_find_symbol", "/bin/evil", "code_blast_radius"})
+	denied := map[string]bool{}
+	for _, d := range pol.Deny {
+		denied[d] = true
+	}
+	if denied["code_find_symbol"] || denied["code_blast_radius"] {
+		t.Fatalf("approved caps must not be denied: %v", pol.Deny)
+	}
+	if !denied["code_references"] || !denied["code_callers"] {
+		t.Fatalf("non-selected codeintel tools must be denied: %v", pol.Deny)
+	}
+	if denied["/bin/evil"] {
+		// Unapproved IDs are dropped by FilterCodeIntelCaps, not added as tool denies.
+		t.Fatalf("executable path must not become a tool name deny: %v", pol.Deny)
 	}
 }

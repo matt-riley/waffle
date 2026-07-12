@@ -75,16 +75,22 @@ func TestSpawnSubagentRejectsUnknownAndDisallowedProfile(t *testing.T) {
 }
 
 func TestSpawnSubagentProfileCannotWidenTools(t *testing.T) {
-	// Parent only has read_file; profile tries to allow bash — bash must not run.
+	// Parent only has read_file; profile tries to allow bash — bash must not run
+	// even if profile allow includes it (tighten-only intersect with parent toolbox).
 	ran := false
 	bash := namedTool{n: "bash", run: func() { ran = true }}
-	// Parent toolbox deliberately omits bash.
 	parentTB := tool.NewRegistry(namedTool{n: "read_file"})
-	// Child profile allow includes bash, but parent tools don't have it.
+	var offered []string
+	calls := 0
 	tl := SubagentTool{
 		Provider: &recordingProvider{onComplete: func(req llm.Request) llm.Response {
-			// Ask for bash — should be denied by restrict/unknown.
-			if len(req.Tools) == 1 {
+			calls++
+			if calls == 1 {
+				offered = offered[:0]
+				for _, d := range req.Tools {
+					offered = append(offered, d.Name)
+				}
+				// First turn: ask for bash — must fail as unknown/not permitted.
 				return llm.Response{
 					StopReason: llm.StopToolUse,
 					Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
@@ -105,8 +111,6 @@ func TestSpawnSubagentProfileCannotWidenTools(t *testing.T) {
 			"evil": {Tools: tool.Policy{Allow: []string{"bash", "read_file"}}},
 		},
 	}
-	// Attach bash only on a different toolbox would be widening — profile allow
-	// without parent def means bash is unknown.
 	_ = bash
 	out, err := tl.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"evil"}`))
 	if err != nil {
@@ -115,9 +119,33 @@ func TestSpawnSubagentProfileCannotWidenTools(t *testing.T) {
 	if ran {
 		t.Fatal("bash must not run under parent-restricted tools")
 	}
-	if !strings.Contains(out, "ok") && !strings.Contains(out, "error") {
-		// Either denied tool result then done, or failed handoff — both fine.
+	for _, n := range offered {
+		if n == "bash" {
+			t.Fatalf("bash must not appear in child tool defs; offered=%v", offered)
+		}
+	}
+	if !strings.Contains(out, "ok") && !strings.Contains(out, "error") && !strings.Contains(out, "unknown") {
 		t.Logf("out=%q", out)
+	}
+}
+
+func TestSpawnSubagentAllowedChildSet(t *testing.T) {
+	// allowed child set: only listed profiles may be spawned.
+	tl := SubagentTool{
+		Provider: oneShotProvider{reply: "ok"},
+		Tools:    tool.NewRegistry(),
+		Model:    "m",
+		Profiles: map[string]ChildProfile{
+			"reviewer": {System: "r"},
+			"hacker":   {System: "h"},
+		},
+		AllowedProfiles: []string{"reviewer"},
+	}
+	if _, err := tl.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"reviewer"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tl.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"hacker"}`)); err == nil {
+		t.Fatal("hacker not in allowed set")
 	}
 }
 

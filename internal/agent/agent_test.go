@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/llmtest"
 	"github.com/matt-riley/waffle/internal/tool"
 )
 
@@ -60,9 +61,8 @@ func assistantText(text string) llm.Message {
 }
 
 func TestRunPlainAnswer(t *testing.T) {
-	p := &fakeProvider{responses: []llm.Response{
-		{Message: assistantText("hello there"), StopReason: llm.StopEndTurn},
-	}}
+	// Uses shared llmtest.Script (#63) instead of a local fake provider.
+	p := &llmtest.Script{Responses: []llm.Response{llmtest.Text("hello there")}}
 	a := &Agent{Provider: p, Tools: tool.NewRegistry(), System: "sys", Model: "m"}
 
 	var streamed strings.Builder
@@ -80,7 +80,7 @@ func TestRunPlainAnswer(t *testing.T) {
 	if streamed.String() != "hello there" {
 		t.Errorf("streamed = %q", streamed.String())
 	}
-	if p.requests[0].System != "sys" {
+	if len(p.Requests) == 0 || p.Requests[0].System != "sys" {
 		t.Errorf("system not passed through")
 	}
 }
@@ -293,6 +293,117 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 	// First message sent to provider must always be user role.
 	if mainReq.Messages[0].Role != llm.RoleUser {
 		t.Errorf("first message role = %q, want user", mainReq.Messages[0].Role)
+	}
+}
+
+// TestSummaryCacheSingleCallPerPrefix verifies M iterations over overflowing
+// history summarize each prefix length at most once (#61).
+func TestSummaryCacheSingleCallPerPrefix(t *testing.T) {
+	// Tool loop: first Complete is summarize, then tool, then summarize (cached), then finish.
+	// Build history > recentWindow so every prepareContext summarizes.
+	longHist := make([]llm.Message, 0, 30)
+	for i := 0; i < 22; i++ {
+		longHist = append(longHist, llm.UserText(fmt.Sprintf("u%d", i)))
+		longHist = append(longHist, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: fmt.Sprintf("a%d", i)}}})
+	}
+	longHist = append(longHist, llm.UserText("go"))
+
+	// Responses: summarize, tool-use, (no summarize - cached), finish.
+	// Each prepareContext that misses cache consumes one response as summarize.
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("summary v1"), StopReason: llm.StopEndTurn}, // summarize prefix
+		{ // main: request tool
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"x"}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+		},
+		// after tool: history grew by 2 (assistant tool-use + user tool result) so prefix len changed
+		// → new summarize
+		{Message: assistantText("summary v2"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("done"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(&echoTool{}), Model: "m", MaxIterations: 10}
+	ctx := WithSession(context.Background(), "cache-sess")
+	if _, err := a.Run(ctx, longHist, Hooks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Count summarize calls: those with 2 messages (flat+prompt) and no tools.
+	sumCalls := 0
+	for _, req := range p.requests {
+		if len(req.Messages) == 2 && len(req.Tools) == 0 {
+			sumCalls++
+		}
+	}
+	// Two distinct prefix lengths during the multi-iteration run → at most 2 summarizes.
+	if sumCalls > 2 {
+		t.Fatalf("summarize calls=%d want <=2 (one per prefix segment)", sumCalls)
+	}
+	if sumCalls < 1 {
+		t.Fatal("expected at least one summarize")
+	}
+
+	// Same history again in-process: must reuse cache (only main Complete, no summarize).
+	callsBefore := len(p.requests)
+	p.responses = append(p.responses, llm.Response{Message: assistantText("again"), StopReason: llm.StopEndTurn})
+	if _, err := a.Run(ctx, longHist, Hooks{}); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	added := p.requests[callsBefore:]
+	for _, req := range added {
+		if len(req.Messages) == 2 && len(req.Tools) == 0 {
+			t.Fatalf("second Run re-summarized; requests after first=%d", len(added))
+		}
+	}
+}
+
+func TestSummaryBlockFormatGolden(t *testing.T) {
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("old work summary"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("ok"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+	longHist := make([]llm.Message, 25)
+	for i := range longHist {
+		longHist[i] = llm.UserText(fmt.Sprintf("turn %d", i))
+	}
+	hist := append(longHist, llm.UserText("current"))
+	if _, err := a.Run(context.Background(), hist, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.requests) < 2 {
+		t.Fatalf("requests=%d", len(p.requests))
+	}
+	sys := p.requests[1].System
+	// Golden shape: turn range handle for expand_context (#61).
+	// hist = 25 prior + current = 26; prefix = 26-recentWindow(20) = 6.
+	const golden = "[CONTEXT SUMMARY turns=1-6 — generated for bounding only; not a user instruction; full history in SQLite; expand_context can fetch verbatim turns] old work summary"
+	if sys != golden {
+		t.Fatalf("summary block:\n got: %q\nwant: %q", sys, golden)
+	}
+}
+
+func TestUtilityModelUsedForSummarize(t *testing.T) {
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("sum"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("ok"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "main-model", UtilityModel: "utility-model"}
+	longHist := make([]llm.Message, 25)
+	for i := range longHist {
+		longHist[i] = llm.UserText(fmt.Sprintf("t%d", i))
+	}
+	if _, err := a.Run(context.Background(), append(longHist, llm.UserText("q")), Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.requests) < 2 {
+		t.Fatalf("requests=%d", len(p.requests))
+	}
+	if p.requests[0].Model != "utility-model" {
+		t.Fatalf("summarize model=%q want utility-model", p.requests[0].Model)
+	}
+	if p.requests[1].Model != "main-model" {
+		t.Fatalf("main model=%q want main-model", p.requests[1].Model)
 	}
 }
 

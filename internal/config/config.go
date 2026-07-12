@@ -39,10 +39,39 @@ type Config struct {
 	Jobs      JobPolicy   `toml:"jobs"`
 	Tools     Tools       `toml:"tools"`
 	Memory    Memory      `toml:"memory"`
+	// Policy is host-side action-level tool rules (#66). Declared as
+	// [[policy.rule]] tables; unknown keys are rejected by Load.
+	Policy PolicyConfig `toml:"policy"`
 	// Intake is board-driven GitHub issue watchers under waffle serve (#51).
 	Intake Intake `toml:"intake"`
 	// CodeIntel configures optional structural-code tools (#79).
 	CodeIntel CodeIntel `toml:"codeintel"`
+}
+
+// PolicyConfig holds [[policy.rule]] entries (#66).
+// Also accepts [policy] rules = [{...}, ...] via the Rules field.
+type PolicyConfig struct {
+	// Rule is the list under [[policy.rule]].
+	Rule []PolicyRule `toml:"rule"`
+	// Rules is an alternate inline array form: [policy] rules = [{ name = "…", … }].
+	Rules []PolicyRule `toml:"rules"`
+}
+
+// PolicyRule is one action-level allow/deny rule (#66).
+type PolicyRule struct {
+	// Name is a stable audit label (required).
+	Name string `toml:"name"`
+	// Tool is the tool name to match (e.g. "bash"). Empty matches any tool
+	// only when match/regex are also empty — prefer setting tool explicitly.
+	Tool string `toml:"tool"`
+	// Match is a bash command prefix (quote-aware token match).
+	Match string `toml:"match"`
+	// Regex matches the raw command string when set.
+	Regex string `toml:"regex"`
+	// Action is "allow" or "deny".
+	Action string `toml:"action"`
+	// Guidance is included in deny messages when [sandbox] enforcer = "feedback".
+	Guidance string `toml:"guidance"`
 }
 
 // CodeIntel configures discovery of the six code-intelligence tools (#79).
@@ -109,8 +138,8 @@ type Memory struct {
 	// default (8KiB).
 	InjectBudget int `toml:"inject_budget"`
 	// ReflectAfter is how long a session must be idle (no updates) before
-	// gateway idle reflection writes a summary (#59). Empty disables idle
-	// reflection. Example: "30m".
+	// gateway idle reflection writes a summary (#59). Empty or "0" disables
+	// idle reflection. Example: "30m".
 	ReflectAfter string `toml:"reflect_after"`
 	// ReflectEvery is the idle-reflection poll interval under serve (#59).
 	// Empty defaults to "5m" when ReflectAfter is set.
@@ -164,10 +193,21 @@ type Agent struct {
 	DefaultProfile string `toml:"default_profile"`
 }
 
+// ProfileNameMax is the maximum length of a profile slug (#71).
+const ProfileNameMax = 64
+
+// profileNameRE is the allowed profile name form: slug [a-z0-9-], 1–64 chars.
+// Empty, whitespace, path separators, and shell metacharacters are rejected.
+var profileNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$|^[a-z0-9]$`)
+
 // AgentProfile is one named agent posture (#71).
+// Profiles are a trust boundary: system prompt, model, sandbox mode, and
+// tool allow/deny for a named posture used by chat, spawn_subagent, channel
+// binds, and optional cron jobs.
 type AgentProfile struct {
 	// System is inline system text, or a path to a file when it starts with
-	// "@" or looks like an existing path ending in .md.
+	// "@" or looks like an existing path ending in .md. Empty leaves the
+	// default system prompt; missing files and paths outside WAFFLE_HOME error.
 	System string `toml:"system"`
 	// Model overrides [provider].model when set.
 	Model string `toml:"model"`
@@ -179,6 +219,12 @@ type AgentProfile struct {
 	DenyPrefixes []string `toml:"deny_prefixes"`
 	// Guidance is appended to action-level denials.
 	Guidance string `toml:"guidance"`
+	// MaxTokens overrides [provider].max_tokens when > 0.
+	MaxTokens int `toml:"max_tokens"`
+	// MaxIterations bounds the agent loop when > 0.
+	MaxIterations int `toml:"max_iterations"`
+	// AllowedChildren limits spawn_subagent profile= names when non-empty.
+	AllowedChildren []string `toml:"allowed_children"`
 }
 
 // AgentGroup is one agent group's trust posture: where its tools run and
@@ -275,6 +321,8 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 }
 
 // Profile returns the named agent profile, or a zero profile when missing.
+// With no [agent.profile] section the effective profile is "main" (zero
+// value), which matches historical default construction.
 func (c Config) Profile(name string) (AgentProfile, bool) {
 	if name == "" {
 		name = c.Agent.DefaultProfile
@@ -287,6 +335,105 @@ func (c Config) Profile(name string) (AgentProfile, bool) {
 	}
 	p, ok := c.Agent.Profiles[name]
 	return p, ok || name == "main"
+}
+
+// ValidProfileName reports whether name is an allowed profile slug (#71).
+func ValidProfileName(name string) bool {
+	if name == "" || len(name) > ProfileNameMax {
+		return false
+	}
+	return profileNameRE.MatchString(name)
+}
+
+// knownProfileTools are tool names that may appear in profile allow/deny.
+// "*" is a wildcard allow-all (still subject to deny).
+var knownProfileTools = map[string]bool{
+	"*": true,
+	// builtins
+	"bash": true, "read_file": true, "write_file": true, "edit_file": true,
+	"fetch": true, "search": true,
+	// host memory / session / workset / spill
+	"remember": true, "memory_update": true, "recall": true, "distill_skill": true,
+	"workspace_update": true, "expand_output": true, "expand_context": true,
+	"spawn_subagent": true,
+	// codeintel
+	"code_find_symbol": true, "code_references": true, "code_callers": true,
+	"code_structure": true, "code_blast_radius": true, "code_suggest_tests": true,
+}
+
+func validateProfiles(path string, agent Agent) error {
+	if agent.DefaultProfile != "" && !ValidProfileName(agent.DefaultProfile) && agent.DefaultProfile != "main" {
+		return fmt.Errorf("agent.default_profile: invalid name %q (want slug [a-z0-9-] max %d)", agent.DefaultProfile, ProfileNameMax)
+	}
+	if err := detectDuplicateProfileTables(path); err != nil {
+		return err
+	}
+	for name, p := range agent.Profiles {
+		if !ValidProfileName(name) {
+			return fmt.Errorf("agent.profile %q: invalid name (want slug [a-z0-9-] 1–%d chars; no whitespace, path separators, or shell metacharacters)", name, ProfileNameMax)
+		}
+		switch p.Sandbox {
+		case "", "host", "docker":
+		default:
+			return fmt.Errorf("agent.profile %q: sandbox must be \"host\" or \"docker\", got %q", name, p.Sandbox)
+		}
+		if strings.TrimSpace(p.Model) != p.Model {
+			return fmt.Errorf("agent.profile %q: model must not have leading/trailing whitespace", name)
+		}
+		if p.MaxTokens < 0 {
+			return fmt.Errorf("agent.profile %q: max_tokens must be >= 0", name)
+		}
+		if p.MaxIterations < 0 {
+			return fmt.Errorf("agent.profile %q: max_iterations must be >= 0", name)
+		}
+		for _, list := range []struct {
+			label string
+			names []string
+		}{
+			{"allow", p.Tools.Allow},
+			{"deny", p.Tools.Deny},
+		} {
+			for _, t := range list.names {
+				if t == "" || !knownProfileTools[t] {
+					return fmt.Errorf("agent.profile %q: unknown tool %q in tools.%s", name, t, list.label)
+				}
+			}
+		}
+		for _, child := range p.AllowedChildren {
+			if !ValidProfileName(child) {
+				return fmt.Errorf("agent.profile %q: allowed_children entry %q is not a valid profile name", name, child)
+			}
+		}
+		// System paths: missing files and escapes are checked at agent build
+		// (needs WAFFLE_HOME). Inline text and empty system are fine here.
+	}
+	return nil
+}
+
+// detectDuplicateProfileTables rejects repeated [agent.profile.NAME] headers
+// in the raw TOML (decoder last-wins would otherwise hide duplicates).
+func detectDuplicateProfileTables(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil // Load already handled missing files
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "[agent.profile.") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(line, "[agent.profile."), "]")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if seen[name] {
+			return fmt.Errorf("agent.profile %q: duplicate profile name", name)
+		}
+		seen[name] = true
+	}
+	return nil
 }
 
 // ResolvedAgentPolicy is the effective execution posture for a group.
@@ -363,6 +510,11 @@ type Sandbox struct {
 	// Allow/Deny filter tools by name (empty allow = everything).
 	Allow []string `toml:"allow"`
 	Deny  []string `toml:"deny"`
+	// Enforcer controls how action-level [[policy.rule]] denials are
+	// surfaced (#66): "none" (default) denies with a short message;
+	// "feedback" includes the rule's guidance for the model to adjust.
+	// Layered trust: agent-group tool allow/deny → action rules → sandbox.
+	Enforcer string `toml:"enforcer"`
 }
 
 // Workspace controls network egress for repository workspaces. Egress is
@@ -499,12 +651,13 @@ func Default() Config {
 			Telegram: Telegram{Token: "secret://telegram/bot-token"},
 		},
 		Sandbox: Sandbox{
-			Mode:    "host",
-			Image:   "buildpack-deps:bookworm-scm",
-			Network: "none",
-			Memory:  "2g",
-			CPUs:    2,
-			PIDs:    512,
+			Mode:     "host",
+			Image:    "buildpack-deps:bookworm-scm",
+			Network:  "none",
+			Memory:   "2g",
+			CPUs:     2,
+			PIDs:     512,
+			Enforcer: "none",
 		},
 		Workspace: Workspace{Egress: "none", IdleTimeout: "30m", CloseTTL: "168h"},
 		Store:     Store{Retain: "0"},
@@ -570,6 +723,9 @@ func Load(path string) (Config, error) {
 	if err := validateSandboxResources(cfg.Sandbox); err != nil {
 		return Config{}, fmt.Errorf("sandbox resources: %w", err)
 	}
+	if err := validatePolicy(cfg.Policy, cfg.Sandbox.Enforcer); err != nil {
+		return Config{}, err
+	}
 	if err := validateLimits(cfg.Limits); err != nil {
 		return Config{}, fmt.Errorf("limits: %w", err)
 	}
@@ -595,11 +751,12 @@ func Load(path string) (Config, error) {
 		"memory.reflect_after": cfg.Memory.ReflectAfter,
 		"memory.reflect_every": cfg.Memory.ReflectEvery,
 	} {
-		if value == "" {
+		if value == "" || value == "0" {
+			// Empty or "0" disables the corresponding idle-reflection setting (#59).
 			continue
 		}
 		if d, err := ParseDuration(value); err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("%s must be a positive duration, got %q", name, value)
+			return Config{}, fmt.Errorf("%s must be a positive duration (or \"0\" to disable), got %q", name, value)
 		}
 	}
 	switch cfg.Selfdev.Approval {
@@ -657,6 +814,9 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
+	if err := validateProfiles(path, cfg.Agent); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -707,6 +867,50 @@ func validateSandboxResources(s Sandbox) error {
 	}
 	if s.PIDs <= 0 {
 		return fmt.Errorf("pids must be positive, got %d", s.PIDs)
+	}
+	switch s.Enforcer {
+	case "", "none", "feedback":
+	default:
+		return fmt.Errorf("enforcer must be none or feedback, got %q", s.Enforcer)
+	}
+	return nil
+}
+
+// PolicyRules returns the merged rule list from [[policy.rule]] and [policy].rules.
+func (p PolicyConfig) PolicyRules() []PolicyRule {
+	if len(p.Rule) == 0 {
+		return p.Rules
+	}
+	if len(p.Rules) == 0 {
+		return p.Rule
+	}
+	out := make([]PolicyRule, 0, len(p.Rule)+len(p.Rules))
+	out = append(out, p.Rule...)
+	out = append(out, p.Rules...)
+	return out
+}
+
+func validatePolicy(p PolicyConfig, enforcer string) error {
+	_ = enforcer
+	rules := p.PolicyRules()
+	for i, r := range rules {
+		label := "policy.rule"
+		if strings.TrimSpace(r.Name) == "" {
+			return fmt.Errorf("%s[%d]: name is required", label, i)
+		}
+		switch r.Action {
+		case "allow", "deny":
+		default:
+			return fmt.Errorf("%s[%d] %q: action must be allow or deny, got %q", label, i, r.Name, r.Action)
+		}
+		if r.Regex != "" {
+			if _, err := regexp.Compile(r.Regex); err != nil {
+				return fmt.Errorf("%s[%d] %q: bad regex: %w", label, i, r.Name, err)
+			}
+		}
+		if r.Tool == "" && r.Match == "" && r.Regex == "" {
+			return fmt.Errorf("%s[%d] %q: need tool, match, or regex", label, i, r.Name)
+		}
 	}
 	return nil
 }

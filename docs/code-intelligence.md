@@ -62,12 +62,21 @@ language tooling. They must **not** inherit the gateway's ambient environment
 or secrets:
 
 - Prefer `execution = "sandbox"` (workspace-scoped).
-- `env` is an allowlist; secret-like names (`TOKEN`, `SECRET`, `API_KEY`,
+- `env` is an allowlist of variable **names**; MCP children receive only
+  `PATH` plus allowlisted values via `mcp.BuildProcessEnv` — never
+  `os.Environ()`. Secret-like names (`TOKEN`, `SECRET`, `API_KEY`,
   `WAFFLE_AGE_IDENTITY`, …) are rejected for codeintel tool providers.
 - Host execution requires explicit `[codeintel] allow_host_mcp = true`.
+- **MCP-in-container is not wired yet.** When `execution = "sandbox"`,
+  waffle does **not** launch the MCP process on the host; the agent uses
+  the in-process `go/parser` text-fallback tools instead until full
+  MCP-in-sandbox lands. Host MCP is the restricted-env executor above.
 
 Repo policy (`WAFFLE.md`) may only **select host-approved capability IDs**
-from this list; it cannot name arbitrary executables or widen launch posture.
+from this list (`FilterCodeIntelCaps` + `ApprovedCapability`); it cannot
+name arbitrary executables or widen launch posture. When
+`code_intel_caps` is set, non-selected codeintel tools are denied at
+workspace open / issue dispatch.
 
 ## Reference implementation
 

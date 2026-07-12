@@ -316,6 +316,81 @@ func TestFTSSurvivesSessionDelete(t *testing.T) {
 	}
 }
 
+// TestMemoryNotesMigrationOnPopulatedDB applies 0019 over a DB that already
+// has sessions/turns from earlier schema, then verifies the new table works (#60).
+func TestMemoryNotesMigrationOnPopulatedDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	// Open once so all current migrations apply (including 0019), then drop
+	// the memory_notes objects and un-record 0019 to simulate a pre-change DB
+	// that already holds live conversation data.
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO sessions (id, title, created_at, updated_at)
+		VALUES ('pre', 'pre-change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		VALUES ('pre', 1, 'user', '[]', 'docker networking turn pre-migration', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	// Tear down 0019 as if it had never run.
+	for _, stmt := range []string{
+		`DROP TRIGGER IF EXISTS memory_notes_ai`,
+		`DROP TRIGGER IF EXISTS memory_notes_ad`,
+		`DROP TRIGGER IF EXISTS memory_notes_au`,
+		`DROP TABLE IF EXISTS memory_notes_fts`,
+		`DROP TABLE IF EXISTS memory_notes`,
+		`DELETE FROM schema_migrations WHERE version = 19`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-open applies pending 0019 against the populated DB.
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after 0019: %v", err)
+	}
+	defer func() {
+		if err := s2.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	// Pre-existing turn still searchable.
+	var n int
+	if err := s2.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'docker'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("turns_fts hits = %d, want 1", n)
+	}
+	// New table is usable.
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO memory_notes (id, agent, body, raw_line, archived, pinned, note_date, created_at, updated_at)
+		VALUES ('n1', 'main', 'docker networking fact', '- note', 0, 0, '2026-07-01', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert memory_notes: %v", err)
+	}
+	if err := s2.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_notes_fts WHERE memory_notes_fts MATCH 'networking'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("memory_notes_fts hits = %d, want 1", n)
+	}
+}
+
 func TestFTSSurvivesTurnUpdate(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))

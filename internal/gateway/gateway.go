@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/matt-riley/waffle/internal/agent"
@@ -25,12 +26,21 @@ import (
 // Gateway wires adapters to the agent runtime.
 type Gateway struct {
 	// Agent remains the main group fallback for existing callers.
-	Agent    *agent.Agent
-	Agents   map[string]*agent.Agent
-	Entities *entity.Store
-	Sessions *session.Store
-	Adapters []channel.Adapter
-	Log      *slog.Logger
+	Agent  *agent.Agent
+	Agents map[string]*agent.Agent
+	// Profiles maps named agent profiles built against the main trust tier (#71).
+	// When a channel group binds a Profile and this map is non-nil, the
+	// matching agent is used; an unknown profile errors rather than falling
+	// back to the group agent. When the map is nil, Profile is ignored
+	// (tests and partial wiring).
+	Profiles map[string]*agent.Agent
+	// GroupProfiles maps profiles built against the multiparty "group" tier
+	// so a bind cannot widen tools past group policy (#71 / #34).
+	GroupProfiles map[string]*agent.Agent
+	Entities      *entity.Store
+	Sessions      *session.Store
+	Adapters      []channel.Adapter
+	Log           *slog.Logger
 
 	// Observability records gateway agent runs when configured.
 	Observability *observability.Service
@@ -47,13 +57,51 @@ type Gateway struct {
 }
 
 func (g *Gateway) agentFor(group string) (*agent.Agent, error) {
-	if selected := g.Agents[group]; selected != nil {
-		return selected, nil
+	if g.Agents != nil {
+		if selected := g.Agents[group]; selected != nil {
+			return selected, nil
+		}
 	}
 	if group == "main" && g.Agent != nil {
 		return g.Agent, nil
 	}
 	return nil, fmt.Errorf("gateway: no agent configured for group %s", group)
+}
+
+// agentForGroup resolves the agent for a channel group, applying a named
+// profile bind when set (#71). Multiparty groups use GroupProfiles so the
+// bound profile cannot widen tools past the restricted group tier (#34).
+func (g *Gateway) agentForGroup(group *entity.Group) (*agent.Agent, error) {
+	if group == nil {
+		return nil, fmt.Errorf("gateway: nil group")
+	}
+	selected, err := g.agentFor(group.AgentGroup)
+	if err != nil {
+		return nil, err
+	}
+	if group.Profile == "" {
+		return selected, nil
+	}
+	// Prefer tier-matched profile maps.
+	var tier map[string]*agent.Agent
+	switch group.AgentGroup {
+	case config.GroupGroup:
+		tier = g.GroupProfiles
+		if tier == nil {
+			// Fall back to main-tier profiles only when group map is unset
+			// (tests); production always wires GroupProfiles.
+			tier = g.Profiles
+		}
+	default:
+		tier = g.Profiles
+	}
+	if tier == nil {
+		return selected, nil
+	}
+	if p := tier[group.Profile]; p != nil {
+		return p, nil
+	}
+	return nil, fmt.Errorf("gateway: unknown profile %q", group.Profile)
 }
 
 type groupLock struct {
@@ -138,8 +186,15 @@ func (g *Gateway) adapter(name string) channel.Adapter {
 	return nil
 }
 
+func (g *Gateway) ensureGroups() {
+	if g.groups == nil {
+		g.groups = make(map[string]*groupLock)
+	}
+}
+
 func (g *Gateway) lockGroup(key string) func() {
 	g.mu.Lock()
+	g.ensureGroups()
 	l, ok := g.groups[key]
 	if !ok {
 		l = &groupLock{}
@@ -158,6 +213,145 @@ func (g *Gateway) lockGroup(key string) func() {
 		}
 		g.mu.Unlock()
 	}
+}
+
+// tryLockGroup acquires the conversation lock without blocking. ok is false
+// when another handler already holds it (#59 idle reflection).
+func (g *Gateway) tryLockGroup(key string) (unlock func(), ok bool) {
+	g.mu.Lock()
+	g.ensureGroups()
+	l, exists := g.groups[key]
+	if !exists {
+		l = &groupLock{}
+		g.groups[key] = l
+	}
+	l.refs++
+	g.mu.Unlock()
+
+	if !l.mu.TryLock() {
+		g.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(g.groups, key)
+		}
+		g.mu.Unlock()
+		return nil, false
+	}
+	return func() {
+		l.mu.Unlock()
+		g.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(g.groups, key)
+		}
+		g.mu.Unlock()
+	}, true
+}
+
+// TryLockSession locks the channel+chat group for a session when one is
+// mapped; sessions without a channel group need no lock. Returns ok=false
+// when the conversation is busy with message handling (#59).
+func (g *Gateway) TryLockSession(ctx context.Context, sessionID string) (unlock func(), ok bool) {
+	if g.Entities == nil || sessionID == "" {
+		return func() {}, true
+	}
+	ch, chatID, found, err := g.Entities.ChannelChatForSession(ctx, sessionID)
+	if err != nil || !found {
+		// CLI / unbound sessions: no group lock required.
+		return func() {}, true
+	}
+	return g.tryLockGroup(ch + "\x00" + chatID)
+}
+
+// ReflectSession writes a session summary under the conversation group lock
+// when the session maps to a channel group. Skips when locked (busy) or when
+// a summary is already present (at most once per quiet period) (#59).
+func (g *Gateway) ReflectSession(ctx context.Context, sessionID string) (wrote bool, err error) {
+	if g.Sessions == nil || sessionID == "" {
+		return false, nil
+	}
+	unlock, ok := g.TryLockSession(ctx, sessionID)
+	if !ok {
+		return false, nil
+	}
+	defer unlock()
+	return g.reflectSessionLocked(ctx, sessionID, nil, "", true)
+}
+
+// reflectSessionLocked assumes the caller holds the conversation lock (or none
+// is needed). history/provider/model may be provided by the turn path to avoid
+// reloading; empty history reloads from the store. When onlyIfEmpty is true,
+// an existing summary is left alone (idle / quiet-period path).
+func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, history []llm.Message, model string, onlyIfEmpty bool) (bool, error) {
+	log := g.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	if onlyIfEmpty {
+		sess, err := g.Sessions.Get(ctx, sessionID)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(sess.Summary) != "" {
+			return false, nil
+		}
+	}
+	var err error
+	if history == nil {
+		history, err = g.Sessions.Turns(ctx, sessionID)
+		if err != nil {
+			return false, err
+		}
+	}
+	if len(history) < 2 {
+		return false, nil
+	}
+	provider, reflectModel := g.providerForSession(ctx, sessionID)
+	if model != "" {
+		reflectModel = model
+	}
+	if provider == nil {
+		return false, nil
+	}
+	summary, err := session.Reflect(ctx, provider, history, session.ReflectOptions{Model: reflectModel})
+	if err != nil {
+		log.Warn("session reflection failed", "session_id", sessionID, "err", err)
+		return false, err
+	}
+	if summary == "" {
+		return false, nil
+	}
+	if err := g.Sessions.SetSummary(ctx, sessionID, summary); err != nil {
+		log.Warn("session summary persist failed", "session_id", sessionID, "err", err)
+		return false, err
+	}
+	return true, nil
+}
+
+func (g *Gateway) providerForSession(ctx context.Context, sessionID string) (llm.Provider, string) {
+	// Prefer the agent bound to the channel group (and profile, if set); fall back to main.
+	if g.Entities != nil {
+		ch, chatID, found, err := g.Entities.ChannelChatForSession(ctx, sessionID)
+		if err == nil && found {
+			if group, err := g.Entities.GroupFor(ctx, ch, chatID, ""); err == nil {
+				if selected, err := g.agentForGroup(group); err == nil && selected != nil {
+					model := selected.Model
+					if selected.UtilityModel != "" {
+						model = selected.UtilityModel
+					}
+					return selected.Provider, model
+				}
+			}
+		}
+	}
+	if g.Agent != nil {
+		model := g.Agent.Model
+		if g.Agent.UtilityModel != "" {
+			model = g.Agent.UtilityModel
+		}
+		return g.Agent.Provider, model
+	}
+	return nil, ""
 }
 
 func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
@@ -203,7 +397,7 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 		log.Error("agent run", "err", err)
 		detail := fmt.Sprintf("%v", err)
 		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID, agentGroupFor(msg)); groupErr == nil {
-			if selected, agentErr := g.agentFor(group.AgentGroup); agentErr == nil && selected.Redact != nil {
+			if selected, agentErr := g.agentForGroup(group); agentErr == nil && selected != nil && selected.Redact != nil {
 				detail = selected.Redact(detail)
 			}
 		}
@@ -246,7 +440,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	if err != nil {
 		return "", err
 	}
-	selected, err := g.agentFor(group.AgentGroup)
+	selected, err := g.agentForGroup(group)
 	if err != nil {
 		return "", err
 	}
@@ -263,6 +457,9 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		log = slog.Default()
 	}
 	log = log.With("session_id", group.SessionID)
+	if group.Profile != "" {
+		log = log.With("profile", group.Profile)
+	}
 	log.Info("gateway run started")
 
 	var runID string
@@ -307,10 +504,15 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		}
 	}
 	// Turn-count reflection for conversations that never go idle (#59).
+	// Already holds the conversation group lock via handle → converse.
 	if g.ReflectEveryTurns > 0 && runErr == nil {
 		if n, err := g.Sessions.TurnCount(ctx, group.SessionID); err == nil && n > 0 && n%g.ReflectEveryTurns == 0 {
-			if summary, err := session.Reflect(ctx, selected.Provider, newHistory, session.ReflectOptions{Model: selected.UtilityModel}); err == nil && summary != "" {
-				_ = g.Sessions.SetSummary(ctx, group.SessionID, summary)
+			model := selected.Model
+			if selected.UtilityModel != "" {
+				model = selected.UtilityModel
+			}
+			if _, err := g.reflectSessionLocked(ctx, group.SessionID, newHistory, model, false); err != nil {
+				log.Warn("reflect every turns", "err", err)
 			}
 		}
 	}

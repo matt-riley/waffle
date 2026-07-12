@@ -9,6 +9,7 @@ package selfdev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 )
 
 // Check is one doctor probe result.
@@ -183,11 +185,13 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	if cfg.UsesDocker() {
 		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
 		add("sandbox runner", err, info)
-		// Full docker round-trip (pull image + start container) is intentionally
-		// skipped: daemon/image availability varies and is slow. Operators can
-		// smoke with: docker run --rm -v … <image> /waffle runner … and the
-		// sandbox_stress queue test (see docs/plan.md, Sandboxing & IPC).
-		add("sandbox docker round-trip", nil, "skipped (manual/ops; queue stress via -tags=sandbox_stress)")
+		// Queue pair round-trip on the host filesystem (same IPC docker mode uses).
+		// Full container start is separate: we probe the daemon and, when available,
+		// a short `docker run --rm` of the configured image's true entrypoint probe.
+		qInfo, qErr := sandboxQueueRoundTrip()
+		add("sandbox queue round-trip", qErr, qInfo)
+		dInfo, dErr := sandboxDockerRoundTrip(cfg.Sandbox.Image)
+		add("sandbox docker round-trip", dErr, dInfo)
 	} else {
 		add("sandbox runner", nil, "host mode (skipped)")
 	}
@@ -213,6 +217,114 @@ func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
 		return "runner_binary " + resolved, nil
 	}
 	return "using the running binary (" + resolved + ")", nil
+}
+
+// sandboxQueueRoundTrip exercises the SQLite inbound/outbound queue pair that
+// docker sandboxes use for IPC (#29). Runs on the host filesystem without Docker.
+func sandboxQueueRoundTrip() (info string, err error) {
+	dir, err := os.MkdirTemp("", "waffle-doctor-queue-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	return sandboxDoctorQueue(dir)
+}
+
+type doctorPingTool struct{}
+
+func (doctorPingTool) Def() llm.Tool {
+	return llm.Tool{Name: "ping", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+func (doctorPingTool) Run(context.Context, json.RawMessage) (string, error) { return "pong", nil }
+
+func sandboxDoctorQueue(dir string) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		r := &sandbox.Runner{Tools: tool.NewRegistry(doctorPingTool{})}
+		done <- r.Serve(ctx, dir)
+	}()
+	// Give the runner a moment to create DBs.
+	time.Sleep(50 * time.Millisecond)
+	client, err := sandbox.NewClient(dir)
+	if err != nil {
+		cancel()
+		<-done
+		return "", fmt.Errorf("queue client: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+	execCtx, execCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer execCancel()
+	out, isErr, err := client.Exec(execCtx, "ping", json.RawMessage(`{}`))
+	cancel()
+	<-done
+	if err != nil || isErr || out != "pong" {
+		return "", fmt.Errorf("queue exec: out=%q isErr=%v err=%v", out, isErr, err)
+	}
+	return "inbound/outbound queue ok", nil
+}
+
+// sandboxDockerRoundTrip probes the Docker daemon and, when containers can
+// run, a bind-mount write/read round-trip (the filesystem path docker sandboxes
+// use for the SQLite queue; #29). A full waffle image pull is not required.
+func sandboxDockerRoundTrip(image string) (info string, err error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "docker not in PATH", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(out)), fmt.Errorf("docker daemon unavailable: %w", err)
+	}
+	ver := strings.TrimSpace(string(out))
+	if ver == "" {
+		ver = "unknown"
+	}
+	// Lightweight container probe + bind-mount visibility (VirtioFS / fuse-overlay).
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer probeCancel()
+	probe := exec.CommandContext(probeCtx, "docker", "run", "--rm", "--network", "none", "busybox:1.36", "true")
+	if pout, perr := probe.CombinedOutput(); perr != nil {
+		// Daemon is up but cannot run containers (permissions/image). Report soft info.
+		return fmt.Sprintf("daemon %s (container probe skipped: %v)", ver, strings.TrimSpace(string(pout))), nil
+	}
+	mountInfo, mountErr := sandboxDockerBindMountProbe(probeCtx)
+	if mountErr != nil {
+		// Container run worked; bind-mount failure is still a hard fail when
+		// docker mode is configured — queue IPC would not work.
+		return fmt.Sprintf("daemon %s; container ok; bind-mount: %v", ver, mountErr), mountErr
+	}
+	_ = image
+	return "daemon " + ver + "; container probe ok; " + mountInfo, nil
+}
+
+// sandboxDockerBindMountProbe writes from inside a container to a host temp
+// dir and reads it back on the host — the same host↔container visibility the
+// inbound/outbound SQLite queue depends on.
+func sandboxDockerBindMountProbe(ctx context.Context) (string, error) {
+	dir, err := os.MkdirTemp("", "waffle-doctor-bind-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	// Docker Desktop on macOS needs the path under a shared directory; temp
+	// dirs usually are. Marker is written only inside the container.
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none",
+		"-v", dir+":/q", "busybox:1.36", "sh", "-c", "echo waffle-bind-ok > /q/probe && sync")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("bind-mount write: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "probe"))
+	if err != nil {
+		return "", fmt.Errorf("host read after bind-mount write: %w", err)
+	}
+	if strings.TrimSpace(string(b)) != "waffle-bind-ok" {
+		return "", fmt.Errorf("bind-mount content = %q, want waffle-bind-ok", string(b))
+	}
+	return "bind-mount round-trip ok", nil
 }
 
 // Upgrade builds waffle from repoDir at ref, runs doctor against the new
@@ -298,18 +410,30 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 }
 
 func verifyRepo(ctx context.Context, repoDir string, stderr io.Writer) error {
-	steps := [][]string{{"go", "vet", "./..."}, {"go", "test", "-race", "./..."}}
-	if _, err := exec.LookPath("golangci-lint"); err == nil {
-		steps = append(steps, []string{"golangci-lint", "run"})
-	} else {
-		fmt.Fprintln(stderr, "warning: golangci-lint not installed; lint gate skipped")
-	}
-	for _, step := range steps {
+	for _, step := range verifySteps() {
+		if step[0] == "golangci-lint" {
+			if _, err := exec.LookPath("golangci-lint"); err != nil {
+				fmt.Fprintln(stderr, "warning: golangci-lint not installed; lint gate skipped")
+				continue
+			}
+		}
 		if err := run(ctx, repoDir, stderr, step[0], step[1:]...); err != nil {
 			return fmt.Errorf("verify: %s failed: %w", strings.Join(step, " "), err)
 		}
 	}
 	return nil
+}
+
+// verifySteps is the deterministic upgrade verification ladder (#63):
+// vet, tests, optional lint, then the zero-network eval harness. A broken
+// eval blocks upgrade the same way a failing test does.
+func verifySteps() [][]string {
+	return [][]string{
+		{"go", "vet", "./..."},
+		{"go", "test", "-race", "./..."},
+		{"golangci-lint", "run"},
+		{"go", "run", "./cmd/waffle", "eval"},
+	}
 }
 
 func rejectProtectedChanges(ctx context.Context, repoDir, ref string, protected []string) error {
@@ -322,7 +446,7 @@ func rejectProtectedChanges(ctx context.Context, repoDir, ref string, protected 
 	}
 	paths := append([]string{
 		"internal/selfdev", "internal/config", "cmd/waffle/selfdev_cmd.go",
-		"cmd/waffle/main.go", "internal/doctor", "evals",
+		"cmd/waffle/main.go", "internal/doctor", "evals", "internal/eval",
 	}, protected...)
 	for _, file := range strings.Fields(out) {
 		for _, prefix := range paths {

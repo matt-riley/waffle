@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +92,27 @@ func TestMemoryInjectBudget(t *testing.T) {
 	writeFile(t, path, "[memory]\ninject_budget = -1\n")
 	if _, err := Load(path); err == nil {
 		t.Fatal("negative inject_budget accepted")
+	}
+}
+
+func TestReflectAfterZeroDisables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[memory]\nreflect_after = \"0\"\nreflect_every = \"0\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Memory.ReflectAfter != "0" {
+		t.Fatalf("ReflectAfter = %q", cfg.Memory.ReflectAfter)
+	}
+	// "0" is a disable sentinel; positive durations still required for other values.
+	writeFile(t, path, "[memory]\nreflect_after = \"30m\"\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Memory.ReflectAfter != "30m" {
+		t.Fatalf("ReflectAfter = %q", cfg.Memory.ReflectAfter)
 	}
 }
 
@@ -286,6 +308,240 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func TestDefaultNoProfilesIsMain(t *testing.T) {
+	cfg := Default()
+	p, ok := cfg.Profile("")
+	if !ok {
+		t.Fatal("default profile should resolve")
+	}
+	if p.Model != "" || p.Sandbox != "" || len(p.Tools.Allow) != 0 {
+		t.Fatalf("zero main profile expected, got %+v", p)
+	}
+	// Missing file = defaults, same effective main posture.
+	loaded, err := Load(filepath.Join(t.TempDir(), "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.Profile("main"); !ok {
+		t.Fatal("main missing")
+	}
+}
+
+func TestProfilesLoadRegistryAndDenyOverridesAllowStar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.profile.reviewer]
+system = "review carefully"
+model = "claude-review"
+sandbox = "docker"
+max_tokens = 1000
+max_iterations = 20
+allowed_children = ["reader"]
+[agent.profile.reviewer.tools]
+allow = ["*"]
+deny = ["bash", "write_file"]
+
+[agent.profile.reader]
+system = "read only"
+[agent.profile.reader.tools]
+allow = ["read_file", "search"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Agent.Profiles) != 2 {
+		t.Fatalf("profiles = %d, want 2", len(cfg.Agent.Profiles))
+	}
+	rev, ok := cfg.Profile("reviewer")
+	if !ok || rev.Model != "claude-review" || rev.Sandbox != "docker" || rev.MaxTokens != 1000 || rev.MaxIterations != 20 {
+		t.Fatalf("reviewer = %+v ok=%v", rev, ok)
+	}
+	// Deny wins over allow=["*"] (policy semantics tested in tool package; config stores both).
+	if len(rev.Tools.Allow) != 1 || rev.Tools.Allow[0] != "*" || !contains(rev.Tools.Deny, "bash") {
+		t.Fatalf("reviewer tools = %+v", rev.Tools)
+	}
+}
+
+func TestProfileInvalidNamesRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	// Quoted invalid keys
+	cases := []string{
+		`[agent.profile."bad name"]` + "\nsystem = \"x\"\n",
+		`[agent.profile."../escape"]` + "\nsystem = \"x\"\n",
+		`[agent.profile."a;rm"]` + "\nsystem = \"x\"\n",
+		`[agent.profile."` + strings.Repeat("a", 65) + `"]` + "\nsystem = \"x\"\n",
+	}
+	for _, body := range cases {
+		writeFile(t, path, body)
+		if _, err := Load(path); err == nil {
+			t.Fatalf("accepted invalid profile:\n%s", body)
+		}
+	}
+	// Valid short slug
+	writeFile(t, path, "[agent.profile.ok]\nsystem = \"x\"\n")
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProfileDuplicateNamesRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.profile.dup]
+system = "a"
+[agent.profile.dup]
+system = "b"
+`)
+	// BurntSushi/toml rejects redefined table keys before our validator runs.
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("want error for duplicate profile table")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "already been defined") && !strings.Contains(msg, "duplicate") {
+		t.Fatalf("want duplicate/already-defined error, got %v", err)
+	}
+}
+
+func TestProfileUnknownToolRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.profile.reviewer.tools]
+allow = ["not_a_real_tool"]
+`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "reviewer") || !strings.Contains(err.Error(), "not_a_real_tool") {
+		t.Fatalf("want unknown tool with profile name, got %v", err)
+	}
+}
+
+func TestProfileNestedUnknownKeyRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.profile.reviewer]
+system = "x"
+typo_key = true
+`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("want unknown key error, got %v", err)
+	}
+}
+
+func TestProfileModelAndLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[provider]
+model = "default-model"
+utility_model = "cheap"
+max_tokens = 100
+
+[agent.profile.special]
+model = "special-model"
+max_tokens = 50
+max_iterations = 7
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := cfg.Profile("special")
+	if p.Model != "special-model" || p.MaxTokens != 50 || p.MaxIterations != 7 {
+		t.Fatalf("%+v", p)
+	}
+	// Utility model stays on provider, not profile.
+	if cfg.Provider.UtilityModel != "cheap" {
+		t.Fatal(cfg.Provider.UtilityModel)
+	}
+	// Negative rejected
+	writeFile(t, path, "[agent.profile.x]\nmax_tokens = -1\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("negative max_tokens accepted")
+	}
+}
+
+func TestIntakeConfigRejectsBadConcurrencyAndLabelRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `[[intake.github]]
+repo = "owner/name"
+label = "agent-ok"
+max_concurrency = 3
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Intake.GitHub[0].Label != "agent-ok" || cfg.Intake.GitHub[0].MaxConcurrency != 3 {
+		t.Fatalf("%+v", cfg.Intake.GitHub[0])
+	}
+	writeFile(t, path, `[[intake.github]]
+repo = "owner/name"
+max_concurrency = 0
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("max_concurrency 0 accepted")
+	}
+}
+
+func TestPolicyRulesParseAndUnknownKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+enforcer = "feedback"
+
+[[policy.rule]]
+name = "no-rm"
+tool = "bash"
+match = "rm -rf"
+action = "deny"
+guidance = "use safer cleanup"
+
+[[policy.rule]]
+name = "no-curl-http"
+tool = "bash"
+regex = "curl\\s+http://"
+action = "deny"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.Enforcer != "feedback" {
+		t.Fatalf("enforcer = %q", cfg.Sandbox.Enforcer)
+	}
+	if len(cfg.Policy.Rule) != 2 {
+		t.Fatalf("rules = %d", len(cfg.Policy.Rule))
+	}
+	if cfg.Policy.Rule[0].Name != "no-rm" || cfg.Policy.Rule[0].Action != "deny" {
+		t.Fatalf("%+v", cfg.Policy.Rule[0])
+	}
+	// Unknown key on a rule table is rejected.
+	writeFile(t, path, `
+[[policy.rule]]
+name = "x"
+tool = "bash"
+action = "deny"
+not_a_real_key = true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("unknown policy.rule key accepted")
+	}
+	// Bad action rejected.
+	writeFile(t, path, `
+[[policy.rule]]
+name = "x"
+tool = "bash"
+action = "maybe"
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("bad action accepted")
+	}
+	// Bad enforcer rejected.
+	writeFile(t, path, "[sandbox]\nenforcer = \"hard\"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("bad enforcer accepted")
+	}
 }
 
 func TestUsesDocker(t *testing.T) {

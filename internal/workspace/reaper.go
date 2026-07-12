@@ -33,13 +33,20 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 		return err
 	}
 	now := r.now()
+	idleTimeout := r.IdleTimeout
+	// Prefer manager idle when set (may be tightened by repo policy #53).
+	if r.Manager != nil && r.Manager.IdleTimeout > 0 {
+		if idleTimeout <= 0 || r.Manager.IdleTimeout < idleTimeout {
+			idleTimeout = r.Manager.IdleTimeout
+		}
+	}
 	for _, ws := range items {
 		last := ws.LastActive
 		if last.IsZero() {
 			last = ws.UpdatedAt
 		}
 		age := now.Sub(last)
-		if ws.Status == StatusOpen && r.IdleTimeout > 0 && age >= r.IdleTimeout {
+		if ws.Status == StatusOpen && idleTimeout > 0 && age >= idleTimeout {
 			if err := r.Manager.Idle(ctx, ws.ID); err != nil {
 				return fmt.Errorf("idle workspace %s: %w", ws.ID, err)
 			}

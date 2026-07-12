@@ -25,10 +25,21 @@ What's here, by capability:
   multi-tier `recall` (turns/summaries/notes/spills); `remember` /
   `memory_update`; working set via `workspace_update`; tool spills with
   `expand_output` / `expand_context`; `AGENT.md`/`USER.md`/`MEMORY.md`
-  workspace files; sessions summarized on exit (and idle reflection under
-  `serve` when `[memory] reflect_after` is set).
+  workspace files; sessions summarized on exit via the shared reflection
+  prompt. Under `serve`, idle reflection runs when
+  `[memory] reflect_after` is a positive duration (e.g. `"30m"`;
+  `"0"` disables); `reflect_every` is the poll interval and
+  `reflect_every_turns` also summarizes active gateway chats every N
+  turns. Reflection holds the per-conversation group lock and skips when
+  busy. `waffle session ls` shows stored summaries. Long histories are
+  summarized with an in-process prefix cache; summary blocks name turn
+  ranges for `expand_context`. Optional `[provider] utility_model` is
+  used for summarization/reflection.
 - **Skills** — agentskills.io-compatible `SKILL.md` dirs, invoked with
-  `/skill`; `distill_skill` writes new ones from what the agent works out.
+  `/skill`; `distill_skill` writes new ones **inactive** until
+  `waffle skills activate <name>`. `waffle learn` (or `skills audit`) mines
+  recurring tool failures and proposes constrained skill/memory/config-stub
+  edits under a held-in/held-out promotion rule.
 - **Gateway** — `waffle serve` with a Telegram adapter. Single-owner:
   unknown senders in **private** chats get a pairing code redeemable only
   via `waffle pair approve` on the host. **Group chats** are quieter and
@@ -54,7 +65,10 @@ What's here, by capability:
 
   `waffle doctor` fails fast if the path is missing or not absolute.
   Queue bind-mount stress: `go test -tags=sandbox_stress ./internal/sandbox -run Stress`
-  (see docs/plan.md). Zero-network agent checks: `waffle eval`.
+  (see docs/plan.md). Zero-network agent checks: `waffle eval` (also run by
+  `mise run test` and `waffle upgrade` verify). Results are recorded in
+  SQLite; `waffle eval --history` lists them. Live provider evals are opt-in
+  via `WAFFLE_EVAL_LIVE=1` and are skipped without a configured provider.
 
   Each sandbox and workspace container is limited by default to `2g` memory,
   two CPUs, and 512 processes, with `no-new-privileges`. Override these with
@@ -130,8 +144,11 @@ with the constrained runner and currently fails closed.
   and multi-party channel chats on the `group` tier — all three **deny host
   `bash` and memory writes by default**. Override only with an explicit
   `[agent.group.cron]` / `[agent.group.issue]` / `[agent.group.group]` tool
-  policy. See [docs/plan.md](docs/plan.md) for the extension-surface map
-  (MCP for tools, fork for code; no embedded plugin runtime).
+  policy. Action-level `[[policy.rule]]` tables match tool name + optional
+  bash prefix/regex with allow/deny and guidance; `[sandbox] enforcer`
+  is `none` (default) or `feedback` (include guidance in denials). Decisions
+  are audited in `policy_audit`. Bash matching is quote-aware but does **not**
+  expand shell indirection — see [docs/plan.md](docs/plan.md).
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.

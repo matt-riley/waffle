@@ -13,7 +13,11 @@ run = 'go build -ldflags "-X main.version=$(git describe --tags --always --dirty
 run = "go vet ./..."
 
 [tasks.test]
-run = "go test -race ./..."
+description = "Unit tests (includes internal/eval) and zero-network waffle eval (#63)"
+run = """
+go test -race ./...
+go run ./cmd/waffle eval
+"""
 
 [tasks.fmt]
 run = "gofmt -l . && test -z \"$(gofmt -l .)\""

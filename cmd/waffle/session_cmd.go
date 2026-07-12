@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 
+	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/session"
 )
 
@@ -64,11 +66,46 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 		fmt.Fprintln(stdout, "session deleted")
 		return nil
+	case "profile":
+		// waffle session profile <channel:chat|chat_id> <name|clear>
+		if len(args) != 3 {
+			return errors.New("usage: waffle session profile <channel:chat_id|chat_id> <profile-name>")
+		}
+		cfg, st, openErr := openConfigAndStore(ctx)
+		if openErr != nil {
+			return openErr
+		}
+		defer func() {
+			if cerr := st.Close(); err == nil {
+				err = cerr
+			}
+		}()
+		name := strings.TrimSpace(args[2])
+		if name == "" || name == "-" || name == "clear" {
+			name = ""
+		} else {
+			if !config.ValidProfileName(name) && name != "main" {
+				return fmt.Errorf("invalid profile name %q (slug [a-z0-9-] max %d)", name, config.ProfileNameMax)
+			}
+			if _, ok := cfg.Profile(name); !ok {
+				return fmt.Errorf("unknown agent profile %q", name)
+			}
+		}
+		entities := entity.New(st, session.New(st))
+		if setErr := entities.SetProfileByChat(ctx, args[1], name); setErr != nil {
+			return setErr
+		}
+		if name == "" {
+			fmt.Fprintf(stdout, "cleared profile on %s\n", args[1])
+		} else {
+			fmt.Fprintf(stdout, "bound profile %q to %s\n", name, args[1])
+		}
+		return nil
 	case "help", "-h", "--help":
-		fmt.Fprintln(stdout, "usage: waffle session ls | waffle session rm <id>")
+		fmt.Fprintln(stdout, "usage: waffle session ls | waffle session rm <id> | waffle session profile <chat> <name>")
 		return nil
 	default:
-		fmt.Fprintln(stderr, "usage: waffle session ls | waffle session rm <id>")
+		fmt.Fprintln(stderr, "usage: waffle session ls | waffle session rm <id> | waffle session profile <chat> <name>")
 		return fmt.Errorf("unknown session command %q", sub)
 	}
 }

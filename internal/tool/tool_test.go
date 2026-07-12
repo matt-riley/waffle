@@ -246,3 +246,53 @@ func TestTruncateKeepsHeadAndTail(t *testing.T) {
 		t.Fatalf("truncate produced %d bytes, want <= 50", len(got))
 	}
 }
+
+// TestHostBuiltinsReturnPastOutputLimit ensures Bash/ReadFile do not apply
+// OutputLimit truncation themselves — Agent.runOne spills then truncates (#69).
+func TestHostBuiltinsReturnPastOutputLimit(t *testing.T) {
+	// Bash: produce more than OutputLimit bytes of ASCII.
+	n := OutputLimit + 500
+	out, err := run(t, Bash{}, fmt.Sprintf(`{"command":"python3 -c \"import sys; sys.stdout.write('B'*%d)\""}`, n))
+	if err != nil {
+		// Fallback when python3 is missing (rare on CI/mac).
+		out, err = run(t, Bash{}, fmt.Sprintf(`{"command":"yes B | tr -d '\\n' | head -c %d"}`, n))
+		if err != nil {
+			t.Fatalf("bash large: %v", err)
+		}
+	}
+	if len(out) <= OutputLimit {
+		t.Fatalf("bash returned %d bytes, want > OutputLimit (%d) so spill can run", len(out), OutputLimit)
+	}
+	if len(out) > HostReturnCap {
+		t.Fatalf("bash returned %d bytes, want <= HostReturnCap (%d)", len(out), HostReturnCap)
+	}
+
+	// ReadFile: large temp file returns full content past OutputLimit.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	body := strings.Repeat("R", OutputLimit+800)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q}`, path))
+	if err != nil {
+		t.Fatalf("read_file large: %v", err)
+	}
+	if len(got) <= OutputLimit {
+		t.Fatalf("read_file returned %d bytes, want > OutputLimit", len(got))
+	}
+	if got != body {
+		t.Fatalf("read_file content mismatch: len=%d want %d", len(got), len(body))
+	}
+}
+
+func TestCapHostReturn(t *testing.T) {
+	if capHostReturn("short") != "short" {
+		t.Fatal("short modified")
+	}
+	huge := strings.Repeat("H", HostReturnCap+100)
+	got := capHostReturn(huge)
+	if len(got) != HostReturnCap {
+		t.Fatalf("cap len=%d want %d", len(got), HostReturnCap)
+	}
+}

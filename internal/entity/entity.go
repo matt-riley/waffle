@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/id"
@@ -45,7 +46,9 @@ type Group struct {
 	Channel    string
 	ChatID     string
 	AgentGroup string
-	SessionID  string
+	// Profile is an optional named agent profile (#71). Empty uses default.
+	Profile   string
+	SessionID string
 }
 
 // Store persists the entity model.
@@ -181,9 +184,9 @@ func (s *Store) Approve(ctx context.Context, code, name string) (*Identity, erro
 func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string) (*Group, error) {
 	g := &Group{Channel: channel, ChatID: chatID}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, agent_group, session_id FROM channel_groups
+		SELECT id, agent_group, session_id, profile FROM channel_groups
 		WHERE channel = ? AND chat_id = ?`, channel, chatID).
-		Scan(&g.ID, &g.AgentGroup, &g.SessionID)
+		Scan(&g.ID, &g.AgentGroup, &g.SessionID, &g.Profile)
 	if err == nil {
 		return g, nil
 	}
@@ -201,8 +204,8 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string
 	g.AgentGroup = agentGroup
 	g.SessionID = sess.ID
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO channel_groups (channel, chat_id, agent_group, session_id, created_at)
-		VALUES (?, ?, ?, ?, ?)`, channel, chatID, g.AgentGroup, g.SessionID, now())
+		INSERT INTO channel_groups (channel, chat_id, agent_group, session_id, created_at, profile)
+		VALUES (?, ?, ?, ?, ?, '')`, channel, chatID, g.AgentGroup, g.SessionID, now())
 	if err != nil {
 		return nil, fmt.Errorf("create channel group: %w", err)
 	}
@@ -210,16 +213,63 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string
 	return g, nil
 }
 
+// SetProfile binds a named agent profile to a channel group (#71).
+// profile may be empty to clear. chat may be "channel:chat_id" or just chat_id
+// when unique.
+func (s *Store) SetProfile(ctx context.Context, channel, chatID, profile string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE channel_groups SET profile = ? WHERE channel = ? AND chat_id = ?`,
+		profile, channel, chatID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("no channel group for %s:%s", channel, chatID)
+	}
+	return nil
+}
+
+// SetProfileByChat sets profile when chat_id uniquely identifies a row.
+func (s *Store) SetProfileByChat(ctx context.Context, chatRef, profile string) error {
+	channel, chatID, ok := strings.Cut(chatRef, ":")
+	if ok && channel != "" && chatID != "" {
+		return s.SetProfile(ctx, channel, chatID, profile)
+	}
+	// chat-only: must be unique
+	var ch, id string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT channel, chat_id FROM channel_groups WHERE chat_id = ?`, chatRef).
+		Scan(&ch, &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("no channel group for chat %q", chatRef)
+	}
+	if err != nil {
+		return err
+	}
+	return s.SetProfile(ctx, ch, id, profile)
+}
+
+// ChannelChatForSession returns the channel and chat id bound to a session,
+// if any. Used by gateway reflection to take the same group lock as message
+// handling (#59).
+func (s *Store) ChannelChatForSession(ctx context.Context, sessionID string) (channel, chatID string, ok bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT channel, chat_id FROM channel_groups WHERE session_id = ?`, sessionID).Scan(&channel, &chatID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return channel, chatID, true, nil
+}
+
 // TargetForSession returns the channel delivery target associated with a
 // conversation session, if it has one.
 func (s *Store) TargetForSession(ctx context.Context, sessionID string) (string, bool, error) {
-	var channel, chatID string
-	err := s.db.QueryRowContext(ctx, `SELECT channel, chat_id FROM channel_groups WHERE session_id = ?`, sessionID).Scan(&channel, &chatID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
+	channel, chatID, ok, err := s.ChannelChatForSession(ctx, sessionID)
+	if err != nil || !ok {
+		return "", ok, err
 	}
 	return channel + ":" + chatID, true, nil
 }

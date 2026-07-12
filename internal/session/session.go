@@ -23,11 +23,23 @@ var ErrNotFound = errors.New("session not found")
 // Store persists sessions and turns.
 type Store struct {
 	db *sql.DB
+	// Now, when set, freezes the clock for recency ranking and timestamps
+	// (tests: equal-relevance hits prefer the newer turn under a fixed now).
+	Now func() time.Time
 }
 
 // New wraps an opened waffle store.
 func New(s *store.Store) *Store { return &Store{db: s.DB} }
 func (s *Store) DB() *sql.DB    { return s.db }
+
+func (s *Store) clock() time.Time {
+	if s != nil && s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Store) nowStr() string { return s.clock().Format(time.RFC3339Nano) }
 
 // Session is one conversation.
 type Session struct {
@@ -38,8 +50,6 @@ type Session struct {
 	UpdatedAt time.Time
 }
 
-func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
-
 // Create starts a new session.
 func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
 	idstr, err := id.NewSession()
@@ -47,7 +57,7 @@ func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
 		return nil, fmt.Errorf("new session id: %w", err)
 	}
 	sess := &Session{ID: idstr, Title: title}
-	ts := now()
+	ts := s.nowStr()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)`,
 		sess.ID, sess.Title, ts, ts)
@@ -60,14 +70,14 @@ func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
 // SetTitle names a session (typically from its first user message).
 func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`, title, now(), id)
+		`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`, title, s.nowStr(), id)
 	return err
 }
 
 // SetSummary records the reflection pass's summary.
 func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`, summary, now(), id)
+		`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`, summary, s.nowStr(), id)
 	return err
 }
 
@@ -148,7 +158,7 @@ func (s *Store) AppendTurn(ctx context.Context, sessionID string, msg llm.Messag
 	if err != nil {
 		return err
 	}
-	ts := now()
+	ts := s.nowStr()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -265,10 +275,13 @@ type Hit struct {
 	Summary   string
 	Snippet   string
 	CreatedAt time.Time
+	// Partial is true when query terms match but not as a contiguous phrase (#60).
+	Partial bool
 }
 
 // Delete removes a session and its turns atomically. The foreign-key cascade
-// and FTS delete trigger keep the searchable index consistent.
+// and FTS delete trigger keep the searchable index consistent. Tool spills
+// and working-set rows for the session are also removed (#69 / #67).
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -277,6 +290,13 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id = ?`, id); err != nil {
 		return fmt.Errorf("delete session binding: %w", err)
+	}
+	// Spills: delete FTS rows via trigger after content delete.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tool_spills WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session spills: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM working_set_entries WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session working set: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
 	if err != nil {
@@ -376,14 +396,15 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 	for i, t := range terms {
 		ftsTerms[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"`
 	}
+	now := s.clock().Format(time.RFC3339)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.id, s.title, s.summary, s.updated_at,
 		       snippet(sessions_fts, 0, '[', ']', ' … ', 24)
 		FROM sessions_fts
 		JOIN sessions s ON s.rowid = sessions_fts.rowid
 		WHERE sessions_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?`, strings.Join(ftsTerms, " "), limit)
+		ORDER BY (rank + (strftime('%s', ?) - strftime('%s', s.updated_at)) / 86400.0 * 0.1)
+		LIMIT ?`, strings.Join(ftsTerms, " "), now, limit)
 	if err == nil {
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
@@ -442,6 +463,8 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 
 // Search runs a full-text query over all stored turns. The user-supplied
 // query is quoted term-by-term so FTS5 operator syntax can't error out.
+// Results blend FTS relevance with recency: equal-relevance hits prefer the
+// newer turn (#60).
 func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit, err error) {
 	terms := strings.Fields(query)
 	if len(terms) == 0 {
@@ -453,16 +476,19 @@ func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit
 	if limit <= 0 {
 		limit = 8
 	}
+	now := s.clock().Format(time.RFC3339)
+	// FTS5 rank is more negative for better matches; age (days) is added so
+	// older equal-relevance hits sort after newer ones.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.session_id, s.title, s.summary,
 		       snippet(turns_fts, 0, '[', ']', ' … ', 24),
-		       t.created_at
+		       t.created_at, t.text
 		FROM turns_fts
 		JOIN turns t ON t.id = turns_fts.rowid
 		JOIN sessions s ON s.id = t.session_id
 		WHERE turns_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?`, strings.Join(terms, " "), limit)
+		ORDER BY (rank + (strftime('%s', ?) - strftime('%s', t.created_at)) / 86400.0 * 0.1)
+		LIMIT ?`, strings.Join(terms, " "), now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
@@ -471,15 +497,18 @@ func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit
 			err = cerr
 		}
 	}()
+	qLower := strings.ToLower(strings.Join(strings.Fields(query), " "))
 	for rows.Next() {
 		var h Hit
-		var created string
-		if err := rows.Scan(&h.TurnID, &h.SessionID, &h.Title, &h.Summary, &h.Snippet, &created); err != nil {
+		var created, fullText string
+		if err := rows.Scan(&h.TurnID, &h.SessionID, &h.Title, &h.Summary, &h.Snippet, &created, &fullText); err != nil {
 			return nil, err
 		}
 		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
 			return nil, fmt.Errorf("parse hit created_at: %w", err)
 		}
+		// Partial match: terms hit but the query phrase is not contiguous.
+		h.Partial = qLower != "" && !strings.Contains(strings.ToLower(fullText), qLower)
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()

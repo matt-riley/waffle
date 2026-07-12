@@ -12,7 +12,9 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/spill"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 )
 
 func testWorkspace(t *testing.T) Workspace {
@@ -356,6 +358,227 @@ func TestRecallTool(t *testing.T) {
 	out, err = tool.Run(ctx, json.RawMessage(`{"query":"zanzibar","scope":"turns"}`))
 	if err != nil || !strings.Contains(out, "[turn]") {
 		t.Errorf("scoped recall = %q, %v", out, err)
+	}
+
+	// Invalid scope is a tool error, not a crash (#60).
+	if _, err := tool.Run(ctx, json.RawMessage(`{"query":"zanzibar","scope":"bogus"}`)); err == nil {
+		t.Fatal("expected invalid scope error")
+	} else if !strings.Contains(err.Error(), "invalid scope") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRecallNotesViaFTSAndArchive(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	notes := &NotesIndex{DB: st.DB}
+	ws := testWorkspace(t)
+	ws.Notes = notes
+
+	tool := RememberTool{WS: ws, Notes: notes}
+	if _, err := tool.Run(ctx, json.RawMessage(`{"note":"docker bridge networking quirk"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Forget moves to archive but stays FTS-searchable.
+	idOut, err := tool.Run(ctx, json.RawMessage(`{"note":"archived unique token xyzzy"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nid := extractReportedID(t, idOut)
+	upd := MemoryUpdateTool{WS: ws, Notes: notes, Provenance: Provenance{TrustClass: "owner_stated"}}
+	if _, err := upd.Run(ctx, json.RawMessage(`{"id":"`+nid+`","action":"forget"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	recall := RecallTool{Notes: notes, WS: ws}
+	got, err := recall.Run(ctx, json.RawMessage(`{"query":"docker networking","scope":"notes"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "docker") {
+		t.Fatalf("FTS notes miss live note: %q", got)
+	}
+	got, err = recall.Run(ctx, json.RawMessage(`{"query":"xyzzy","scope":"notes"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "xyzzy") || !strings.Contains(got, "archive") {
+		t.Fatalf("FTS notes miss archive: %q", got)
+	}
+}
+
+func TestRecallFindsDockerNetworkingTurn(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "sandbox networking")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendTurn(ctx, sess.ID, llm.UserText("fix docker networking so the container can reach the broker")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RecallTool{Sessions: sessions}.Run(ctx, json.RawMessage(`{"query":"docker networking"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, sess.ID) || !strings.Contains(strings.ToLower(out), "docker") {
+		t.Fatalf("regression recall docker networking: %q", out)
+	}
+}
+
+func TestRecallSummariesScope(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "ops retros")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Distinctive terms only in the session summary (not in turns).
+	if err := sessions.SetSummary(ctx, sess.ID, "diagnosed the flubber deployment rollback after canary"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RecallTool{Sessions: sessions}.Run(ctx, json.RawMessage(`{"query":"flubber deployment","scope":"summaries"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[summary]") {
+		t.Fatalf("expected [summary] hit, got %q", out)
+	}
+	if !strings.Contains(out, sess.ID) || !strings.Contains(strings.ToLower(out), "flubber") {
+		t.Fatalf("summary recall missing session/snippet: %q", out)
+	}
+	// scope=turns must not surface the summary-only match.
+	out, err = RecallTool{Sessions: sessions}.Run(ctx, json.RawMessage(`{"query":"flubber deployment","scope":"turns"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "[summary]") || strings.Contains(out, "flubber") {
+		t.Fatalf("turns scope should not return summary-only content: %q", out)
+	}
+}
+
+func TestRecallSpillsScope(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	sp := &spill.Store{DB: st.DB}
+	// Save requires content past OutputLimit; embed a unique FTS token.
+	big := strings.Repeat("x", tool.OutputLimit) + "\nUNIQUE_SPILL_RECALL_TOKEN\n" + strings.Repeat("y", 200)
+	sid, _, err := sp.Save(ctx, "sess-spill-recall", "bash", big)
+	if err != nil || sid == "" {
+		t.Fatalf("spill save: id=%q err=%v", sid, err)
+	}
+	out, err := RecallTool{Spills: sp}.Run(ctx, json.RawMessage(`{"query":"UNIQUE_SPILL_RECALL_TOKEN","scope":"spills"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[spill]") {
+		t.Fatalf("expected [spill] labeled hit, got %q", out)
+	}
+	if !strings.Contains(out, sid) && !strings.Contains(out, "sess-spill-recall") {
+		t.Fatalf("spill hit missing id/session: %q", out)
+	}
+	if !strings.Contains(out, "UNIQUE_SPILL_RECALL_TOKEN") {
+		t.Fatalf("spill snippet missing token: %q", out)
+	}
+}
+
+func TestRecallPartialMatchLabel(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	sessions := session.New(st)
+	sess, _ := sessions.Create(ctx, "")
+	// Terms match but not as the contiguous phrase "alpha omega".
+	if err := sessions.AppendTurn(ctx, sess.ID, llm.UserText("alpha sits in the middle before omega arrives")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RecallTool{Sessions: sessions}.Run(ctx, json.RawMessage(`{"query":"alpha omega","scope":"turns"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "partial:") {
+		t.Fatalf("expected partial label: %q", out)
+	}
+	// Contiguous phrase → match:
+	if err := sessions.AppendTurn(ctx, sess.ID, llm.UserText("discussed the alpha omega plan end-to-end")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = RecallTool{Sessions: sessions}.Run(ctx, json.RawMessage(`{"query":"alpha omega","scope":"turns"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "match:") {
+		t.Fatalf("expected match label for phrase: %q", out)
+	}
+}
+
+func TestNotesIndexSyncFromFiles(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	ws := testWorkspace(t)
+	// Pre-change: notes only on disk (no index rows yet).
+	if err := os.WriteFile(ws.MemoryPath(), []byte("- [id=pre001] 2026-01-01 [trust=owner_stated source=]: pre-migration fact about widgets\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx := &NotesIndex{DB: st.DB}
+	if err := idx.SyncWorkspace(ctx, DefaultAgent, ws); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := idx.Search(ctx, "widgets", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Body, "widgets") {
+		t.Fatalf("hits = %+v", hits)
 	}
 }
 

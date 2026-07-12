@@ -141,6 +141,72 @@ func TestMtimeReload(t *testing.T) {
 	}
 }
 
+// TestCacheGetReloadsOnMtime covers serve-without-restart policy refresh (#53).
+func TestCacheGetReloadsOnMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WAFFLE.md")
+	if err := os.WriteFile(path, []byte("---\ntools.deny: bash\n---\nsession-one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := NewCache(dir)
+	p1, err := cache.Get()
+	if err != nil || p1 == nil || p1.Body != "session-one" {
+		t.Fatalf("p1 = %#v err=%v", p1, err)
+	}
+	// Same mtime → cached pointer.
+	p1b, err := cache.Get()
+	if err != nil || p1b != p1 {
+		t.Fatalf("expected cache hit, got %#v err=%v", p1b, err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("---\ntools.deny: bash,remember\n---\nsession-two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := cache.Get()
+	if err != nil || p2 == nil {
+		t.Fatalf("p2 err=%v", err)
+	}
+	if p2.Body != "session-two" || len(p2.Tools.Deny) != 2 {
+		t.Fatalf("p2 not reloaded: %#v", p2)
+	}
+	if p2 == p1 {
+		t.Fatal("expected new policy pointer after mtime advance")
+	}
+}
+
+func TestTightenToolsCannotWidenHostDeny(t *testing.T) {
+	// Both directions: repo deny tightens; repo cannot re-enable host deny.
+	host := tool.Policy{Allow: []string{"bash", "read", "write", "fetch"}, Deny: []string{"remember"}}
+	got := TightenTools(host, ToolFilter{Deny: []string{"write"}, Allow: []string{"bash", "read", "write", "fetch", "remember"}})
+	if got.Permits("write") {
+		t.Error("repo deny of write should stick")
+	}
+	if got.Permits("remember") {
+		t.Error("repo allow must not re-enable host-denied remember")
+	}
+	if !got.Permits("bash") || !got.Permits("read") {
+		t.Error("untouched allows should remain")
+	}
+}
+
+func TestAbsentPolicyNoChange(t *testing.T) {
+	host := tool.Policy{Allow: []string{"bash"}, Deny: []string{"remember"}}
+	got := TightenTools(host, ToolFilter{})
+	if !got.Permits("bash") || got.Permits("remember") {
+		t.Fatalf("absent filter changed policy: %#v", got)
+	}
+	if g := TightenEgress("full", ""); g != "full" {
+		t.Fatalf("egress = %q", g)
+	}
+	hostIdle := 30 * time.Minute
+	if g := TightenIdle(hostIdle, 0); g != hostIdle {
+		t.Fatalf("idle = %v", g)
+	}
+	if p, err := Load(t.TempDir()); err != nil || p != nil {
+		t.Fatalf("missing file: %#v %v", p, err)
+	}
+}
+
 func TestFilterCodeIntelCaps(t *testing.T) {
 	approved := func(id string) bool {
 		return id == "code_find_symbol" || id == "code_blast_radius"

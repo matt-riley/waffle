@@ -24,6 +24,9 @@ func TestDistillWritesLoadableSkill(t *testing.T) {
 	if !strings.Contains(out, "release-cli") {
 		t.Errorf("out = %q", out)
 	}
+	if !strings.Contains(out, "inactive") {
+		t.Errorf("expected inactive notice, out = %q", out)
+	}
 
 	// Check the written SKILL.md directly (do not import skill — skill imports
 	// memory for audit and that creates a test import cycle).
@@ -39,11 +42,30 @@ func TestDistillWritesLoadableSkill(t *testing.T) {
 	if !strings.Contains(body, "bump version") {
 		t.Errorf("body missing: %q", body)
 	}
+	if !strings.Contains(body, "status: inactive") {
+		t.Errorf("expected inactive status in frontmatter: %q", body)
+	}
 
-	// Re-distilling updates in place.
+	// Re-distilling updates in place while inactive.
 	out, err = tl.Run(context.Background(), json.RawMessage(`{"name":"release-cli","description":"d","body":"1. new steps for release\n2. publish artifacts"}`))
 	if err != nil || !strings.Contains(out, "updated") {
 		t.Errorf("re-distill = %q, %v", out, err)
+	}
+}
+
+func TestDistillRefusesActiveOverwrite(t *testing.T) {
+	ws := testWorkspace(t)
+	path := filepath.Join(ws.SkillsDir(), "live", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: live\nstatus: active\n---\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := DistillTool{WS: ws}
+	_, err := tl.Run(context.Background(), json.RawMessage(`{"name":"live","description":"d","body":"step one of a real procedure that is long enough"}`))
+	if err == nil || !strings.Contains(err.Error(), "active") {
+		t.Fatalf("want active overwrite refusal, got %v", err)
 	}
 }
 

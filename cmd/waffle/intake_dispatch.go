@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/broker"
@@ -19,7 +18,24 @@ import (
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
+	"github.com/matt-riley/waffle/internal/workspace"
 )
+
+// issueRunSession is one open workspace used for a single issue dispatch.
+// Production uses a real container queue client; tests inject fakes (#51 e2e).
+type issueRunSession interface {
+	Workspace() *workspace.Workspace
+	QueueTools() tool.Toolbox
+	LoadRepoPolicy(ctx context.Context) (*repopolicy.Policy, error)
+	RunHook(ctx context.Context, point hooks.Point) (hooks.Result, error)
+	Close() error
+}
+
+// issueWorkspaceOpener opens (or resumes) a repo workspace for issue intake.
+type issueWorkspaceOpener interface {
+	Open(ctx context.Context, repo string) (issueRunSession, error)
+	CloseWorkspace(ctx context.Context, workspaceID string, force bool) error
+}
 
 // issueDispatcher opens a repo workspace and runs one issue on the restricted
 // issue agent tier (#51). Workspace tools execute inside the container.
@@ -33,48 +49,57 @@ type issueDispatcher struct {
 	brokerURL string
 	agent     *agent.Agent
 	log       *slog.Logger
+
+	// opener, when non-nil, replaces the production workspace.Manager path.
+	// Tests inject a fake so Dispatch can be exercised without Docker.
+	opener issueWorkspaceOpener
+}
+
+func (d *issueDispatcher) workspaceOpener() issueWorkspaceOpener {
+	if d.opener != nil {
+		return d.opener
+	}
+	return &prodIssueOpener{
+		cfg:       d.cfg,
+		st:        d.st,
+		broker:    d.broker,
+		brokerURL: d.brokerURL,
+	}
 }
 
 func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig, iss intake.Issue) (string, error) {
-	mgr := newWorkspaceManager(d.cfg, d.st, d.broker)
-	mgr.BrokerURL = d.brokerURL
-	ws, client, err := mgr.Open(ctx, watch.Repo)
+	run, err := d.workspaceOpener().Open(ctx, watch.Repo)
 	if err != nil {
 		return "", fmt.Errorf("open workspace: %w", err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = run.Close() }()
+
+	ws := run.Workspace()
 
 	// before_run: fatal on failure.
-	if res, err := mgr.RunHookFor(ctx, client, hooks.BeforeRun, ws.ID, ws.SessionID); err != nil {
+	if res, err := run.RunHook(ctx, hooks.BeforeRun); err != nil {
 		return "", err
 	} else if res.Output != "" {
 		d.log.Info("before_run hook", "output", res.Output)
 	}
 
-	// Repo policy may only tighten the issue-tier tool policy.
+	// Repo policy may only tighten the issue-tier tool policy; body is
+	// injected as untrusted data. Manager also applies egress/idle/hooks (#53).
 	hostPol := d.cfg.AgentPolicy(config.GroupIssue)
 	toolPol := tool.Policy{Allow: hostPol.Allow, Deny: hostPol.Deny}
 	var repoPrompt string
-	if raw, err := mgrBashCat(ctx, client, "/work/repo/WAFFLE.md"); err == nil && strings.TrimSpace(raw) != "" {
-		if p, perr := repopolicy.Parse(raw); perr != nil {
-			return "", fmt.Errorf("repo policy: %w", perr)
-		} else {
-			toolPol = repopolicy.TightenTools(toolPol, p.Tools)
-			repoPrompt = p.PromptBlock()
-		}
-	} else if raw, err := mgrBashCat(ctx, client, "/work/repo/AGENT.md"); err == nil && strings.TrimSpace(raw) != "" {
-		if p, perr := repopolicy.Parse(raw); perr != nil {
-			return "", fmt.Errorf("repo policy: %w", perr)
-		} else {
-			toolPol = repopolicy.TightenTools(toolPol, p.Tools)
-			repoPrompt = p.PromptBlock()
-		}
+	if p, perr := run.LoadRepoPolicy(ctx); perr != nil {
+		return "", perr
+	} else if p != nil {
+		toolPol = repopolicy.TightenTools(toolPol, p.Tools)
+		toolPol = applyCodeIntelCaps(toolPol, p.CodeIntelCaps)
+		repoPrompt = p.PromptBlock()
 	}
 
 	// Tools: workspace container queue + restricted issue agent tools.
 	// Memory write tools are already denied by GroupIssue policy.
 	baseTools := tool.Restrict(d.agent.Tools, toolPol)
-	runTools := tool.Restrict(tool.Combine(sandbox.NewQueueToolbox(client), baseTools), toolPol)
+	runTools := tool.Restrict(tool.Combine(run.QueueTools(), baseTools), toolPol)
 
 	sys := d.agent.System
 	sys += fmt.Sprintf("\n\nYou are working in a container workspace on %s at /work/repo.", ws.Repo)
@@ -105,7 +130,7 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	}
 
 	// after_run is best-effort.
-	if res, _ := mgr.RunHookFor(ctx, client, hooks.AfterRun, ws.ID, ws.SessionID); res.Err != nil {
+	if res, _ := run.RunHook(ctx, hooks.AfterRun); res.Err != nil {
 		d.log.Warn("after_run hook failed", "err", res.Err, "output", res.Output)
 	} else if res.Output != "" {
 		d.log.Info("after_run hook", "output", res.Output)
@@ -135,22 +160,59 @@ func (d *issueDispatcher) Cancel(ctx context.Context, claim intake.Claim) error 
 		// Best-effort: close any open workspace for the watched repo.
 		return nil
 	}
-	mgr := newWorkspaceManager(d.cfg, d.st, d.broker)
-	mgr.BrokerURL = d.brokerURL
-	_, err := mgr.Close(ctx, claim.WorkspaceID, true)
+	return d.workspaceOpener().CloseWorkspace(ctx, claim.WorkspaceID, true)
+}
+
+// prodIssueOpener is the production workspace path (Docker container + queue).
+type prodIssueOpener struct {
+	cfg       config.Config
+	st        *store.Store
+	broker    *broker.Broker
+	brokerURL string
+}
+
+func (o *prodIssueOpener) Open(ctx context.Context, repo string) (issueRunSession, error) {
+	mgr := newWorkspaceManager(o.cfg, o.st, o.broker)
+	mgr.BrokerURL = o.brokerURL
+	ws, client, err := mgr.Open(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return &prodIssueRun{ws: ws, client: client, mgr: mgr}, nil
+}
+
+func (o *prodIssueOpener) CloseWorkspace(ctx context.Context, workspaceID string, force bool) error {
+	mgr := newWorkspaceManager(o.cfg, o.st, o.broker)
+	mgr.BrokerURL = o.brokerURL
+	_, err := mgr.Close(ctx, workspaceID, force)
 	return err
 }
 
-func mgrBashCat(ctx context.Context, client *sandbox.Client, path string) (string, error) {
-	input := []byte(fmt.Sprintf(`{"command":%q}`, "cat "+path))
-	out, isError, err := client.Exec(ctx, "bash", input)
-	if err != nil {
-		return "", err
+type prodIssueRun struct {
+	ws     *workspace.Workspace
+	client *sandbox.Client
+	mgr    *workspace.Manager
+}
+
+func (r *prodIssueRun) Workspace() *workspace.Workspace { return r.ws }
+
+func (r *prodIssueRun) QueueTools() tool.Toolbox {
+	return sandbox.NewQueueToolbox(r.client)
+}
+
+func (r *prodIssueRun) LoadRepoPolicy(ctx context.Context) (*repopolicy.Policy, error) {
+	return r.mgr.LoadRepoPolicy(ctx, r.client)
+}
+
+func (r *prodIssueRun) RunHook(ctx context.Context, point hooks.Point) (hooks.Result, error) {
+	return r.mgr.RunHookFor(ctx, r.client, point, r.ws.ID, r.ws.SessionID)
+}
+
+func (r *prodIssueRun) Close() error {
+	if r.client == nil {
+		return nil
 	}
-	if isError {
-		return "", fmt.Errorf("%s", strings.TrimSpace(out))
-	}
-	return out, nil
+	return r.client.Close()
 }
 
 // ensureIssueAgent builds or returns the restricted issue-tier agent.

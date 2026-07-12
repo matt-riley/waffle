@@ -98,6 +98,32 @@ func TestGroupForCreatesOnceAndBindsSession(t *testing.T) {
 	}
 }
 
+func TestSetProfileOnChannelGroup(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	g, err := s.GroupFor(ctx, "telegram", "42", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Profile != "" {
+		t.Fatalf("default profile = %q", g.Profile)
+	}
+	if err := s.SetProfile(ctx, "telegram", "42", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.GroupFor(ctx, "telegram", "42", "")
+	if err != nil || again.Profile != "reviewer" {
+		t.Fatalf("after set = %+v %v", again, err)
+	}
+	if err := s.SetProfileByChat(ctx, "telegram:42", ""); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := s.GroupFor(ctx, "telegram", "42", "")
+	if err != nil || cleared.Profile != "" {
+		t.Fatalf("cleared = %+v %v", cleared, err)
+	}
+}
+
 func TestGroupForCreatesGroupChatOnRestrictedTier(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

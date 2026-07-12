@@ -4,21 +4,22 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
-	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
 )
 
 // ErrorPattern is a recurring tool-error signature found in turns (#65).
+// Prefer FailurePattern (with evidence session IDs) for new code.
 type ErrorPattern struct {
 	// Signature is a normalized error fingerprint.
 	Signature string
 	Count     int
 	// Samples are short example lines.
 	Samples []string
+	// SessionIDs are evidence sessions (populated when available).
+	SessionIDs []string
 }
 
 var (
@@ -31,60 +32,21 @@ var (
 )
 
 // MineToolErrors scans recent session turns for tool-error patterns (#65).
+// Thin adapter over MineFailurePatterns for older callers.
 func MineToolErrors(ctx context.Context, sessions *session.Store, sessionLimit int) ([]ErrorPattern, error) {
-	if sessions == nil {
-		return nil, fmt.Errorf("no session store")
-	}
-	if sessionLimit <= 0 {
-		sessionLimit = 20
-	}
-	list, err := sessions.List(ctx, sessionLimit)
+	fps, err := MineFailurePatterns(ctx, sessions, "", sessionLimit)
 	if err != nil {
 		return nil, err
 	}
-	counts := map[string]*ErrorPattern{}
-	for _, sess := range list {
-		turns, err := sessions.Turns(ctx, sess.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, m := range turns {
-			for _, b := range m.Blocks {
-				if b.Type != llm.BlockToolResult || b.ToolResult == nil {
-					continue
-				}
-				if !b.ToolResult.IsError && !strings.Contains(strings.ToLower(b.ToolResult.Content), "error:") {
-					continue
-				}
-				content := b.ToolResult.Content
-				sig, sample := fingerprintError(content)
-				if sig == "" {
-					continue
-				}
-				p := counts[sig]
-				if p == nil {
-					p = &ErrorPattern{Signature: sig}
-					counts[sig] = p
-				}
-				p.Count++
-				if len(p.Samples) < 3 {
-					p.Samples = append(p.Samples, sample)
-				}
-			}
+	out := make([]ErrorPattern, len(fps))
+	for i, p := range fps {
+		out[i] = ErrorPattern{
+			Signature:  p.Class,
+			Count:      p.Count,
+			Samples:    p.Samples,
+			SessionIDs: p.SessionIDs,
 		}
 	}
-	out := make([]ErrorPattern, 0, len(counts))
-	for _, p := range counts {
-		if p.Count >= 2 { // only recurring
-			out = append(out, *p)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count != out[j].Count {
-			return out[i].Count > out[j].Count
-		}
-		return out[i].Signature < out[j].Signature
-	})
 	return out, nil
 }
 

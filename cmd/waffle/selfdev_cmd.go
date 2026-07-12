@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -15,13 +16,24 @@ import (
 )
 
 // loadWorkspace opens the default workspace and its skills — shared by
-// chat, serve, and cron.
+// chat, serve, and cron. Only active skills are indexed (#65); inactive
+// distill/learn skills stay out of the system prompt until activated.
 func loadWorkspace() (memory.Workspace, []skill.Skill, error) {
+	return loadWorkspaceWithStore(nil)
+}
+
+// loadWorkspaceWithStore is loadWorkspace using skill_status overrides when st is set.
+func loadWorkspaceWithStore(st *store.Store) (memory.Workspace, []skill.Skill, error) {
 	ws, err := memory.Open(memory.DefaultAgent)
 	if err != nil {
 		return memory.Workspace{}, nil, err
 	}
-	skills, err := skill.Discover(ws.SkillsDir())
+	var skills []skill.Skill
+	if st != nil {
+		skills, err = skill.DiscoverActive(ws.SkillsDir(), st.DB)
+	} else {
+		skills, err = skill.DiscoverActive(ws.SkillsDir(), nil)
+	}
 	if err != nil {
 		return memory.Workspace{}, nil, err
 	}
@@ -124,16 +136,36 @@ func rollbackCmd(stdout io.Writer) error {
 // It uses the cron agent group so a manual `waffle cron run` matches the tier
 // the scheduler runs jobs under in `waffle serve` (restricted — host bash
 // denied by default), rather than previewing them with the owner's main tier.
-// cleanup stops any sandbox the agent started.
+// Named profiles from config are pre-built against the cron tier so Job.Profile
+// binds the same way as scheduled runs (#71). cleanup stops any sandboxes.
 func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store) (*schedule.Runner, func(), error) {
 	sessions := session.New(st)
 	ws, skills, err := loadWorkspace()
 	if err != nil {
 		return nil, func() {}, err
 	}
-	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron)
+	var cleanups []func()
+	cleanup := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+	a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron)
+	cleanups = append(cleanups, closer)
 	if err != nil {
 		return nil, cleanup, err
 	}
-	return &schedule.Runner{Agent: a, Sessions: sessions}, cleanup, nil
+	byProfile := make(map[string]*agent.Agent)
+	for name := range cfg.Agent.Profiles {
+		if name == "" || name == "main" {
+			continue
+		}
+		pa, pCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name)
+		cleanups = append(cleanups, pCloser)
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)
+		}
+		byProfile[name] = pa
+	}
+	return &schedule.Runner{Agent: a, AgentsByProfile: byProfile, Sessions: sessions}, cleanup, nil
 }

@@ -80,11 +80,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 
-	ws, skills, err := loadWorkspace()
+	ws, skills, err := loadWorkspaceWithStore(st)
 	if err != nil {
 		return err
 	}
-	agents, cronAgent, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
+	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
 	if err != nil {
 		cleanup()
 		return err
@@ -131,6 +131,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		wsManager.BindGitScope = serveBroker.BindGitRepo
 	}
 	idleTimeout := parseOptionalDuration(cfg.Workspace.IdleTimeout)
+	if idleTimeout > 0 {
+		wsManager.IdleTimeout = idleTimeout
+	}
 	closeTTL := parseOptionalDuration(cfg.Workspace.CloseTTL)
 	wsReaper := &workspace.Reaper{Manager: wsManager, IdleTimeout: idleTimeout, CloseTTL: closeTTL, Notify: func(notifyCtx context.Context, ws workspace.Workspace, msg string) error {
 		target, ok, err := entities.TargetForSession(notifyCtx, ws.SessionID)
@@ -147,34 +150,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		return nil
 	}}
 	retention := session.RetentionSweep{Store: sessions, Retain: parseOptionalDuration(cfg.Store.Retain)}
-	// Idle reflection: summarize sessions that went quiet without a finish pass (#59).
-	if cfg.Memory.ReflectAfter != "" {
-		after := parseOptionalDuration(cfg.Memory.ReflectAfter)
-		every := parseOptionalDuration(cfg.Memory.ReflectEvery)
-		if every <= 0 {
-			every = 5 * time.Minute
-		}
-		// Prefer main agent provider/model for reflection.
-		mainAgent := agents[config.GroupMain]
-		reflector := &session.IdleReflector{
-			Sessions: sessions,
-			After:    after,
-			Every:    every,
-			OnError:  func(err error) { log.Warn("idle reflection", "err", err) },
-			Provider: func() (llm.Provider, string) {
-				if mainAgent == nil {
-					return nil, ""
-				}
-				model := mainAgent.Model
-				if mainAgent.UtilityModel != "" {
-					model = mainAgent.UtilityModel
-				}
-				return mainAgent.Provider, model
-			},
-		}
-		go reflector.Loop(lifecycleCtx)
-		log.Info("idle reflection armed", "after", after, "every", every)
-	}
 	wsStore := &workset.Store{DB: st.DB}
 	go func() {
 		tick := time.NewTicker(time.Minute)
@@ -203,6 +178,8 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	gw := &gateway.Gateway{
 		Agent:             agents[config.GroupMain],
 		Agents:            agents,
+		Profiles:          profilesMain,
+		GroupProfiles:     profilesGroup,
 		Entities:          entities,
 		Sessions:          sessions,
 		Adapters:          adapters,
@@ -212,16 +189,50 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		ReflectEveryTurns: cfg.Memory.ReflectEveryTurns,
 	}
 
+	// Idle reflection: summarize sessions that went quiet without a finish pass (#59).
+	// reflect_after = "0" or empty disables; when armed, holds the same group
+	// lock as message handling (skip if the conversation is busy).
+	if after := parseOptionalDuration(cfg.Memory.ReflectAfter); after > 0 {
+		every := parseOptionalDuration(cfg.Memory.ReflectEvery)
+		if every <= 0 {
+			every = 5 * time.Minute
+		}
+		mainAgent := agents[config.GroupMain]
+		reflector := &session.IdleReflector{
+			Sessions: sessions,
+			After:    after,
+			Every:    every,
+			OnError:  func(err error) { log.Warn("idle reflection", "err", err) },
+			TryLockSession: func(lockCtx context.Context, sessionID string) (func(), bool) {
+				return gw.TryLockSession(lockCtx, sessionID)
+			},
+			Provider: func() (llm.Provider, string) {
+				if mainAgent == nil {
+					return nil, ""
+				}
+				model := mainAgent.Model
+				if mainAgent.UtilityModel != "" {
+					model = mainAgent.UtilityModel
+				}
+				return mainAgent.Provider, model
+			},
+		}
+		go reflector.Loop(lifecycleCtx)
+		log.Info("idle reflection armed", "after", after, "every", every)
+	}
+
 	// Scheduler: fire cron jobs while the gateway runs, delivering results
-	// through the same channel adapters. Runs on the restricted cron agent.
+	// through the same channel adapters. Runs on the restricted cron agent
+	// (or a named profile built against the cron tier when Job.Profile is set).
 	sched := &schedule.Scheduler{
 		Store: schedule.NewStore(st),
 		Runner: &schedule.Runner{
-			Agent:         cronAgent,
-			Sessions:      sessions,
-			Deliverer:     adapterDeliverer(adapters),
-			Log:           log,
-			Observability: obs,
+			Agent:           cronAgent,
+			AgentsByProfile: profilesCron,
+			Sessions:        sessions,
+			Deliverer:       adapterDeliverer(adapters),
+			Log:             log,
+			Observability:   obs,
 		},
 		Log:    log,
 		Usage:  usagepkg.New(st),
@@ -355,12 +366,22 @@ func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
 }
 
 // buildGatewayAgents constructs every agent tier the gateway can route to,
-// together with the cron agent used by the scheduler. The cleanup callback
+// the cron agent used by the scheduler, and named profile agents for channel
+// (main + multiparty group) and cron surfaces (#71). The cleanup callback
 // closes successfully and partially-built agents in reverse build order.
-func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (map[string]*agent.Agent, *agent.Agent, func(), error) {
-	agents := make(map[string]*agent.Agent)
+func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (
+	agents map[string]*agent.Agent,
+	cronAgent *agent.Agent,
+	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
+	cleanup func(),
+	err error,
+) {
+	agents = make(map[string]*agent.Agent)
+	profilesMain = make(map[string]*agent.Agent)
+	profilesGroup = make(map[string]*agent.Agent)
+	profilesCron = make(map[string]*agent.Agent)
 	var cleanups []func()
-	cleanup := func() {
+	cleanup = func() {
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			cleanups[i]()
 		}
@@ -377,21 +398,21 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	}
 
 	if _, err := build(config.GroupMain); err != nil {
-		return nil, nil, cleanup, err
+		return nil, nil, nil, nil, nil, cleanup, err
 	}
-	cronAgent, err := build(config.GroupCron)
+	cronAgent, err = build(config.GroupCron)
 	if err != nil {
-		return nil, nil, cleanup, err
+		return nil, nil, nil, nil, nil, cleanup, err
 	}
 	// Group chats always get the restricted multi-party tier (#34).
 	if _, err := build(config.GroupGroup); err != nil {
-		return nil, nil, cleanup, err
+		return nil, nil, nil, nil, nil, cleanup, err
 	}
 	// Issue intake uses the restricted issue tier (#51); build it when any
 	// watcher is configured so toolbox policy is ready before the first tick.
 	if len(cfg.Intake.GitHub) > 0 {
 		if _, err := build(config.GroupIssue); err != nil {
-			return nil, nil, cleanup, err
+			return nil, nil, nil, nil, nil, cleanup, err
 		}
 	}
 
@@ -404,11 +425,46 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	sort.Strings(groups)
 	for _, group := range groups {
 		if _, err := build(group); err != nil {
-			return nil, nil, cleanup, err
+			return nil, nil, nil, nil, nil, cleanup, err
 		}
 	}
 
-	return agents, cronAgent, cleanup, nil
+	// Named profiles for main, multiparty group, and cron surfaces (#71).
+	// Built once at serve start so binds only select, never rebuild mid-run.
+	// Group-tier profiles inherit the restricted multiparty toolbox so a
+	// channel bind cannot widen past #34 trust tiering.
+	profileNames := make([]string, 0, len(cfg.Agent.Profiles))
+	for name := range cfg.Agent.Profiles {
+		if name == "" || name == "main" {
+			continue
+		}
+		profileNames = append(profileNames, name)
+	}
+	sort.Strings(profileNames)
+	for _, name := range profileNames {
+		mainA, mainCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupMain, name)
+		cleanups = append(cleanups, mainCloser)
+		if err != nil {
+			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (main): %w", name, err)
+		}
+		profilesMain[name] = mainA
+
+		groupA, groupCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupGroup, name)
+		cleanups = append(cleanups, groupCloser)
+		if err != nil {
+			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (group): %w", name, err)
+		}
+		profilesGroup[name] = groupA
+
+		cronA, cronCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name)
+		cleanups = append(cleanups, cronCloser)
+		if err != nil {
+			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)
+		}
+		profilesCron[name] = cronA
+	}
+
+	return agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, nil
 }
 
 // adapterDeliverer routes a job's "channel:chat_id" target to the matching

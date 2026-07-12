@@ -3,6 +3,9 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -121,6 +124,140 @@ func newTestGateway(t *testing.T) (*Gateway, *fakeAdapter, *entity.Store, *sessi
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = gw.Run(ctx) }()
 	return gw, adapter, entities, sessions, cancel
+}
+
+func TestGatewayUsesProfileAgent(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	if _, err := entities.GroupFor(ctx, "fake", "profile-chat", "main"); err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	if err := entities.SetProfile(ctx, "fake", "profile-chat", "reviewer"); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	// Re-load so Profile is populated.
+	group, err := entities.GroupFor(ctx, "fake", "profile-chat", "main")
+	if err != nil || group.Profile != "reviewer" {
+		t.Fatalf("group = %+v err=%v", group, err)
+	}
+	_ = group
+
+	defaultProv := &recordingProvider{}
+	profileProv := &recordingProvider{}
+	var logs bytes.Buffer
+	gw := &Gateway{
+		Agent: &agent.Agent{
+			Provider: defaultProv,
+			Tools:    tool.NewRegistry(gwNamedTool("bash")),
+			System:   "main-system",
+			Model:    "main-model",
+		},
+		Profiles: map[string]*agent.Agent{
+			"reviewer": {
+				Provider: profileProv,
+				Tools:    tool.NewRegistry(gwNamedTool("read_file"), gwNamedTool("search")),
+				System:   "reviewer-profile-system",
+				Model:    "review-model",
+			},
+		},
+		Entities: entities,
+		Sessions: sessions,
+		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+
+	reply, err := gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "profile-chat", Text: "please review"})
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if reply != "ok" {
+		t.Fatalf("reply = %q", reply)
+	}
+	if profileProv.last.System != "reviewer-profile-system" {
+		t.Fatalf("system = %q, want reviewer-profile-system", profileProv.last.System)
+	}
+	if profileProv.last.Model != "review-model" {
+		t.Fatalf("model = %q", profileProv.last.Model)
+	}
+	toolNames := make([]string, 0, len(profileProv.last.Tools))
+	for _, d := range profileProv.last.Tools {
+		toolNames = append(toolNames, d.Name)
+	}
+	if !strings.Contains(strings.Join(toolNames, ","), "read_file") || !strings.Contains(strings.Join(toolNames, ","), "search") {
+		t.Fatalf("tools = %v, want profile toolbox", toolNames)
+	}
+	if strings.Contains(strings.Join(toolNames, ","), "bash") {
+		t.Fatalf("tools include main bash: %v", toolNames)
+	}
+	if defaultProv.last.System != "" {
+		t.Fatal("main agent should not have been used")
+	}
+	if !strings.Contains(logs.String(), "profile=reviewer") {
+		t.Errorf("logs missing profile: %s", logs.String())
+	}
+}
+
+func TestGatewayUnknownProfileErrors(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	if _, err := entities.GroupFor(ctx, "fake", "chat-x", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := entities.SetProfile(ctx, "fake", "chat-x", "missing"); err != nil {
+		t.Fatal(err)
+	}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Profiles: map[string]*agent.Agent{}, // non-nil: unknown must error
+		Entities: entities,
+		Sessions: sessions,
+	}
+	_, err = gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "chat-x", Text: "hi"})
+	if err == nil || !strings.Contains(err.Error(), `gateway: unknown profile "missing"`) {
+		t.Fatalf("err = %v, want unknown profile", err)
+	}
+}
+
+// recordingProvider captures the Complete request for profile-selection tests (#71).
+type recordingProvider struct {
+	last llm.Request
+}
+
+func (p *recordingProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.last = req
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "ok"}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+type gwNamedTool string
+
+func (n gwNamedTool) Def() llm.Tool {
+	return llm.Tool{Name: string(n), InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (n gwNamedTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	return string(n), nil
 }
 
 func TestGatewayUsesPersistedAgentGroup(t *testing.T) {
@@ -542,4 +679,153 @@ func TestCompletedConversationReleasesGroupLock(t *testing.T) {
 	remaining := len(gw.groups)
 	gw.mu.Unlock()
 	t.Fatalf("completed conversation left %d group lock entries", remaining)
+}
+
+// reflectProvider returns a fixed summary and counts Complete calls.
+type reflectProvider struct {
+	reply string
+	err   error
+	calls int
+}
+
+func (p *reflectProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.calls++
+	if p.err != nil {
+		return nil, p.err
+	}
+	// Echo path for normal agent turns (last message is user text, not ReflectPrompt).
+	last := ""
+	if len(req.Messages) > 0 {
+		last = req.Messages[len(req.Messages)-1].Text()
+	}
+	if strings.Contains(last, "Summarize it in 2-3 sentences") {
+		return &llm.Response{
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: p.reply}}},
+			StopReason: llm.StopEndTurn,
+		}, nil
+	}
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "echo: " + last}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+func TestReflectEveryTurnsWritesSummary(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	p := &reflectProvider{reply: "worked on every-N reflection"}
+	gw := &Gateway{
+		Agent:             &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
+		Entities:          entities,
+		Sessions:          sessions,
+		ReflectEveryTurns: 2,
+		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	// Two turns total after one converse (user+assistant) — need 2 converses for turn count 4?
+	// TurnCount is messages persisted: each converse adds user + assistant = 2 turns.
+	// ReflectEveryTurns=2 fires when n%2==0 after first converse (n=2).
+	if _, err := gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "reflect-chat", Text: "hello"}); err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	group, err := entities.GroupFor(ctx, "fake", "reflect-chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Get(ctx, group.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sess.Summary, "every-N") {
+		t.Fatalf("summary = %q, want every-N reflection summary", sess.Summary)
+	}
+}
+
+func TestReflectSessionFailureLoggedNoCrash(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	p := &reflectProvider{err: errors.New("provider down")}
+	var logs bytes.Buffer
+	gw := &Gateway{
+		Agent:             &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
+		Entities:          entities,
+		Sessions:          sessions,
+		ReflectEveryTurns: 2,
+		Log:               slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	// Provider fails on every Complete including the main agent turn — use a
+	// hybrid: first succeed for agent, fail for reflect.
+	// Use converse with scriptProvider path by setting ReflectEveryTurns and
+	// failing only on ReflectPrompt via reflectProvider with err always set.
+	// That also fails agent turn. So call ReflectSession after seeding turns.
+	group, err := entities.GroupFor(ctx, "fake", "fail-chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.UserText("a"))
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.Message{
+		Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "b"}},
+	})
+	wrote, err := gw.ReflectSession(ctx, group.SessionID)
+	if wrote {
+		t.Fatal("expected no write on failure")
+	}
+	if err == nil {
+		t.Fatal("expected reflection error")
+	}
+	if !strings.Contains(logs.String(), "session reflection failed") {
+		t.Fatalf("logs missing failure: %s", logs.String())
+	}
+	// Process continues; second call still safe.
+	_, _ = gw.ReflectSession(ctx, group.SessionID)
+}
+
+func TestReflectSessionSkipsWhenGroupLocked(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	group, err := entities.GroupFor(ctx, "fake", "busy-chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.UserText("a"))
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.Message{
+		Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "b"}},
+	})
+	p := &reflectProvider{reply: "should not write while locked"}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	// Hold the same group lock message handling would hold.
+	unlock := gw.lockGroup("fake\x00busy-chat")
+	defer unlock()
+	wrote, err := gw.ReflectSession(ctx, group.SessionID)
+	if err != nil {
+		t.Fatalf("ReflectSession: %v", err)
+	}
+	if wrote {
+		t.Fatal("expected skip while locked")
+	}
+	if p.calls != 0 {
+		t.Fatalf("provider calls=%d, want 0 while locked", p.calls)
+	}
 }

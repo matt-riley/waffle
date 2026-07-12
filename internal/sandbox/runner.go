@@ -124,8 +124,15 @@ func (r *Runner) step(ctx context.Context, in, out *sql.DB, last int64) (int64, 
 		isError = 1
 	}
 	// Enforce truncation inside the runner (before the outbound write) so
-	// that the result row never exceeds the host limit, regardless of what
-	// the tool implementation returned. This also covers non-builtin tools.
+	// that the result row never exceeds the host OutputLimit, regardless of
+	// what the tool implementation returned. This also covers non-builtin tools.
+	//
+	// Sandbox limitation (#69): truncating here means Agent.runOne never sees
+	// the full host-side payload and cannot spill oversized sandbox tool
+	// output. expand_output / tool_spills only cover host-executed (and MCP)
+	// results that return up to HostReturnCap without OutputLimit truncation.
+	// Full in-container spill would require a larger outbound row or a side
+	// channel; not implemented.
 	content = tool.Truncate(content, tool.OutputLimit)
 	if _, err := out.ExecContext(ctx, `
 		INSERT OR IGNORE INTO results (request_id, content, is_error, created_at)

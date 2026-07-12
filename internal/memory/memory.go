@@ -36,6 +36,25 @@ type Workspace struct {
 	// InjectBudget caps the rendered MEMORY.md notes in SystemContext.
 	// Zero means DefaultInjectBudget.
 	InjectBudget int
+	// Agent is the workspace agent name used for FTS note indexing (#60).
+	// Empty means DefaultAgent.
+	Agent string
+	// Notes, when set, keeps MEMORY.md searchable via SQLite FTS (#60).
+	Notes *NotesIndex
+}
+
+func (w Workspace) agentName() string {
+	if w.Agent != "" {
+		return w.Agent
+	}
+	return DefaultAgent
+}
+
+func (w Workspace) syncNote(ctx context.Context, n note, archived bool) {
+	if w.Notes == nil {
+		return
+	}
+	_ = w.Notes.Upsert(ctx, w.agentName(), n, archived)
 }
 
 // MatchingLines returns numbered memory lines containing all query terms.
@@ -93,6 +112,9 @@ const DefaultAgent = "main"
 
 // Open resolves (and creates) the workspace directory for agent.
 func Open(agent string) (Workspace, error) {
+	if agent == "" {
+		agent = DefaultAgent
+	}
 	home, err := config.Home()
 	if err != nil {
 		return Workspace{}, err
@@ -101,7 +123,7 @@ func Open(agent string) (Workspace, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Workspace{}, err
 	}
-	return Workspace{Dir: dir}, nil
+	return Workspace{Dir: dir, Agent: agent}, nil
 }
 
 // SkillsDir is where this workspace's SKILL.md directories live.
@@ -318,10 +340,15 @@ func (w Workspace) appendCandidate(c Candidate) (string, error) {
 			}
 		}
 	}
-	line := formatNoteLine(noteID, time.Now().UTC(), false, c.Provenance, oneLine(c.Body), "")
+	day := time.Now().UTC()
+	if w.Notes != nil && w.Notes.Now != nil {
+		day = w.Notes.Now().UTC()
+	}
+	line := formatNoteLine(noteID, day, false, c.Provenance, oneLine(c.Body), "")
 	if err := appendFileLine(w.MemoryPath(), line); err != nil {
 		return "", err
 	}
+	w.syncNote(context.Background(), parseNote(strings.TrimRight(line, "\n"), 0), false)
 	return noteID, nil
 }
 
@@ -457,7 +484,14 @@ func (w Workspace) ForgetNote(noteID string) error {
 	if err != nil {
 		return err
 	}
-	return w.archiveLine(removed)
+	if err := w.archiveLine(removed); err != nil {
+		return err
+	}
+	if w.Notes != nil {
+		n := parseNote(removed, 0)
+		_ = w.Notes.Upsert(context.Background(), w.agentName(), n, true)
+	}
+	return nil
 }
 
 // SupersedeNote archives the old note and appends a replacement with a new
@@ -476,16 +510,24 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	if err := w.archiveLine(removed); err != nil {
 		return "", err
 	}
+	if w.Notes != nil {
+		_ = w.Notes.Upsert(context.Background(), w.agentName(), parseNote(removed, 0), true)
+	}
 	newID, err := newNoteID()
 	if err != nil {
 		return "", err
 	}
 	// Preserve pin from the archived line if present (header only).
 	pin := parseNote(removed, 0).pinned
-	line := formatNoteLine(newID, time.Now().UTC(), pin, p, oneLine(body), oldID)
+	day := time.Now().UTC()
+	if w.Notes != nil && w.Notes.Now != nil {
+		day = w.Notes.Now().UTC()
+	}
+	line := formatNoteLine(newID, day, pin, p, oneLine(body), oldID)
 	if err := appendFileLine(w.MemoryPath(), line); err != nil {
 		return "", err
 	}
+	w.syncNote(context.Background(), parseNote(strings.TrimRight(line, "\n"), 0), false)
 	return newID, nil
 }
 
@@ -498,6 +540,16 @@ type RememberTool struct {
 	WS         Workspace
 	Gate       *Gate
 	Provenance Provenance
+	// Notes indexes new notes into FTS when set (usually same as WS.Notes).
+	Notes *NotesIndex
+}
+
+func (t RememberTool) workspace() Workspace {
+	ws := t.WS
+	if t.Notes != nil && ws.Notes == nil {
+		ws.Notes = t.Notes
+	}
+	return ws
 }
 
 func (t RememberTool) Def() llm.Tool {
@@ -524,7 +576,8 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	if strings.TrimSpace(in.Note) == "" {
 		return "", errors.New("note is required")
 	}
-	if dupID, found, err := t.WS.findDuplicateID(in.Note); err != nil {
+	ws := t.workspace()
+	if dupID, found, err := ws.findDuplicateID(in.Note); err != nil {
 		return "", err
 	} else if found {
 		if dupID != "" {
@@ -534,11 +587,11 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	}
 	gate := t.Gate
 	if gate == nil {
-		gate = &Gate{Mode: "auto", WS: t.WS}
+		gate = &Gate{Mode: "auto", WS: ws}
 	}
 	var noteID string
 	c, err := gate.submit(Candidate{Kind: "memory", Body: in.Note, Provenance: t.Provenance}, func() error {
-		nid, err := t.WS.appendCandidate(Candidate{Body: in.Note, Provenance: t.Provenance})
+		nid, err := ws.appendCandidate(Candidate{Body: in.Note, Provenance: t.Provenance})
 		if err != nil {
 			return err
 		}
@@ -560,6 +613,15 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 type MemoryUpdateTool struct {
 	WS         Workspace
 	Provenance Provenance
+	Notes      *NotesIndex
+}
+
+func (t MemoryUpdateTool) workspace() Workspace {
+	ws := t.WS
+	if t.Notes != nil && ws.Notes == nil {
+		ws.Notes = t.Notes
+	}
+	return ws
 }
 
 func (t MemoryUpdateTool) Def() llm.Tool {
@@ -592,9 +654,10 @@ func (t MemoryUpdateTool) Run(ctx context.Context, input json.RawMessage) (strin
 	if in.ID == "" {
 		return "", errors.New("id is required")
 	}
+	ws := t.workspace()
 	switch in.Action {
 	case "forget":
-		if err := t.WS.ForgetNote(in.ID); err != nil {
+		if err := ws.ForgetNote(in.ID); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("forgot note %s (archived)", in.ID), nil
@@ -602,7 +665,7 @@ func (t MemoryUpdateTool) Run(ctx context.Context, input json.RawMessage) (strin
 		if strings.TrimSpace(in.Note) == "" {
 			return "", errors.New("note is required for supersede")
 		}
-		newID, err := t.WS.SupersedeNote(in.ID, in.Note, t.Provenance)
+		newID, err := ws.SupersedeNote(in.ID, in.Note, t.Provenance)
 		if err != nil {
 			return "", err
 		}
@@ -618,6 +681,8 @@ type RecallTool struct {
 	Sessions *session.Store
 	// WS enables MEMORY.md note search when set.
 	WS Workspace
+	// Notes enables FTS note search when set (preferred over file scan).
+	Notes *NotesIndex
 	// Spills enables spill FTS when set.
 	Spills *spill.Store
 }
@@ -638,6 +703,10 @@ func (t RecallTool) Def() llm.Tool {
 	}
 }
 
+var validRecallScopes = map[string]bool{
+	"all": true, "turns": true, "summaries": true, "notes": true, "spills": true,
+}
+
 func (t RecallTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Query string `json:"query"`
@@ -653,6 +722,9 @@ func (t RecallTool) Run(ctx context.Context, input json.RawMessage) (string, err
 	scope := strings.TrimSpace(strings.ToLower(in.Scope))
 	if scope == "" {
 		scope = "all"
+	}
+	if !validRecallScopes[scope] {
+		return "", fmt.Errorf("invalid scope %q (want all|turns|summaries|notes|spills)", in.Scope)
 	}
 	want := func(s string) bool { return scope == "all" || scope == s }
 
@@ -670,7 +742,11 @@ func (t RecallTool) Run(ctx context.Context, input json.RawMessage) (string, err
 			if h.Title != "" {
 				fmt.Fprintf(&b, " %q", h.Title)
 			}
-			fmt.Fprintf(&b, "\n  match: %s\n", h.Snippet)
+			label := "match"
+			if h.Partial {
+				label = "partial"
+			}
+			fmt.Fprintf(&b, "\n  %s: %s\n", label, h.Snippet)
 		}
 	}
 
@@ -689,8 +765,8 @@ func (t RecallTool) Run(ctx context.Context, input json.RawMessage) (string, err
 		}
 	}
 
-	if want("notes") && t.WS.Dir != "" {
-		noteHits, err := searchNotes(t.WS, in.Query, 6)
+	if want("notes") {
+		noteHits, err := t.searchNotes(ctx, in.Query, 6)
 		if err != nil {
 			return "", err
 		}
@@ -721,8 +797,39 @@ func (t RecallTool) Run(ctx context.Context, input json.RawMessage) (string, err
 	return b.String(), nil
 }
 
-// searchNotes scans MEMORY.md and memory_archive for term matches.
-func searchNotes(ws Workspace, query string, limit int) ([]string, error) {
+func (t RecallTool) searchNotes(ctx context.Context, query string, limit int) ([]string, error) {
+	idx := t.Notes
+	if idx == nil {
+		idx = t.WS.Notes
+	}
+	if idx != nil && idx.DB != nil {
+		hits, err := idx.Search(ctx, query, limit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(hits))
+		for _, h := range hits {
+			label := "MEMORY.md"
+			if h.Archived {
+				label = "MEMORY.archive.md"
+			}
+			snip := h.Snippet
+			if snip == "" {
+				snip = h.RawLine
+			}
+			out = append(out, label+": "+strings.TrimSpace(snip))
+		}
+		return out, nil
+	}
+	if t.WS.Dir == "" {
+		return nil, nil
+	}
+	return searchNotesFiles(t.WS, query, limit)
+}
+
+// searchNotesFiles scans MEMORY.md and archive for term matches (fallback when
+// no NotesIndex is wired).
+func searchNotesFiles(ws Workspace, query string, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 6
 	}
@@ -764,7 +871,6 @@ func searchNotes(ws Workspace, query string, limit int) ([]string, error) {
 	if len(out) >= limit {
 		return out, nil
 	}
-	// Superseded/forgotten notes live in MEMORY.archive.md.
 	if err := scan(ws.ArchivePath(), "MEMORY.archive.md"); err != nil && !errors.Is(err, errLimit) {
 		return out, err
 	}

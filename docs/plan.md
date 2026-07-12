@@ -99,8 +99,11 @@ watchdog. Attempt and next-retry state is persisted in SQLite and shown by
 `waffle cron ls`. Retry prompts include their attempt number, and only the
 final exhausted attempt sends a failure notification.
 
-Context overflow is handled by summarize-and-truncate; full history stays in
-SQLite and remains searchable via FTS5.
+Context overflow is handled by summarize-and-truncate with an in-process
+summary cache (one summarize per prefix segment / session); summaries
+name turn ranges for `expand_context`. Full history stays in SQLite and
+remains searchable via FTS5. Optional `[provider] utility_model` is used
+for summarization and reflection.
 
 ### Provider layer (from workweave/router)
 
@@ -238,14 +241,19 @@ cannot read another repo, another session's secrets, or any raw key.
   the agent curate `MEMORY.md` (stable note IDs, exact-body dedupe); a
   `memory_update` tool supersedes or forgets by ID, archiving old lines to
   `MEMORY.archive.md` via localized line edits (never whole-file rewrites
-  through the model). A periodic reflection pass nudges curation and writes
-  session summaries for cross-session recall.
+  through the model). A shared reflection prompt (`session.Reflect`) writes
+  session summaries for cross-session recall: chat finish, gateway
+  `reflect_every_turns`, and idle reflection under `serve` when
+  `[memory] reflect_after` is set (use `"0"` to disable idle). Idle
+  reflection serializes on the same per-conversation group lock as message
+  handling and does not re-reflect when a summary is already present.
 - System injection: `MEMORY.md` notes are selected under
   `[memory] inject_budget` (default 8KiB) — pinned first, then newest;
   elided notes report a count and point at `recall`. Archive is never
   injected. Legacy un-ID'd lines still render.
-- Learning loop (later phase): after a complex task completes, the agent is
-  prompted to distill the procedure into a new or improved skill file.
+- Learning loop: `distill_skill` writes inactive skills; `waffle learn`
+  mines sessions → proposes constrained edits → validates held-in/out
+  (see Phase 7 mine→propose→validate below).
 
 Prompt-level self-modification is gated like code self-modification. Memory
 and skill candidates carry provenance; `[memory] write_gate` accepts `auto`,
@@ -267,8 +275,11 @@ The pipeline, using only machinery that already exists by Phase 5:
    repo — sandboxed container, scoped git credentials, like any other repo.
 2. **Change.** The agent edits, then must get `go build`, `go vet`, and
    `go test -race` green *inside the workspace*. `golangci-lint` is run when
-   installed (otherwise the gate reports a warning). The running gateway is
-   never edited in place.
+   installed (otherwise the gate reports a warning). The zero-network
+   `waffle eval` harness is part of the same ladder; a broken eval blocks
+   upgrade. Live provider evals are opt-in (`WAFFLE_EVAL_LIVE=1`) and
+   skipped without a provider. `internal/eval` and `evals/` are protected
+   auto-patch paths. The running gateway is never edited in place.
 3. **Land.** The change is pushed as a branch. The approval policy is
    configured under `[selfdev]`: `approval = "manual"` (the default),
    `"ci"`, or `"auto-patch"`, with `verify = true` by default and optional
@@ -300,6 +311,45 @@ the config change — there is no second system to keep consistent.
 `robfig/cron`-style scheduler persisted in SQLite. A job is: cron expression +
 prompt + agent group + delivery target. Jobs run as normal (sandboxed)
 sessions, so "email me a Monday summary of my starred repos" is one row.
+Optional `profile` on a job (#71) selects a named agent posture for that firing.
+
+### Named agent profiles (#71)
+
+Profiles are a **trust boundary in config**, parallel to agent groups: each
+`[agent.profile.<slug>]` names system prompt, model, sandbox mode, and tool
+allow/deny for a posture (e.g. `reviewer`, `researcher`). Slugs are
+`[a-z0-9-]` up to 64 characters. With no profile section the effective posture
+is `main` (historical defaults). Deny always wins over allow, including
+`allow = ["*"]`. Unknown tool names in profile policies are rejected at load.
+Prompt files (`system = "@path.md"`) must resolve under `$WAFFLE_HOME`.
+
+`spawn_subagent` may pass `profile`; children can only **tighten** the parent
+toolbox. `allowed_children` on a parent profile limits which child profiles may
+be delegated. Channel groups bind a profile via
+`waffle session profile <channel:chat> <name>`; cron jobs accept
+`--profile name`.
+
+### Subagent working-set broadcast (#68)
+
+When a parent session has a non-empty working set, `spawn_subagent` injects a
+**read-only snapshot** into the child system prompt at dispatch time. Parallel
+spawns share the same snapshot (captured once per spawn call). Empty set or
+`BroadcastWorkingSet=false` leaves the system prompt without a working-set
+block (byte-identical to no broadcast). Child handoffs may include
+`proposals`; they are **never applied automatically** — the parent set is
+unchanged until the owner accepts via `workspace_update`. Children never
+receive `workspace_update` or nested `spawn_subagent`.
+
+### Tool-output spill (#69)
+
+Tool results larger than `tool.OutputLimit` (48KiB) are **redacted first**,
+then spilled to SQLite (`tool_spills` + FTS) up to `spill.SpillCap` (512KiB).
+The model sees a truncated head/tail plus a marker with spill id for
+`expand_output` (range or grep). Partial spills (over cap) mark
+`partial spill` in the notice. Session delete removes spills. Secrets that
+pass through `Agent.Redact` never land on disk in spill content. Sandbox
+tools that truncate inside the container never deliver full bytes to the
+host, so spill applies to host/MCP large strings only.
 
 ### Security posture (from openclaw)
 
@@ -479,11 +529,58 @@ promotion via self-PRs); optional weave-router deployment docs for smart
 model routing; second channel (Discord) remains optional and **not
 shipped** (see [Deviations](#deviations)).
 
+**Phase 7 mine→propose→validate (#65).** Offline loop owned by `waffle learn`
+(and `waffle skills audit`):
+
+1. **Mine.** Sessions updated since the last `learn_runs` high-water mark are
+   scanned for recurring tool-error fingerprints. Output is failure classes
+   with counts and evidence session IDs (SQLite + fixture-tested).
+2. **Attribute.** When `[provider] utility_model` is set, each class is labeled
+   via that model; results land in `learn_attr_cache` keyed by content hash so
+   a re-run on unchanged data makes **zero** provider calls.
+3. **Propose.** Edits are constrained to enumerated surfaces: `skill`,
+   `memory` (MEMORY.md), `config_stub`. Other surfaces are rejected.
+4. **Validate / promote.** Conservative rule: held-in evidence must improve
+   and held-out must not regress. Rejected proposals are stored with audit;
+   accepted skill edits write **inactive** skills and attempt a git commit
+   message linking the pattern (audit-only when no git repo).
+5. **Activate.** `distill_skill` and learn writes are inactive until
+   `waffle skills activate <name>`; the skills index lists only active skills
+   and refuses to overwrite an active skill without validation.
+
+Cron surface: schedule `waffle learn` (system crontab or a wrapper) and
+deliver the stdout **digest** (pattern counts, proposal statuses, provider
+call count). Example: `0 3 * * * waffle learn >> ~/.waffle/learn.log`.
+
+**Action-level policy (#66).** Host config declares ordered rules:
+
+```toml
+[sandbox]
+enforcer = "none" # or "feedback" to include rule guidance in deny messages
+
+[[policy.rule]]
+name = "no-rm"
+tool = "bash"
+match = "rm -rf"          # quote-aware token prefix
+# regex = "^curl\\s+http:"  # optional raw-command regex
+action = "deny"
+guidance = "use safer cleanup"
+```
+
+Unknown keys are rejected at load. Rules integrate with `tool.Restrict` /
+`restricted.Run` (after tool allow/deny and `deny_prefixes`). Bash matching
+splits the command respecting quotes; **shell indirection** (`eval`,
+variables, `$()`, aliases) is **not** expanded — prefix/regex policy is not
+a substitute for sandbox isolation. Decisions matching a rule are logged to
+`policy_audit` (session, rule, verdict). Layered trust: agent-group tool
+lists → action rules → sandbox executor.
+
 ## Decisions to make now
 
-- **Name the trust boundary in config, not code:** `agent groups` carry
-  `sandbox: host|docker` and a tool allow/deny list from day one, even while
-  Docker support is unimplemented — retrofitting policy is much harder.
+- **Name the trust boundary in config, not code:** `agent groups` and
+  named `agent profiles` (#71) carry `sandbox: host|docker` and tool
+  allow/deny lists from day one, even while Docker support is unimplemented —
+  retrofitting policy is much harder.
 - **Anthropic-first, never Anthropic-only:** Phase 1 ships both the Anthropic
   and openai-compatible translators so the no-lock-in property is real from
   the first release.

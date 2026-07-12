@@ -119,6 +119,88 @@ func TestSearchFindsTextAndToolResults(t *testing.T) {
 	}
 }
 
+func TestSearchBlendsRecencyEqualRelevance(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	// Frozen "now" so age math is deterministic (#60).
+	frozen := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return frozen }
+
+	// Two sessions, identical searchable text, ages 1d and 90d.
+	old, err := s.Create(ctx, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSess, err := s.Create(ctx, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert turns with fixed created_at via SQL so FTS content matches exactly.
+	text := "equal relevance recency probe token"
+	oldAt := frozen.Add(-90 * 24 * time.Hour).Format(time.RFC3339)
+	newAt := frozen.Add(-24 * time.Hour).Format(time.RFC3339)
+	for _, row := range []struct {
+		sid, at string
+		seq     int
+	}{
+		{old.ID, oldAt, 1},
+		{newSess.ID, newAt, 1},
+	} {
+		blocks, _ := json.Marshal([]llm.Block{{Type: llm.BlockText, Text: text}})
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+			VALUES (?, ?, 'user', ?, ?, ?)`, row.sid, row.seq, string(blocks), text, row.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hits, err := s.Search(ctx, "equal relevance recency probe token", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) < 2 {
+		t.Fatalf("hits = %d, want >= 2", len(hits))
+	}
+	if hits[0].SessionID != newSess.ID {
+		t.Fatalf("expected newer session first, got %+v then %+v", hits[0], hits[1])
+	}
+	if hits[1].SessionID != old.ID {
+		t.Fatalf("expected older second, got %+v", hits[1])
+	}
+}
+
+func TestSearchPartialMatchFlag(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, _ := s.Create(ctx, "")
+	if err := s.AppendTurn(ctx, sess.ID, llm.UserText("alpha middle omega")); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(ctx, "alpha omega", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || !hits[0].Partial {
+		t.Fatalf("want partial hit, got %+v", hits)
+	}
+	if err := s.AppendTurn(ctx, sess.ID, llm.UserText("the alpha omega phrase")); err != nil {
+		t.Fatal(err)
+	}
+	hits, err = s.Search(ctx, "alpha omega", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundNonPartial := false
+	for _, h := range hits {
+		if !h.Partial {
+			foundNonPartial = true
+		}
+	}
+	if !foundNonPartial {
+		t.Fatalf("expected a non-partial hit among %+v", hits)
+	}
+}
+
 func TestDeleteRemovesSessionTurnsAndFTS(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -127,6 +209,19 @@ func TestDeleteRemovesSessionTurnsAndFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.AppendTurn(ctx, sess.ID, llm.UserText("private forgettable phrase")); err != nil {
+		t.Fatal(err)
+	}
+	// Spill + working set rows must be cleared with the session (#69 / #67).
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO tool_spills (id, session_id, tool_name, content, created_at)
+		VALUES ('spill-del1', ?, 'bash', 'huge spill body UNIQUE_DEL_TOKEN', ?)`,
+		sess.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO working_set_entries (session_id, id, kind, body, source, pinned, created_at, updated_at)
+		VALUES (?, 'e1', 'goal', 'x', 'user', 0, ?, ?)`,
+		sess.ID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Delete(ctx, sess.ID); err != nil {
@@ -145,6 +240,18 @@ func TestDeleteRemovesSessionTurnsAndFTS(t *testing.T) {
 	}
 	if len(hits) != 0 {
 		t.Fatalf("hits after delete = %d", len(hits))
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tool_spills WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("spills remain after session delete: %d", count)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM working_set_entries WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("working set remains after session delete: %d", count)
 	}
 }
 

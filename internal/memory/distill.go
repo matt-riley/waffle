@@ -18,10 +18,17 @@ import (
 // reusable skill (docs/plan.md, "Self-development loop" / hermes-style
 // learning loop). Skills are agentskills.io-compatible SKILL.md dirs, so
 // what waffle distills is portable.
+//
+// Distilled skills are written inactive (status: inactive) until the owner
+// runs `waffle skills activate` (#65). Overwriting an active skill is refused
+// without validation.
 type DistillTool struct {
 	WS         Workspace
 	Gate       *Gate
 	Provenance Provenance
+	// ActiveCheck, when set, returns true if name is currently active.
+	// Used to refuse overwrite of active skills. Nil uses frontmatter only.
+	ActiveCheck func(name string) bool
 }
 
 func (t DistillTool) Def() llm.Tool {
@@ -64,26 +71,40 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		return "", err
 	}
 
+	// Refuse overwrite of an active skill without validation (#65).
+	path := filepath.Join(t.WS.SkillsDir(), in.Name, "SKILL.md")
+	existed := fileExists(path)
+	if existed {
+		active := false
+		if t.ActiveCheck != nil {
+			active = t.ActiveCheck(in.Name)
+		} else if raw, err := os.ReadFile(path); err == nil {
+			active = skillFrontmatterActive(string(raw))
+		}
+		if active {
+			return "", fmt.Errorf("cannot overwrite active skill %q without validation; deactivate or use waffle skills activate after review", in.Name)
+		}
+	}
+
 	gate := t.Gate
 	if gate == nil {
 		gate = &Gate{Mode: "auto", WS: t.WS}
 	}
+	// Always write inactive until explicit activation (#65), and force review
+	// when write_gate is review (existing gate behavior).
 	candidate := Candidate{Kind: "skill", Name: in.Name, Description: in.Description, Body: in.Body, Provenance: t.Provenance}
 	c, err := gate.submit(candidate, func() error { return t.WS.writeSkillCandidate(candidate) })
 	if err != nil {
 		return "", err
 	}
 	if c.Status == "pending" {
-		return fmt.Sprintf("skill candidate %s is pending owner approval", c.ID), nil
+		return fmt.Sprintf("skill candidate %s is pending owner approval (will be inactive until waffle skills activate)", c.ID), nil
 	}
-	return fmt.Sprintf("%s skill %q at %s — available as /skill %s", skillVerb(t.WS, in.Name), in.Name, filepath.Join(t.WS.SkillsDir(), in.Name, "SKILL.md"), in.Name), nil
-}
-
-func skillVerb(w Workspace, name string) string {
-	if fileExists(filepath.Join(w.SkillsDir(), name, "SKILL.md")) {
-		return "updated"
+	verb := "saved new"
+	if existed {
+		verb = "updated"
 	}
-	return "saved new"
+	return fmt.Sprintf("%s skill %q at %s — inactive until `waffle skills activate %s`", verb, in.Name, path, in.Name), nil
 }
 
 func (w Workspace) writeSkillCandidate(c Candidate) error {
@@ -91,13 +112,42 @@ func (w Workspace) writeSkillCandidate(c Candidate) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nprovenance: %s\nsource_id: %s\ntrust_class: %s\n---\n\n%s\n",
-		c.Name, strconv.Quote(oneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, strings.TrimSpace(c.Body))
 	path := filepath.Join(dir, "SKILL.md")
+	// Cannot overwrite active skill without validation (#65).
+	if raw, err := os.ReadFile(path); err == nil && skillFrontmatterActive(string(raw)) {
+		return fmt.Errorf("cannot overwrite active skill %q without validation", c.Name)
+	}
+	// status: inactive until waffle skills activate (#65).
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: inactive\nprovenance: %s\nsource_id: %s\ntrust_class: %s\n---\n\n%s\n",
+		c.Name, strconv.Quote(oneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, strings.TrimSpace(c.Body))
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return err
 	}
 	return nil
+}
+
+// skillFrontmatterActive reports whether SKILL.md frontmatter status is
+// active (or missing — pre-#65 skills default active).
+func skillFrontmatterActive(raw string) bool {
+	if !strings.HasPrefix(raw, "---\n") && raw != "---" {
+		return true
+	}
+	rest := strings.TrimPrefix(raw, "---\n")
+	fm, _, found := strings.Cut(rest, "\n---")
+	if !found {
+		return true
+	}
+	status := ""
+	for _, line := range strings.Split(fm, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(key) == "status" {
+			status = strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	return status == "" || status == "active"
 }
 
 func fileExists(path string) bool {

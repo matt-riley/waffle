@@ -164,6 +164,11 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	mgr.PIDs = cfg.Sandbox.PIDs
 	mgr.Disk = cfg.Sandbox.Disk
 	mgr.Hooks = workspaceHooksFromConfig(cfg)
+	if cfg.Workspace.IdleTimeout != "" {
+		if d, err := config.ParseDuration(cfg.Workspace.IdleTimeout); err == nil {
+			mgr.IdleTimeout = d
+		}
+	}
 	if b != nil {
 		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return b.Mint(ctx, sessionID) }
 		mgr.RevokeSession = b.RevokeSession

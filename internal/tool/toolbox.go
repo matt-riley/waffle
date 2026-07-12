@@ -37,22 +37,30 @@ type Policy struct {
 	DenyPrefixes []string
 	// Guidance is appended to action-level denial messages.
 	Guidance string
+	// CheckAction, when set, runs after tool allow/deny and DenyPrefixes
+	// for finer-grained [[policy.rule]] evaluation (#66). Return a non-nil
+	// error to deny the call (message is shown to the model).
+	CheckAction func(ctx context.Context, name string, input json.RawMessage) error
 }
 
 // Permits reports whether the policy allows the named tool.
+// Deny always wins over Allow. Allow entry "*" means all tools not denied.
 func (p Policy) Permits(name string) bool {
 	if slices.Contains(p.Deny, name) {
 		return false
 	}
-	if len(p.Allow) > 0 && !slices.Contains(p.Allow, name) {
-		return false
+	if len(p.Allow) == 0 {
+		return true
 	}
-	return true
+	if slices.Contains(p.Allow, "*") {
+		return true
+	}
+	return slices.Contains(p.Allow, name)
 }
 
 // IsZero reports whether the policy restricts nothing.
 func (p Policy) IsZero() bool {
-	return len(p.Allow) == 0 && len(p.Deny) == 0 && len(p.DenyPrefixes) == 0
+	return len(p.Allow) == 0 && len(p.Deny) == 0 && len(p.DenyPrefixes) == 0 && p.CheckAction == nil
 }
 
 // Restrict applies a policy to a toolbox: denied tools disappear from Defs
@@ -87,6 +95,11 @@ func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage
 	if err := r.policy.checkCommand(name, input); err != nil {
 		return "", err
 	}
+	if r.policy.CheckAction != nil {
+		if err := r.policy.CheckAction(ctx, name, input); err != nil {
+			return "", err
+		}
+	}
 	return r.tb.Run(ctx, name, input)
 }
 
@@ -97,6 +110,11 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 	if err := r.policy.checkCommand(name, input); err != nil {
 		return "", err
 	}
+	if r.policy.CheckAction != nil {
+		if err := r.policy.CheckAction(ctx, name, input); err != nil {
+			return "", err
+		}
+	}
 	if tb, ok := r.tb.(CallerToolbox); ok {
 		return tb.RunWithID(ctx, id, name, input)
 	}
@@ -104,6 +122,9 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 }
 
 // checkCommand enforces DenyPrefixes for bash (#66).
+// Matching uses quote-aware token split so `rm -rf "/tmp/x"` matches prefix
+// `rm -rf`. Shell indirection (eval, variables, $(), aliases) is not
+// expanded — do not rely on prefix policy alone for high-assurance isolation.
 func (p Policy) checkCommand(name string, input json.RawMessage) error {
 	if name != "bash" || len(p.DenyPrefixes) == 0 {
 		return nil
@@ -120,7 +141,7 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		if pref == "" {
 			continue
 		}
-		if strings.HasPrefix(cmd, pref) {
+		if matchCommandPrefix(cmd, pref) {
 			msg := fmt.Sprintf("bash command denied by policy: prefix %q is not allowed", pref)
 			if p.Guidance != "" {
 				msg += " — " + p.Guidance
@@ -129,6 +150,73 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// matchCommandPrefix reports whether cmd starts with prefix, using a simple
+// string prefix or quote-aware token comparison.
+func matchCommandPrefix(cmd, prefix string) bool {
+	if strings.HasPrefix(cmd, prefix) {
+		return true
+	}
+	want := splitShellTokens(prefix)
+	got := splitShellTokens(cmd)
+	if len(want) == 0 || len(got) < len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// splitShellTokens splits on whitespace respecting single/double quotes.
+// Does not expand shell indirection (see package docs / plan.md).
+func splitShellTokens(cmd string) []string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return nil
+	}
+	var tokens []string
+	var cur strings.Builder
+	var quote rune
+	esc := false
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range cmd {
+		if esc {
+			cur.WriteRune(r)
+			esc = false
+			continue
+		}
+		if quote == 0 && r == '\\' {
+			esc = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				continue
+			}
+			cur.WriteRune(r)
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return tokens
 }
 
 // Combine merges toolboxes; the first box offering a name wins. Used to

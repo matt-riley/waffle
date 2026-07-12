@@ -70,24 +70,33 @@ type Client struct {
 	readErr error // set once when the reader loop exits
 }
 
-// Connect launches the server process and performs the initialize
-// handshake.
-func Connect(ctx context.Context, s Server) (*Client, error) {
-	cmd := exec.Command(s.Command, s.Args...)
-	cmd.Env = make([]string, 0, len(s.Env))
-	// Keep command-line helpers usable without inheriting the daemon's
-	// credentials or application settings.
+// BuildProcessEnv constructs the restricted environment for an MCP child
+// process (#79). Only PATH (from the host) and explicitly allowlisted variable
+// names are included — never a copy of os.Environ(). Secret-bearing ambient
+// vars (WAFFLE_HOME, tokens, age identity, …) are excluded unless named in
+// allowlist (and codeintel config rejects secret-like names entirely).
+func BuildProcessEnv(allowlist []string) []string {
+	env := make([]string, 0, len(allowlist)+1)
 	if path, ok := os.LookupEnv("PATH"); ok {
-		cmd.Env = append(cmd.Env, "PATH="+path)
+		env = append(env, "PATH="+path)
 	}
-	for _, name := range s.Env {
-		if name == "PATH" {
+	for _, name := range allowlist {
+		if name == "" || name == "PATH" {
 			continue
 		}
 		if value, ok := os.LookupEnv(name); ok {
-			cmd.Env = append(cmd.Env, name+"="+value)
+			env = append(env, name+"="+value)
 		}
 	}
+	return env
+}
+
+// Connect launches the server process and performs the initialize
+// handshake. The child receives only BuildProcessEnv(s.Env) — no ambient
+// secret inheritance (#79).
+func Connect(ctx context.Context, s Server) (*Client, error) {
+	cmd := exec.Command(s.Command, s.Args...)
+	cmd.Env = BuildProcessEnv(s.Env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

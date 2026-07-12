@@ -3,6 +3,7 @@ package schedule
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -60,6 +61,30 @@ func TestAddValidatesCron(t *testing.T) {
 	}
 }
 
+func TestJobProfileField(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore(newTestStore(t))
+	j, err := s.AddWithProfile(ctx, "research", "0 * * * *", "dig", "", "researcher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Profile != "researcher" {
+		t.Fatalf("profile = %q", j.Profile)
+	}
+	got, err := s.Get(ctx, j.ID)
+	if err != nil || got.Profile != "researcher" {
+		t.Fatalf("get = %+v %v", got, err)
+	}
+	if !sameDefinition(*j, *got) {
+		t.Fatal("sameDefinition should include profile")
+	}
+	other := *got
+	other.Profile = "other"
+	if sameDefinition(*got, other) {
+		t.Fatal("profile change should break sameDefinition")
+	}
+}
+
 // echoProvider replies with the user's text, verbatim.
 type echoProvider struct{}
 
@@ -111,6 +136,135 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	turns, _ := sessions.Turns(ctx, list[0].ID)
 	if len(turns) != 2 {
 		t.Errorf("turns = %d, want 2", len(turns))
+	}
+}
+
+// recordingProvider captures Complete requests so tests can assert system
+// prompt and tool definitions for profile selection (#71). Reflect may call
+// Complete again; tests inspect the first agent-turn request via first().
+type recordingProvider struct {
+	reqs []llm.Request
+}
+
+func (p *recordingProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.reqs = append(p.reqs, req)
+	// Text-shaped replies so Reflect (if it runs) also completes cleanly.
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "ok"}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+func (p *recordingProvider) first() llm.Request {
+	if len(p.reqs) == 0 {
+		return llm.Request{}
+	}
+	return p.reqs[0]
+}
+
+type namedTool string
+
+func (n namedTool) Def() llm.Tool {
+	return llm.Tool{Name: string(n), InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (n namedTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	return string(n), nil
+}
+
+func TestRunnerUsesProfileAgent(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	defaultProv := &recordingProvider{}
+	profileProv := &recordingProvider{}
+	var logs bytes.Buffer
+	runner := &Runner{
+		Agent: &agent.Agent{
+			Provider: defaultProv,
+			Tools:    tool.NewRegistry(namedTool("bash")),
+			System:   "default-cron-system",
+			Model:    "default-model",
+		},
+		AgentsByProfile: map[string]*agent.Agent{
+			"researcher": {
+				Provider: profileProv,
+				Tools:    tool.NewRegistry(namedTool("read_file"), namedTool("search")),
+				System:   "researcher-profile-system",
+				Model:    "research-model",
+			},
+		},
+		Sessions: session.New(st),
+		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+
+	if _, err := runner.Run(ctx, Job{ID: "j1", Name: "dig", Prompt: "research topic", Profile: "researcher"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := profileProv.first()
+	if got.System != "researcher-profile-system" {
+		t.Fatalf("system = %q, want researcher-profile-system", got.System)
+	}
+	if got.Model != "research-model" {
+		t.Fatalf("model = %q, want research-model", got.Model)
+	}
+	toolNames := make([]string, 0, len(got.Tools))
+	for _, d := range got.Tools {
+		toolNames = append(toolNames, d.Name)
+	}
+	if !slices.Contains(toolNames, "read_file") || !slices.Contains(toolNames, "search") {
+		t.Fatalf("tools = %v, want read_file+search from profile", toolNames)
+	}
+	if slices.Contains(toolNames, "bash") {
+		t.Fatalf("tools include bash from default agent: %v", toolNames)
+	}
+	if len(defaultProv.reqs) != 0 {
+		t.Fatal("default agent should not have been used")
+	}
+	if !strings.Contains(logs.String(), "profile=researcher") {
+		t.Errorf("logs missing profile: %s", logs.String())
+	}
+}
+
+func TestRunnerUnknownProfileErrors(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	runner := &Runner{
+		Agent:           &agent.Agent{Provider: echoProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		AgentsByProfile: map[string]*agent.Agent{}, // non-nil: unknown must error, not fall back
+		Sessions:        session.New(st),
+	}
+	_, err := runner.Run(ctx, Job{Name: "x", Prompt: "p", Profile: "missing"})
+	if err == nil || !strings.Contains(err.Error(), `cron: unknown profile "missing"`) {
+		t.Fatalf("err = %v, want unknown profile", err)
+	}
+}
+
+func TestRunnerEmptyProfileUsesDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	defaultProv := &recordingProvider{}
+	runner := &Runner{
+		Agent: &agent.Agent{
+			Provider: defaultProv,
+			Tools:    tool.NewRegistry(),
+			System:   "default-cron-system",
+			Model:    "m",
+		},
+		AgentsByProfile: map[string]*agent.Agent{
+			"researcher": {
+				Provider: &recordingProvider{},
+				Tools:    tool.NewRegistry(),
+				System:   "other",
+				Model:    "other",
+			},
+		},
+		Sessions: session.New(st),
+	}
+	if _, err := runner.Run(ctx, Job{Name: "x", Prompt: "p"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if defaultProv.first().System != "default-cron-system" {
+		t.Fatalf("system = %q", defaultProv.first().System)
 	}
 }
 

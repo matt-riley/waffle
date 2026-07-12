@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -28,6 +30,11 @@ type scriptedBash struct {
 	outputs map[string]string
 	// failing maps a substring to an error message.
 	failing map[string]string
+	// delays maps a substring to a sleep that respects ctx (timeout tests).
+	delays map[string]time.Duration
+	// hostExecWouldPanic, when true, panics if Run is invoked — proves hooks
+	// never fall back to host os/exec in these tests (they go through the queue).
+	viaQueue bool
 }
 
 func (s *scriptedBash) Def() llm.Tool {
@@ -43,7 +50,17 @@ func (s *scriptedBash) Run(ctx context.Context, input json.RawMessage) (string, 
 	}
 	s.mu.Lock()
 	s.commands = append(s.commands, in.Command)
+	s.viaQueue = true
 	s.mu.Unlock()
+	for k, d := range s.delays {
+		if strings.Contains(in.Command, k) {
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+	}
 	for k, msg := range s.failing {
 		if strings.Contains(in.Command, k) {
 			return "", fmt.Errorf("%s", msg)
@@ -928,6 +945,116 @@ func TestNormalizeRepo(t *testing.T) {
 	}
 }
 
+func TestUnparsableRepoPolicyAtOpen(t *testing.T) {
+	// Unclosed front matter → Parse error at open (#53).
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "---\nbad line without colon\n",
+	}}
+	mgr, _ := newTestManager(t, tools)
+	_, _, err := mgr.Open(context.Background(), "acme/widgets")
+	if err == nil || !strings.Contains(err.Error(), "repo policy") {
+		t.Fatalf("expected repo policy error, got %v", err)
+	}
+	if _, err := mgr.ForRepo(context.Background(), "acme/widgets"); !errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("unusable workspace leaked: %v", err)
+	}
+}
+
+func TestRepoPolicyTightensEgressIdleHooks(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+egress: none
+idle_timeout: 5m
+hooks.after_create: echo setup
+hooks.before_run: true
+---
+Follow repo rules.
+`,
+	}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.IdleTimeout = 30 * time.Minute
+	mgr.Hooks = hooks.Config{Timeout: time.Minute}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if ws.Status != StatusOpen {
+		t.Fatalf("status = %s", ws.Status)
+	}
+	if mgr.Egress != "none" {
+		t.Fatalf("egress not tightened: %q", mgr.Egress)
+	}
+	if mgr.IdleTimeout != 5*time.Minute {
+		t.Fatalf("idle not tightened: %v", mgr.IdleTimeout)
+	}
+	if mgr.Hooks.AfterCreate != "echo setup" {
+		t.Fatalf("hooks not merged: %+v", mgr.Hooks)
+	}
+	p := mgr.LastPolicy()
+	if p == nil || !strings.Contains(p.PromptBlock(), "untrusted") {
+		t.Fatalf("last policy = %#v", p)
+	}
+}
+
+func TestAbsentRepoPolicyLeavesManagerUnchanged(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.IdleTimeout = 20 * time.Minute
+	hostHooks := hooks.Config{AfterCreate: "host-setup", Timeout: time.Minute}
+	mgr.Hooks = hostHooks
+	_, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if mgr.Egress != "full" || mgr.IdleTimeout != 20*time.Minute {
+		t.Fatalf("egress/idle changed: %q %v", mgr.Egress, mgr.IdleTimeout)
+	}
+	if mgr.Hooks.AfterCreate != "host-setup" {
+		t.Fatalf("hooks changed: %+v", mgr.Hooks)
+	}
+	if mgr.LastPolicy() != nil {
+		t.Fatal("expected nil last policy")
+	}
+}
+
+func TestPolicyCacheReloadBetweenSessions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WAFFLE.md")
+	if err := os.WriteFile(path, []byte("---\negress: none\n---\nv1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tools := &scriptedBash{}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.PolicyCache = repopolicy.NewCache(dir)
+	// Open without container policy (empty cat); cache supplies policy.
+	_, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if mgr.Egress != "none" {
+		t.Fatalf("cache policy not applied: %q", mgr.Egress)
+	}
+	// Simulate next session: rewrite policy, Cache.Get reloads by mtime.
+	time.Sleep(15 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("---\negress: none\nidle_timeout: 1m\n---\nv2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.IdleTimeout = 10 * time.Minute
+	p, err := mgr.LoadRepoPolicy(context.Background(), nil)
+	if err != nil || p == nil || p.Body != "v2" {
+		t.Fatalf("reload = %#v err=%v", p, err)
+	}
+	if mgr.IdleTimeout != time.Minute {
+		t.Fatalf("idle after reload = %v", mgr.IdleTimeout)
+	}
+}
+
 func TestAfterCreateHookFailureRefusesWorkspace(t *testing.T) {
 	tools := &scriptedBash{
 		outputs: map[string]string{},
@@ -966,5 +1093,140 @@ func TestBeforeRemoveHookDoesNotBlockClose(t *testing.T) {
 	}
 	if !tools.ran("cleanup.sh") {
 		t.Fatal("before_remove did not run")
+	}
+}
+
+func TestHookRunsViaSandboxClientExec(t *testing.T) {
+	// Hooks must reach scriptedBash through the queue client, not host os/exec (#54).
+	tools := &scriptedBash{}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{AfterCreate: "go mod download"}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if !tools.ran("go mod download") {
+		t.Fatal("after_create not executed via sandbox bash tool")
+	}
+	if !tools.viaQueue {
+		t.Fatal("hook did not go through queue toolbox")
+	}
+	_ = ws
+}
+
+func TestHookTimeoutViaSandbox(t *testing.T) {
+	tools := &scriptedBash{
+		delays: map[string]time.Duration{"sleep-hook": 500 * time.Millisecond},
+	}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{BeforeRun: "sleep-hook", Timeout: 40 * time.Millisecond}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	res, err := mgr.RunHookFor(context.Background(), client, hooks.BeforeRun, ws.ID, ws.SessionID)
+	if err == nil {
+		t.Fatal("expected before_run timeout")
+	}
+	if res.Err == nil {
+		t.Fatal("expected res.Err on timeout")
+	}
+}
+
+func TestBeforeRunFailureAborts(t *testing.T) {
+	tools := &scriptedBash{failing: map[string]string{"git fetch": "fetch failed"}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{BeforeRun: "git fetch --all"}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	_, err = mgr.RunHookFor(context.Background(), client, hooks.BeforeRun, ws.ID, ws.SessionID)
+	if err == nil || !strings.Contains(err.Error(), "before_run") {
+		t.Fatalf("expected before_run fatal error, got %v", err)
+	}
+}
+
+func TestAfterRunFailureLoggedAndProceeds(t *testing.T) {
+	tools := &scriptedBash{failing: map[string]string{"git status": "status failed"}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{AfterRun: "git status"}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	// after_run is non-fatal: RunHookFor returns nil error.
+	res, err := mgr.RunHookFor(context.Background(), client, hooks.AfterRun, ws.ID, ws.SessionID)
+	if err != nil {
+		t.Fatalf("after_run should not fail RunHookFor: %v", err)
+	}
+	if res.Err == nil {
+		t.Fatal("expected res.Err recorded")
+	}
+	// hook_logs row must exist for session debuggability.
+	var n int
+	var point, errText string
+	row := mgr.DB.QueryRow(`SELECT COUNT(*), MAX(point), MAX(error) FROM hook_logs WHERE session_id = ?`, ws.SessionID)
+	if err := row.Scan(&n, &point, &errText); err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 || point != "after_run" || errText == "" {
+		t.Fatalf("hook_logs = n=%d point=%q err=%q", n, point, errText)
+	}
+}
+
+func TestBeforeRemoveFailureLoggedAndProceeds(t *testing.T) {
+	tools := &scriptedBash{
+		outputs: map[string]string{"git status": "", "git log": ""},
+		failing: map[string]string{"export.sh": "export failed"},
+	}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{BeforeRemove: "./export.sh"}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if _, err := mgr.Close(context.Background(), ws.ID, true); err != nil {
+		t.Fatalf("close blocked by before_remove: %v", err)
+	}
+	var n int
+	if err := mgr.DB.QueryRow(`SELECT COUNT(*) FROM hook_logs WHERE point = 'before_remove' AND session_id = ?`, ws.SessionID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatal("expected before_remove hook_logs row")
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusClosed {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+func TestNoHooksRegression(t *testing.T) {
+	tools := &scriptedBash{}
+	mgr, _ := newTestManager(t, tools)
+	// Empty hooks config: open/close must work as before.
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if _, err := mgr.Close(context.Background(), ws.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := mgr.DB.QueryRow(`SELECT COUNT(*) FROM hook_logs`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("unexpected hook_logs with no hooks: %d", n)
 	}
 }

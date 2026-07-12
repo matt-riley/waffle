@@ -74,7 +74,9 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "bash", "-c", in.Command).CombinedOutput()
-	result := Truncate(string(out), OutputLimit)
+	// Return up to HostReturnCap so Agent.runOne can spill before OutputLimit
+	// truncation (#69). Do not Truncate to OutputLimit here.
+	result := capHostReturn(string(out))
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("command timed out after %s\n%s", timeout, result)
 	}
@@ -113,11 +115,18 @@ func (ReadFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
 	}
-	b, err := os.ReadFile(in.Path)
+	f, err := os.Open(in.Path)
 	if err != nil {
 		return "", err
 	}
-	return Truncate(string(b), OutputLimit), nil
+	defer func() { _ = f.Close() }()
+	// Cap at HostReturnCap so Agent can spill full content; OutputLimit
+	// truncation happens in Agent.runOne (#69).
+	b, err := io.ReadAll(io.LimitReader(f, int64(HostReturnCap)))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // WriteFile writes a file, creating parent directories.
@@ -289,7 +298,8 @@ func (f Fetch) Run(ctx context.Context, input json.RawMessage) (result string, e
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(string(body), 2048))
 	}
-	return Truncate(string(body), OutputLimit), nil
+	// HostReturnCap (not OutputLimit) so Agent can spill before model truncate (#69).
+	return capHostReturn(string(body)), nil
 }
 
 type fetchPolicy struct {
@@ -479,7 +489,8 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return nil
 	})
 	if errors.Is(err, errSearchResultsCapped) {
-		return Truncate(strings.Join(results, "\n")+fmt.Sprintf("\n... [results capped at %d]", maxResults), OutputLimit), nil
+		// HostReturnCap so oversized result sets can still spill (#69).
+		return capHostReturn(strings.Join(results, "\n") + fmt.Sprintf("\n... [results capped at %d]", maxResults)), nil
 	}
 	if err != nil {
 		return "", err
@@ -487,7 +498,7 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(results) == 0 {
 		return "(no matches)", nil
 	}
-	return Truncate(strings.Join(results, "\n"), OutputLimit), nil
+	return capHostReturn(strings.Join(results, "\n")), nil
 }
 
 func searchFile(ctx context.Context, path string, re *regexp.Regexp) (matches []string, binary bool, err error) {

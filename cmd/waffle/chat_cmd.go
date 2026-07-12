@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
@@ -24,6 +25,8 @@ import (
 	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
+	policypkg "github.com/matt-riley/waffle/internal/policy"
+	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
@@ -260,14 +263,30 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 	}
 	c.wsClient = client
 
+	// Repo policy: untrusted body → system prompt; tools/egress already
+	// tightened on the manager during Open. Re-load for tool policy here (#53).
+	hostPol := c.cfg.AgentPolicy(config.GroupMain)
+	toolPol := tool.Policy{Allow: hostPol.Allow, Deny: hostPol.Deny}
+	sysExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo)
+	if p, perr := mgr.LoadRepoPolicy(ctx, client); perr != nil {
+		return perr
+	} else if p != nil {
+		toolPol = repopolicy.TightenTools(toolPol, p.Tools)
+		// Repo may only select host-approved codeintel capability IDs (#79).
+		toolPol = applyCodeIntelCaps(toolPol, p.CodeIntelCaps)
+		if block := p.PromptBlock(); block != "" {
+			sysExtra += "\n\n" + block
+		}
+	}
+
 	// Same provider and memory tools; builtins now execute in the
-	// workspace container.
-	hostTools := c.agent.Tools
-	boxed := tool.Combine(sandbox.NewQueueToolbox(client), hostTools)
+	// workspace container, under tighten-only repo tool policy.
+	hostTools := tool.Restrict(c.agent.Tools, toolPol)
+	boxed := tool.Restrict(tool.Combine(sandbox.NewQueueToolbox(client), hostTools), toolPol)
 	c.agent = &agent.Agent{
 		Provider:  c.agent.Provider,
 		Tools:     boxed,
-		System:    c.agent.System + fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo),
+		System:    c.agent.System + sysExtra,
 		Model:     c.agent.Model,
 		MaxTokens: c.agent.MaxTokens,
 		Redact:    c.agent.Redact,
@@ -354,7 +373,7 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 
 func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool) (*chat, func(), error) {
 	cleanup := func() {}
-	ws, skills, err := loadWorkspace()
+	ws, skills, err := loadWorkspaceWithStore(st)
 	if err != nil {
 		return nil, cleanup, err
 	}
@@ -423,6 +442,24 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		DenyPrefixes: denyPrefixes,
 		Guidance:     guidance,
 	}
+	// Action-level [[policy.rule]] evaluation + optional policy_audit (#66).
+	if policyRules := cfg.Policy.PolicyRules(); len(policyRules) > 0 {
+		rules := make([]policypkg.Rule, 0, len(policyRules))
+		for _, r := range policyRules {
+			rules = append(rules, policypkg.Rule{
+				Name: r.Name, Tool: r.Tool, Match: r.Match,
+				Regex: r.Regex, Action: r.Action, Guidance: r.Guidance,
+			})
+		}
+		engine := policypkg.NewEngineFromStore(&store.Store{DB: sessions.DB()}, rules, cfg.Sandbox.Enforcer)
+		toolPolicy.CheckAction = func(ctx context.Context, name string, input json.RawMessage) error {
+			d := engine.CheckAndAuditSession(ctx, session.IDFromContext(ctx), name, input)
+			if !d.Allowed {
+				return fmt.Errorf("%s", d.Message)
+			}
+			return nil
+		}
+	}
 	apiKey, redact, err := resolveAPIKey(cfg.Provider)
 	if err != nil {
 		return nil, cleanup, err
@@ -451,14 +488,22 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 
 	spillStore := &spill.Store{DB: sessions.DB()}
 	wsStore := &workset.Store{DB: sessions.DB()}
+	notesIdx := &memory.NotesIndex{DB: sessions.DB()}
 
 	// Host tools execute on the host regardless of sandbox mode — memory
 	// is waffle's own state, and learning writes to the workspace.
 	ws.InjectBudget = cfg.Memory.InjectBudget
+	ws.Notes = notesIdx
+	// Best-effort: reindex on-disk notes into FTS after upgrades (#60).
+	agentName := ws.Agent
+	if agentName == "" {
+		agentName = memory.DefaultAgent
+	}
+	_ = notesIdx.SyncWorkspace(context.Background(), agentName, ws)
 	hostToolList := []tool.Tool{
-		memory.RememberTool{WS: ws, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
-		memory.MemoryUpdateTool{WS: ws, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
-		memory.RecallTool{Sessions: sessions, WS: ws, Spills: spillStore},
+		memory.RememberTool{WS: ws, Notes: notesIdx, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
+		memory.MemoryUpdateTool{WS: ws, Notes: notesIdx, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
+		memory.RecallTool{Sessions: sessions, WS: ws, Notes: notesIdx, Spills: spillStore},
 		workset.UpdateTool{Store: wsStore},
 		spill.ExpandTool{Store: spillStore},
 		session.ExpandContextTool{Sessions: sessions},
@@ -470,7 +515,9 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 
 	// Optional code intelligence (#79): in-process text-fallback tools.
 	// Absence is fine — agent keeps search/read. MCP codeintel servers are
-	// validated at config load (sandbox + no secret env).
+	// validated at config load (sandbox + no secret env). Sandbox MCP launch
+	// is not wired yet — execution=sandbox codeintel degrades to this
+	// go/parser fallback (see docs/code-intelligence.md).
 	var codeTools tool.Toolbox
 	if cfg.CodeIntelEnabled() {
 		root := cfg.CodeIntel.Root
@@ -533,18 +580,26 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		if execution == "" {
 			execution = "host"
 		}
+		isCodeIntel := strings.HasPrefix(strings.ToLower(s.Name), "codeintel") || mcpDeclaresCodeIntel(s.Tools)
 		if execution == "sandbox" {
-			// MCP-in-sandbox is not wired yet. Code-intelligence servers degrade
-			// to the in-process fallback (#79); other servers fail closed.
-			if strings.HasPrefix(strings.ToLower(s.Name), "codeintel") || mcpDeclaresCodeIntel(s.Tools) {
+			// MCP-in-container is not wired yet (#79 / #77). Code-intelligence
+			// servers degrade to the in-process go/parser fallback already
+			// registered above; other servers fail closed (no ambient host launch).
+			if isCodeIntel {
 				continue
 			}
 			return nil, cleanup, fmt.Errorf("mcp %q: sandbox execution is not available; refusing to launch it", s.Name)
 		}
+		// Host launch for codeintel requires allow_host_mcp (enforced at config
+		// load). Restricted executor: only declared Env allowlist + PATH — never
+		// os.Environ() (mcp.Connect / BuildProcessEnv).
+		if isCodeIntel && !cfg.CodeIntel.AllowHostMCP {
+			return nil, cleanup, fmt.Errorf("mcp %q: code-intelligence host launch requires [codeintel] allow_host_mcp = true", s.Name)
+		}
 		if pol.Mode == "docker" && (s.Execution != "host" || !slices.Contains(s.Groups, group)) {
 			return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
 		}
-		// Env is already an allowlist; never pass the full process environment.
+		// Env is an allowlist of variable *names*; Connect never inherits ambient secrets.
 		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
@@ -564,6 +619,14 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	if profile.Model != "" {
 		model = profile.Model
 	}
+	maxTokens := cfg.Provider.MaxTokens
+	if profile.MaxTokens > 0 {
+		maxTokens = profile.MaxTokens
+	}
+	maxIter := 0
+	if profile.MaxIterations > 0 {
+		maxIter = profile.MaxIterations
+	}
 
 	// Subagents get the execution + MCP tools, but not the ability to
 	// spawn further subagents (their toolbox omits spawn_subagent).
@@ -574,22 +637,23 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			Provider:            provider,
 			Tools:               subTools,
 			Model:               model,
-			MaxTokens:           cfg.Provider.MaxTokens,
+			MaxTokens:           maxTokens,
 			Redact:              redact,
 			BroadcastWorkingSet: true,
 			WorkingSetBroadcast: "", // filled below if non-empty at build time; runtime inject via note
 		}
-		// Snapshot current default session working set is empty at build;
-		// SubagentTool re-reads via optional hook is not available, so we
-		// attach a thin wrapper that loads working set from the active session.
+		// Pointer wrapper freezes working-set broadcast across parallel
+		// spawn_subagent calls in one turn (#68).
 		sub.Spill = spillStore
-		boxes = append(boxes, tool.NewRegistry(workingSetSubagent{
+		boxes = append(boxes, tool.NewRegistry(&workingSetSubagent{
 			inner:      sub,
 			store:      wsStore,
 			spill:      spillStore,
 			sessions:   sessions,
 			cfg:        cfg,
 			parentDeny: append([]string{}, toolPolicy.Deny...),
+			// Parent profile's allowed_children gates spawn profile= (#71).
+			allowedChildren: append([]string{}, profile.AllowedChildren...),
 		}))
 	}
 
@@ -609,15 +673,16 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		}
 	}
 	return &agent.Agent{
-		Provider:     provider,
-		Tools:        toolbox,
-		System:       sys,
-		Model:        model,
-		UtilityModel: cfg.Provider.UtilityModel,
-		MaxTokens:    cfg.Provider.MaxTokens,
-		Redact:       redact,
-		Spill:        spillStore,
-		Usage:        usagepkg.New(&store.Store{DB: sessions.DB()}),
+		Provider:      provider,
+		Tools:         toolbox,
+		System:        sys,
+		Model:         model,
+		UtilityModel:  cfg.Provider.UtilityModel,
+		MaxTokens:     maxTokens,
+		MaxIterations: maxIter,
+		Redact:        redact,
+		Spill:         spillStore,
+		Usage:         usagepkg.New(&store.Store{DB: sessions.DB()}),
 		Limits: func() usagepkg.Limits {
 			l := cfg.LimitsFor(group)
 			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
@@ -626,7 +691,8 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 }
 
 // workingSetSubagent wraps SubagentTool to inject a live working-set broadcast (#68)
-// and named child profiles from config (#71).
+// and named child profiles from config (#71). Pointer-valued so parallel Runs
+// share one freeze cache (snapshot as of first concurrent dispatch).
 type workingSetSubagent struct {
 	inner    agent.SubagentTool
 	store    *workset.Store
@@ -635,19 +701,35 @@ type workingSetSubagent struct {
 	cfg      config.Config
 	// parentDeny lists tools the parent cannot use — children cannot re-enable them.
 	parentDeny []string
+	// allowedChildren, when non-empty, is the only spawn profile set (#71).
+	allowedChildren []string
+
+	// snapMu guards freeze maps for parallel spawn_subagent in one turn (#68).
+	snapMu    sync.Mutex
+	snapOnce  map[string]*sync.Once
+	snapReady map[string]string
+	snapHold  map[string]int
 }
 
-func (w workingSetSubagent) Def() llm.Tool { return w.inner.Def() }
+func (w *workingSetSubagent) Def() llm.Tool { return w.inner.Def() }
 
-func (w workingSetSubagent) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (w *workingSetSubagent) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	t := w.inner
 	t.Spill = w.spill
 	t.Profiles = childProfilesFromConfig(w.cfg, w.parentDeny)
+	t.AllowedProfiles = append([]string{}, w.allowedChildren...)
+	// Freeze broadcast once per session for concurrent parallel spawns (#68).
+	// When the last holder finishes, the freeze is released so the next turn
+	// re-lists a fresh set.
+	t.WorkingSetBroadcast = ""
+	t.BroadcastWorkingSet = false
+	t.WorkingSetSnapshot = nil
 	if w.store != nil {
 		if sid := session.IDFromContext(ctx); sid != "" {
-			// Snapshot at dispatch so parallel spawns share the same view (#68).
-			if entries, err := w.store.List(ctx, sid); err == nil && len(entries) > 0 {
-				t.WorkingSetBroadcast = workset.Render(entries)
+			snap := w.freezeSnapshot(ctx, sid)
+			defer w.releaseSnapshot(sid)
+			if snap != "" {
+				t.WorkingSetBroadcast = snap
 				t.BroadcastWorkingSet = true
 			}
 		}
@@ -667,6 +749,51 @@ func (w workingSetSubagent) Run(ctx context.Context, input json.RawMessage) (str
 	return t.Run(ctx, input)
 }
 
+// freezeSnapshot captures the working set once per session for concurrent Runs.
+func (w *workingSetSubagent) freezeSnapshot(ctx context.Context, sid string) string {
+	w.snapMu.Lock()
+	if w.snapOnce == nil {
+		w.snapOnce = map[string]*sync.Once{}
+		w.snapReady = map[string]string{}
+		w.snapHold = map[string]int{}
+	}
+	if w.snapOnce[sid] == nil {
+		w.snapOnce[sid] = &sync.Once{}
+	}
+	once := w.snapOnce[sid]
+	w.snapHold[sid]++
+	store := w.store
+	w.snapMu.Unlock()
+
+	once.Do(func() {
+		var rendered string
+		if store != nil {
+			if entries, err := store.List(ctx, sid); err == nil && len(entries) > 0 {
+				rendered = workset.Render(entries)
+			}
+		}
+		w.snapMu.Lock()
+		w.snapReady[sid] = rendered
+		w.snapMu.Unlock()
+	})
+
+	w.snapMu.Lock()
+	s := w.snapReady[sid]
+	w.snapMu.Unlock()
+	return s
+}
+
+func (w *workingSetSubagent) releaseSnapshot(sid string) {
+	w.snapMu.Lock()
+	defer w.snapMu.Unlock()
+	w.snapHold[sid]--
+	if w.snapHold[sid] <= 0 {
+		delete(w.snapHold, sid)
+		delete(w.snapReady, sid)
+		delete(w.snapOnce, sid)
+	}
+}
+
 func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]agent.ChildProfile {
 	if len(cfg.Agent.Profiles) == 0 {
 		return nil
@@ -683,16 +810,23 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 				sys = loaded
 			}
 		}
-		out[name] = agent.ChildProfile{
+		cp := agent.ChildProfile{
 			Name:   name,
 			System: sys,
 			Model:  p.Model,
 			Tools:  pol,
 		}
+		if p.MaxTokens > 0 {
+			cp.MaxTokens = p.MaxTokens
+		}
+		out[name] = cp
 	}
 	return out
 }
 
+// loadProfileSystem returns inline system text or file contents. File paths
+// (with or without "@" prefix, or ending in .md) must resolve under
+// WAFFLE_HOME; missing files and path escapes are errors (#71).
 func loadProfileSystem(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -703,7 +837,27 @@ func loadProfileSystem(s string) (string, error) {
 		path = strings.TrimPrefix(s, "@")
 	}
 	if strings.HasSuffix(path, ".md") || strings.HasPrefix(s, "@") {
-		b, err := os.ReadFile(path)
+		home, err := config.Home()
+		if err != nil {
+			return "", fmt.Errorf("profile system file: %w", err)
+		}
+		homeAbs, err := filepath.Abs(home)
+		if err != nil {
+			return "", fmt.Errorf("profile system file: %w", err)
+		}
+		// Relative paths resolve under WAFFLE_HOME; absolute paths must still sit under it.
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(homeAbs, path)
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("profile system file: %w", err)
+		}
+		rel, err := filepath.Rel(homeAbs, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("profile system file %q is outside WAFFLE_HOME", path)
+		}
+		b, err := os.ReadFile(abs)
 		if err != nil {
 			return "", fmt.Errorf("profile system file: %w", err)
 		}
@@ -744,6 +898,30 @@ func mcpDeclaresCodeIntel(tools []string) bool {
 		}
 	}
 	return false
+}
+
+// applyCodeIntelCaps denies codeintel tools not in the repo's filtered
+// host-approved capability list (#79). Empty requested → no extra restriction
+// (host registers the full fallback set). Unknown/executable IDs are dropped
+// by FilterCodeIntelCaps so repos cannot select unapproved launches.
+func applyCodeIntelCaps(pol tool.Policy, requested []string) tool.Policy {
+	if len(requested) == 0 {
+		return pol
+	}
+	allowed := repopolicy.FilterCodeIntelCaps(requested, codeintel.ApprovedCapability)
+	allowedSet := map[string]bool{}
+	for _, id := range allowed {
+		allowedSet[id] = true
+	}
+	for _, name := range codeintel.ToolNames {
+		if allowedSet[name] {
+			continue
+		}
+		if !slices.Contains(pol.Deny, name) {
+			pol.Deny = append(pol.Deny, name)
+		}
+	}
+	return pol
 }
 
 // Declared tools allow a denied server to be skipped before its process is

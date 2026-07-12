@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -123,5 +124,45 @@ func TestRenderToolResult(t *testing.T) {
 	errOut := renderToolResult(json.RawMessage(`{"content":[{"type":"text","text":"boom"}],"isError":true}`))
 	if errOut != "error: boom" {
 		t.Errorf("errOut = %q", errOut)
+	}
+}
+
+// TestBuildProcessEnvNoAmbientSecrets asserts Connect/BuildProcessEnv never
+// copies ambient process env (WAFFLE_HOME, tokens, age identity) into the child (#79).
+func TestBuildProcessEnvNoAmbientSecrets(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", "/secret/waffle-home")
+	t.Setenv("WAFFLE_AGE_IDENTITY", "AGE-SECRET-KEY-leak")
+	t.Setenv("GITHUB_TOKEN", "ghp_should_not_leak")
+	t.Setenv("SAFE_VAR", "ok-value")
+
+	env := BuildProcessEnv([]string{"SAFE_VAR"})
+	joined := fmt.Sprintf("%q", env)
+	for _, leak := range []string{"WAFFLE_HOME", "WAFFLE_AGE_IDENTITY", "GITHUB_TOKEN", "/secret/waffle-home", "AGE-SECRET", "ghp_should"} {
+		if strings.Contains(joined, leak) {
+			t.Fatalf("ambient secret %q leaked into child env: %v", leak, env)
+		}
+	}
+	foundSafe := false
+	for _, e := range env {
+		if e == "SAFE_VAR=ok-value" {
+			foundSafe = true
+		}
+		if strings.HasPrefix(e, "PATH=") {
+			continue
+		}
+		if e != "SAFE_VAR=ok-value" {
+			t.Fatalf("unexpected env entry %q (only allowlist + PATH permitted)", e)
+		}
+	}
+	if !foundSafe {
+		t.Fatalf("allowlisted SAFE_VAR missing: %v", env)
+	}
+
+	// Empty allowlist: only PATH (if set).
+	env2 := BuildProcessEnv(nil)
+	for _, e := range env2 {
+		if !strings.HasPrefix(e, "PATH=") {
+			t.Fatalf("empty allowlist must not pass %q", e)
+		}
 	}
 }
