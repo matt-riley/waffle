@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/llm"
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -95,14 +96,64 @@ func (c *Client) Close() error {
 // heartbeats, detects a stuck or missing runner and returns early with a
 // clear "runner appears dead" error (instead of blocking until the caller's
 // ctx or the 11m tool timeout expires).
-func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (string, bool, error) {
-	res, err := c.inbound.ExecContext(ctx,
-		`INSERT INTO requests (tool, input, created_at) VALUES (?, ?, ?)`,
-		name, string(input), time.Now().UTC().Format(time.RFC3339Nano))
+func (c *Client) Exec(ctx context.Context, useIDOrName string, args ...interface{}) (string, bool, error) {
+	var useID, name string
+	var input json.RawMessage
+	asJSON := func(v interface{}) (json.RawMessage, bool) {
+		switch x := v.(type) {
+		case json.RawMessage:
+			return x, true
+		case []byte:
+			return json.RawMessage(x), true
+		case string:
+			return json.RawMessage(x), true
+		default:
+			return nil, false
+		}
+	}
+	if len(args) == 1 {
+		var ok bool
+		input, ok = asJSON(args[0])
+		if !ok {
+			return "", false, fmt.Errorf("sandbox: Exec input must be JSON")
+		}
+		name = useIDOrName
+	} else if len(args) == 2 {
+		var ok bool
+		useID = useIDOrName
+		name, ok = args[0].(string)
+		if !ok {
+			return "", false, fmt.Errorf("sandbox: Exec name must be string")
+		}
+		input, ok = asJSON(args[1])
+		if !ok {
+			return "", false, fmt.Errorf("sandbox: Exec input must be JSON")
+		}
+	} else {
+		return "", false, fmt.Errorf("sandbox: Exec expects name,input or useID,name,input")
+	}
+	var (
+		res sql.Result
+		err error
+	)
+	if useID == "" {
+		res, err = c.inbound.ExecContext(ctx,
+			`INSERT INTO requests (tool, input, created_at) VALUES (?, ?, ?)`,
+			name, string(input), time.Now().UTC().Format(time.RFC3339Nano))
+	} else {
+		res, err = c.inbound.ExecContext(ctx,
+			`INSERT OR IGNORE INTO requests (tool_use_id, tool, input, created_at) VALUES (?, ?, ?, ?)`,
+			useID, name, string(input), time.Now().UTC().Format(time.RFC3339Nano))
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: enqueue: %w", err)
 	}
-	id, err := res.LastInsertId()
+	var id int64
+	if useID == "" {
+		id, err = res.LastInsertId()
+	} else {
+		err = c.inbound.QueryRowContext(ctx, `SELECT id FROM requests WHERE tool_use_id = ?`, useID).Scan(&id)
+	}
 	if err != nil {
 		return "", false, err
 	}
@@ -167,6 +218,36 @@ func (c *Client) Exec(ctx context.Context, name string, input json.RawMessage) (
 			return "", false, fmt.Errorf("sandbox: waiting for %s: %w (runner may be stuck or dead)", name, ctx.Err())
 		}
 	}
+}
+
+// Reclaim returns durable results for caller identities completed while the
+// host was offline.
+func (c *Client) Reclaim(ctx context.Context, useIDs []string) (map[string]llm.ToolResult, error) {
+	out := make(map[string]llm.ToolResult)
+	for _, useID := range useIDs {
+		var result llm.ToolResult
+		var isError bool
+		var id int64
+		err := c.inbound.QueryRowContext(ctx, `SELECT id FROM requests WHERE tool_use_id = ?`, useID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: reclaim %s: %w", useID, err)
+		}
+		err = c.outbound.QueryRowContext(ctx,
+			`SELECT content, is_error FROM results WHERE request_id = ?`, id).
+			Scan(&result.Content, &isError)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: reclaim %s: %w", useID, err)
+		}
+		result.ToolUseID, result.IsError = useID, isError
+		out[useID] = result
+	}
+	return out, nil
 }
 
 // isBusyErr reports whether err is SQLite's transient SQLITE_BUSY

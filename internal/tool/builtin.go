@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,7 +217,13 @@ func (EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 }
 
 // Fetch retrieves a URL as text.
-type Fetch struct{}
+type Fetch struct {
+	// AllowPrivate contains CIDRs or exact host:port entries which may resolve
+	// to otherwise-protected addresses.
+	AllowPrivate []string
+	// Resolver is injectable for tests; nil uses the system resolver.
+	Resolver *net.Resolver
+}
 
 var fetchSchema = mustSchema(`{
 	"type": "object",
@@ -233,7 +241,7 @@ func (Fetch) Def() llm.Tool {
 	}
 }
 
-func (Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (f Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		URL string `json:"url"`
 	}
@@ -251,7 +259,20 @@ func (Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "waffle/0 (+https://github.com/matt-riley/waffle)")
-	resp, err := http.DefaultClient.Do(req)
+	transport, err := f.transport(ctx)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("fetch: refused redirect to unsupported scheme %q", req.URL.Scheme)
+			}
+			return nil // the transport checks the address at dial time
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -265,6 +286,85 @@ func (Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(string(body), 2048))
 	}
 	return Truncate(string(body), OutputLimit), nil
+}
+
+type fetchPolicy struct {
+	prefixes []netip.Prefix
+	hosts    map[string]struct{}
+}
+
+func (f Fetch) transport(ctx context.Context) (http.RoundTripper, error) {
+	policy, err := parseFetchPolicy(f.AllowPrivate)
+	if err != nil {
+		return nil, err
+	}
+	resolver := f.Resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	dialer := &net.Dialer{}
+	return &http.Transport{
+		DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("fetch: refused: invalid destination %q", address)
+			}
+			hostKey := strings.ToLower(net.JoinHostPort(strings.Trim(host, "[]"), port))
+			ips, err := resolver.LookupNetIP(dialCtx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+			var lastErr error
+			for _, ip := range ips {
+				ip = ip.Unmap()
+				if blockedFetchAddr(ip) && !policy.allows(ip, hostKey) {
+					lastErr = fmt.Errorf("fetch: refused: %s is in a private/link-local range; add it to [tools.fetch] allow_private if intended", ip)
+					continue
+				}
+				conn, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("fetch: refused: no address resolved for %s", host)
+		},
+	}, nil
+}
+
+func parseFetchPolicy(entries []string) (fetchPolicy, error) {
+	p := fetchPolicy{hosts: make(map[string]struct{})}
+	for _, entry := range entries {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			p.prefixes = append(p.prefixes, prefix)
+			continue
+		}
+		host, port, err := net.SplitHostPort(entry)
+		if err != nil || host == "" || port == "" {
+			return fetchPolicy{}, fmt.Errorf("fetch: invalid allow_private entry %q (want CIDR or host:port)", entry)
+		}
+		p.hosts[strings.ToLower(net.JoinHostPort(strings.Trim(host, "[]"), port))] = struct{}{}
+	}
+	return p, nil
+}
+
+func (p fetchPolicy) allows(addr netip.Addr, hostport string) bool {
+	if _, ok := p.hosts[hostport]; ok {
+		return true
+	}
+	for _, prefix := range p.prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func blockedFetchAddr(addr netip.Addr) bool {
+	return addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() || addr.IsPrivate()
 }
 
 const (

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,12 +111,56 @@ func TestFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := run(t, Fetch{}, fmt.Sprintf(`{"url":%q}`, srv.URL))
+	out, err := run(t, Fetch{AllowPrivate: []string{"127.0.0.0/8"}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
 	if err != nil || out != "fetched body" {
 		t.Fatalf("fetch = %q, %v", out, err)
 	}
 	if _, err := run(t, Fetch{}, `{"url":"file:///etc/passwd"}`); err == nil {
 		t.Error("non-http URL accepted")
+	}
+}
+
+func TestFetchBlocksPrivateAndAllowsHostPort(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+	if _, err := run(t, Fetch{}, fmt.Sprintf(`{"url":%q}`, srv.URL)); err == nil ||
+		!strings.Contains(err.Error(), "private/link-local range") {
+		t.Fatalf("private fetch error = %v", err)
+	}
+	hostport := strings.TrimPrefix(srv.URL, "http://")
+	out, err := run(t, Fetch{AllowPrivate: []string{hostport}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
+	if err != nil || out != "ok" {
+		t.Fatalf("host:port allowlist fetch = %q, %v", out, err)
+	}
+}
+
+func TestFetchAddressClasses(t *testing.T) {
+	for _, raw := range []string{"127.0.0.1", "::1", "169.254.1.1", "fe80::1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "fc00::1", "0.0.0.0", "::"} {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !blockedFetchAddr(addr) {
+			t.Errorf("%s was not blocked", raw)
+		}
+
+	}
+}
+
+func TestFetchRedirectToPrivateIsRefused(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "should not reach")
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
+	defer source.Close()
+	allowSource := strings.TrimPrefix(source.URL, "http://")
+	_, err := run(t, Fetch{AllowPrivate: []string{allowSource}}, fmt.Sprintf(`{"url":%q}`, source.URL))
+	if err == nil || !strings.Contains(err.Error(), "private/link-local range") {
+		t.Fatalf("redirect error = %v", err)
 	}
 }
 

@@ -86,6 +86,15 @@ Plain and synchronous per session, streaming to the channel:
 4. Otherwise deliver the reply, persist the turn, and (periodically) run the
    memory/skill reflection pass.
 
+### Scheduled job retries
+
+Unattended cron jobs use the optional `[jobs]` policy in `config.toml`.
+`max_attempts` defaults to `1` (the legacy fire-once behavior); retries use
+exponential `base_backoff` capped by `max_backoff` and a `stall_timeout`
+watchdog. Attempt and next-retry state is persisted in SQLite and shown by
+`waffle cron ls`. Retry prompts include their attempt number, and only the
+final exhausted attempt sends a failure notification.
+
 Context overflow is handled by summarize-and-truncate; full history stays in
 SQLite and remains searchable via FTS5.
 
@@ -131,7 +140,9 @@ per session on a shared mount: `inbound.db` (host writes exec requests,
 runner reads) and `outbound.db` (runner writes results/output, host reads).
 One writer per file — no sockets, no exec-attach fragility, results survive
 container or gateway restarts, and a stopped container resumes exactly where
-it left off. Containers see only their workspace volume, the queue mount,
+it left off. Requests carry the model's durable `tool_use_id`; duplicate
+delivery is absorbed and completed results can be reclaimed after a host
+restart. Containers see only their workspace volume, the queue mount,
 and the host's proxy endpoints — never secrets, never the host filesystem.
 
 ### Repo workspaces ("work on this repo")
@@ -213,6 +224,12 @@ cannot read another repo, another session's secrets, or any raw key.
 - Learning loop (later phase): after a complex task completes, the agent is
   prompted to distill the procedure into a new or improved skill file.
 
+Prompt-level self-modification is gated like code self-modification. Memory
+and skill candidates carry provenance; `[memory] write_gate` accepts `auto`,
+`notify`, or `review`. Review writes remain pending until host approval, and
+untrusted-derived candidates never enter the live prompt automatically.
+Rendered `MEMORY.md` is explicitly observational data, not instructions.
+
 ### Self-development loop (waffle works on waffle)
 
 hermes-agent improves itself at the *prompt* level (skills). waffle goes one
@@ -225,14 +242,18 @@ The pipeline, using only machinery that already exists by Phase 5:
 1. **Propose.** "Fix that timeout you keep hitting" (or the agent notices a
    recurring papercut during reflection) opens a workspace on the waffle
    repo — sandboxed container, scoped git credentials, like any other repo.
-2. **Change.** The agent edits, then must get `go build`, `go vet`,
-   `go test -race`, and `golangci-lint` green *inside the workspace*. The
-   running gateway is never edited in place.
-3. **Land.** The change is pushed as a branch. The approval gate is
-   config-per-instance: review every diff, review PRs with CI green, or
-   auto-land patch-level changes. Git is the audit trail either way — every
-   self-modification is a commit that can be read, reverted, and merged
-   with upstream.
+2. **Change.** The agent edits, then must get `go build`, `go vet`, and
+   `go test -race` green *inside the workspace*. `golangci-lint` is run when
+   installed (otherwise the gate reports a warning). The running gateway is
+   never edited in place.
+3. **Land.** The change is pushed as a branch. The approval policy is
+   configured under `[selfdev]`: `approval = "manual"` (the default),
+   `"ci"`, or `"auto-patch"`, with `verify = true` by default and optional
+   `protected` path prefixes. Auto-patch refuses protected paths and the
+   self-development gate/config/doctor code. Git is the audit trail either
+   way — every self-modification is a commit that can be read, reverted, and
+   merged with upstream. `waffle upgrade --no-verify` is an explicitly unsafe
+   escape hatch for emergency recovery.
 4. **Deploy.** `waffle upgrade` builds the new binary from the approved
    ref, runs `waffle doctor` against it (self-check: config parses, DB
    migrates on a copy, secret store round-trips, providers reachable), then

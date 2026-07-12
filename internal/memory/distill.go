@@ -19,7 +19,9 @@ import (
 // learning loop). Skills are agentskills.io-compatible SKILL.md dirs, so
 // what waffle distills is portable.
 type DistillTool struct {
-	WS Workspace
+	WS         Workspace
+	Gate       *Gate
+	Provenance Provenance
 }
 
 func (t DistillTool) Def() llm.Tool {
@@ -57,22 +59,40 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		return "", errors.New("body is required")
 	}
 
-	dir := filepath.Join(t.WS.SkillsDir(), in.Name)
+	gate := t.Gate
+	if gate == nil {
+		gate = &Gate{Mode: "auto", WS: t.WS}
+	}
+	candidate := Candidate{Kind: "skill", Name: in.Name, Description: in.Description, Body: in.Body, Provenance: t.Provenance}
+	c, err := gate.submit(candidate, func() error { return t.WS.writeSkillCandidate(candidate) })
+	if err != nil {
+		return "", err
+	}
+	if c.Status == "pending" {
+		return fmt.Sprintf("skill candidate %s is pending owner approval", c.ID), nil
+	}
+	return fmt.Sprintf("%s skill %q at %s — available as /skill %s", skillVerb(t.WS, in.Name), in.Name, filepath.Join(t.WS.SkillsDir(), in.Name, "SKILL.md"), in.Name), nil
+}
+
+func skillVerb(w Workspace, name string) string {
+	if fileExists(filepath.Join(w.SkillsDir(), name, "SKILL.md")) {
+		return "updated"
+	}
+	return "saved new"
+}
+
+func (w Workspace) writeSkillCandidate(c Candidate) error {
+	dir := filepath.Join(w.SkillsDir(), c.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return err
 	}
-	content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n",
-		in.Name, strconv.Quote(oneLine(in.Description)), strings.TrimSpace(in.Body))
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nprovenance: %s\nsource_id: %s\ntrust_class: %s\n---\n\n%s\n",
+		c.Name, strconv.Quote(oneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, strings.TrimSpace(c.Body))
 	path := filepath.Join(dir, "SKILL.md")
-	existed := fileExists(path)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", err
+		return err
 	}
-	verb := "saved new"
-	if existed {
-		verb = "updated"
-	}
-	return fmt.Sprintf("%s skill %q at %s — available as /skill %s", verb, in.Name, path, in.Name), nil
+	return nil
 }
 
 func fileExists(path string) bool {

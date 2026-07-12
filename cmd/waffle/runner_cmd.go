@@ -26,8 +26,19 @@ func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
 	defer stop()
 
 	fmt.Fprintf(stderr, "waffle runner: serving queue %s\n", dir)
-	r := &sandbox.Runner{Tools: tool.Builtins()}
+	r := &sandbox.Runner{Tools: tool.BuiltinsWithFetch(fetchAllowPrivateArgs(args))}
 	return r.Serve(ctx, dir)
+}
+
+func fetchAllowPrivateArgs(args []string) []string {
+	var entries []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--fetch-allow-private" {
+			entries = append(entries, args[i+1])
+			i++
+		}
+	}
+	return entries
 }
 
 // sandboxCmd offers `waffle sandbox exec` — a diagnostic client for a

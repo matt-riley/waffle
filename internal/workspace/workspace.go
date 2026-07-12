@@ -66,6 +66,11 @@ type Manager struct {
 	// Network for workspace containers; cloning needs egress, so default
 	// bridge.
 	Network string
+	// Egress is none (default), allowlist, or full. Allowlist uses the
+	// host-side broker rather than granting the container a network.
+	Egress          string
+	EgressAllowlist []string
+	ProxyURL        string
 	// RunnerBinary is a linux build of waffle to bind-mount as the
 	// container entrypoint; empty uses the running binary (linux hosts only).
 	RunnerBinary string
@@ -251,19 +256,33 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 }
 
 func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
+	egress := m.Egress
+	if egress == "" {
+		egress = "none"
+	}
+	network := m.Network
+	proxy := ""
+	if egress == "none" || egress == "allowlist" {
+		network = "none"
+	}
+	if egress == "allowlist" {
+		proxy = m.ProxyURL
+	}
 	return ContainerOpts{
-		Name:      ws.Container,
-		Image:     ws.Image,
-		Volume:    ws.Volume,
-		QueueDir:  m.queueDir(ws.ID),
-		Network:   m.Network,
-		BrokerURL: m.BrokerURL,
-		Token:     token,
-		SelfPath:  m.RunnerBinary,
-		Memory:    m.Memory,
-		CPUs:      m.CPUs,
-		PIDs:      m.PIDs,
-		Disk:      m.Disk,
+		Name:       ws.Container,
+		Image:      ws.Image,
+		Volume:     ws.Volume,
+		QueueDir:   m.queueDir(ws.ID),
+		Network:    network,
+		BrokerURL:  m.BrokerURL,
+		Token:      token,
+		SelfPath:   m.RunnerBinary,
+		Memory:     m.Memory,
+		CPUs:       m.CPUs,
+		PIDs:       m.PIDs,
+		Disk:       m.Disk,
+		ProxyURL:   proxy,
+		ProxyToken: token,
 	}
 }
 

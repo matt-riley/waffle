@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,7 +23,9 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/id"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/usage"
 )
 
 // Upstream is one provider the broker can front.
@@ -37,6 +40,15 @@ type Upstream struct {
 	Value string
 }
 
+// EgressTarget is an allowlisted HTTP(S) destination. Value is injected only
+// for this host and is never written to audit logs.
+type EgressTarget struct {
+	Host    string
+	BaseURL string
+	Header  string
+	Value   string
+}
+
 // GitCredentialFunc returns a git credential for host/path on behalf of a
 // session. First iteration: a stored fine-grained PAT; a GitHub App
 // minting short-lived installation tokens slots in behind the same
@@ -47,6 +59,7 @@ type GitCredentialFunc func(ctx context.Context, sessionID, host, path string) (
 type Broker struct {
 	audit     *sql.DB
 	upstreams map[string]*httputil.ReverseProxy
+	egress    map[string]*EgressTarget
 
 	// GitCredential, when set, enables the /git-credential face used by
 	// `waffle git-credential` inside workspace containers.
@@ -56,6 +69,8 @@ type Broker struct {
 	tokens   map[string]string // token → session id
 	sessions map[string]string // session id → current token
 	gitScope map[string]string // session id → bound repo (owner/name)
+	Usage    *usage.Store
+	Limits   usage.Limits
 }
 
 // New builds a broker over the given upstreams; st may be nil to skip
@@ -63,10 +78,12 @@ type Broker struct {
 func New(st *store.Store, upstreams []Upstream) *Broker {
 	b := &Broker{
 		upstreams: map[string]*httputil.ReverseProxy{},
+		egress:    map[string]*EgressTarget{},
 		tokens:    map[string]string{},
 		sessions:  map[string]string{},
 		gitScope:  map[string]string{},
 	}
+
 	if st != nil {
 		b.audit = st.DB
 	}
@@ -90,6 +107,21 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		b.upstreams[u.Name] = proxy
 	}
 	return b
+}
+
+// SetEgress configures the broker's HTTP egress face. Hosts are matched
+// exactly (callers should list each required host explicitly).
+func (b *Broker) SetEgress(targets []EgressTarget) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, target := range targets {
+		host := strings.ToLower(strings.TrimSpace(target.Host))
+		if host == "" || target.BaseURL == "" {
+			continue
+		}
+		t := target
+		b.egress[host] = &t
+	}
 }
 
 // Mint issues a wk_ session token bound to sessionID.
@@ -163,6 +195,13 @@ func (b *Broker) session(token string) string {
 // wk_ token required.
 func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == r.Header.Get("Authorization") {
+		if scheme, value, ok := strings.Cut(r.Header.Get("Proxy-Authorization"), " "); ok && strings.EqualFold(scheme, "Basic") {
+			if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+				token, _, _ = strings.Cut(string(decoded), ":")
+			}
+		}
+	}
 	sessionID := ""
 	if strings.HasPrefix(token, "wk_") {
 		sessionID = b.session(token)
@@ -172,9 +211,23 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if b.Usage != nil {
+		if paused, err := b.Usage.Paused(r.Context()); err != nil || paused {
+			http.Error(w, "waffle is paused", http.StatusTooManyRequests)
+			return
+		}
+		if err := b.Usage.Check(r.Context(), sessionID, b.Limits, time.Now()); err != nil {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+	}
 
 	if r.URL.Path == "/git-credential" {
 		b.serveGitCredential(w, r, token, sessionID)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/egress") || r.URL.IsAbs() {
+		b.serveEgress(w, r, token, sessionID)
 		return
 	}
 
@@ -184,9 +237,98 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
 		return
 	}
+
 	b.record(r.Context(), token, sessionID, "proxy", name+"/"+rest)
+	if b.Usage != nil {
+		if err := b.Usage.AddRequest(r.Context(), sessionID, llm.Usage{}); err != nil {
+			http.Error(w, "usage accounting failed", 500)
+			return
+		}
+	}
 	r.URL.Path = "/" + rest
 	proxy.ServeHTTP(w, r)
+}
+
+func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sessionID string) {
+	targetURL := r.URL
+	if !targetURL.IsAbs() {
+		http.Error(w, "egress requires an absolute URL", http.StatusBadRequest)
+		b.record(r.Context(), token, sessionID, "denied", "egress relative")
+		return
+	}
+	host := strings.ToLower(targetURL.Hostname())
+	b.mu.Lock()
+	target := b.egress[host]
+	b.mu.Unlock()
+	if target == nil {
+		http.Error(w, "egress host not allowlisted", http.StatusForbidden)
+		b.record(r.Context(), token, sessionID, "denied", "egress "+host)
+		return
+	}
+	base, err := url.Parse(target.BaseURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
+		http.Error(w, "invalid egress target", http.StatusInternalServerError)
+		return
+	}
+	if targetURL.Port() != "" && targetURL.Port() != base.Port() {
+		http.Error(w, "egress port not allowlisted", http.StatusForbidden)
+		return
+	}
+	outURL := *targetURL
+	outURL.Scheme, outURL.Host = base.Scheme, base.Host
+	req := r.Clone(r.Context())
+	req.URL = &outURL
+	req.Host = base.Host
+	req.Header.Del("Authorization")
+	req.Header.Del("Proxy-Authorization")
+	if target.Header != "" {
+		req.Header.Set(target.Header, target.Value)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(base)
+	proxy.Transport = safeTransport{}
+	proxy.Director = func(out *http.Request) {
+		out.URL = &outURL
+		out.Host = base.Host
+		out.Header.Del("Authorization")
+		out.Header.Del("Proxy-Authorization")
+		if target.Header != "" {
+			out.Header.Set(target.Header, target.Value)
+		}
+	}
+	b.record(r.Context(), token, sessionID, "egress", host+targetURL.EscapedPath())
+	proxy.ServeHTTP(w, req)
+}
+
+type safeTransport struct{}
+
+func (safeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	t.DialContext = safeDialContext
+	return t.RoundTrip(r)
+}
+
+func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			continue
+		}
+		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return nil, fmt.Errorf("egress address resolves to a private or otherwise unsafe network")
+}
+
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 // serveGitCredential speaks git's credential wire format: key=value lines

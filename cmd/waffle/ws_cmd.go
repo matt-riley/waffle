@@ -62,6 +62,9 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		mgr := newWorkspaceManager(cfg, st, b)
 		mgr.BrokerURL = brokerURL
+		if cfg.Workspace.Egress == "allowlist" {
+			mgr.ProxyURL = brokerURL + "/egress"
+		}
 		ws, client, err := mgr.Open(ctx, args[1])
 		if err != nil {
 			return err
@@ -140,6 +143,12 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	if cfg.Sandbox.Image != "" {
 		mgr.DefaultImage = cfg.Sandbox.Image
 	}
+	mgr.Network = cfg.Sandbox.Network
+	if cfg.Workspace.Egress == "full" {
+		mgr.Network = "bridge"
+	}
+	mgr.Egress = cfg.Workspace.Egress
+	mgr.EgressAllowlist = append([]string(nil), cfg.Workspace.Allowlist...)
 	mgr.RunnerBinary = cfg.Sandbox.RunnerBinary
 	mgr.Memory = cfg.Sandbox.Memory
 	mgr.CPUs = cfg.Sandbox.CPUs
@@ -176,6 +185,13 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	}
 
 	b := broker.New(st, brokerUpstreams(cfg))
+	if cfg.Workspace.Egress == "allowlist" {
+		targets := make([]broker.EgressTarget, 0, len(cfg.Workspace.Allowlist))
+		for _, host := range cfg.Workspace.Allowlist {
+			targets = append(targets, broker.EgressTarget{Host: host, BaseURL: "https://" + host})
+		}
+		b.SetEgress(targets)
+	}
 	// Scope git credentials to the repo the requesting session opened.
 	mgr := newWorkspaceManager(cfg, st, nil)
 	b.GitCredential = gitCredentialFromSecrets(repoScopeResolver(b, mgr))

@@ -18,6 +18,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/usage"
 )
 
 // Gateway wires adapters to the agent runtime.
@@ -32,6 +33,7 @@ type Gateway struct {
 
 	// Observability records gateway agent runs when configured.
 	Observability *observability.Service
+	Usage         *usage.Store
 
 	// MaxConcurrent bounds in-flight message handlers so a flooding
 	// channel can't spawn unbounded goroutines. Zero means the default.
@@ -211,6 +213,15 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 
 // converse routes one owner message through the conversation's session.
 func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, error) {
+	if g.Usage != nil {
+		paused, err := g.Usage.Paused(ctx)
+		if err != nil {
+			return "", err
+		}
+		if paused {
+			return "", errors.New("waffle is paused")
+		}
+	}
 	group, err := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID)
 	if err != nil {
 		return "", err
@@ -245,6 +256,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 			runID = ""
 		}
 	}
+	ctx = agent.WithSession(ctx, group.SessionID)
 	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{
 		OnToolStart: func(use llm.ToolUse) {
 			log.Info("tool", "channel", msg.Channel, "chat", msg.ChatID, "name", use.Name)

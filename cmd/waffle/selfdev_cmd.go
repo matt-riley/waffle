@@ -38,6 +38,21 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 		if !c.OK {
 			mark = "FAIL"
 		}
+		if path, e := config.Path(); e == nil {
+			if cfg, e := config.Load(path); e == nil {
+				for _, s := range cfg.MCP {
+					execution := s.Execution
+					if execution == "" {
+						execution = "host (default for host groups)"
+					}
+					scope := "all groups"
+					if len(s.Groups) > 0 {
+						scope = fmt.Sprintf("groups=%v", s.Groups)
+					}
+					fmt.Fprintf(stdout, "[info] mcp %q — execution=%s, %s, env=%d allowlisted vars\n", s.Name, execution, scope, len(s.Env))
+				}
+			}
+		}
 		fmt.Fprintf(stdout, "[%s] %s", mark, c.Name)
 		if c.Info != "" {
 			fmt.Fprintf(stdout, " — %s", c.Info)
@@ -53,8 +68,16 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 
 func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	ref := ""
-	if len(args) > 0 {
-		ref = args[0]
+	noVerify := false
+	for _, arg := range args {
+		if arg == "--no-verify" {
+			noVerify = true
+			continue
+		}
+		if ref != "" {
+			return fmt.Errorf("upgrade accepts at most one ref")
+		}
+		ref = arg
 	}
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -74,7 +97,11 @@ func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	fmt.Fprintln(stdout, " ...")
 
-	path, err := selfdev.Upgrade(ctx, cfg.Repo.Dir, ref, stderr)
+	verify := cfg.Selfdev.Verify && !noVerify
+	if noVerify {
+		fmt.Fprintln(stderr, "warning: --no-verify is unsafe; vet, tests, and lint are being skipped")
+	}
+	path, err := selfdev.UpgradeWithOptions(ctx, cfg.Repo.Dir, ref, stderr, verify, cfg.Selfdev.Approval, cfg.Selfdev.Protected)
 	if err != nil {
 		return err
 	}

@@ -15,21 +15,59 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the root of config.toml.
 type Config struct {
-	Gateway  Gateway     `toml:"gateway"`
-	Provider Provider    `toml:"provider"`
-	Channel  Channels    `toml:"channel"`
-	Sandbox  Sandbox     `toml:"sandbox"`
-	Broker   Broker      `toml:"broker"`
-	MCP      []MCPServer `toml:"mcp"`
-	Agent    Agent       `toml:"agent"`
-	Repo     Repo        `toml:"repo"`
-	Log      Log         `toml:"log"`
+	Gateway   Gateway     `toml:"gateway"`
+	Provider  Provider    `toml:"provider"`
+	Channel   Channels    `toml:"channel"`
+	Sandbox   Sandbox     `toml:"sandbox"`
+	Broker    Broker      `toml:"broker"`
+	Workspace Workspace   `toml:"workspace"`
+	MCP       []MCPServer `toml:"mcp"`
+	Agent     Agent       `toml:"agent"`
+	Repo      Repo        `toml:"repo"`
+	Selfdev   Selfdev     `toml:"selfdev"`
+	Log       Log         `toml:"log"`
+	Limits    Limits      `toml:"limits"`
+	Jobs      JobPolicy   `toml:"jobs"`
+	Tools     Tools       `toml:"tools"`
+	Memory    Memory      `toml:"memory"`
+}
+
+// JobPolicy controls retries for unattended scheduled jobs. Durations use
+// Go duration syntax (for example, "10s" or "5m").
+type JobPolicy struct {
+	MaxAttempts  int    `toml:"max_attempts"`
+	BaseBackoff  string `toml:"base_backoff"`
+	MaxBackoff   string `toml:"max_backoff"`
+	StallTimeout string `toml:"stall_timeout"`
+}
+
+// Tools configures builtin tool network policy.
+type Tools struct {
+	Fetch Fetch `toml:"fetch"`
+}
+
+// Fetch configures the fetch tool's private-address escape hatch.
+type Fetch struct {
+	AllowPrivate []string `toml:"allow_private"`
+}
+
+// Memory controls writes to prompt-visible memory and skills.
+type Memory struct {
+	WriteGate string `toml:"write_gate"`
+}
+
+// Selfdev configures the approval and verification policy for upgrades.
+type Selfdev struct {
+	Approval  string   `toml:"approval"`
+	Verify    bool     `toml:"verify"`
+	Protected []string `toml:"protected"`
 }
 
 // MCPServer is one Model Context Protocol server run over stdio.
@@ -37,6 +75,17 @@ type MCPServer struct {
 	Name    string   `toml:"name"`
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
+	// Execution is "host" or "sandbox". Sandbox execution is currently
+	// fail-closed by the agent builder until MCP can be wired into a
+	// constrained runner.
+	Execution string `toml:"execution"`
+	// Groups limits this server to named agent groups; empty means all groups.
+	Groups []string `toml:"groups"`
+	// Tools is an optional declaration of the server's exposed tool names.
+	// It permits launch filtering before the process is started.
+	Tools []string `toml:"tools"`
+	// Env names the only parent environment variables copied to the child.
+	Env []string `toml:"env"`
 }
 
 // Agent tunes agent behavior.
@@ -117,6 +166,12 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	// cron tool policy opts out of that safety default.
 	if group == GroupCron && !explicitTools {
 		r.Deny = appendUnique(r.Deny, "bash")
+		r.Deny = appendUnique(r.Deny, "remember")
+		r.Deny = appendUnique(r.Deny, "distill_skill")
+	}
+	if r.Mode == "docker" {
+		r.Deny = appendUnique(r.Deny, "remember")
+		r.Deny = appendUnique(r.Deny, "distill_skill")
 	}
 	return r
 }
@@ -188,6 +243,13 @@ type Sandbox struct {
 	Deny  []string `toml:"deny"`
 }
 
+// Workspace controls network egress for repository workspaces. Egress is
+// deny-by-default; allowlist routes HTTP(S) through the host broker.
+type Workspace struct {
+	Egress    string   `toml:"egress"`
+	Allowlist []string `toml:"allowlist"`
+}
+
 // Broker configures the credential broker's HTTP listener; empty disables.
 type Broker struct {
 	Listen string `toml:"listen"`
@@ -235,6 +297,20 @@ type Log struct {
 	Level string `toml:"level"`
 }
 
+// Limits are optional safety budgets. Zero means unlimited.
+type Limits struct {
+	TokensPerDay    int               `toml:"tokens_per_day"`
+	RequestsPerHour int               `toml:"requests_per_hour"`
+	Groups          map[string]Limits `toml:"group"`
+}
+
+func (c Config) LimitsFor(group string) Limits {
+	if l, ok := c.Limits.Groups[group]; ok {
+		return l
+	}
+	return Limits{TokensPerDay: c.Limits.TokensPerDay, RequestsPerHour: c.Limits.RequestsPerHour}
+}
+
 // Default returns the configuration waffle runs with when no file exists.
 func Default() Config {
 	return Config{
@@ -256,8 +332,12 @@ func Default() Config {
 			CPUs:    2,
 			PIDs:    512,
 		},
-		Agent: Agent{Subagents: true, Learn: true},
-		Log:   Log{Level: "info"},
+		Workspace: Workspace{Egress: "none"},
+		Agent:     Agent{Subagents: true, Learn: true},
+		Memory:    Memory{WriteGate: "auto"},
+		Selfdev:   Selfdev{Approval: "manual", Verify: true},
+		Log:       Log{Level: "info"},
+		Jobs:      JobPolicy{MaxAttempts: 1, BaseBackoff: "10s", MaxBackoff: "10m", StallTimeout: "5m"},
 	}
 }
 
@@ -315,7 +395,68 @@ func Load(path string) (Config, error) {
 	if err := validateSandboxResources(cfg.Sandbox); err != nil {
 		return Config{}, fmt.Errorf("sandbox resources: %w", err)
 	}
+	if err := validateLimits(cfg.Limits); err != nil {
+		return Config{}, fmt.Errorf("limits: %w", err)
+	}
+	if err := validateFetch(cfg.Tools.Fetch); err != nil {
+		return Config{}, fmt.Errorf("tools.fetch: %w", err)
+	}
+
+	if cfg.Jobs.MaxAttempts < 1 {
+		return Config{}, fmt.Errorf("jobs.max_attempts must be at least 1")
+	}
+	for name, value := range map[string]string{"base_backoff": cfg.Jobs.BaseBackoff, "max_backoff": cfg.Jobs.MaxBackoff, "stall_timeout": cfg.Jobs.StallTimeout} {
+		if d, err := time.ParseDuration(value); err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("jobs.%s must be a positive duration, got %q", name, value)
+		}
+	}
+	if cfg.Memory.WriteGate != "auto" && cfg.Memory.WriteGate != "notify" && cfg.Memory.WriteGate != "review" {
+		return Config{}, fmt.Errorf("memory.write_gate: must be auto, notify, or review")
+	}
+	switch cfg.Selfdev.Approval {
+	case "manual", "ci", "auto-patch":
+	default:
+		return Config{}, fmt.Errorf("selfdev.approval: unknown value %q (want \"manual\", \"ci\", or \"auto-patch\")", cfg.Selfdev.Approval)
+	}
+	if err := validateWorkspaceEgress(cfg.Workspace); err != nil {
+		return Config{}, fmt.Errorf("workspace egress: %w", err)
+	}
+	for _, s := range cfg.MCP {
+		if s.Execution != "" && s.Execution != "host" && s.Execution != "sandbox" {
+			return Config{}, fmt.Errorf("mcp %q: execution must be \"host\" or \"sandbox\", got %q", s.Name, s.Execution)
+		}
+	}
 	return cfg, nil
+}
+
+func validateLimits(l Limits) error {
+	if l.TokensPerDay < 0 || l.RequestsPerHour < 0 {
+		return errors.New("limits must be zero (unlimited) or positive")
+	}
+	for _, g := range l.Groups {
+		if err := validateLimits(g); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWorkspaceEgress(w Workspace) error {
+	switch w.Egress {
+	case "", "none", "allowlist", "full":
+	default:
+		return fmt.Errorf("egress must be none, allowlist, or full, got %q", w.Egress)
+	}
+	if w.Egress == "allowlist" && len(w.Allowlist) == 0 {
+		return errors.New("allowlist egress requires at least one host")
+	}
+	for _, host := range w.Allowlist {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host == "" || strings.ContainsAny(host, "/?#") || net.ParseIP(host) != nil {
+			return fmt.Errorf("invalid allowlist host %q", host)
+		}
+	}
+	return nil
 }
 
 var memoryLimitRE = regexp.MustCompile(`(?i)^[1-9][0-9]*(b|k|m|g|t|kb|mb|gb|tb)$`)
@@ -327,11 +468,25 @@ func validateSandboxResources(s Sandbox) error {
 	if s.Disk != "" && !memoryLimitRE.MatchString(s.Disk) {
 		return fmt.Errorf("disk must be a positive Docker size such as 10g, got %q", s.Disk)
 	}
+
 	if s.CPUs <= 0 {
 		return fmt.Errorf("cpus must be positive, got %g", s.CPUs)
 	}
 	if s.PIDs <= 0 {
 		return fmt.Errorf("pids must be positive, got %d", s.PIDs)
+	}
+	return nil
+}
+
+func validateFetch(f Fetch) error {
+	for _, entry := range f.AllowPrivate {
+		if _, _, err := net.ParseCIDR(entry); err == nil {
+			continue
+		}
+		host, port, err := net.SplitHostPort(entry)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("allow_private entry %q must be a CIDR or host:port", entry)
+		}
 	}
 	return nil
 }

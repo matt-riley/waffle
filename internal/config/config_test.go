@@ -77,6 +77,22 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load accepted unknown key, want error")
 	}
+
+}
+
+func TestSelfdevDefaultsAndApproval(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.toml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.Selfdev.Approval != "manual" || !cfg.Selfdev.Verify {
+		t.Errorf("Selfdev defaults = %+v, want manual and verify=true", cfg.Selfdev)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[selfdev]\napproval = \"bogus\"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted unknown selfdev approval")
+	}
 }
 
 func TestHomeRespectsEnv(t *testing.T) {

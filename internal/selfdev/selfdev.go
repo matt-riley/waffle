@@ -164,6 +164,12 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	info, err := providerCheck(ctx, cfg.Provider)
 	add("provider reachable", err, info)
 
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		add("golangci-lint gate", nil, "not installed (optional; verify gate skipped)")
+	} else {
+		add("golangci-lint gate", nil, "installed (verify gate armed)")
+	}
+
 	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
 	// container entrypoint. On a non-linux host that must be an explicitly
 	// configured linux build; otherwise the sandbox dies on start with a
@@ -207,7 +213,15 @@ func sandboxRunnerCheck(runnerBinary string) (info string, err error) {
 // Upgrade builds waffle from repoDir at ref, runs doctor against the new
 // binary, and — if it passes — atomically swaps it into place, keeping the
 // previous binary for rollback. It returns the path that was replaced.
+// Upgrade builds and installs an upgrade with verification enabled.
 func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string, error) {
+	return UpgradeWithOptions(ctx, repoDir, ref, stderr, true, "", nil)
+}
+
+// UpgradeWithOptions is Upgrade with an explicit verification and approval
+// policy. Verification is intentionally opt-out only: callers should make
+// the unsafe choice visible in their own CLI.
+func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writer, verify bool, approval string, protected []string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -221,6 +235,11 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 		if err := validateRef(ref); err != nil {
 			return "", err
 		}
+		if approval == "auto-patch" {
+			if err := rejectProtectedChanges(ctx, repoDir, ref, protected); err != nil {
+				return "", err
+			}
+		}
 		// Trailing "--" marks end of pathspecs; with the ref already
 		// validated it is belt-and-braces against option injection and
 		// does not change checkout semantics for a branch/tag/sha.
@@ -229,10 +248,16 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 		}
 	}
 
+	if verify {
+		if err := verifyRepo(ctx, repoDir, stderr); err != nil {
+			return "", err
+		}
+	}
 	built := filepath.Join(repoDir, ".waffle-build")
 	if err := run(ctx, repoDir, stderr, "go", "build", "-o", built, "./cmd/waffle"); err != nil {
 		return "", fmt.Errorf("build: %w", err)
 	}
+
 	defer os.Remove(built) //nolint:errcheck // best-effort cleanup
 
 	// Gate on the *new* binary's own doctor.
@@ -258,6 +283,43 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 		return "", fmt.Errorf("swap binary: %w", err)
 	}
 	return self, nil
+}
+
+func verifyRepo(ctx context.Context, repoDir string, stderr io.Writer) error {
+	steps := [][]string{{"go", "vet", "./..."}, {"go", "test", "-race", "./..."}}
+	if _, err := exec.LookPath("golangci-lint"); err == nil {
+		steps = append(steps, []string{"golangci-lint", "run"})
+	} else {
+		fmt.Fprintln(stderr, "warning: golangci-lint not installed; lint gate skipped")
+	}
+	for _, step := range steps {
+		if err := run(ctx, repoDir, stderr, step[0], step[1:]...); err != nil {
+			return fmt.Errorf("verify: %s failed: %w", strings.Join(step, " "), err)
+		}
+	}
+	return nil
+}
+
+func rejectProtectedChanges(ctx context.Context, repoDir, ref string, protected []string) error {
+	if ref == "" {
+		return nil
+	}
+	out, err := commandOutput(ctx, repoDir, "git", "diff", "--name-only", "HEAD", ref)
+	if err != nil {
+		return fmt.Errorf("inspect auto-patch diff: %w", err)
+	}
+	paths := append([]string{
+		"internal/selfdev", "internal/config", "cmd/waffle/selfdev_cmd.go",
+		"cmd/waffle/main.go", "internal/doctor", "evals",
+	}, protected...)
+	for _, file := range strings.Fields(out) {
+		for _, prefix := range paths {
+			if file == prefix || strings.HasPrefix(file, strings.TrimSuffix(prefix, "/")+"/") {
+				return fmt.Errorf("auto-patch refused: change touches protected path %q", file)
+			}
+		}
+	}
+	return nil
 }
 
 // Rollback restores the binary saved by the last Upgrade.
@@ -299,6 +361,13 @@ func run(ctx context.Context, dir string, stderr io.Writer, name string, args ..
 	cmd.Stdout = stderr
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func commandOutput(ctx context.Context, dir, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 func copyFile(src, dst string) error {

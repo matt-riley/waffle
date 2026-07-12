@@ -62,6 +62,7 @@ func InitIdentity(printOnly bool) (*age.X25519Identity, error) {
 		return nil, fmt.Errorf(
 			"cannot verify whether an identity already exists (%w); refusing to overwrite", err)
 	}
+
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return nil, fmt.Errorf("generate identity: %w", err)
@@ -74,4 +75,22 @@ func InitIdentity(printOnly bool) (*age.X25519Identity, error) {
 		}
 	}
 	return id, nil
+}
+
+// ImportIdentity validates and stores an identity in the OS keyring. It never
+// replaces an existing identity; callers must explicitly remove it first.
+func ImportIdentity(value string) error {
+	id, err := age.ParseX25519Identity(strings.TrimSpace(value))
+	if err != nil {
+		return fmt.Errorf("parse identity: %w", err)
+	}
+	if _, err := LoadIdentity(); err == nil {
+		return errors.New("an identity already exists; refusing to overwrite it")
+	} else if !errors.Is(err, ErrNoIdentity) {
+		return fmt.Errorf("cannot verify whether an identity exists (%w); refusing to overwrite it", err)
+	}
+	if err := keyring.Set(keyringService, keyringUser, id.String()); err != nil {
+		return fmt.Errorf("store identity in OS keyring: %w", err)
+	}
+	return nil
 }

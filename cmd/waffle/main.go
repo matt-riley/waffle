@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 
+	"github.com/matt-riley/waffle/internal/backup"
 	"github.com/matt-riley/waffle/internal/gitcred"
+	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/telemetry"
 )
 
@@ -50,10 +52,42 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return nil
 	case "secret":
 		return secretCmd(args[1:], stdin, stdout, stderr)
+	case "backup":
+		if len(args) < 2 || len(args) > 3 {
+			return errors.New("usage: waffle backup <absolute-dir> [--with-identity]")
+		}
+		withIdentity := len(args) == 3 && args[2] == "--with-identity"
+		if len(args) == 3 && !withIdentity {
+			return errors.New("usage: waffle backup <absolute-dir> [--with-identity]")
+		}
+		var identity string
+		if withIdentity {
+			id, err := secret.LoadIdentity()
+			if err != nil {
+				return err
+			}
+			identity = id.String()
+		}
+		if err := backup.Create(ctx, args[1], withIdentity, identity); err != nil {
+			return err
+		}
+		if !withIdentity {
+			fmt.Fprintln(stdout, "backup created; export your identity separately with `waffle secret export-identity`")
+		}
+		return nil
+	case "restore":
+		if len(args) != 2 {
+			return errors.New("usage: waffle restore <absolute-dir>")
+		}
+		return backup.Restore(ctx, args[1])
 	case "chat":
 		return chatCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "session":
 		return sessionCmd(ctx, args[1:], stdout, stderr)
+	case "usage":
+		return usageCmd(ctx, args[1:], stdout, stderr)
+	case "pause", "resume":
+		return pauseCmd(ctx, args[0], stdout)
 	case "serve":
 		return serveCmd(ctx, stderr)
 	case "status":
@@ -103,9 +137,15 @@ Commands:
   ws        manage repo workspaces (open/ls/idle/close)
   cron      manage scheduled jobs (add/ls/run/rm)
   session   list past sessions
+  usage     show persisted token/request usage
+  pause     pause new agent runs
+  resume    resume agent runs
   secret    manage the encrypted secret store
+  backup    create a local state backup
+  restore   validate and restore a local state backup
   doctor    run self-checks
-  upgrade   rebuild waffle from source and swap in the new binary
+  upgrade   rebuild and verify waffle, then swap in the new binary
+            --no-verify skips vet/tests/lint (unsafe)
   rollback  restore the previous binary
   version   print version
   help      show this help

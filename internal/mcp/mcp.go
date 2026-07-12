@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type Server struct {
 	Name    string
 	Command string
 	Args    []string
+	Env     []string // allowlisted parent environment variable names
 }
 
 // rpcRequest / rpcResponse are JSON-RPC 2.0 envelopes.
@@ -71,6 +73,20 @@ type Client struct {
 // handshake.
 func Connect(ctx context.Context, s Server) (*Client, error) {
 	cmd := exec.Command(s.Command, s.Args...)
+	cmd.Env = make([]string, 0, len(s.Env))
+	// Keep command-line helpers usable without inheriting the daemon's
+	// credentials or application settings.
+	if path, ok := os.LookupEnv("PATH"); ok {
+		cmd.Env = append(cmd.Env, "PATH="+path)
+	}
+	for _, name := range s.Env {
+		if name == "PATH" {
+			continue
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			cmd.Env = append(cmd.Env, name+"="+value)
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
+	"github.com/matt-riley/waffle/internal/usage"
 )
 
 // Agent runs conversations against one provider with one toolset.
@@ -29,7 +31,16 @@ type Agent struct {
 	// Redact, if set, scrubs tool results before they enter the
 	// transcript (see internal/secret.Redactor).
 	Redact func(string) string
+	Usage  *usage.Store
+	Limits usage.Limits
 }
+
+type sessionKey struct{}
+
+func WithSession(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, sessionKey{}, id)
+}
+func sessionID(ctx context.Context) string { v, _ := ctx.Value(sessionKey{}).(string); return v }
 
 // Hooks observe a Run for UI purposes. Any field may be nil.
 type Hooks struct {
@@ -77,12 +88,25 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	observeUsage := func(callUsage llm.Usage) {
 		usage.InputTokens += callUsage.InputTokens
 		usage.OutputTokens += callUsage.OutputTokens
+		if a.Usage != nil {
+			_ = a.Usage.AddRequest(ctx, sessionID(ctx), callUsage)
+		}
 		if hooks.OnUsage != nil {
 			hooks.OnUsage(usage)
 		}
 	}
 
 	for i := 0; i < maxIter; i++ {
+		if a.Usage != nil {
+			if paused, err := a.Usage.Paused(ctx); err != nil {
+				return history, err
+			} else if paused {
+				return history, errors.New("waffle is paused")
+			}
+			if err := a.Usage.Check(ctx, sessionID(ctx), a.Limits, time.Now()); err != nil {
+				return history, err
+			}
+		}
 		// Pre-Complete step: summarize old turns + recent window. This
 		// bounds prompt size independent of total session length (only
 		// MaxIterations + provider MaxTokens were bounds before).
@@ -187,7 +211,13 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 }
 
 func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
-	out, err := a.Tools.Run(ctx, use.Name, use.Input)
+	var out string
+	var err error
+	if caller, ok := a.Tools.(tool.CallerToolbox); ok {
+		out, err = caller.RunWithID(ctx, use.ID, use.Name, use.Input)
+	} else {
+		out, err = a.Tools.Run(ctx, use.Name, use.Input)
+	}
 	res := llm.ToolResult{ToolUseID: use.ID, Content: out}
 	if err != nil {
 		res.Content = fmt.Sprintf("error: %v", err)

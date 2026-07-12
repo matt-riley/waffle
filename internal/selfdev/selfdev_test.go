@@ -146,10 +146,12 @@ func TestUpgradeRejectsOptionRefs(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Upgrade(ref=%q): want error, got nil", ref)
 		}
+
 		if !strings.Contains(err.Error(), "may not start with '-'") {
 			t.Errorf("Upgrade(ref=%q) error = %q, want ref validation error", ref, err)
 		}
 	}
+
 }
 
 func TestValidateRef(t *testing.T) {
@@ -195,6 +197,7 @@ func TestSandboxRunnerCheck(t *testing.T) {
 	if err := os.WriteFile(f, []byte("binary"), 0o755); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
+
 	if info, err := sandboxRunnerCheck(f); err != nil || !strings.Contains(info, f) {
 		t.Errorf("existing runner_binary: info=%q err=%v", info, err)
 	}

@@ -78,6 +78,7 @@ func TestQueueRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+
 	defer client.Close() //nolint:errcheck // test teardown
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -494,5 +495,42 @@ func TestResolveRunnerBinaryUsesSelfOnLinux(t *testing.T) {
 	}
 	if got == "" {
 		t.Error("want the running binary path, got empty")
+	}
+}
+
+func TestDuplicateExecIsAbsorbedAndReclaimable(t *testing.T) {
+	dir := t.TempDir()
+	startRunner(t, dir)
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first, _, err := client.Exec(ctx, "tool-call-1", "upper", json.RawMessage(`{"s":"once"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := client.Exec(ctx, "tool-call-1", "upper", json.RawMessage(`{"s":"different"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || first != "ONCE" {
+		t.Fatalf("duplicate results = %q, %q", first, second)
+	}
+	var count int
+	if err := client.inbound.QueryRow(`SELECT count(*) FROM requests WHERE tool_use_id = 'tool-call-1'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("request count = %d, want 1", count)
+	}
+	got, err := client.Reclaim(ctx, []string{"tool-call-1", "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["tool-call-1"].Content != "ONCE" || len(got) != 1 {
+		t.Fatalf("reclaim = %#v", got)
 	}
 }

@@ -22,19 +22,54 @@ import (
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/usage"
 )
 
 // Job is one scheduled task.
 type Job struct {
-	ID         string
-	Name       string
-	Cron       string
-	Prompt     string
-	Deliver    string // "channel:chat_id" or "" for log-only
-	Enabled    bool
-	LastRun    time.Time
-	LastStatus string
-	CreatedAt  time.Time
+	ID           string
+	Name         string
+	Cron         string
+	Prompt       string
+	Deliver      string // "channel:chat_id" or "" for log-only
+	Enabled      bool
+	LastRun      time.Time
+	LastStatus   string
+	CreatedAt    time.Time
+	Attempt      int
+	NextRetry    time.Time
+	MaxAttempts  int
+	BaseBackoff  time.Duration
+	MaxBackoff   time.Duration
+	StallTimeout time.Duration
+}
+
+type RetryPolicy struct {
+	MaxAttempts  int
+	BaseBackoff  time.Duration
+	MaxBackoff   time.Duration
+	StallTimeout time.Duration
+}
+
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{MaxAttempts: 1, BaseBackoff: 10 * time.Second, MaxBackoff: 10 * time.Minute, StallTimeout: 5 * time.Minute}
+}
+
+func (p RetryPolicy) normalized() RetryPolicy {
+	d := DefaultRetryPolicy()
+	if p.MaxAttempts > 0 {
+		d.MaxAttempts = p.MaxAttempts
+	}
+	if p.BaseBackoff > 0 {
+		d.BaseBackoff = p.BaseBackoff
+	}
+	if p.MaxBackoff > 0 {
+		d.MaxBackoff = p.MaxBackoff
+	}
+	if p.StallTimeout > 0 {
+		d.StallTimeout = p.StallTimeout
+	}
+	return d
 }
 
 // Deliverer sends a job's result somewhere (a channel adapter, typically).
@@ -64,8 +99,8 @@ func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*J
 	}
 	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Enabled: true}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at)
-		VALUES (?, ?, ?, ?, ?, 1, ?)`, j.ID, name, spec, prompt, deliver, now())
+		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at, max_attempts, base_backoff, max_backoff, stall_timeout)
+		VALUES (?, ?, ?, ?, ?, 1, ?, 1, '10s', '10m', '5m')`, j.ID, name, spec, prompt, deliver, now())
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +122,7 @@ func (s *Store) Remove(ctx context.Context, id string) error {
 // List returns all jobs.
 func (s *Store) List(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout
 		FROM jobs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -107,7 +142,7 @@ func (s *Store) List(ctx context.Context) ([]Job, error) {
 // Get loads one job.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	return scanJob(s.db.QueryRowContext(ctx, `
-		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout
 		FROM jobs WHERE id = ?`, id))
 }
 
@@ -117,13 +152,24 @@ func (s *Store) markRun(ctx context.Context, id, status string) error {
 	return err
 }
 
+func (s *Store) startAttempt(ctx context.Context, id string, attempt int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET attempt = ?, next_retry = '' WHERE id = ?`, attempt, id)
+	return err
+}
+
+func (s *Store) scheduleRetry(ctx context.Context, id, status string, next time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET last_run = ?, last_status = ?, next_retry = ? WHERE id = ?`,
+		now(), status, next.UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
 type rowScanner interface{ Scan(...any) error }
 
 func scanJob(row rowScanner) (*Job, error) {
 	var j Job
 	var enabled int
-	var lastRun, created string
-	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.Prompt, &j.Deliver, &enabled, &lastRun, &j.LastStatus, &created)
+	var lastRun, created, nextRetry, base, max, stall string
+	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.Prompt, &j.Deliver, &enabled, &lastRun, &j.LastStatus, &created, &j.Attempt, &nextRetry, &j.MaxAttempts, &base, &max, &stall)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("job not found")
 	}
@@ -139,6 +185,23 @@ func scanJob(row rowScanner) (*Job, error) {
 	}
 	if j.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, created); parseErr != nil && created != "" {
 		return nil, fmt.Errorf("parse job created_at: %w", parseErr)
+	}
+	if nextRetry != "" {
+		if j.NextRetry, parseErr = time.Parse(time.RFC3339Nano, nextRetry); parseErr != nil {
+			return nil, fmt.Errorf("parse job next_retry: %w", parseErr)
+		}
+	}
+	j.BaseBackoff, parseErr = time.ParseDuration(base)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse job base_backoff: %w", parseErr)
+	}
+	j.MaxBackoff, parseErr = time.ParseDuration(max)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse job max_backoff: %w", parseErr)
+	}
+	j.StallTimeout, parseErr = time.ParseDuration(stall)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse job stall_timeout: %w", parseErr)
 	}
 	return &j, nil
 }
@@ -157,11 +220,53 @@ type Runner struct {
 
 // Run executes one job now: fresh session, agent turn, deliver the reply.
 func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
+	return r.RunAttempt(ctx, j, 1)
+}
+
+// RunAttempt executes one numbered attempt. Retries add context to the
+// prompt while the first attempt remains byte-for-byte compatible.
+func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, error) {
+	policy := RetryPolicy{MaxAttempts: j.MaxAttempts, BaseBackoff: j.BaseBackoff, MaxBackoff: j.MaxBackoff, StallTimeout: j.StallTimeout}.normalized()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	activity := make(chan struct{}, 1)
+	pulse := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
+	timer := time.NewTimer(policy.StallTimeout)
+	defer timer.Stop()
+	watchCtx := runCtx
+	go func() {
+		for {
+			select {
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(policy.StallTimeout)
+			case <-timer.C:
+				cancel()
+				return
+			case <-watchCtx.Done():
+				return
+			}
+		}
+	}()
 	sess, err := r.Sessions.Create(ctx, "cron: "+j.Name)
 	if err != nil {
 		return "", err
 	}
-	history := []llm.Message{llm.UserText(j.Prompt)}
+	prompt := j.Prompt
+	if attempt > 1 {
+		prompt += fmt.Sprintf("\n\n[Retry context: this is attempt %d of %d; the previous attempt did not complete successfully. Continue the work and avoid repeating completed steps.]", attempt, policy.MaxAttempts)
+	}
+	history := []llm.Message{llm.UserText(prompt)}
 	if err := r.Sessions.AppendTurn(ctx, sess.ID, history[0]); err != nil {
 		return "", err
 	}
@@ -193,8 +298,13 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 		}
 	}()
 
-	out, runErr := r.Agent.Run(ctx, history, agent.Hooks{
+	runCtx = agent.WithSession(runCtx, sess.ID)
+	out, runErr := r.Agent.Run(runCtx, history, agent.Hooks{
+		OnText:      func(string) { pulse() },
+		OnToolStart: func(llm.ToolUse) { pulse() },
+		OnToolDone:  func(llm.ToolUse, llm.ToolResult) { pulse() },
 		OnUsage: func(usage llm.Usage) {
+			pulse()
 			if runID == "" {
 				return
 			}
@@ -207,6 +317,9 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 		_ = r.Sessions.AppendTurn(ctx, sess.ID, m)
 	}
 	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
+			return "", fmt.Errorf("stalled after %s: %w", policy.StallTimeout, runErr)
+		}
 		return "", runErr
 	}
 
@@ -235,10 +348,12 @@ type Scheduler struct {
 	Store  *Store
 	Runner *Runner
 	Log    *slog.Logger
+	Policy RetryPolicy
 	// Reconcile is how often the scheduler re-lists jobs and syncs the
 	// cron set, so adds/removals/edits made while serving take effect
 	// without a restart. Zero means DefaultReconcile.
 	Reconcile time.Duration
+	Usage     *usage.Store
 
 	mu         sync.Mutex
 	registered map[string]registration // job id -> live cron entry
@@ -346,17 +461,73 @@ func (s *Scheduler) registeredIDs() []string {
 }
 
 func (s *Scheduler) fire(ctx context.Context, j Job) {
-	s.Log.Info("job firing", "job", j.ID, "name", j.Name)
-	runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	defer cancel()
-	_, err := s.Runner.Run(runCtx, j)
-	status := "ok"
-	if err != nil {
-		status = "error: " + err.Error()
-		s.Log.Error("job failed", "job", j.ID, "err", err)
+	if s.Usage != nil {
+		paused, err := s.Usage.Paused(ctx)
+		if err != nil || paused {
+			return
+		}
 	}
-	if err := s.Store.markRun(context.WithoutCancel(runCtx), j.ID, status); err != nil {
-		s.Log.Error("mark job run failed", "job", j.ID, "err", err)
+	if current, err := s.Store.Get(context.WithoutCancel(ctx), j.ID); err == nil &&
+		!current.NextRetry.IsZero() && time.Now().Before(current.NextRetry) {
+		return
+	}
+	s.Log.Info("job firing", "job", j.ID, "name", j.Name)
+	policy := s.Policy.normalized()
+	if j.MaxAttempts > 1 || policy.MaxAttempts == 1 {
+		policy.MaxAttempts = j.MaxAttempts
+	}
+	if j.BaseBackoff > 0 && (j.BaseBackoff != DefaultRetryPolicy().BaseBackoff || policy.BaseBackoff == DefaultRetryPolicy().BaseBackoff) {
+		policy.BaseBackoff = j.BaseBackoff
+	}
+	if j.MaxBackoff > 0 && (j.MaxBackoff != DefaultRetryPolicy().MaxBackoff || policy.MaxBackoff == DefaultRetryPolicy().MaxBackoff) {
+		policy.MaxBackoff = j.MaxBackoff
+	}
+	if j.StallTimeout > 0 && (j.StallTimeout != DefaultRetryPolicy().StallTimeout || policy.StallTimeout == DefaultRetryPolicy().StallTimeout) {
+		policy.StallTimeout = j.StallTimeout
+	}
+	attempt := 1
+	for {
+		if err := s.Store.startAttempt(context.WithoutCancel(ctx), j.ID, attempt); err != nil {
+			s.Log.Error("record job attempt failed", "job", j.ID, "err", err)
+		}
+		j.MaxAttempts, j.BaseBackoff, j.MaxBackoff, j.StallTimeout = policy.MaxAttempts, policy.BaseBackoff, policy.MaxBackoff, policy.StallTimeout
+		runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		_, err := s.Runner.RunAttempt(runCtx, j, attempt)
+		cancel()
+		if err == nil {
+			_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok")
+			return
+		}
+		s.Log.Error("job attempt failed", "job", j.ID, "attempt", attempt, "err", err)
+		if attempt >= policy.MaxAttempts {
+			status := "failed: " + err.Error()
+			_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, status)
+			if j.Deliver != "" && s.Runner.Deliverer != nil {
+				notice := fmt.Sprintf("Job %q failed after %d attempt(s): %v", j.Name, attempt, err)
+				if derr := s.Runner.Deliverer.Deliver(context.WithoutCancel(ctx), j.Deliver, notice); derr != nil {
+					s.Log.Error("final failure delivery failed", "job", j.ID, "err", derr)
+				}
+			}
+			return
+		}
+		delay := policy.BaseBackoff
+		for n := 1; n < attempt; n++ {
+			delay *= 2
+			if delay >= policy.MaxBackoff {
+				delay = policy.MaxBackoff
+				break
+			}
+		}
+		next := time.Now().Add(delay)
+		_ = s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, fmt.Sprintf("retrying: %v", err), next)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		attempt++
 	}
 }
 

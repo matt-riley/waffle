@@ -27,6 +27,7 @@ type Store struct {
 
 // New wraps an opened waffle store.
 func New(s *store.Store) *Store { return &Store{db: s.DB} }
+func (s *Store) DB() *sql.DB    { return s.db }
 
 // Session is one conversation.
 type Session struct {
@@ -184,6 +185,12 @@ func indexableText(msg llm.Message) string {
 // loop ends with unanswered tool_use blocks, which providers reject. Close
 // them out with error results.
 func Repair(history []llm.Message) []llm.Message {
+	return RepairWithReclaim(history, nil)
+}
+
+// RepairWithReclaim closes dangling tool calls, adopting durable results
+// supplied by the sandbox when available and fabricating only the remainder.
+func RepairWithReclaim(history []llm.Message, reclaim func([]string) (map[string]llm.ToolResult, error)) []llm.Message {
 	if len(history) == 0 {
 		return history
 	}
@@ -192,8 +199,24 @@ func Repair(history []llm.Message) []llm.Message {
 		return history
 	}
 	var results []llm.Block
+	var ids []string
 	for _, b := range last.Blocks {
 		if b.Type == llm.BlockToolUse {
+			ids = append(ids, b.ToolUse.ID)
+		}
+	}
+	adopted := map[string]llm.ToolResult{}
+	if reclaim != nil && len(ids) > 0 {
+		if got, err := reclaim(ids); err == nil {
+			adopted = got
+		}
+	}
+	for _, b := range last.Blocks {
+		if b.Type == llm.BlockToolUse {
+			if result, ok := adopted[b.ToolUse.ID]; ok {
+				results = append(results, llm.Block{Type: llm.BlockToolResult, ToolResult: &result})
+				continue
+			}
 			results = append(results, llm.Block{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{
 				ToolUseID: b.ToolUse.ID,
 				Content:   "session was interrupted before this tool ran",

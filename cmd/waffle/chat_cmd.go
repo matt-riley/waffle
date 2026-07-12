@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
+	usagepkg "github.com/matt-riley/waffle/internal/usage"
 )
 
 const (
@@ -152,6 +154,7 @@ func splitCommand(line string) (cmd, args string) {
 
 // turn sends one user message through the agent and persists everything.
 func (c *chat) turn(ctx context.Context, message string, stdout, stderr io.Writer) error {
+	ctx = agent.WithSession(ctx, c.current.ID)
 	if len(c.history) == 0 && c.current.Title == "" {
 		title := message
 		if len(title) > 60 {
@@ -410,11 +413,11 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 	// Host tools execute on the host regardless of sandbox mode — memory
 	// is waffle's own state, and learning writes to the workspace.
 	hostToolList := []tool.Tool{
-		memory.RememberTool{WS: ws},
+		memory.RememberTool{WS: ws, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}},
 		memory.RecallTool{Sessions: sessions},
 	}
 	if cfg.Agent.Learn {
-		hostToolList = append(hostToolList, memory.DistillTool{WS: ws})
+		hostToolList = append(hostToolList, memory.DistillTool{WS: ws, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}})
 	}
 	hostTools := tool.NewRegistry(hostToolList...)
 
@@ -423,7 +426,7 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 	var execTools tool.Toolbox
 	switch pol.Mode {
 	case "host", "":
-		execTools = tool.Builtins()
+		execTools = tool.BuiltinsWithFetch(cfg.Tools.Fetch.AllowPrivate)
 	case "docker":
 		home, err := config.Home()
 		if err != nil {
@@ -434,15 +437,16 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 			return nil, cleanup, fmt.Errorf("new sandbox id: %w", err)
 		}
 		executor, err := sandbox.StartDocker(ctx, sandbox.DockerOpts{
-			Image:    cfg.Sandbox.Image,
-			Network:  cfg.Sandbox.Network,
-			Memory:   cfg.Sandbox.Memory,
-			CPUs:     cfg.Sandbox.CPUs,
-			PIDs:     cfg.Sandbox.PIDs,
-			Disk:     cfg.Sandbox.Disk,
-			WorkDir:  cfg.Sandbox.WorkDir,
-			QueueDir: filepath.Join(home, "sandboxes", sandboxID),
-			SelfPath: cfg.Sandbox.RunnerBinary,
+			Image:             cfg.Sandbox.Image,
+			Network:           cfg.Sandbox.Network,
+			Memory:            cfg.Sandbox.Memory,
+			CPUs:              cfg.Sandbox.CPUs,
+			PIDs:              cfg.Sandbox.PIDs,
+			Disk:              cfg.Sandbox.Disk,
+			WorkDir:           cfg.Sandbox.WorkDir,
+			QueueDir:          filepath.Join(home, "sandboxes", sandboxID),
+			SelfPath:          cfg.Sandbox.RunnerBinary,
+			FetchAllowPrivate: cfg.Tools.Fetch.AllowPrivate,
 		})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
@@ -457,7 +461,20 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 
 	// MCP servers contribute their tools (the long tail).
 	for _, s := range cfg.MCP {
-		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args})
+		if !mcpServerInGroup(s, group) || !mcpServerPermitted(s, toolPolicy) {
+			continue
+		}
+		execution := s.Execution
+		if execution == "" {
+			execution = "host"
+		}
+		if execution == "sandbox" {
+			return nil, cleanup, fmt.Errorf("mcp %q: sandbox execution is not available; refusing to launch it", s.Name)
+		}
+		if pol.Mode == "docker" && !(s.Execution == "host" && slices.Contains(s.Groups, group)) {
+			return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
+		}
+		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
 		}
@@ -492,7 +509,30 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 		Model:     cfg.Provider.Model,
 		MaxTokens: cfg.Provider.MaxTokens,
 		Redact:    redact,
+		Usage:     usagepkg.New(&store.Store{DB: sessions.DB()}),
+		Limits: func() usagepkg.Limits {
+			l := cfg.LimitsFor(group)
+			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
+		}(),
 	}, cleanup, nil
+}
+
+func mcpServerInGroup(s config.MCPServer, group string) bool {
+	return len(s.Groups) == 0 || slices.Contains(s.Groups, group)
+}
+
+// Declared tools allow a denied server to be skipped before its process is
+// launched. An undeclared server remains eligible for backwards compatibility.
+func mcpServerPermitted(s config.MCPServer, p tool.Policy) bool {
+	if len(s.Tools) == 0 {
+		return true
+	}
+	for _, name := range s.Tools {
+		if p.Permits(s.Name + "__" + name) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAPIKey turns the configured api_key into a real key: secret://

@@ -30,6 +30,7 @@ func TestSessionAndTurnRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+
 	if err := s.SetTitle(ctx, sess.ID, "fix the deploy script"); err != nil {
 		t.Fatalf("SetTitle: %v", err)
 	}
@@ -139,5 +140,22 @@ func TestLatestAndList(t *testing.T) {
 	all, err := s.List(ctx, 10)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("List = %d sessions, %v", len(all), err)
+	}
+}
+
+func TestRepairWithReclaimPreservesOrderAndFabricatesMissing(t *testing.T) {
+	history := []llm.Message{{Role: llm.RoleAssistant, Blocks: []llm.Block{
+		{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "done"}},
+		{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "lost"}},
+	}}}
+	got := RepairWithReclaim(history, func(ids []string) (map[string]llm.ToolResult, error) {
+		if len(ids) != 2 || ids[0] != "done" || ids[1] != "lost" {
+			t.Fatalf("ids = %v", ids)
+		}
+		return map[string]llm.ToolResult{"done": {ToolUseID: "done", Content: "real output"}}, nil
+	})
+	blocks := got[1].Blocks
+	if blocks[0].ToolResult.Content != "real output" || blocks[1].ToolResult.ToolUseID != "lost" || !blocks[1].ToolResult.IsError {
+		t.Fatalf("repaired blocks = %#v", blocks)
 	}
 }

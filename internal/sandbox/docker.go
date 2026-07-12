@@ -106,7 +106,8 @@ type DockerOpts struct {
 	BrokerURL string
 	Token     string
 	// SelfPath overrides the waffle binary to mount (default: this one).
-	SelfPath string
+	SelfPath          string
+	FetchAllowPrivate []string
 }
 
 const (
@@ -165,7 +166,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	return &DockerExecutor{
 		client:    client,
 		container: name,
-		defs:      tool.Builtins().Defs(),
+		defs:      tool.BuiltinsWithFetch(opts.FetchAllowPrivate).Defs(),
 		Timeout:   DefaultToolTimeout, // > bash's 10-minute cap; dead-runner detection is faster
 	}, nil
 }
@@ -203,7 +204,11 @@ func dockerRunArgs(name string, opts DockerOpts) []string {
 			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
 		)
 	}
-	return append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
+	args = append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
+	for _, entry := range opts.FetchAllowPrivate {
+		args = append(args, "--fetch-allow-private", entry)
+	}
+	return args
 }
 
 // DockerLimits fills in the conservative defaults shared by sandbox and workspace containers.

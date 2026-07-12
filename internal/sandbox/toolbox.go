@@ -33,9 +33,18 @@ func (q *QueueToolbox) Defs() []llm.Tool { return q.defs }
 
 // Run implements tool.Toolbox.
 func (q *QueueToolbox) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	return q.run(ctx, "", name, input)
+}
+
+// RunWithID dispatches using the model's durable tool-call identity.
+func (q *QueueToolbox) RunWithID(ctx context.Context, useID, name string, input json.RawMessage) (string, error) {
+	return q.run(ctx, useID, name, input)
+}
+
+func (q *QueueToolbox) run(ctx context.Context, useID, name string, input json.RawMessage) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, q.Timeout)
 	defer cancel()
-	content, isError, err := q.Client.Exec(ctx, name, input)
+	content, isError, err := q.Client.Exec(ctx, useID, name, input)
 	if err != nil {
 		return "", err
 	}

@@ -36,8 +36,12 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 			if !j.Enabled {
 				state = "disabled"
 			}
-			fmt.Fprintf(stdout, "%s  %q  [%s] %s  deliver=%s  last=%s %s\n",
-				j.ID, j.Name, j.Cron, state, orNone(j.Deliver), j.LastStatus, j.LastRun.Format("2006-01-02 15:04"))
+			next := "-"
+			if !j.NextRetry.IsZero() {
+				next = j.NextRetry.Format("2006-01-02 15:04:05")
+			}
+			fmt.Fprintf(stdout, "%s  %q  [%s] %s  deliver=%s  attempt=%d/%d  next-retry=%s  last=%s %s\n",
+				j.ID, j.Name, j.Cron, state, orNone(j.Deliver), j.Attempt, j.MaxAttempts, next, j.LastStatus, j.LastRun.Format("2006-01-02 15:04"))
 			fmt.Fprintf(stdout, "    %s\n", j.Prompt)
 		}
 		return nil

@@ -17,6 +17,13 @@ type Toolbox interface {
 	Run(ctx context.Context, name string, input json.RawMessage) (string, error)
 }
 
+// CallerToolbox optionally accepts the provider's stable tool-call identity.
+// Toolboxes that do not implement it retain the legacy Run behavior.
+type CallerToolbox interface {
+	Toolbox
+	RunWithID(context.Context, string, string, json.RawMessage) (string, error)
+}
+
 // Policy is an allow/deny tool filter. Policy is enforced host-side —
 // before a call ever reaches a sandbox — so a compromised sandbox can't
 // grant itself tools (docs/plan.md, "Tools").
@@ -70,6 +77,16 @@ func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage
 	return r.tb.Run(ctx, name, input)
 }
 
+func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.RawMessage) (string, error) {
+	if !r.policy.Permits(name) {
+		return "", fmt.Errorf("tool %q is not permitted by policy", name)
+	}
+	if tb, ok := r.tb.(CallerToolbox); ok {
+		return tb.RunWithID(ctx, id, name, input)
+	}
+	return r.tb.Run(ctx, name, input)
+}
+
 // Combine merges toolboxes; the first box offering a name wins. Used to
 // pair sandboxed builtins with host-side memory tools.
 func Combine(boxes ...Toolbox) Toolbox {
@@ -97,6 +114,17 @@ func (c *combined) Run(ctx context.Context, name string, input json.RawMessage) 
 	tb, ok := c.routes[name]
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
+	}
+	return tb.Run(ctx, name, input)
+}
+
+func (c *combined) RunWithID(ctx context.Context, id, name string, input json.RawMessage) (string, error) {
+	tb, ok := c.routes[name]
+	if !ok {
+		return "", fmt.Errorf("unknown tool %q", name)
+	}
+	if caller, ok := tb.(CallerToolbox); ok {
+		return caller.RunWithID(ctx, id, name, input)
 	}
 	return tb.Run(ctx, name, input)
 }

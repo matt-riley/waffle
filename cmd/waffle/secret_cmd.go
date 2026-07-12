@@ -39,6 +39,10 @@ func secretCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return errors.New("usage: waffle secret rm <name>")
 		}
 		return secretDelete(args[1])
+	case "export-identity":
+		return secretExportIdentity(args[1:], stdin, stdout, stderr)
+	case "import-identity":
+		return secretImportIdentity(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "--help":
 		secretUsage(stdout)
 		return nil
@@ -57,10 +61,110 @@ Usage:
   waffle secret get <name>       print a secret value
   waffle secret ls               list secret names
   waffle secret rm <name>        delete a secret
+  waffle secret export-identity [--yes] [--output <file>]
+                                export the keyring identity (0600 file)
+  waffle secret import-identity [--yes] [--file <file>]
+                                import an identity into the keyring
 
 Names look like "anthropic/api-key". Reference them from config.toml as
 "secret://anthropic/api-key" — config never holds raw values.
 `)
+}
+
+func confirm(stdin io.Reader, stderr io.Writer, yes bool, prompt string) error {
+	if yes {
+		return nil
+	}
+	fmt.Fprintf(stderr, "%s [y/N] ", prompt)
+	var answer string
+	if _, err := fmt.Fscan(stdin, &answer); err != nil {
+		return errors.New("confirmation required (use --yes for noninteractive use)")
+	}
+	if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+		return errors.New("cancelled")
+	}
+	return nil
+}
+
+func secretExportIdentity(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	yes := false
+	output := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--yes":
+			yes = true
+		case "--output":
+			if i+1 >= len(args) {
+				return errors.New("--output requires a path")
+			}
+			output = args[i+1]
+			i++
+		default:
+			return fmt.Errorf("unknown export-identity option %q", args[i])
+		}
+	}
+	if err := confirm(stdin, stderr, yes, "Export the secret-store identity? Anyone with it can decrypt your secrets."); err != nil {
+		return err
+	}
+	id, err := secret.LoadIdentity()
+	if err != nil {
+		return err
+	}
+	if output == "" {
+		_, err = fmt.Fprintln(stdout, id)
+		return err
+	}
+	f, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(id.String() + "\n"); err != nil {
+		_ = f.Close()
+		_ = os.Remove(output)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "identity exported to %s (keep it private)\n", output)
+	return nil
+}
+
+func secretImportIdentity(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	yes := false
+	file := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--yes":
+			yes = true
+		case "--file":
+			if i+1 >= len(args) {
+				return errors.New("--file requires a path")
+			}
+			file = args[i+1]
+			i++
+		default:
+			return fmt.Errorf("unknown import-identity option %q", args[i])
+		}
+	}
+	if err := confirm(stdin, stderr, yes, "Import and save this secret-store identity to the OS keyring?"); err != nil {
+		return err
+	}
+	var b []byte
+	var err error
+	if file != "" {
+		b, err = os.ReadFile(file)
+	} else {
+		b, err = io.ReadAll(stdin)
+	}
+	if err != nil {
+		return err
+	}
+	if err := secret.ImportIdentity(string(b)); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "secret-store identity imported")
+	return nil
 }
 
 func openSecretStore() (secret.Store, error) {

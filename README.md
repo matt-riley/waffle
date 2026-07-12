@@ -15,6 +15,10 @@ What's here, by capability:
   a running workweave/router) are config, not code.
 - **Terminal** — `waffle chat` (`-c` resumes the last session), with native
   tools (bash, file read/write/edit, fetch).
+  Fetch blocks loopback, link-local, unspecified, and private IPv4/IPv6
+  destinations by default (including redirects). For deliberate local use,
+  allow exact CIDRs or host:port destinations with
+  `[tools.fetch] allow_private = ["192.168.1.0/24", "localhost:3000"]`.
 - **Memory** — every conversation persisted to SQLite with FTS5 search;
   `remember`/`recall` tools; `AGENT.md`/`USER.md`/`MEMORY.md` workspace
   files injected into the prompt; sessions summarized on exit.
@@ -53,10 +57,33 @@ What's here, by capability:
 - **Repo workspaces** — `waffle ws open owner/repo` / `/repo` clones into a
   dedicated container + volume (devcontainer image when present), git auth
   via `waffle git-credential` to the broker, idle keeps the volume, close
-  refuses on unpushed work.
+  refuses on unpushed work. Egress is deny-by-default; choose
+  `[workspace] egress = "none"` (default), `"allowlist"` with
+  `allowlist = ["api.github.com"]` (host broker proxy), or `"full"` only when
+  unrestricted network access is required. Allowlisted HTTP requests are
+  token-authenticated, audited, and rejected if DNS resolves to private
+  address space.
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
   `spawn_subagent` delegates parallel work; MCP servers add their tools.
+
+MCP servers are configured explicitly in `config.toml`:
+
+```toml
+[[mcp]]
+name = "example"
+command = "/absolute/path/to/server"
+execution = "host"
+groups = ["main"]       # omit for all host groups
+tools = ["echo"]        # optional; enables pre-launch policy filtering
+env = ["EXAMPLE_TOKEN"] # only these variables are passed to the child
+```
+
+MCP processes run as the daemon user and are never made safe by a Docker
+agent group. A Docker group must explicitly opt a server into host execution
+by setting `execution = "host"` and listing that group; otherwise startup
+fails closed. `execution = "sandbox"` is reserved until MCP can be integrated
+with the constrained runner and currently fails closed.
 - **Trust tiering** — agent groups carry their own sandbox mode and tool
   policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
   The owner's interactive sessions run on the `main` tier; unattended
@@ -73,6 +100,31 @@ go build ./cmd/waffle
 printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key
 ./waffle chat
 ```
+
+## Backup and disaster recovery
+
+Back up to a new local directory (the destination must not already exist):
+
+```sh
+waffle backup /Volumes/Backup/waffle
+waffle secret export-identity --output /Volumes/Backup/waffle.identity
+```
+
+The backup contains a consistent SQLite snapshot, `secrets.age`,
+`config.toml`, and workspace/skill files. The identity is deliberately kept
+separate; use `waffle backup ... --with-identity` only when the destination is
+protected, because that directory then contains both ciphertext and its key.
+Identity export/import requires confirmation, or `--yes` for scripted recovery.
+
+To recover, import the identity on the new machine, inspect the backup, then
+run `waffle restore /Volumes/Backup/waffle`. Restore validates the database
+migrations and configuration before replacing live files. Keep old backups in
+mind when applying retention or `forget`: deleting data from the live store
+does not delete it from prior backups.
+
+Workspace Docker volumes are disposable and are not backed up. Push repository
+work before `waffle ws close`; the repository is the source of truth and close
+refuses unpushed work.
 
 Point it elsewhere in `~/.waffle/config.toml` — any OpenAI-compatible
 endpoint (OpenRouter, Ollama, a running workweave/router) works:
@@ -92,3 +144,18 @@ Start here:
   [nanoclaw](https://github.com/nanocoai/nanoclaw),
   [openclaw](https://github.com/openclaw/openclaw), and
   [workweave/router](https://github.com/workweave/router)
+
+### Usage limits
+
+Usage is persisted per session and period. By default limits are unlimited; for unattended use configure a budget:
+
+```toml
+[limits]
+tokens_per_day = 100000
+requests_per_hour = 100
+[limits.group.cron]
+tokens_per_day = 20000
+requests_per_hour = 20
+```
+
+`waffle usage` reports totals. `waffle pause` stops new agent calls (including cron and broker traffic); `waffle resume` re-enables them.

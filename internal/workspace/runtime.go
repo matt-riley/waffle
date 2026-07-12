@@ -20,11 +20,15 @@ type ContainerOpts struct {
 	Network   string
 	BrokerURL string
 	Token     string
-	SelfPath  string // waffle binary to bind-mount
-	Memory    string
-	CPUs      float64
-	PIDs      int
-	Disk      string
+	// ProxyURL is the host broker's egress proxy. It is only used for the
+	// allowlist posture; the broker remains the policy enforcement point.
+	ProxyURL   string
+	ProxyToken string
+	SelfPath   string // waffle binary to bind-mount
+	Memory     string
+	CPUs       float64
+	PIDs       int
+	Disk       string
 }
 
 // Runtime abstracts the container engine so the lifecycle logic is
@@ -87,11 +91,25 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 		"-v", opts.Volume + ":/work",
 		"-w", "/work",
 	}
-	if opts.BrokerURL != "" {
+	if opts.BrokerURL != "" || opts.ProxyURL != "" {
+		args = append(args, "--add-host", "waffle-host:host-gateway")
+		if opts.BrokerURL != "" {
+			args = append(args,
+				"-e", "WAFFLE_BROKER="+opts.BrokerURL,
+				"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
+			)
+		}
+	}
+	if opts.ProxyURL != "" {
+		proxyURL := opts.ProxyURL
+		if opts.ProxyToken != "" {
+			proxyURL = strings.Replace(proxyURL, "://", "://"+opts.ProxyToken+"@", 1)
+		}
 		args = append(args,
-			"--add-host", "waffle-host:host-gateway",
-			"-e", "WAFFLE_BROKER="+opts.BrokerURL,
-			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
+			"-e", "HTTP_PROXY="+proxyURL,
+			"-e", "HTTPS_PROXY="+proxyURL,
+			"-e", "ALL_PROXY="+proxyURL,
+			"-e", "NO_PROXY=waffle-host,localhost,127.0.0.1",
 		)
 	}
 	if opts.Disk != "" {

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/broker"
@@ -25,6 +26,7 @@ import (
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
+	usagepkg "github.com/matt-riley/waffle/internal/usage"
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
@@ -82,6 +84,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if cfg.Broker.Listen != "" {
 		upstreams := brokerUpstreams(cfg)
 		b := broker.New(st, upstreams)
+		b.Usage = usagepkg.New(st)
+		l := cfg.LimitsFor(config.GroupMain)
+		b.Limits = usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
 		go func() {
 			if err := b.Serve(ctx, cfg.Broker.Listen); err != nil {
 				log.Error("broker stopped", "err", err)
@@ -103,6 +108,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		Adapters:      adapters,
 		Log:           log,
 		Observability: obs,
+		Usage:         usagepkg.New(st),
 	}
 
 	// Scheduler: fire cron jobs while the gateway runs, delivering results
@@ -116,7 +122,14 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 			Log:           log,
 			Observability: obs,
 		},
-		Log: log,
+		Log:   log,
+		Usage: usagepkg.New(st),
+		Policy: schedule.RetryPolicy{
+			MaxAttempts:  cfg.Jobs.MaxAttempts,
+			BaseBackoff:  mustDuration(cfg.Jobs.BaseBackoff),
+			MaxBackoff:   mustDuration(cfg.Jobs.MaxBackoff),
+			StallTimeout: mustDuration(cfg.Jobs.StallTimeout),
+		},
 	}
 	schedDone := make(chan error, 1)
 	go func() {
@@ -124,6 +137,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		if serr != nil {
 			log.Error("scheduler stopped", "err", serr)
 		}
+
 		schedDone <- serr
 	}()
 
@@ -136,6 +150,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	stop()
 	<-schedDone
 	return err
+}
+
+func mustDuration(s string) time.Duration {
+	d, _ := time.ParseDuration(s)
+	return d
 }
 
 func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {

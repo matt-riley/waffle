@@ -9,6 +9,7 @@ package sandbox
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,7 +40,8 @@ const DefaultToolTimeout = 11 * time.Minute
 
 const inboundSchema = `
 CREATE TABLE IF NOT EXISTS requests (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_use_id TEXT UNIQUE,
     tool       TEXT NOT NULL,
     input      TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -77,6 +79,23 @@ func openQueueDB(path, schema string) (*sql.DB, error) {
 		if _, err := db.Exec(schema); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("init queue %s: %w", path, err)
+		}
+		if schema == inboundSchema {
+			var column string
+			err := db.QueryRow(`SELECT name FROM pragma_table_info('requests') WHERE name = 'tool_use_id'`).Scan(&column)
+			if errors.Is(err, sql.ErrNoRows) {
+				if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN tool_use_id TEXT`); err != nil {
+					_ = db.Close()
+					return nil, fmt.Errorf("migrate queue %s: %w", path, err)
+				}
+			} else if err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("inspect queue %s: %w", path, err)
+			}
+			if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS requests_tool_use_id ON requests(tool_use_id)`); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("index queue %s: %w", path, err)
+			}
 		}
 	}
 	return db, nil
