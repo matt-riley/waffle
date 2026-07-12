@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,32 +164,34 @@ func TestVerifyRepoFailsOnBrokenTree(t *testing.T) {
 }
 
 func TestRejectProtectedIncludesEvalPath(t *testing.T) {
-	// Default auto-patch protected prefixes include internal/eval and evals (#63).
-	paths := []string{
-		"internal/selfdev", "internal/config", "cmd/waffle/selfdev_cmd.go",
-		"cmd/waffle/main.go", "internal/doctor", "evals", "internal/eval",
-	}
-	var sawEval, sawEvals bool
-	for _, p := range paths {
-		if p == "internal/eval" {
-			sawEval = true
-		}
-		if p == "evals" {
-			sawEvals = true
+	dir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	if !sawEval || !sawEvals {
-		t.Fatal("expected internal/eval and evals in default protected set")
+	git("init", "-q", "-b", "base")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	file := "internal/eval/eval.go"
-	blocked := false
-	for _, prefix := range paths {
-		if file == prefix || strings.HasPrefix(file, strings.TrimSuffix(prefix, "/")+"/") {
-			blocked = true
-		}
+	git("add", ".")
+	git("commit", "-qm", "base")
+	git("checkout", "-qb", "candidate")
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "eval"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if !blocked {
-		t.Fatalf("%q not blocked by protected prefixes", file)
+	if err := os.WriteFile(filepath.Join(dir, "internal", "eval", "eval.go"), []byte("package eval"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "touch protected eval")
+	git("checkout", "-q", "base")
+	err := rejectProtectedChanges(context.Background(), dir, "candidate", nil)
+	if err == nil || !strings.Contains(err.Error(), `protected path "internal/eval/eval.go"`) {
+		t.Fatalf("production protected-path check = %v", err)
 	}
 }
 

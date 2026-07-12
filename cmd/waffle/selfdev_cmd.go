@@ -67,17 +67,9 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 }
 
 func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	ref := ""
-	noVerify := false
-	for _, arg := range args {
-		if arg == "--no-verify" {
-			noVerify = true
-			continue
-		}
-		if ref != "" {
-			return fmt.Errorf("upgrade accepts at most one ref")
-		}
-		ref = arg
+	ref, noVerify, err := parseUpgradeArgs(args)
+	if err != nil {
+		return err
 	}
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -108,6 +100,20 @@ func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fmt.Fprintf(stdout, "upgraded %s\nprevious binary kept at %s.prev — `waffle rollback` restores it\n", path, path)
 	fmt.Fprintln(stdout, "restart waffle (or `waffle serve`) to run the new code")
 	return nil
+}
+
+func parseUpgradeArgs(args []string) (ref string, noVerify bool, err error) {
+	for _, arg := range args {
+		if arg == "--no-verify" {
+			noVerify = true
+			continue
+		}
+		if ref != "" {
+			return "", false, fmt.Errorf("upgrade accepts at most one ref")
+		}
+		ref = arg
+	}
+	return ref, noVerify, nil
 }
 
 func rollbackCmd(stdout io.Writer) error {

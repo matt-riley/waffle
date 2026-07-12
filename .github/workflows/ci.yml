@@ -10,6 +10,14 @@ permissions:
   packages: read
 
 jobs:
+  deterministic-eval:
+    name: deterministic agent evals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: go run ./cmd/waffle eval
+
   ci:
     uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@main
     with:

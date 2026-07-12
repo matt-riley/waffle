@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llmtest"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
 )
 
@@ -355,6 +359,77 @@ func TestSummaryCacheSingleCallPerPrefix(t *testing.T) {
 			t.Fatalf("second Run re-summarized; requests after first=%d", len(added))
 		}
 	}
+}
+
+func TestFreshAgentLazilyRebuildsSummaryCacheForResumedSession(t *testing.T) {
+	history := overflowingHistory()
+	firstProvider := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("first summary"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("first answer"), StopReason: llm.StopEndTurn},
+	}}
+	ctx := WithSession(context.Background(), "resumed-summary")
+	first := &Agent{Provider: firstProvider, Tools: tool.NewRegistry(), Model: "m"}
+	if _, err := first.Run(ctx, history, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	secondProvider := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("rebuilt summary"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("resumed answer"), StopReason: llm.StopEndTurn},
+	}}
+	resumed := &Agent{Provider: secondProvider, Tools: tool.NewRegistry(), Model: "m"}
+	if _, err := resumed.Run(ctx, history, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondProvider.requests) != 2 || !strings.Contains(secondProvider.requests[1].System, "rebuilt summary") {
+		t.Fatalf("fresh agent did not lazily rebuild summary: %+v", secondProvider.requests)
+	}
+}
+
+func TestCompressionLeavesPersistedSessionTurnsUntouched(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := overflowingHistory()
+	for _, message := range history {
+		if err := sessions.AppendTurn(ctx, sess.ID, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := sessions.Turns(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("compressed provider context"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("answer"), StopReason: llm.StopEndTurn},
+	}}
+	if _, err := (&Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}).Run(WithSession(ctx, sess.ID), history, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sessions.Turns(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("persisted turns changed by compression\nbefore=%#v\nafter=%#v", before, after)
+	}
+}
+
+func overflowingHistory() []llm.Message {
+	var history []llm.Message
+	for i := 0; i < recentWindow+3; i++ {
+		history = append(history, llm.UserText(fmt.Sprintf("u%d", i)))
+		history = append(history, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: fmt.Sprintf("a%d", i)}}})
+	}
+	return append(history, llm.UserText("continue"))
 }
 
 func TestSummaryBlockFormatGolden(t *testing.T) {
