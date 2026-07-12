@@ -81,3 +81,50 @@ func TestStressQueueConcurrentExec(t *testing.T) {
 	}
 	_ = tool.OutputLimit // document shared truncation cap
 }
+
+func TestStressQueueIntegrityAfterKill(t *testing.T) {
+	// Crash-style check (#29): mid-flight cancel + integrity_check both DBs.
+	if testing.Short() {
+		t.Skip("skipping under -short")
+	}
+	dir := t.TempDir()
+	startRunner(t, dir)
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			_, _, _ = client.Exec(ctx, "echo", json.RawMessage(`{"s":"x"}`))
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel() // simulate abrupt host stop
+	<-done
+
+	for _, name := range []string{inboundFile, outboundFile} {
+		schema := inboundSchema
+		if name == outboundFile {
+			schema = outboundSchema
+		}
+		db, err := openQueueDB(filepath.Join(dir, name), schema)
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		var ok string
+		if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&ok); err != nil {
+			_ = db.Close()
+			t.Fatalf("%s integrity: %v", name, err)
+		}
+		if ok != "ok" {
+			_ = db.Close()
+			t.Fatalf("%s integrity_check = %q", name, ok)
+		}
+		_ = db.Close()
+	}
+}

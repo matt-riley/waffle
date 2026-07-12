@@ -132,3 +132,30 @@ func (s *Store) DropStaleAssumptions(ctx context.Context, sessionID string, maxA
 func (s *Store) DropUnpinnedModelAssumptions(ctx context.Context, sessionID string) (int, error) {
 	return s.DropStaleAssumptions(ctx, sessionID, 0, false)
 }
+
+// DropStaleAssumptionsAll removes unpinned model assumptions across all sessions (#70).
+func (s *Store) DropStaleAssumptionsAll(ctx context.Context, maxAge time.Duration) (int, error) {
+	if s == nil || s.DB == nil {
+		return 0, nil
+	}
+	if maxAge <= 0 {
+		res, err := s.DB.ExecContext(ctx, `
+			DELETE FROM working_set_entries
+			WHERE source = ? AND kind = ? AND pinned = 0`, SourceModel, KindAssumption)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	}
+	cut := time.Now().UTC().Add(-maxAge).Format(time.RFC3339Nano)
+	res, err := s.DB.ExecContext(ctx, `
+		DELETE FROM working_set_entries
+		WHERE source = ? AND kind = ? AND pinned = 0 AND updated_at < ?`,
+		SourceModel, KindAssumption, cut)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

@@ -252,6 +252,9 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	}
 	// Spill large results after redaction so mid-run expand_output can recover
 	// dropped bytes without putting secrets into SQLite (#69).
+	// Sandbox limitation: tools that truncate inside the container never
+	// deliver full bytes here; only host/MCP large strings are spilled.
+	// expand_output works only when the result marker includes a spill id.
 	if a.Spill != nil && !res.IsError {
 		if sid := sessionID(ctx); sid != "" && utf8.RuneCountInString(res.Content) > tool.OutputLimit {
 			spillID, partial, serr := a.Spill.Save(ctx, sid, use.Name, res.Content)
