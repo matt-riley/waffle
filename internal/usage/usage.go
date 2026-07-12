@@ -91,7 +91,7 @@ type Row struct {
 	Requests, InputTokens, OutputTokens int
 }
 
-func (s *Store) List(ctx context.Context, session string) ([]Row, error) {
+func (s *Store) List(ctx context.Context, session string) (out []Row, err error) {
 	q := `SELECT session_id,period,period_start,requests,input_tokens,output_tokens FROM usage`
 	args := []any{}
 	if session != "" {
@@ -103,8 +103,11 @@ func (s *Store) List(ctx context.Context, session string) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var out []Row
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		var r Row
 		if err := rows.Scan(&r.SessionID, &r.Period, &r.PeriodStart, &r.Requests, &r.InputTokens, &r.OutputTokens); err != nil {

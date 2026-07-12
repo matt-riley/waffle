@@ -8,7 +8,7 @@ import (
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 )
 
-func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) error {
+func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) (err error) {
 	if len(args) > 0 && args[0] != "ls" {
 		return fmt.Errorf("usage: waffle usage")
 	}
@@ -16,7 +16,11 @@ func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	rows, err := usagepkg.New(st).List(ctx, "")
 	if err != nil {
 		return err
@@ -27,14 +31,18 @@ func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) error {
 	return nil
 }
 
-func pauseCmd(ctx context.Context, command string, out io.Writer) error {
+func pauseCmd(ctx context.Context, command string, out io.Writer) (err error) {
 	_, st, err := openConfigAndStore(ctx)
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	p := command == "pause"
-	if err := usagepkg.New(st).SetPaused(ctx, p); err != nil {
+	if err = usagepkg.New(st).SetPaused(ctx, p); err != nil {
 		return err
 	}
 	if p {

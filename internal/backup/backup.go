@@ -136,7 +136,9 @@ func Restore(ctx context.Context, src string) error {
 	if err != nil {
 		return fmt.Errorf("create restore staging area: %w", err)
 	}
-	defer os.RemoveAll(stage) //nolint:errcheck // temp dir
+	// Best-effort: staged files are under home and cleaned up after rename
+	// or on the next restore attempt if removal fails.
+	defer func() { _ = os.RemoveAll(stage) }()
 	if p := filepath.Join(src, "waffle.db"); exists(p) {
 		cp := filepath.Join(stage, "waffle.db")
 		if err := copyFile(p, cp, 0o600); err != nil {
@@ -189,12 +191,16 @@ func copyIfExists(src, dst string, mode fs.FileMode) error {
 	}
 	return copyFile(src, dst, mode)
 }
-func copyFile(src, dst string, mode fs.FileMode) error {
+func copyFile(src, dst string, mode fs.FileMode) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close() //nolint:errcheck // read-only
+	defer func() {
+		if cerr := in.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
