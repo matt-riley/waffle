@@ -63,7 +63,7 @@ type captureSystemProvider struct {
 func (p *captureSystemProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
 	p.system = req.System
 	return &llm.Response{
-		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: `{"status":"done","summary":"ok"}`}}},
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "```json\n{\"status\":\"done\",\"summary\":\"ok\"}\n```"}}},
 		StopReason: llm.StopEndTurn,
 	}, nil
 }

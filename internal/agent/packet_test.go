@@ -44,3 +44,37 @@ func TestFramePacketLegacyCompatible(t *testing.T) {
 		t.Fatal(f)
 	}
 }
+
+func TestParseHandoffRequiresFencedJSON(t *testing.T) {
+	if _, err := ParseHandoff(`{"status":"done","summary":"bare"}`); err == nil {
+		t.Fatal("bare JSON must not satisfy the strict handoff contract")
+	}
+}
+
+func TestNormalizeHandoffDowngradesMissingRequestedCommand(t *testing.T) {
+	h := Handoff{
+		Status:  "done",
+		Summary: "only one requested check was reported",
+		Verification: []VerificationResult{{
+			Command: "go test ./...",
+			Status:  "pass",
+		}},
+	}
+	h = NormalizeHandoff(h, WorkPacket{
+		Task:           "t",
+		VerifyCommands: []string{"go test ./...", "go vet ./..."},
+	})
+	if h.Status != "partial" {
+		t.Fatalf("status = %q, want partial", h.Status)
+	}
+	if !strings.Contains(strings.Join(h.Reasons, "\n"), "go vet ./...") {
+		t.Fatalf("reasons = %v, want missing command", h.Reasons)
+	}
+}
+
+func TestParseHandoffRejectsDuplicateChangedPaths(t *testing.T) {
+	text := "```json\n{\"status\":\"done\",\"summary\":\"x\",\"files_changed\":[\"a.go\",\"a.go\"]}\n```"
+	if _, err := ParseHandoff(text); err == nil {
+		t.Fatal("duplicate changed paths must fail handoff validation")
+	}
+}

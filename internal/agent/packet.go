@@ -97,6 +97,13 @@ func ParseHandoff(text string) (Handoff, error) {
 	if strings.TrimSpace(h.Summary) == "" {
 		return Handoff{}, fmt.Errorf("summary required")
 	}
+	seenPaths := make(map[string]struct{}, len(h.FilesChanged))
+	for _, path := range h.FilesChanged {
+		if _, ok := seenPaths[path]; ok {
+			return Handoff{}, fmt.Errorf("duplicate changed path %q", path)
+		}
+		seenPaths[path] = struct{}{}
+	}
 	return h, nil
 }
 
@@ -108,28 +115,25 @@ func extractJSONBlock(text string) string {
 			return strings.TrimSpace(rest[:j])
 		}
 	}
-	// Bare object fallback: first { ... last }
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start >= 0 && end > start {
-		return text[start : end+1]
-	}
 	return ""
 }
 
 // NormalizeHandoff applies verification/scope rules (#78).
 func NormalizeHandoff(h Handoff, p WorkPacket) Handoff {
 	if h.Status == "done" && len(p.VerifyCommands) > 0 {
+		seen := make(map[string]bool, len(h.Verification))
 		for _, v := range h.Verification {
+			seen[v.Command] = true
 			if v.Status == "fail" || v.Status == "skipped" {
 				h.Status = "partial"
 				h.Reasons = append(h.Reasons, "verification incomplete or failed")
-				break
 			}
 		}
-		if len(h.Verification) == 0 {
-			h.Status = "partial"
-			h.Reasons = append(h.Reasons, "requested verification missing")
+		for _, command := range p.VerifyCommands {
+			if !seen[command] {
+				h.Status = "partial"
+				h.Reasons = append(h.Reasons, "requested verification missing: "+command)
+			}
 		}
 	}
 	if p.ReadOnly && len(h.FilesChanged) > 0 {
