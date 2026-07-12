@@ -1,11 +1,28 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/workset"
 )
+
+type orderedHandoffProvider struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+	file    string
+}
+
+func (p orderedHandoffProvider) Complete(context.Context, llm.Request, llm.StreamFunc) (*llm.Response, error) {
+	p.entered <- struct{}{}
+	<-p.release
+	return &llm.Response{StopReason: llm.StopEndTurn, Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "```json\n{\"status\":\"done\",\"summary\":\"ok\",\"files_changed\":[\"" + p.file + "\"]}\n```"}}}}, nil
+}
 
 func TestParseAndNormalizeHandoff(t *testing.T) {
 	text := "done\n```json\n{\"status\":\"done\",\"summary\":\"ok\",\"verification\":[]}\n```\n"
@@ -166,5 +183,39 @@ func TestNormalizeHandoffRejectsOwnedPathTraversalBypass(t *testing.T) {
 	h := NormalizeHandoff(Handoff{Status: "done", Summary: "x", FilesChanged: []string{"./pkg/a.go"}}, WorkPacket{Task: "x", OwnedPaths: []string{"pkg/./"}})
 	if h.Status != "done" {
 		t.Fatalf("normalized in-scope path rejected: %+v", h)
+	}
+}
+
+func TestParallelSubagentsDisjointOwnedPathsRemainAssociatedOutOfOrder(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	releaseA, releaseB := make(chan struct{}), make(chan struct{})
+	tasks := []struct {
+		provider llm.Provider
+		input    string
+	}{
+		{orderedHandoffProvider{entered, releaseA, "a/a.go"}, `{"task":"A","owned_paths":["a"]}`},
+		// B deliberately violates its b/ ownership; its partial result must not
+		// contaminate A when B completes first.
+		{orderedHandoffProvider{entered, releaseB, "a/intruder.go"}, `{"task":"B","owned_paths":["b"]}`},
+	}
+	results := make([]string, 2)
+	var wg sync.WaitGroup
+	for i := range tasks {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], _ = (SubagentTool{Provider: tasks[i].provider, Tools: tool.NewRegistry(), Model: "m"}).Run(context.Background(), json.RawMessage(tasks[i].input))
+		}(i)
+	}
+	<-entered
+	<-entered
+	close(releaseB) // reverse completion order
+	close(releaseA)
+	wg.Wait()
+	if !strings.Contains(results[0], `"status": "done"`) || !strings.Contains(results[0], "a/a.go") || strings.Contains(results[0], "intruder") {
+		t.Fatalf("child A result misassociated: %s", results[0])
+	}
+	if !strings.Contains(results[1], `"status": "partial"`) || !strings.Contains(results[1], "needs_supervisor_review: a/intruder.go") || strings.Contains(results[1], "a/a.go") {
+		t.Fatalf("child B result misassociated: %s", results[1])
 	}
 }

@@ -1,11 +1,14 @@
-package session
+package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 )
 
@@ -16,9 +19,9 @@ func TestSubagentPacketHandoffPersistsAcrossStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	packet := map[string]any{"task": "persist me", "owned_paths": []string{"pkg"}}
-	handoff := map[string]any{"status": "partial", "summary": "normalized", "reasons": []string{"requested verification missing"}}
-	if err := PersistSubagentHandoff(ctx, st.DB, "parent", "child", packet, handoff); err != nil {
+	packet := agent.WorkPacket{Task: "persist me", OwnedPaths: []string{"pkg"}}
+	handoff := agent.Handoff{Status: "partial", Summary: "normalized", Reasons: []string{"requested verification missing"}}
+	if err := session.PersistSubagentHandoff(ctx, st.DB, "parent", "child", packet, handoff); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {
@@ -29,15 +32,22 @@ func TestSubagentPacketHandoffPersistsAcrossStoreReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	raws, err := LoadSubagentHandoffJSON(ctx, st.DB, "parent")
+	records, err := session.LoadSubagentHandoffs(ctx, st.DB, "parent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raws) != 1 {
-		t.Fatalf("handoffs=%d", len(raws))
+	if len(records) != 1 {
+		t.Fatalf("handoffs=%d", len(records))
 	}
-	raw := raws[0]
-	if !strings.Contains(raw, "normalized") || !strings.Contains(raw, "requested verification missing") {
-		t.Fatalf("handoff=%q", raw)
+	var gotPacket agent.WorkPacket
+	var gotHandoff agent.Handoff
+	if err := json.Unmarshal([]byte(records[0].PacketJSON), &gotPacket); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(records[0].HandoffJSON), &gotHandoff); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotPacket, packet) || !reflect.DeepEqual(gotHandoff, handoff) {
+		t.Fatalf("round trip packet=%+v handoff=%+v", gotPacket, gotHandoff)
 	}
 }

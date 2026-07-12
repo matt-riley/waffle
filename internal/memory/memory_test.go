@@ -368,6 +368,15 @@ func TestRecallTool(t *testing.T) {
 	}
 }
 
+func TestRecallToolDescriptionNamesAllSearchScopes(t *testing.T) {
+	description := (RecallTool{}).Def().Description
+	for _, scope := range []string{"turns", "summaries", "notes", "spills"} {
+		if !strings.Contains(description, scope) {
+			t.Fatalf("description missing %q: %q", scope, description)
+		}
+	}
+}
+
 func TestRecallNotesViaFTSAndArchive(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
