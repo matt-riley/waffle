@@ -123,6 +123,32 @@ func (g *Gate) Pending() ([]Candidate, error) {
 	return out, nil
 }
 
+// SubmitForReview forces a candidate into pending without applying it.
+// Used by weakness mining and other offline proposers (#65).
+func (g *Gate) SubmitForReview(c Candidate) (Candidate, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c.ID == "" {
+		c.ID = fmt.Sprintf("candidate-%d", time.Now().UnixNano())
+	}
+	c.CreatedAt = time.Now().UTC()
+	c.Status = "pending"
+	if c.Provenance.TrustClass == "" {
+		c.Provenance.TrustClass = "untrusted_derived"
+	}
+	if err := os.MkdirAll(filepath.Dir(g.pendingPath(c.ID)), 0o700); err != nil {
+		return c, err
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return c, err
+	}
+	if err := os.WriteFile(g.pendingPath(c.ID), b, 0o600); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
 // Approve applies one pending candidate. approver is recorded for audit.
 func (g *Gate) Approve(id, approver string) (Candidate, error) {
 	g.mu.Lock()
@@ -139,7 +165,7 @@ func (g *Gate) Approve(id, approver string) (Candidate, error) {
 		return c, errors.New("candidate is not pending")
 	}
 	if c.Kind == "memory" {
-		if err := g.WS.appendCandidate(c); err != nil {
+		if _, err := g.WS.appendCandidate(c); err != nil {
 			return c, err
 		}
 	} else if err := g.WS.writeSkillCandidate(c); err != nil {

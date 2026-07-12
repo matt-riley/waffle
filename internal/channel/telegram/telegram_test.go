@@ -51,28 +51,35 @@ func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 	var mu sync.Mutex
 	var offsets []int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/bottest-token/getUpdates") {
-			t.Errorf("path = %s", r.URL.Path)
-		}
-		var req struct {
-			Offset int64 `json:"offset"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Error(err)
-		}
-		mu.Lock()
-		offsets = append(offsets, req.Offset)
-		n := len(offsets)
-		mu.Unlock()
-		if n == 1 {
-			fmt.Fprint(w, `{"ok":true,"result":[
-				{"update_id":7,"message":{"text":"hello","chat":{"id":100},"from":{"id":42,"first_name":"Matt"}}},
-				{"update_id":8,"message":{"text":"","chat":{"id":100},"from":{"id":42}}},
-				{"update_id":9}
-			]}`)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"waffle_bot"}}`)
 			return
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			var req struct {
+				Offset int64 `json:"offset"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			offsets = append(offsets, req.Offset)
+			n := len(offsets)
+			mu.Unlock()
+			if n == 1 {
+				fmt.Fprint(w, `{"ok":true,"result":[
+					{"update_id":7,"message":{"text":"hello","chat":{"id":100,"type":"private"},"from":{"id":42,"first_name":"Matt"}}},
+					{"update_id":8,"message":{"text":"","chat":{"id":100,"type":"private"},"from":{"id":42}}},
+					{"update_id":9}
+				]}`)
+				return
+			}
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+			return
+		default:
+			t.Errorf("path = %s", r.URL.Path)
+			http.NotFound(w, r)
 		}
-		fmt.Fprint(w, `{"ok":true,"result":[]}`)
 	}))
 	defer srv.Close()
 
@@ -84,7 +91,10 @@ func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 
 	select {
 	case msg := <-inbound:
-		want := channel.Message{Channel: "telegram", ChatID: "100", SenderID: "42", SenderName: "Matt", Text: "hello"}
+		want := channel.Message{
+			Channel: "telegram", ChatID: "100", SenderID: "42", SenderName: "Matt",
+			Text: "hello", ChatType: "private",
+		}
 		if msg != want {
 			t.Errorf("msg = %+v, want %+v", msg, want)
 		}
@@ -107,6 +117,185 @@ func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 	defer mu.Unlock()
 	if len(offsets) < 2 || offsets[1] != 10 {
 		t.Errorf("offsets = %v, want second poll at 10", offsets)
+	}
+}
+
+// groupTestServer serves getMe plus a single getUpdates payload, then empty polls.
+func groupTestServer(t *testing.T, firstUpdates string) *httptest.Server {
+	t.Helper()
+	var n int
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			fmt.Fprint(w, `{"ok":true,"result":{"id":99,"is_bot":true,"username":"waffle_bot"}}`)
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			n++
+			if n == 1 {
+				fmt.Fprint(w, firstUpdates)
+				return
+			}
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestPrivateChatAlwaysDelivered(t *testing.T) {
+	srv := groupTestServer(t, `{"ok":true,"result":[
+		{"update_id":1,"message":{"text":"dm hello","chat":{"id":100,"type":"private"},"from":{"id":42,"first_name":"Matt"}}}
+	]}`)
+	defer srv.Close()
+
+	a := New("t", srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 2)
+	go func() { _ = a.Run(ctx, inbound) }()
+
+	select {
+	case msg := <-inbound:
+		if msg.IsGroup || msg.Text != "dm hello" || msg.ChatType != "private" {
+			t.Fatalf("msg = %+v", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no message")
+	}
+}
+
+func TestGroupWithoutMentionDropped(t *testing.T) {
+	srv := groupTestServer(t, `{"ok":true,"result":[
+		{"update_id":1,"message":{"text":"just chatting","chat":{"id":-100,"type":"supergroup"},"from":{"id":42,"first_name":"Matt"}}}
+	]}`)
+	defer srv.Close()
+
+	a := New("t", srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 2)
+	go func() { _ = a.Run(ctx, inbound) }()
+
+	select {
+	case msg := <-inbound:
+		t.Fatalf("group message without mention delivered: %+v", msg)
+	case <-time.After(400 * time.Millisecond):
+	}
+}
+
+func TestGroupMentionDeliveredAndStripped(t *testing.T) {
+	// "hey @waffle_bot please help" — mention entity spans the @username.
+	// Offsets are UTF-16; ASCII so byte offsets match.
+	text := "hey @waffle_bot please help"
+	srv := groupTestServer(t, fmt.Sprintf(`{"ok":true,"result":[
+		{"update_id":1,"message":{
+			"text":%q,
+			"chat":{"id":-100,"type":"supergroup"},
+			"from":{"id":42,"first_name":"Matt"},
+			"entities":[{"type":"mention","offset":4,"length":11}]
+		}}
+	]}`, text))
+	defer srv.Close()
+
+	a := New("t", srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 2)
+	go func() { _ = a.Run(ctx, inbound) }()
+
+	select {
+	case msg := <-inbound:
+		if !msg.IsGroup || msg.ChatType != "supergroup" {
+			t.Fatalf("expected group message, got %+v", msg)
+		}
+		if strings.Join(strings.Fields(msg.Text), " ") != "hey please help" {
+			t.Fatalf("text = %q, want mention stripped", msg.Text)
+		}
+		if a.BotUsername() != "waffle_bot" {
+			t.Errorf("cached username = %q", a.BotUsername())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no message")
+	}
+}
+
+func TestGroupReplyToBotDelivered(t *testing.T) {
+	srv := groupTestServer(t, `{"ok":true,"result":[
+		{"update_id":1,"message":{
+			"text":"follow up",
+			"chat":{"id":-100,"type":"group"},
+			"from":{"id":42,"first_name":"Matt"},
+			"reply_to_message":{"text":"earlier","from":{"id":99,"is_bot":true,"username":"waffle_bot"},"chat":{"id":-100,"type":"group"}}
+		}}
+	]}`)
+	defer srv.Close()
+
+	a := New("t", srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 2)
+	go func() { _ = a.Run(ctx, inbound) }()
+
+	select {
+	case msg := <-inbound:
+		if !msg.IsGroup || msg.Text != "follow up" {
+			t.Fatalf("msg = %+v", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no message")
+	}
+}
+
+func TestGroupBotCommandAtUsernameDelivered(t *testing.T) {
+	text := "/status@waffle_bot"
+	srv := groupTestServer(t, fmt.Sprintf(`{"ok":true,"result":[
+		{"update_id":1,"message":{
+			"text":%q,
+			"chat":{"id":-100,"type":"supergroup"},
+			"from":{"id":42,"first_name":"Matt"},
+			"entities":[{"type":"bot_command","offset":0,"length":%d}]
+		}}
+	]}`, text, len(text)))
+	defer srv.Close()
+
+	a := New("t", srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 2)
+	go func() { _ = a.Run(ctx, inbound) }()
+
+	select {
+	case msg := <-inbound:
+		if !msg.IsGroup {
+			t.Fatalf("msg = %+v", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no message")
+	}
+}
+
+func TestStripBotMention(t *testing.T) {
+	got := stripBotMention("hi @Waffle_Bot there", "waffle_bot")
+	if strings.Join(strings.Fields(got), " ") != "hi there" {
+		t.Fatalf("strip = %q", got)
+	}
+	if got := stripBotMention("no mention", "waffle_bot"); got != "no mention" {
+		t.Fatalf("unchanged = %q", got)
+	}
+}
+
+func TestAddressedToBotHelpers(t *testing.T) {
+	m := &tgMessage{
+		Text: "ping @waffle_bot",
+		Entities: []messageEntity{
+			{Type: "mention", Offset: 5, Length: 11},
+		},
+	}
+	if !addressedToBot(m, 99, "waffle_bot") {
+		t.Error("expected mention to address bot")
+	}
+	if addressedToBot(&tgMessage{Text: "nope"}, 99, "waffle_bot") {
+		t.Error("plain text should not address bot")
 	}
 }
 

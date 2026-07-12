@@ -165,6 +165,38 @@ func TestValidateRef(t *testing.T) {
 	}
 }
 
+func TestBuildVersionFromGit(t *testing.T) {
+	// repoDir is not a git checkout: buildVersion must fall back to "dev"
+	// without error so upgrade can still produce a binary.
+	ver, err := buildVersion(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("buildVersion: %v", err)
+	}
+	if ver != "dev" {
+		t.Errorf("buildVersion(non-git) = %q, want dev", ver)
+	}
+}
+
+func TestSanitizeVersion(t *testing.T) {
+	ok, err := sanitizeVersion("  v1.2.3-4-gabcdef.dirty\n")
+	if err != nil || ok != "v1.2.3-4-gabcdef.dirty" {
+		t.Errorf("sanitizeVersion(good) = %q, %v", ok, err)
+	}
+	if got, err := sanitizeVersion("v1.0.0+meta"); err != nil || got != "v1.0.0+meta" {
+		t.Errorf("sanitizeVersion(+meta) = %q, %v", got, err)
+	}
+	if got, err := sanitizeVersion("   \n"); err != nil || got != "dev" {
+		t.Errorf("sanitizeVersion(empty) = %q, %v; want dev", got, err)
+	}
+	// Note: leading/trailing whitespace is trimmed before validation, so a
+	// trailing tab alone is not an error. Embedded whitespace/metachars are.
+	for _, bad := range []string{"v1 with space", "v1\tx", `v1"x`, "v1't", `v1\y`, "v1;rm", "v1$(x)"} {
+		if _, err := sanitizeVersion(bad); err == nil {
+			t.Errorf("sanitizeVersion(%q): want error", bad)
+		}
+	}
+}
+
 func TestRollbackWithoutBackup(t *testing.T) {
 	if _, err := Rollback(); err == nil {
 		t.Skip("this binary happens to have a .prev; skipping")

@@ -13,6 +13,13 @@ type Message struct {
 	SenderID   string // channel-specific sender id
 	SenderName string
 	Text       string
+	// IsGroup is true for multi-party chats (Telegram group/supergroup/channel).
+	// Group messages are mention-gated by adapters and run on a restricted
+	// agent tier; unknown senders are silently ignored (no pairing codes).
+	IsGroup bool
+	// ChatType is the channel-native conversation kind when known
+	// (e.g. "private", "group", "supergroup", "channel").
+	ChatType string
 }
 
 // Adapter is one messaging surface.

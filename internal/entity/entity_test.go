@@ -79,21 +79,40 @@ func TestGroupForCreatesOnceAndBindsSession(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	g1, err := s.GroupFor(ctx, "telegram", "chat-1")
+	g1, err := s.GroupFor(ctx, "telegram", "chat-1", "")
 	if err != nil {
 		t.Fatalf("GroupFor: %v", err)
 	}
 	if g1.SessionID == "" || g1.AgentGroup != "main" {
 		t.Errorf("group = %+v", g1)
 	}
-	g2, err := s.GroupFor(ctx, "telegram", "chat-1")
-	if err != nil || g2.SessionID != g1.SessionID || g2.ID != g1.ID {
+	g2, err := s.GroupFor(ctx, "telegram", "chat-1", "group")
+	if err != nil || g2.SessionID != g1.SessionID || g2.ID != g1.ID || g2.AgentGroup != "main" {
+		// Second call must not rewrite agent_group on an existing row.
 		t.Errorf("second GroupFor = %+v, %v; want same as %+v", g2, err, g1)
 	}
 
-	other, err := s.GroupFor(ctx, "telegram", "chat-2")
+	other, err := s.GroupFor(ctx, "telegram", "chat-2", "")
 	if err != nil || other.SessionID == g1.SessionID {
 		t.Errorf("distinct chats share a session: %+v vs %+v (%v)", other, g1, err)
+	}
+}
+
+func TestGroupForCreatesGroupChatOnRestrictedTier(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	g, err := s.GroupFor(ctx, "telegram", "-1001", "group")
+	if err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	if g.AgentGroup != "group" {
+		t.Errorf("agent_group = %q, want group", g.AgentGroup)
+	}
+	// Re-fetch with a different requested tier keeps the stored binding.
+	again, err := s.GroupFor(ctx, "telegram", "-1001", "main")
+	if err != nil || again.AgentGroup != "group" || again.SessionID != g.SessionID {
+		t.Errorf("re-fetch = %+v, %v; want agent_group=group session=%s", again, err, g.SessionID)
 	}
 }
 

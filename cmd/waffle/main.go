@@ -1,5 +1,6 @@
 // Command waffle is the personal agent binary. One executable carries every
-// role — gateway, TUI, sandbox runner — selected by subcommand (docs/plan.md).
+// role — gateway, chat REPL, sandbox runner — selected by subcommand
+// (docs/plan.md).
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 
 	"github.com/matt-riley/waffle/internal/backup"
 	"github.com/matt-riley/waffle/internal/gitcred"
@@ -16,7 +18,49 @@ import (
 )
 
 // version is stamped at build time via -ldflags "-X main.version=...".
+// When left as "dev" (plain go build / go install without ldflags),
+// resolveVersion fills it from VCS build info or the module version.
 var version = "dev"
+
+func init() {
+	version = resolveVersion(version)
+}
+
+// resolveVersion returns stamped when it is not the placeholder "dev".
+// Otherwise it prefers a short VCS revision (with .dirty when modified),
+// then the module version from go install @tag, else "dev".
+func resolveVersion(stamped string) string {
+	if stamped != "" && stamped != "dev" {
+		return stamped
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return stamped
+	}
+	var rev string
+	dirty := false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev != "" {
+		if len(rev) > 7 {
+			rev = rev[:7]
+		}
+		if dirty {
+			return rev + ".dirty"
+		}
+		return rev
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	return stamped
+}
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -106,6 +150,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return cronCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(ctx, stdout)
+	case "eval":
+		return evalCmd(ctx, args[1:], stdout, stderr)
+	case "skills":
+		return skillsCmd(ctx, args[1:], stdout, stderr)
 	case "upgrade":
 		return upgradeCmd(ctx, args[1:], stdout, stderr)
 	case "rollback":
@@ -147,6 +195,8 @@ Commands:
   backup    create a local state backup
   restore   validate and restore a local state backup
   doctor    run self-checks
+  eval      run zero-network agent eval harness (exit 1 on failure)
+  skills    skill utilities (audit mines recurring tool errors)
   upgrade   rebuild and verify waffle, then swap in the new binary
             --no-verify skips vet/tests/lint (unsafe)
   rollback  restore the previous binary

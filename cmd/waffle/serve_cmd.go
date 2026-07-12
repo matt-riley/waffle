@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/intake"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -145,6 +146,34 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		return nil
 	}}
 	retention := session.RetentionSweep{Store: sessions, Retain: parseOptionalDuration(cfg.Store.Retain)}
+	// Idle reflection: summarize sessions that went quiet without a finish pass (#59).
+	if cfg.Memory.ReflectAfter != "" {
+		after := parseOptionalDuration(cfg.Memory.ReflectAfter)
+		every := parseOptionalDuration(cfg.Memory.ReflectEvery)
+		if every <= 0 {
+			every = 5 * time.Minute
+		}
+		// Prefer main agent provider/model for reflection.
+		mainAgent := agents[config.GroupMain]
+		reflector := &session.IdleReflector{
+			Sessions: sessions,
+			After:    after,
+			Every:    every,
+			OnError:  func(err error) { log.Warn("idle reflection", "err", err) },
+			Provider: func() (llm.Provider, string) {
+				if mainAgent == nil {
+					return nil, ""
+				}
+				model := mainAgent.Model
+				if mainAgent.UtilityModel != "" {
+					model = mainAgent.UtilityModel
+				}
+				return mainAgent.Provider, model
+			},
+		}
+		go reflector.Loop(lifecycleCtx)
+		log.Info("idle reflection armed", "after", after, "every", every)
+	}
 	go func() {
 		tick := time.NewTicker(time.Minute)
 		defer tick.Stop()
@@ -345,6 +374,10 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	if err != nil {
 		return nil, nil, cleanup, err
 	}
+	// Group chats always get the restricted multi-party tier (#34).
+	if _, err := build(config.GroupGroup); err != nil {
+		return nil, nil, cleanup, err
+	}
 	// Issue intake uses the restricted issue tier (#51); build it when any
 	// watcher is configured so toolbox policy is ready before the first tick.
 	if len(cfg.Intake.GitHub) > 0 {
@@ -355,7 +388,7 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 
 	groups := make([]string, 0, len(cfg.Agent.Groups))
 	for group := range cfg.Agent.Groups {
-		if group != config.GroupMain && group != config.GroupCron && group != config.GroupIssue {
+		if group != config.GroupMain && group != config.GroupCron && group != config.GroupIssue && group != config.GroupGroup {
 			groups = append(groups, group)
 		}
 	}

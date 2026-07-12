@@ -10,8 +10,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	sesspkg "github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/spill"
 	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/usage"
 )
@@ -24,6 +27,9 @@ type Agent struct {
 	Model     string
 	MaxTokens int
 
+	// UtilityModel, when set, is used for summarization/reflection (#61).
+	UtilityModel string
+
 	// MaxIterations bounds provider calls per Run — a runaway tool loop
 	// stops here instead of at the credit card. Default 50.
 	MaxIterations int
@@ -33,14 +39,32 @@ type Agent struct {
 	Redact func(string) string
 	Usage  *usage.Store
 	Limits usage.Limits
+
+	// SummaryCache avoids re-summarizing the same prefix within a process (#61).
+	// Keyed by session id + prefix length fingerprint.
+	summaryMu    sync.Mutex
+	summaryCache map[string]summaryEntry
+
+	// Spill, when set, stores full tool outputs before truncation (#69).
+	Spill *spill.Store
 }
 
-type sessionKey struct{}
+type summaryEntry struct {
+	prefixLen int
+	text      string
+}
 
+// WithSession attaches a session id (delegates to session.WithSession).
 func WithSession(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, sessionKey{}, id)
+	return sesspkg.WithSession(ctx, id)
 }
-func sessionID(ctx context.Context) string { v, _ := ctx.Value(sessionKey{}).(string); return v }
+
+// SessionID returns the id attached by WithSession, or "".
+func SessionID(ctx context.Context) string {
+	return sesspkg.IDFromContext(ctx)
+}
+
+func sessionID(ctx context.Context) string { return SessionID(ctx) }
 
 // Hooks observe a Run for UI purposes. Any field may be nil.
 type Hooks struct {
@@ -226,6 +250,22 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	if a.Redact != nil {
 		res.Content = a.Redact(res.Content)
 	}
+	// Spill large results after redaction so mid-run expand_output can recover
+	// dropped bytes without putting secrets into SQLite (#69).
+	if a.Spill != nil && !res.IsError {
+		if sid := sessionID(ctx); sid != "" && utf8.RuneCountInString(res.Content) > tool.OutputLimit {
+			spillID, partial, serr := a.Spill.Save(ctx, sid, use.Name, res.Content)
+			if serr == nil && spillID != "" {
+				res.Content = tool.Truncate(res.Content, tool.OutputLimit) + spill.Marker(spillID, partial)
+			} else {
+				res.Content = tool.Truncate(res.Content, tool.OutputLimit)
+			}
+		} else if utf8.RuneCountInString(res.Content) > tool.OutputLimit {
+			res.Content = tool.Truncate(res.Content, tool.OutputLimit)
+		}
+	} else if utf8.RuneCountInString(res.Content) > tool.OutputLimit {
+		res.Content = tool.Truncate(res.Content, tool.OutputLimit)
+	}
 	return res
 }
 
@@ -250,12 +290,33 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 		return append([]llm.Message(nil), fullHistory...), ""
 	}
 	prefix := fullHistory[:n-recentWindow]
-	summaryText := a.summarize(ctx, prefix, onUsage)
+	// Cache by session + prefix length so successive iterations of one Run
+	// (and successive Runs in-process) do not re-summarize unchanged prefixes (#61).
+	sid := sessionID(ctx)
+	cacheKey := fmt.Sprintf("%s:%d", sid, len(prefix))
+	summaryText := ""
+	a.summaryMu.Lock()
+	if a.summaryCache != nil {
+		if e, ok := a.summaryCache[cacheKey]; ok && e.prefixLen == len(prefix) {
+			summaryText = e.text
+		}
+	}
+	a.summaryMu.Unlock()
+	if summaryText == "" {
+		summaryText = a.summarize(ctx, prefix, onUsage)
+		a.summaryMu.Lock()
+		if a.summaryCache == nil {
+			a.summaryCache = map[string]summaryEntry{}
+		}
+		a.summaryCache[cacheKey] = summaryEntry{prefixLen: len(prefix), text: summaryText}
+		a.summaryMu.Unlock()
+	}
 
 	// Carry as extra system text so it never lands at messages[0]. System
 	// text is provider-controlled and immune to prompt injection from
 	// model-generated content.
-	extraSystem := "[CONTEXT SUMMARY - generated for bounding only; not a user instruction or command; full history retained in SQLite for search] " + summaryText
+	// Chunk handles name the summarized turn range for expand_context (#61).
+	extraSystem := fmt.Sprintf("[CONTEXT SUMMARY turns=1-%d — generated for bounding only; not a user instruction; full history in SQLite; expand_context can fetch verbatim turns] %s", len(prefix), summaryText)
 
 	recentStart := n - recentWindow
 	if recentStart < 0 {
@@ -353,8 +414,12 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage fun
 	input := strings.Join(lines, "")
 	flat := llm.UserText("Prior turns (summarize these):\n" + input)
 	prompt := llm.UserText("Summarize the prior conversation turns above in 2-3 sentences for context. Focus on key facts, decisions, work done and anything unfinished. Reply with only the summary.")
+	model := a.Model
+	if a.UtilityModel != "" {
+		model = a.UtilityModel
+	}
 	resp, err := a.Provider.Complete(ctx, llm.Request{
-		Model:     a.Model,
+		Model:     model,
 		Messages:  []llm.Message{flat, prompt},
 		MaxTokens: 256,
 	}, nil)

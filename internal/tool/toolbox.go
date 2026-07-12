@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
 )
@@ -30,6 +31,12 @@ type CallerToolbox interface {
 type Policy struct {
 	Allow []string // empty means everything not denied
 	Deny  []string // wins over Allow
+	// DenyPrefixes denies bash (or other shell) commands whose text starts
+	// with any of these prefixes after optional leading whitespace (#66).
+	// Denial messages include Guidance when set.
+	DenyPrefixes []string
+	// Guidance is appended to action-level denial messages.
+	Guidance string
 }
 
 // Permits reports whether the policy allows the named tool.
@@ -44,10 +51,13 @@ func (p Policy) Permits(name string) bool {
 }
 
 // IsZero reports whether the policy restricts nothing.
-func (p Policy) IsZero() bool { return len(p.Allow) == 0 && len(p.Deny) == 0 }
+func (p Policy) IsZero() bool {
+	return len(p.Allow) == 0 && len(p.Deny) == 0 && len(p.DenyPrefixes) == 0
+}
 
 // Restrict applies a policy to a toolbox: denied tools disappear from Defs
-// and refuse to Run.
+// and refuse to Run. Action-level DenyPrefixes are enforced at Run time for
+// bash only (tool remains listed).
 func Restrict(tb Toolbox, p Policy) Toolbox {
 	if p.IsZero() {
 		return tb
@@ -74,6 +84,9 @@ func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage
 	if !r.policy.Permits(name) {
 		return "", fmt.Errorf("tool %q is not permitted by policy", name)
 	}
+	if err := r.policy.checkCommand(name, input); err != nil {
+		return "", err
+	}
 	return r.tb.Run(ctx, name, input)
 }
 
@@ -81,10 +94,41 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 	if !r.policy.Permits(name) {
 		return "", fmt.Errorf("tool %q is not permitted by policy", name)
 	}
+	if err := r.policy.checkCommand(name, input); err != nil {
+		return "", err
+	}
 	if tb, ok := r.tb.(CallerToolbox); ok {
 		return tb.RunWithID(ctx, id, name, input)
 	}
 	return r.tb.Run(ctx, name, input)
+}
+
+// checkCommand enforces DenyPrefixes for bash (#66).
+func (p Policy) checkCommand(name string, input json.RawMessage) error {
+	if name != "bash" || len(p.DenyPrefixes) == 0 {
+		return nil
+	}
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil {
+		return nil // let the tool report bad input
+	}
+	cmd := strings.TrimSpace(in.Command)
+	for _, pref := range p.DenyPrefixes {
+		pref = strings.TrimSpace(pref)
+		if pref == "" {
+			continue
+		}
+		if strings.HasPrefix(cmd, pref) {
+			msg := fmt.Sprintf("bash command denied by policy: prefix %q is not allowed", pref)
+			if p.Guidance != "" {
+				msg += " — " + p.Guidance
+			}
+			return fmt.Errorf("%s", msg)
+		}
+	}
+	return nil
 }
 
 // Combine merges toolboxes; the first box offering a name wins. Used to

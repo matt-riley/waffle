@@ -1,5 +1,6 @@
 # build output
 /waffle
+/bin/
 /dist/
 /.worktrees/
 

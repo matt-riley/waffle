@@ -183,6 +183,11 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	if cfg.UsesDocker() {
 		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
 		add("sandbox runner", err, info)
+		// Full docker round-trip (pull image + start container) is intentionally
+		// skipped: daemon/image availability varies and is slow. Operators can
+		// smoke with: docker run --rm -v … <image> /waffle runner … and the
+		// sandbox_stress queue test (see docs/plan.md, Sandboxing & IPC).
+		add("sandbox docker round-trip", nil, "skipped (manual/ops; queue stress via -tags=sandbox_stress)")
 	} else {
 		add("sandbox runner", nil, "host mode (skipped)")
 	}
@@ -254,9 +259,16 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		}
 	}
 	built := filepath.Join(repoDir, ".waffle-build")
-	if err := run(ctx, repoDir, stderr, "go", "build", "-o", built, "./cmd/waffle"); err != nil {
+	ver, err := buildVersion(ctx, repoDir)
+	if err != nil {
+		return "", fmt.Errorf("version stamp: %w", err)
+	}
+	ldflags := "-X main.version=" + ver
+	fmt.Fprintf(stderr, "building waffle %s\n", ver)
+	if err := run(ctx, repoDir, stderr, "go", "build", "-ldflags", ldflags, "-o", built, "./cmd/waffle"); err != nil {
 		return "", fmt.Errorf("build: %w", err)
 	}
+	fmt.Fprintf(stderr, "built waffle %s\n", ver)
 
 	defer func() { _ = os.Remove(built) }()
 
@@ -353,6 +365,36 @@ func validateRef(ref string) error {
 		return fmt.Errorf("invalid git ref %q: refs may not start with '-'", ref)
 	}
 	return nil
+}
+
+// buildVersion returns a version string suitable for -ldflags -X main.version.
+// Prefer git describe (tags + short sha + dirty); fall back to "dev".
+func buildVersion(ctx context.Context, repoDir string) (string, error) {
+	out, err := commandOutput(ctx, repoDir, "git", "describe", "--tags", "--always", "--dirty")
+	if err != nil {
+		// Not a git checkout, or git missing: still allow the build with "dev".
+		return "dev", nil
+	}
+	return sanitizeVersion(out)
+}
+
+// sanitizeVersion trims git describe output and rejects characters that
+// would break or inject into -ldflags -X main.version=...
+func sanitizeVersion(raw string) (string, error) {
+	ver := strings.TrimSpace(raw)
+	if ver == "" {
+		return "dev", nil
+	}
+	for _, r := range ver {
+		ok := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '-' || r == '_' || r == '+'
+		if !ok {
+			return "", fmt.Errorf("git describe produced unsafe version %q", ver)
+		}
+	}
+	return ver, nil
 }
 
 func run(ctx context.Context, dir string, stderr io.Writer, name string, args ...string) error {

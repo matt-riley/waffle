@@ -67,6 +67,23 @@ func TestRestrict(t *testing.T) {
 	}
 }
 
+func TestDenyPrefixes(t *testing.T) {
+	tb := NewRegistry(Bash{})
+	r := Restrict(tb, Policy{
+		DenyPrefixes: []string{"rm -rf", "curl "},
+		Guidance:     "use safer alternatives or request an explicit allow",
+	})
+	_, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
+	if err == nil || !strings.Contains(err.Error(), "rm -rf") || !strings.Contains(err.Error(), "safer") {
+		t.Fatalf("want prefix denial with guidance, got %v", err)
+	}
+	// Non-matching command is allowed (may still fail for other reasons).
+	out, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"echo ok"}`))
+	if err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("echo = %q %v", out, err)
+	}
+}
+
 func TestCombine(t *testing.T) {
 	a := NewRegistry(namedTool{"bash"}, namedTool{"fetch"})
 	b := NewRegistry(namedTool{"remember"}, namedTool{"bash"}) // duplicate bash: first wins

@@ -79,6 +79,17 @@ type Fetch struct {
 // Memory controls writes to prompt-visible memory and skills.
 type Memory struct {
 	WriteGate string `toml:"write_gate"`
+	// InjectBudget is the max bytes of MEMORY.md notes injected into the
+	// system prompt (pinned first, then newest). Zero uses the package
+	// default (8KiB).
+	InjectBudget int `toml:"inject_budget"`
+	// ReflectAfter is how long a session must be idle (no updates) before
+	// gateway idle reflection writes a summary (#59). Empty disables idle
+	// reflection. Example: "30m".
+	ReflectAfter string `toml:"reflect_after"`
+	// ReflectEvery is the idle-reflection poll interval under serve (#59).
+	// Empty defaults to "5m" when ReflectAfter is set.
+	ReflectEvery string `toml:"reflect_every"`
 }
 
 // Selfdev configures the approval and verification policy for upgrades.
@@ -118,6 +129,28 @@ type Agent struct {
 	// [agent.group.main], [agent.group.cron]. Unlisted groups fall back to
 	// documented defaults (see Config.AgentPolicy).
 	Groups map[string]AgentGroup `toml:"group"`
+	// Profiles are named agent postures (system/tools/sandbox/model) (#71).
+	// The empty name or "main" matches current default behavior when unset.
+	Profiles map[string]AgentProfile `toml:"profile"`
+	// DefaultProfile is used when a run does not name a profile.
+	DefaultProfile string `toml:"default_profile"`
+}
+
+// AgentProfile is one named agent posture (#71).
+type AgentProfile struct {
+	// System is inline system text, or a path to a file when it starts with
+	// "@" or looks like an existing path ending in .md.
+	System string `toml:"system"`
+	// Model overrides [provider].model when set.
+	Model string `toml:"model"`
+	// Sandbox is "host" or "docker"; empty inherits group policy.
+	Sandbox string `toml:"sandbox"`
+	// Tools filters the toolset for this profile.
+	Tools ToolPolicy `toml:"tools"`
+	// DenyPrefixes applies action-level bash prefix denials (#66).
+	DenyPrefixes []string `toml:"deny_prefixes"`
+	// Guidance is appended to action-level denials.
+	Guidance string `toml:"guidance"`
 }
 
 // AgentGroup is one agent group's trust posture: where its tools run and
@@ -138,16 +171,23 @@ type AgentGroup struct {
 type ToolPolicy struct {
 	Allow []string `toml:"allow"`
 	Deny  []string `toml:"deny"`
+	// DenyPrefixes denies bash command prefixes (#66).
+	DenyPrefixes []string `toml:"deny_prefixes"`
+	// Guidance is appended to action-level denial messages.
+	Guidance string `toml:"guidance"`
 }
 
 // GroupCron is the reserved group name for scheduled (cron) sessions, the
 // plan's canonical "risky context": unattended and often driven by external
 // content. GroupIssue is board-driven issue intake (#51), similarly untrusted.
-// GroupMain is the owner's interactive sessions.
+// GroupGroup is multi-party channel chats (Telegram groups, #34): mention-
+// gated and treated as untrusted multi-party input. GroupMain is the owner's
+// interactive 1:1 sessions.
 const (
 	GroupMain  = "main"
 	GroupCron  = "cron"
 	GroupIssue = "issue"
+	GroupGroup = "group"
 )
 
 // AgentPolicy resolves the effective sandbox mode and tool policy for a group.
@@ -172,6 +212,8 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 		r.Mode = "host"
 	}
 	g, ok := c.Agent.Groups[group]
+	// Allow/Deny replace global tool lists; DenyPrefixes alone tightens without
+	// lifting restricted-group defaults.
 	explicitTools := ok && (len(g.Tools.Allow) > 0 || len(g.Tools.Deny) > 0)
 	if ok {
 		if g.Sandbox != "" {
@@ -181,26 +223,51 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 			r.Allow = g.Tools.Allow
 			r.Deny = g.Tools.Deny
 		}
+		if len(g.Tools.DenyPrefixes) > 0 || g.Tools.Guidance != "" {
+			r.DenyPrefixes = append([]string(nil), g.Tools.DenyPrefixes...)
+			r.Guidance = g.Tools.Guidance
+		}
 	}
-	// Unattended tiers deny host bash and durable memory writes by default;
-	// only an explicit tool policy for that group opts out.
-	if (group == GroupCron || group == GroupIssue) && !explicitTools {
+	// Unattended / multi-party tiers deny host bash and durable memory
+	// writes by default; only an explicit tool policy for that group opts out.
+	if restrictedDefaultGroup(group) && !explicitTools {
 		r.Deny = appendUnique(r.Deny, "bash")
 		r.Deny = appendUnique(r.Deny, "remember")
+		r.Deny = appendUnique(r.Deny, "memory_update")
 		r.Deny = appendUnique(r.Deny, "distill_skill")
+		// Working-set mutation is owner-session only by default (#67).
+		r.Deny = appendUnique(r.Deny, "workspace_update")
 	}
 	if r.Mode == "docker" {
 		r.Deny = appendUnique(r.Deny, "remember")
+		r.Deny = appendUnique(r.Deny, "memory_update")
 		r.Deny = appendUnique(r.Deny, "distill_skill")
 	}
 	return r
 }
 
+// Profile returns the named agent profile, or a zero profile when missing.
+func (c Config) Profile(name string) (AgentProfile, bool) {
+	if name == "" {
+		name = c.Agent.DefaultProfile
+	}
+	if name == "" {
+		name = "main"
+	}
+	if c.Agent.Profiles == nil {
+		return AgentProfile{}, name == "main"
+	}
+	p, ok := c.Agent.Profiles[name]
+	return p, ok || name == "main"
+}
+
 // ResolvedAgentPolicy is the effective execution posture for a group.
 type ResolvedAgentPolicy struct {
-	Mode  string // "host" or "docker"
-	Allow []string
-	Deny  []string
+	Mode         string // "host" or "docker"
+	Allow        []string
+	Deny         []string
+	DenyPrefixes []string
+	Guidance     string
 }
 
 // UsesDocker reports whether any tier runs tools in docker: the global
@@ -218,6 +285,13 @@ func (c Config) UsesDocker() bool {
 		}
 	}
 	return false
+}
+
+// restrictedDefaultGroup reports whether group is a reserved tier that
+// inherits the unattended deny defaults (bash, remember, memory_update,
+// distill_skill).
+func restrictedDefaultGroup(group string) bool {
+	return group == GroupCron || group == GroupIssue || group == GroupGroup
 }
 
 func appendUnique(s []string, v string) []string {
@@ -404,7 +478,7 @@ func Default() Config {
 		Workspace: Workspace{Egress: "none", IdleTimeout: "30m", CloseTTL: "168h"},
 		Store:     Store{Retain: "0"},
 		Agent:     Agent{Subagents: true, Learn: true},
-		Memory:    Memory{WriteGate: "auto"},
+		Memory:    Memory{WriteGate: "auto", InjectBudget: 8192},
 		Selfdev:   Selfdev{Approval: "manual", Verify: true},
 		Log:       Log{Level: "info"},
 		Jobs:      JobPolicy{MaxAttempts: 1, BaseBackoff: "10s", MaxBackoff: "10m", StallTimeout: "5m"},
@@ -482,6 +556,20 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Memory.WriteGate != "auto" && cfg.Memory.WriteGate != "notify" && cfg.Memory.WriteGate != "review" {
 		return Config{}, fmt.Errorf("memory.write_gate: must be auto, notify, or review")
+	}
+	if cfg.Memory.InjectBudget < 0 {
+		return Config{}, fmt.Errorf("memory.inject_budget: must be >= 0")
+	}
+	for name, value := range map[string]string{
+		"memory.reflect_after": cfg.Memory.ReflectAfter,
+		"memory.reflect_every": cfg.Memory.ReflectEvery,
+	} {
+		if value == "" {
+			continue
+		}
+		if d, err := ParseDuration(value); err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("%s must be a positive duration, got %q", name, value)
+		}
 	}
 	switch cfg.Selfdev.Approval {
 	case "manual", "ci", "auto-patch":

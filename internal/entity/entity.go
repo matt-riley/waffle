@@ -174,8 +174,11 @@ func (s *Store) Approve(ctx context.Context, code, name string) (*Identity, erro
 }
 
 // GroupFor returns the channel group for a conversation, creating it (and
-// its session) on first contact.
-func (s *Store) GroupFor(ctx context.Context, channel, chatID string) (*Group, error) {
+// its session) on first contact. agentGroup is used only when creating a new
+// row; empty defaults to "main". Multi-party channel chats should pass
+// "group" so sessions inherit the restricted group-chat policy (#34).
+// Existing rows keep their stored agent_group.
+func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string) (*Group, error) {
 	g := &Group{Channel: channel, ChatID: chatID}
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, agent_group, session_id FROM channel_groups
@@ -192,7 +195,10 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID string) (*Group, e
 	if err != nil {
 		return nil, err
 	}
-	g.AgentGroup = "main"
+	if agentGroup == "" {
+		agentGroup = "main"
+	}
+	g.AgentGroup = agentGroup
 	g.SessionID = sess.ID
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO channel_groups (channel, chat_id, agent_group, session_id, created_at)

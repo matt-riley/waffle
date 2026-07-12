@@ -29,6 +29,7 @@ func loadWorkspace() (memory.Workspace, []skill.Skill, error) {
 }
 
 func doctorCmd(ctx context.Context, stdout io.Writer) error {
+	fmt.Fprintf(stdout, "waffle %s\n", version)
 	checks, ok, err := selfdev.Doctor(ctx)
 	if err != nil {
 		return err

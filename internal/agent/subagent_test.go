@@ -41,7 +41,8 @@ func TestSubagentTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != "subagent: research the topic" {
+	// Structured handoff: prose without JSON becomes partial with summary.
+	if !strings.Contains(out, "research the topic") || !strings.Contains(out, "partial") {
 		t.Errorf("out = %q", out)
 	}
 }
@@ -50,5 +51,38 @@ func TestSubagentDepthLimit(t *testing.T) {
 	tl := SubagentTool{Provider: oneShotProvider{}, Tools: tool.NewRegistry(), Model: "m", Depth: 3}
 	if _, err := tl.Run(context.Background(), json.RawMessage(`{"task":"x"}`)); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Errorf("err = %v, want depth limit", err)
+	}
+}
+
+// captureSystemProvider records the system prompt.
+type captureSystemProvider struct {
+	system string
+}
+
+func (p *captureSystemProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.system = req.System
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: `{"status":"done","summary":"ok"}`}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+func TestSubagentWorkingSetBroadcast(t *testing.T) {
+	p := &captureSystemProvider{}
+	tl := SubagentTool{
+		Provider:            p,
+		Tools:               tool.NewRegistry(),
+		Model:               "m",
+		BroadcastWorkingSet: true,
+		WorkingSetBroadcast: "<working_set>\n- [goal id=g1 source=user] ship it\n</working_set>\n",
+	}
+	if _, err := tl.Run(context.Background(), json.RawMessage(`{"task":"do work"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.system, "working_set") || !strings.Contains(p.system, "ship it") {
+		t.Fatalf("system missing broadcast: %q", p.system)
+	}
+	if !strings.Contains(p.system, "read-only") {
+		t.Fatalf("system missing read-only note: %q", p.system)
 	}
 }

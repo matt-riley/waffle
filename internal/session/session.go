@@ -361,6 +361,56 @@ func vacuum(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
+// SearchSummaries finds sessions whose summary or title matches all query
+// terms (simple LIKE AND; no FTS table for summaries).
+func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (hits []Hit, err error) {
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 4
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, title, summary, updated_at FROM sessions
+		WHERE summary IS NOT NULL AND summary != ''
+		ORDER BY updated_at DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var h Hit
+		var created string
+		if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &created); err != nil {
+			return nil, err
+		}
+		hay := strings.ToLower(h.Title + " " + h.Summary)
+		ok := true
+		for _, term := range terms {
+			if !strings.Contains(hay, term) {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		h.Snippet = h.Summary
+		if len(h.Snippet) > 240 {
+			h.Snippet = h.Snippet[:240] + "…"
+		}
+		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
+			return nil, err
+		}
+		hits = append(hits, h)
+		if len(hits) >= limit {
+			break
+		}
+	}
+	return hits, rows.Err()
+}
+
 // Search runs a full-text query over all stored turns. The user-supplied
 // query is quoted term-by-term so FTS5 operator syntax can't error out.
 func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit, err error) {

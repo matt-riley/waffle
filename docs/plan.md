@@ -9,8 +9,9 @@ each borrowed idea are in [research.md](./research.md).
 ## Design principles
 
 1. **One binary.** `waffle` compiles to a single static binary containing the
-   gateway, the agent runtime, the TUI, and all channel adapters. No Node, no
-   Python, no service mesh. Subcommands select the role.
+   gateway, the agent runtime, the terminal chat REPL, and all channel
+   adapters. No Node, no Python, no service mesh. Subcommands select the role.
+   (A full-screen TUI was deliberately cut — see [Deviations](#deviations).)
 2. **Small enough to read.** nanoclaw's discipline: any subsystem should be
    reviewable by one person in one sitting. Features that threaten this get
    cut or become optional modules.
@@ -46,18 +47,19 @@ each borrowed idea are in [research.md](./research.md).
 ```
                                    ┌──────────────────────────────────────┐
   Telegram ──┐                     │            waffle gateway            │
-  Discord ───┤   channel           │                                      │
-  CLI/TUI ───┤   adapters ───► router (entity model) ───► session manager │
-  Webhook ───┘                     │        │                    │        │
-                                   │   cron scheduler       agent runtime │
-                                   │                             │        │
-                                   │                        tool dispatch │
-                                   │                         │       │    │
-                                   │                     host tools  MCP  │
-                                   │                                      │
-                                   │  provider proxy ──► Anthropic/OpenAI/│
-                                   │  (only key holder)   Gemini/Ollama/  │
-                                   │                      weave-router    │
+  CLI/chat ──┤   channel           │                                      │
+             │   adapters ───► router (entity model) ───► session manager │
+             │                     │        │                    │        │
+             │                     │   cron scheduler       agent runtime │
+             │                     │                             │        │
+             │                     │                        tool dispatch │
+             │                     │                         │       │    │
+             │                     │                     host tools  MCP  │
+             │                     │                      (stdio only)    │
+             │                     │  provider proxy ──► Anthropic /      │
+             │                     │  (only key holder)   OpenAI-compat   │
+             │                     │                   (Ollama/router/    │
+             │                     │                    Gemini endpoint)  │
                                    └──────────┬───────────────────────────┘
                                               │ single-writer SQLite queues
                                    ┌──────────┴───────────┐
@@ -65,6 +67,8 @@ each borrowed idea are in [research.md](./research.md).
                                    │  (Docker containers) │
                                    └──────────────────────┘
 ```
+
+Discord is optional and not shipped (see [Deviations](#deviations)).
 
 ### Entity model (from nanoclaw)
 
@@ -102,12 +106,15 @@ SQLite and remains searchable via FTS5.
 
 `internal/llm` defines the canonical types (`Message`, `ToolCall`,
 `ContentBlock`, streaming events) and a `Provider` interface. Translators
-implement it for Anthropic Messages, OpenAI Chat Completions
-(covers OpenRouter, Ollama, and most local servers), and Gemini. A
-`baseURL`-only "openai-compatible" provider means a running
-[workweave/router](https://github.com/workweave/router) instance slots in as
-just another endpoint — that is the recommended way to get smart
-multi-model routing rather than reimplementing cluster scoring in-tree.
+implement it for Anthropic Messages and OpenAI Chat Completions
+(covers OpenRouter, Ollama, Gemini's OpenAI-compatible endpoint, and most
+local servers). There is **no** first-class `gemini/` package — use
+`name = "openai"` with Gemini's compatible `base_url` (see
+[Deviations](#deviations)). A `baseURL`-only "openai-compatible" provider
+means a running [workweave/router](https://github.com/workweave/router)
+instance slots in as just another endpoint — that is the recommended way to
+get smart multi-model routing rather than reimplementing cluster scoring
+in-tree.
 
 The *provider proxy* is a thin HTTP listener inside the gateway that
 sandboxed sessions call with scoped `wk_...` tokens; it injects the real key,
@@ -117,11 +124,12 @@ Vault + router's two-tier key model).
 ### Tools
 
 Native Go tools first: `bash` (policy-gated), `read`/`write`/`edit`, `fetch`,
-`search`. Everything else arrives via MCP — waffle embeds an MCP client
-(official `modelcontextprotocol/go-sdk`) so third-party servers provide the
-long tail instead of a 40-tool builtin matrix. Tool availability is decided
-by the session's policy (openclaw-style allow/deny), evaluated in the
-gateway, not trusted to the sandbox.
+`search`. Everything else arrives via MCP — waffle ships a **hand-rolled
+stdio JSON-RPC client** in `internal/mcp` (not the official go-sdk; no
+HTTP/SSE transport — see [Deviations](#deviations)) so third-party servers
+provide the long tail instead of a 40-tool builtin matrix. Tool availability
+is decided by the session's policy (openclaw-style allow/deny), evaluated in
+the gateway, not trusted to the sandbox.
 
 ### Sandboxing & IPC
 
@@ -144,6 +152,14 @@ it left off. Requests carry the model's durable `tool_use_id`; duplicate
 delivery is absorbed and completed results can be reclaimed after a host
 restart. Containers see only their workspace volume, the queue mount,
 and the host's proxy endpoints — never secrets, never the host filesystem.
+
+**Bind-mount / queue stress (#29).** Concurrent queue load is covered by
+`go test -tags=sandbox_stress ./internal/sandbox -run Stress` (optional env
+`WAFFLE_SANDBOX_STRESS=1`). That exercises the same SQLite inbound/outbound
+pair docker bind-mounts; it does not require Docker. `waffle doctor` checks
+the configured linux `runner_binary` when any tier uses docker mode, and
+skips a full container round-trip (image pull / daemon availability vary by
+host — treat docker smoke as a manual op).
 
 ### Repo workspaces ("work on this repo")
 
@@ -219,8 +235,15 @@ cannot read another repo, another session's secrets, or any raw key.
   standing instructions), `MEMORY.md`, `USER.md`, and `skills/<name>/SKILL.md`
   (agentskills.io-compatible so hermes/openclaw skills port over).
 - Memory recall: every turn is indexed in SQLite FTS5; a `remember` tool lets
-  the agent curate `MEMORY.md`; a periodic reflection pass nudges curation
-  and writes session summaries for cross-session recall.
+  the agent curate `MEMORY.md` (stable note IDs, exact-body dedupe); a
+  `memory_update` tool supersedes or forgets by ID, archiving old lines to
+  `MEMORY.archive.md` via localized line edits (never whole-file rewrites
+  through the model). A periodic reflection pass nudges curation and writes
+  session summaries for cross-session recall.
+- System injection: `MEMORY.md` notes are selected under
+  `[memory] inject_budget` (default 8KiB) — pinned first, then newest;
+  elided notes report a count and point at `recall`. Archive is never
+  injected. Legacy un-ID'd lines still render.
 - Learning loop (later phase): after a complex task completes, the agent is
   prompted to distill the procedure into a new or improved skill file.
 
@@ -315,35 +338,87 @@ Repo-versioned `WAFFLE.md`/`AGENT.md` (#53) and container lifecycle hooks (#54) 
 ## Repository layout
 
 ```
-cmd/waffle/            main; subcommands: serve, chat, runner, ws, secret, cron
-internal/gateway/      control plane: wiring, broker (proxy/git/egress), admin
+cmd/waffle/            main; subcommands: serve, chat, status, pair, runner,
+                       ws, cron, session, forget, usage, pause/resume,
+                       secret, backup/restore, doctor, upgrade, rollback, version
+internal/gateway/      control plane: wiring, pairing, serve loop
 internal/entity/       user/channel-group/agent-group/session model
-internal/channel/      Adapter interface; cli/, telegram/, discord/ ...
-internal/agent/        the loop: context assembly, streaming, tool dispatch
-internal/llm/          canonical types; anthropic/, openai/, gemini/
-internal/tool/         Tool interface, builtins, MCP client, policy
+internal/channel/      Adapter interface; telegram/ (hand-rolled Bot API HTTP)
+internal/agent/        the loop: context assembly, streaming, tool dispatch,
+                       subagents
+internal/llm/          canonical types; anthropicp/, openaip/
+                       (no gemini/ — OpenAI-compatible endpoint instead)
+internal/tool/         Tool interface, builtins, policy
+internal/mcp/          hand-rolled stdio JSON-RPC MCP client (no HTTP/SSE)
 internal/sandbox/      executors: host, docker; runner; sqlite queue IPC
 internal/workspace/    repo workspaces: lifecycle, devcontainer, git helper
+internal/broker/       credential broker (provider proxy, git, egress)
 internal/secret/       Store iface; age+keyring backend; redaction; audit
 internal/skill/        SKILL.md discovery, indexing, learning loop
-internal/memory/       FTS5 store, curation, reflection/summarization
+internal/memory/       FTS5 store, curation, distill_skill, reflection
 internal/schedule/     cron persistence + runner
 internal/intake/       issue-tracker board intake (#51)
 internal/repopolicy/   repo WAFFLE.md tighten-only policy (#53)
 internal/hooks/        workspace lifecycle hooks in sandbox (#54)
+internal/selfdev/      doctor, upgrade, rollback
+internal/observability/ run metrics + loopback status HTTP
 internal/store/        sqlite open/migrations (modernc.org/sqlite)
-docs/                  this plan, research notes, ADRs
+docs/                  this plan, research notes, deploy, ADRs
 ```
 
 Key dependencies (all pure Go where possible): `modernc.org/sqlite`,
-`charmbracelet/bubbletea` (TUI), `modelcontextprotocol/go-sdk` (MCP),
-`robfig/cron/v3`, `go-telegram/bot`, `bwmarrin/discordgo`, stdlib
-`net/http` + `encoding/json/v2` for providers, OTel SDK for tracing.
+`robfig/cron/v3`, `filippo.io/age`, `github.com/zalando/go-keyring`,
+Anthropic SDK, stdlib `net/http` for Telegram Bot API and OpenAI-compatible
+providers, OTel SDK for tracing. **Not** used (deliberate cuts):
+`charmbracelet/bubbletea`, `modelcontextprotocol/go-sdk`, `go-telegram/bot`,
+`bwmarrin/discordgo` — see [Deviations](#deviations).
+
+## Deviations
+
+Deliberate departures from the original sketch (issue #39). These are not
+incomplete work; they are choices to stay small enough to read (principle 2).
+
+1. **Gemini provider** — no `internal/llm/gemini/`. Point the OpenAI-compatible
+   provider at Gemini's compatible endpoint (`name = "openai"`, suitable
+   `base_url` and model). One translator covers OpenRouter, Ollama, Gemini,
+   and weave-router.
+2. **bubbletea TUI** — cut. `waffle chat` is a line-oriented REPL (stdin/stdout
+   with light ANSI), not a full-screen TUI. Keeps the terminal surface
+   reviewable and dependency-free beyond `golang.org/x/term` for raw input
+   where needed.
+3. **MCP SDK** — hand-rolled stdio JSON-RPC in `internal/mcp` instead of
+   `modelcontextprotocol/go-sdk`. **stdio-only; no HTTP/SSE transport.** The
+   surface waffle needs (initialize, tools/list, tools/call) is small enough
+   to own; an SDK would pull a large dependency graph for little gain.
+4. **Channel deps** — Telegram is hand-rolled Bot API HTTP in
+   `internal/channel/telegram` (no `go-telegram/bot`). **Discord is optional
+   and not shipped** (`bwmarrin/discordgo` never added; a second channel
+   remains an optional later addition under principle 2).
+
+### Remaining functional gaps
+
+Phases **0–4** of the original roadmap (skeleton → isolation & broker) are
+fully delivered and in daily use. Phases **5–7** (workspaces, automation,
+learning/self-dev) are also landed in substance; remaining gaps are the
+optional/cut items above plus anything still open on the tracker:
+
+| Gap | Status | Notes |
+|---|---|---|
+| Discord adapter | not shipped | deliberate; see deviation 4 |
+| Native Gemini package | not shipped | deliberate; use OpenAI-compat |
+| Full-screen TUI | not shipped | deliberate; line REPL |
+| MCP over HTTP/SSE | not shipped | deliberate; stdio-only |
+| In-process host hooks (Lua/JS) | deferred | extension-surface decision (#41) |
+| Smart routing in-tree | out of scope | use weave-router as an endpoint |
+
+Cross-check open GitHub issues for anything newer than this table; the
+deviations above are closed by design, not backlog.
 
 ## Roadmap
 
 Each phase ends with something you actually use daily; nothing depends on a
-later phase to be useful. **All seven phases are implemented** — the status
+later phase to be useful. **Phases 0–4 are fully delivered; phases 5–7 are
+delivered with the deliberate cuts in [Deviations](#deviations).** The status
 line in [README.md](../README.md) tracks what's landed; the notes below are
 the original plan, kept as the record of intent.
 
@@ -355,7 +430,8 @@ provider key is configured).
 
 **Phase 1 — The loop (the heart).** `internal/llm` canonical types +
 Anthropic and openai-compatible providers; agent loop with streaming; host
-tools (`bash`, file ops, `fetch`); `waffle chat` TUI. *Milestone: a useful
+tools (`bash`, file ops, `fetch`); `waffle chat` line REPL (not a
+bubbletea TUI — see [Deviations](#deviations)). *Milestone: a useful
 Claude-backed terminal agent.*
 
 **Phase 2 — Persistence, skills, memory.** Sessions/turns in SQLite; FTS5
@@ -380,14 +456,16 @@ credentials + `waffle` as in-container credential helper, egress policy,
 channel spins up a container and ends in a pushed branch.*
 
 **Phase 6 — Automation.** Cron scheduler with channel delivery; subagents
-(parallel sandboxed sessions reporting back to a parent); MCP client.
-*Milestone: unattended recurring jobs, including scheduled repo work.*
+(parallel sandboxed sessions reporting back to a parent); MCP client
+(hand-rolled stdio JSON-RPC — see [Deviations](#deviations)). *Milestone:
+unattended recurring jobs, including scheduled repo work.*
 
 **Phase 7 — The learning loops.** Post-task skill distillation, in-use
 skill refinement, memory-curation nudges; the self-development loop
 (`waffle upgrade`, `waffle doctor`, `waffle rollback`, skill→Go-tool
 promotion via self-PRs); optional weave-router deployment docs for smart
-model routing; second channel (Discord) if wanted.
+model routing; second channel (Discord) remains optional and **not
+shipped** (see [Deviations](#deviations)).
 
 ## Decisions to make now
 

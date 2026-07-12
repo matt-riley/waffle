@@ -1,12 +1,14 @@
 # waffle
 
 A personal AI agent, written in Go, that runs on your own hardware — one
-binary containing the agent loop, a messaging gateway, a terminal UI, and a
-provider-agnostic LLM layer.
+binary containing the agent loop, a messaging gateway, a terminal chat REPL,
+and a provider-agnostic LLM layer.
 
-Status: **all seven planned phases implemented.** waffle is a working
-personal agent — terminal, gateway, isolation, workspaces, automation, and
-self-improvement. See [docs/plan.md](docs/plan.md) for the design.
+Status: **phases 0–4 fully delivered; phases 5–7 landed with deliberate
+cuts** (line REPL instead of a full-screen TUI, OpenAI-compatible Gemini,
+stdio-only MCP, Telegram only — Discord not shipped). See
+[docs/plan.md](docs/plan.md) ([Deviations](docs/plan.md#deviations)) for the
+design and what was intentionally left out.
 
 What's here, by capability:
 
@@ -20,13 +22,17 @@ What's here, by capability:
   allow exact CIDRs or host:port destinations with
   `[tools.fetch] allow_private = ["192.168.1.0/24", "localhost:3000"]`.
 - **Memory** — every conversation persisted to SQLite with FTS5 search;
-  `remember`/`recall` tools; `AGENT.md`/`USER.md`/`MEMORY.md` workspace
-  files injected into the prompt; sessions summarized on exit.
+  multi-tier `recall` (turns/summaries/notes/spills); `remember` /
+  `memory_update`; working set via `workspace_update`; tool spills with
+  `expand_output` / `expand_context`; `AGENT.md`/`USER.md`/`MEMORY.md`
+  workspace files; sessions summarized on exit (and idle reflection under
+  `serve` when `[memory] reflect_after` is set).
 - **Skills** — agentskills.io-compatible `SKILL.md` dirs, invoked with
   `/skill`; `distill_skill` writes new ones from what the agent works out.
 - **Gateway** — `waffle serve` with a Telegram adapter. Single-owner:
-  unknown senders get a pairing code redeemable only via `waffle pair
-  approve` on the host.
+  unknown senders in **private** chats get a pairing code redeemable only
+  via `waffle pair approve` on the host. **Group chats** are quieter and
+  more restricted (see [Group chat posture](#group-chat-posture)).
 - **Run status** — `waffle status` reads the gateway's local-only status
   endpoint and prints active/recent runs plus token and runtime totals. The
   endpoint follows `[gateway] status_listen`, which defaults to
@@ -47,6 +53,8 @@ What's here, by capability:
   ```
 
   `waffle doctor` fails fast if the path is missing or not absolute.
+  Queue bind-mount stress: `go test -tags=sandbox_stress ./internal/sandbox -run Stress`
+  (see docs/plan.md). Zero-network agent checks: `waffle eval`.
 
   Each sandbox and workspace container is limited by default to `2g` memory,
   two CPUs, and 512 processes, with `no-new-privileges`. Override these with
@@ -118,9 +126,10 @@ with the constrained runner and currently fails closed.
 - **Trust tiering** — agent groups carry their own sandbox mode and tool
   policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
   The owner's interactive sessions run on the `main` tier; unattended
-  scheduled jobs run on the `cron` tier and issue intake on the `issue`
-  tier — both **deny host `bash` and memory writes by default**. Override
-  only with an explicit `[agent.group.cron]` / `[agent.group.issue]` tool
+  scheduled jobs run on the `cron` tier, issue intake on the `issue` tier,
+  and multi-party channel chats on the `group` tier — all three **deny host
+  `bash` and memory writes by default**. Override only with an explicit
+  `[agent.group.cron]` / `[agent.group.issue]` / `[agent.group.group]` tool
   policy. See [docs/plan.md](docs/plan.md) for the extension-surface map
   (MCP for tools, fork for code; no embedded plugin runtime).
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
@@ -192,3 +201,26 @@ requests_per_hour = 20
 ```
 
 `waffle usage` reports totals. `waffle pause` stops new agent calls (including cron and broker traffic); `waffle resume` re-enables them.
+
+### Group chat posture
+
+Telegram groups, supergroups, and channels are multi-party and untrusted
+relative to a 1:1 DM with the owner:
+
+1. **Mention-gated** — the bot only processes a group message when it is
+   `@mentioned` (or a `/command@bot` form) or when the message is a reply
+   to the bot. The bot username comes from Telegram `getMe` (cached), not
+   from config. Mentions are stripped from the text before the agent runs.
+2. **Silent strangers** — unknown senders in groups are ignored. No pairing
+   codes, no replies. Pairing remains a private-chat flow only.
+3. **Restricted tools** — conversations that originate in a group bind to
+   the `group` agent tier (same default denies as `cron` / `issue`: no host
+   `bash`, `remember`, `memory_update`, or `distill_skill`). Override with
+   an explicit `[agent.group.group]` tool policy if you intentionally want
+   more power in groups.
+
+Private chats keep the existing single-owner pairing and `main` tier.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -2,7 +2,12 @@
 go = "1.25.12"
 
 [tasks.build]
-run = "go build ./..."
+description = "Build bin/waffle with a git-stamped version"
+run = 'go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o bin/waffle ./cmd/waffle'
+
+[tasks.release]
+description = "Release build (stamped version binary)"
+run = 'go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o bin/waffle ./cmd/waffle'
 
 [tasks.vet]
 run = "go vet ./..."

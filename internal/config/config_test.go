@@ -75,6 +75,25 @@ func TestLoadOverridesDefaults(t *testing.T) {
 	}
 }
 
+func TestMemoryInjectBudget(t *testing.T) {
+	if got := Default().Memory.InjectBudget; got != 8192 {
+		t.Fatalf("default inject_budget = %d, want 8192", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[memory]\ninject_budget = 4096\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Memory.InjectBudget != 4096 {
+		t.Fatalf("inject_budget = %d, want 4096", cfg.Memory.InjectBudget)
+	}
+	writeFile(t, path, "[memory]\ninject_budget = -1\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("negative inject_budget accepted")
+	}
+}
+
 func TestDefaultStatusListenerIsLoopback(t *testing.T) {
 	if got := Default().Gateway.StatusListen; got != "127.0.0.1:8422" {
 		t.Errorf("Gateway.StatusListen = %q, want 127.0.0.1:8422", got)
@@ -155,8 +174,13 @@ func TestAgentPolicyDefaults(t *testing.T) {
 	}
 	// Issue intake shares the restricted unattended defaults (#51).
 	issue := cfg.AgentPolicy(GroupIssue)
-	if !contains(issue.Deny, "bash") || !contains(issue.Deny, "remember") || !contains(issue.Deny, "distill_skill") {
-		t.Errorf("issue deny = %v, want bash/remember/distill_skill", issue.Deny)
+	if !contains(issue.Deny, "bash") || !contains(issue.Deny, "remember") || !contains(issue.Deny, "memory_update") || !contains(issue.Deny, "distill_skill") || !contains(issue.Deny, "workspace_update") {
+		t.Errorf("issue deny = %v, want bash/remember/memory_update/distill_skill/workspace_update", issue.Deny)
+	}
+	// Multi-party channel chats share the same restricted defaults (#34).
+	group := cfg.AgentPolicy(GroupGroup)
+	if !contains(group.Deny, "bash") || !contains(group.Deny, "remember") || !contains(group.Deny, "memory_update") || !contains(group.Deny, "distill_skill") || !contains(group.Deny, "workspace_update") {
+		t.Errorf("group deny = %v, want bash/remember/memory_update/distill_skill/workspace_update", group.Deny)
 	}
 
 	// An unknown group falls back to the global sandbox policy (no bash deny).

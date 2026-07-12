@@ -2,6 +2,11 @@
 // API's long-polling getUpdates. Plain stdlib HTTP — the API is two JSON
 // endpoints, not worth a dependency — and the base URL is configurable so
 // tests (and proxies) can stand in for api.telegram.org.
+//
+// Group-chat posture (#34): multi-party chats (group/supergroup/channel) are
+// mention-gated. Only messages that @mention the bot or reply to it are
+// delivered inbound; the mention is stripped from the text. The bot's own
+// username is resolved once via getMe and cached — never hardcoded.
 package telegram
 
 import (
@@ -14,8 +19,12 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/channel"
@@ -33,6 +42,11 @@ type Adapter struct {
 	baseURL string
 	client  *http.Client
 	onPoll  func()
+
+	// Bot identity from getMe, cached after the first successful call.
+	botMu   sync.Mutex
+	botID   int64
+	botUser string // username without leading @
 }
 
 // New builds an adapter. baseURL may be empty for the real API.
@@ -55,19 +69,46 @@ func (a *Adapter) Name() string { return "telegram" }
 // SetPollObserver installs a callback invoked after each successful poll.
 func (a *Adapter) SetPollObserver(fn func()) { a.onPoll = fn }
 
+// BotUsername returns the cached bot username (without @), or empty if
+// getMe has not succeeded yet. Intended for tests.
+func (a *Adapter) BotUsername() string {
+	a.botMu.Lock()
+	defer a.botMu.Unlock()
+	return a.botUser
+}
+
+type messageEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+	User   *struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		IsBot    bool   `json:"is_bot"`
+	} `json:"user"`
+}
+
+type tgUser struct {
+	ID        int64  `json:"id"`
+	FirstName string `json:"first_name"`
+	Username  string `json:"username"`
+	IsBot     bool   `json:"is_bot"`
+}
+
+type tgMessage struct {
+	Text string `json:"text"`
+	Chat struct {
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
+	} `json:"chat"`
+	From           tgUser          `json:"from"`
+	ReplyToMessage *tgMessage      `json:"reply_to_message"`
+	Entities       []messageEntity `json:"entities"`
+}
+
 type update struct {
-	UpdateID int64 `json:"update_id"`
-	Message  *struct {
-		Text string `json:"text"`
-		Chat struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-		From struct {
-			ID        int64  `json:"id"`
-			FirstName string `json:"first_name"`
-			Username  string `json:"username"`
-		} `json:"from"`
-	} `json:"message"`
+	UpdateID int64      `json:"update_id"`
+	Message  *tgMessage `json:"message"`
 }
 
 type apiResponse struct {
@@ -78,6 +119,12 @@ type apiResponse struct {
 
 // Run long-polls getUpdates until ctx is done.
 func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error {
+	// Resolve bot identity up front so group mention gating works on the
+	// first update. Transient failures are retried on demand later.
+	if err := a.ensureBot(ctx); err != nil && ctx.Err() == nil {
+		slog.Default().Warn("telegram getMe failed; will retry", "err", err)
+	}
+
 	var offset int64
 	consecutive := 0
 	for {
@@ -108,19 +155,9 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
-			if u.Message == nil || u.Message.Text == "" {
+			msg, ok := a.toInbound(ctx, u.Message)
+			if !ok {
 				continue
-			}
-			name := u.Message.From.FirstName
-			if name == "" {
-				name = u.Message.From.Username
-			}
-			msg := channel.Message{
-				Channel:    a.Name(),
-				ChatID:     strconv.FormatInt(u.Message.Chat.ID, 10),
-				SenderID:   strconv.FormatInt(u.Message.From.ID, 10),
-				SenderName: name,
-				Text:       u.Message.Text,
 			}
 			select {
 			case inbound <- msg:
@@ -129,6 +166,148 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			}
 		}
 	}
+}
+
+// toInbound converts a Telegram message into a channel.Message. Returns
+// ok=false when the update should be dropped (empty text, or group chat
+// without an @mention / reply-to-bot).
+func (a *Adapter) toInbound(ctx context.Context, m *tgMessage) (channel.Message, bool) {
+	if m == nil || m.Text == "" {
+		return channel.Message{}, false
+	}
+	chatType := m.Chat.Type
+	isGroup := isGroupChat(chatType)
+	text := m.Text
+
+	if isGroup {
+		if err := a.ensureBot(ctx); err != nil {
+			slog.Default().Error("telegram getMe for group gate", "err", err)
+			return channel.Message{}, false
+		}
+		botID, botUser := a.botIdentity()
+		if !addressedToBot(m, botID, botUser) {
+			return channel.Message{}, false
+		}
+		// Strip @bot so the agent sees the owner's intent, not the address.
+		// A bare @mention may leave empty text; still deliver so a nudge runs.
+		text = stripBotMention(text, botUser)
+	}
+
+	name := m.From.FirstName
+	if name == "" {
+		name = m.From.Username
+	}
+	return channel.Message{
+		Channel:    a.Name(),
+		ChatID:     strconv.FormatInt(m.Chat.ID, 10),
+		SenderID:   strconv.FormatInt(m.From.ID, 10),
+		SenderName: name,
+		Text:       text,
+		IsGroup:    isGroup,
+		ChatType:   chatType,
+	}, true
+}
+
+func isGroupChat(chatType string) bool {
+	switch chatType {
+	case "group", "supergroup", "channel":
+		return true
+	default:
+		return false
+	}
+}
+
+// addressedToBot reports whether the message @mentions the bot or is a
+// reply to one of the bot's messages.
+func addressedToBot(m *tgMessage, botID int64, botUser string) bool {
+	if m.ReplyToMessage != nil && m.ReplyToMessage.From.ID == botID {
+		return true
+	}
+	if botUser == "" && botID == 0 {
+		return false
+	}
+	needle := "@" + strings.ToLower(botUser)
+	for _, e := range m.Entities {
+		switch e.Type {
+		case "mention":
+			if strings.EqualFold(entityText(m.Text, e), "@"+botUser) {
+				return true
+			}
+		case "text_mention":
+			if e.User != nil && e.User.ID == botID {
+				return true
+			}
+		case "bot_command":
+			// /cmd@botusername is how Telegram addresses a bot in groups.
+			cmd := entityText(m.Text, e)
+			if i := strings.Index(cmd, "@"); i >= 0 && strings.EqualFold(cmd[i+1:], botUser) {
+				return true
+			}
+		}
+	}
+	// Fallback: plain-text @username (entities missing in some proxies).
+	if botUser != "" && strings.Contains(strings.ToLower(m.Text), needle) {
+		return true
+	}
+	return false
+}
+
+// entityText extracts the entity span from text. Telegram entity offsets
+// are in UTF-16 code units.
+func entityText(text string, e messageEntity) string {
+	runes := utf16.Encode([]rune(text))
+	if e.Offset < 0 || e.Length < 0 || e.Offset+e.Length > len(runes) {
+		return ""
+	}
+	return string(utf16.Decode(runes[e.Offset : e.Offset+e.Length]))
+}
+
+// stripBotMention removes @botusername occurrences (case-insensitive) and
+// trims surrounding whitespace.
+func stripBotMention(text, botUser string) string {
+	if botUser == "" {
+		return strings.TrimSpace(text)
+	}
+	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUser) + `\b`)
+	return strings.TrimSpace(re.ReplaceAllString(text, ""))
+}
+
+func (a *Adapter) botIdentity() (id int64, user string) {
+	a.botMu.Lock()
+	defer a.botMu.Unlock()
+	return a.botID, a.botUser
+}
+
+// ensureBot loads the bot's id/username via getMe once and caches them.
+func (a *Adapter) ensureBot(ctx context.Context) error {
+	a.botMu.Lock()
+	if a.botUser != "" {
+		a.botMu.Unlock()
+		return nil
+	}
+	a.botMu.Unlock()
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	raw, err := a.call(callCtx, "getMe", map[string]any{})
+	cancel()
+	if err != nil {
+		return err
+	}
+	var me struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(raw, &me); err != nil {
+		return fmt.Errorf("telegram: parse getMe: %w", err)
+	}
+	if me.Username == "" {
+		return fmt.Errorf("telegram: getMe returned empty username")
+	}
+	a.botMu.Lock()
+	a.botID = me.ID
+	a.botUser = me.Username
+	a.botMu.Unlock()
+	return nil
 }
 
 func (a *Adapter) getUpdates(ctx context.Context, offset int64) ([]update, error) {

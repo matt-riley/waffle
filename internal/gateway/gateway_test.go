@@ -133,7 +133,7 @@ func TestGatewayUsesPersistedAgentGroup(t *testing.T) {
 	}
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
-	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat"); err != nil {
+	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat", ""); err != nil {
 		t.Fatalf("GroupFor: %v", err)
 	}
 	if _, err := st.DB.ExecContext(ctx, `UPDATE channel_groups SET agent_group = 'restricted' WHERE channel = 'fake' AND chat_id = 'restricted-chat'`); err != nil {
@@ -183,7 +183,7 @@ func TestGatewayRecordsSessionRunAndLogsSessionID(t *testing.T) {
 	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
-	group, err := entities.GroupFor(ctx, "fake", "chat-1")
+	group, err := entities.GroupFor(ctx, "fake", "chat-1", "")
 	if err != nil {
 		t.Fatalf("GroupFor: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestGatewayRejectsUnavailablePersistedAgentGroup(t *testing.T) {
 	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
-	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat"); err != nil {
+	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat", ""); err != nil {
 		t.Fatalf("GroupFor: %v", err)
 	}
 	if _, err := st.DB.ExecContext(ctx, `UPDATE channel_groups SET agent_group = 'restricted' WHERE channel = 'fake' AND chat_id = 'restricted-chat'`); err != nil {
@@ -261,6 +261,84 @@ func TestUnknownSenderGetsPairingCodeOnly(t *testing.T) {
 	}
 }
 
+// TestGroupUnknownSenderSilentIgnore is #34: group chats never mint pairing
+// codes or reply to strangers.
+func TestGroupUnknownSenderSilentIgnore(t *testing.T) {
+	_, adapter, entities, _, cancel := newTestGateway(t)
+	defer cancel()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "-100", SenderID: "stranger", SenderName: "S",
+		Text: "@waffle hi", IsGroup: true, ChatType: "supergroup",
+	}
+	// No reply should arrive.
+	select {
+	case <-adapter.wake:
+		adapter.mu.Lock()
+		replies := append([]string(nil), adapter.sent["-100"]...)
+		adapter.mu.Unlock()
+		t.Fatalf("unexpected group reply to stranger: %v", replies)
+	case <-time.After(300 * time.Millisecond):
+	}
+	pending, err := entities.Pairings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("group contact created pairing: %v", pending)
+	}
+}
+
+// TestGroupOwnerUsesRestrictedAgentTier verifies new group chats bind to the
+// "group" agent tier rather than main.
+func TestGroupOwnerUsesRestrictedAgentTier(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	// Pair owner identity without going through the gateway.
+	if _, err := st.DB.ExecContext(ctx,
+		`INSERT INTO identities (channel, external_id, name, created_at) VALUES ('fake', 'owner', 'Matt', datetime('now'))`); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := newFakeAdapter()
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: namedProvider("main"), Tools: tool.NewRegistry(), Model: "m"},
+		Agents:   map[string]*agent.Agent{"group": {Provider: namedProvider("group"), Tools: tool.NewRegistry(), Model: "m"}},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "-99", SenderID: "owner", SenderName: "Matt",
+		Text: "status?", IsGroup: true, ChatType: "group",
+	}
+	replies := adapter.waitForReply(t, "-99", 1)
+	if replies[0] != "group: status?" {
+		t.Fatalf("reply = %q, want group-tier provider", replies[0])
+	}
+	g, err := entities.GroupFor(ctx, "fake", "-99", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.AgentGroup != "group" {
+		t.Errorf("agent_group = %q, want group", g.AgentGroup)
+	}
+}
+
 func TestOwnerConversationPersistsAndReplies(t *testing.T) {
 	_, adapter, entities, sessions, cancel := newTestGateway(t)
 	defer cancel()
@@ -285,7 +363,7 @@ func TestOwnerConversationPersistsAndReplies(t *testing.T) {
 	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner-1", SenderName: "Matt", Text: "second message"}
 	adapter.waitForReply(t, "c1", 3)
 
-	group, err := entities.GroupFor(ctx, "fake", "c1")
+	group, err := entities.GroupFor(ctx, "fake", "c1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,8 +397,8 @@ func TestDistinctChatsGetDistinctSessions(t *testing.T) {
 	adapter.waitForReply(t, "c1", 2)
 	adapter.waitForReply(t, "c2", 1)
 
-	g1, _ := entities.GroupFor(ctx, "fake", "c1")
-	g2, _ := entities.GroupFor(ctx, "fake", "c2")
+	g1, _ := entities.GroupFor(ctx, "fake", "c1", "")
+	g2, _ := entities.GroupFor(ctx, "fake", "c2", "")
 	if g1.SessionID == g2.SessionID {
 		t.Error("chats share a session")
 	}
@@ -412,7 +490,7 @@ func TestGracefulShutdownPersistsTurn(t *testing.T) {
 	}
 
 	// The in-flight turn must have been persisted.
-	group, err := entities.GroupFor(bgCtx, "fake", "c1")
+	group, err := entities.GroupFor(bgCtx, "fake", "c1", "")
 	if err != nil {
 		t.Fatalf("GroupFor: %v", err)
 	}

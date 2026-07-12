@@ -13,6 +13,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/channel"
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
@@ -168,11 +169,15 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 		return
 	}
 
-	// Who is this? Not the owner → pairing code, nothing more. The code is
-	// only redeemable via the host CLI, so strangers can't self-approve.
+	// Who is this? Not the owner → pairing code in private chats only.
+	// Group chats: silent ignore — never mint or spam pairing codes (#34).
 	if _, err := g.Entities.Identify(ctx, msg.Channel, msg.SenderID); err != nil {
 		if !errors.Is(err, entity.ErrUnknownSender) {
 			log.Error("identify", "err", err)
+			return
+		}
+		if msg.IsGroup {
+			log.Info("ignored unknown sender in group", "sender", msg.SenderID)
 			return
 		}
 		pairing, err := g.Entities.Pair(ctx, msg.Channel, msg.SenderID, msg.SenderName, msg.ChatID)
@@ -195,7 +200,7 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 	if err != nil {
 		log.Error("agent run", "err", err)
 		detail := fmt.Sprintf("%v", err)
-		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID); groupErr == nil {
+		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID, agentGroupFor(msg)); groupErr == nil {
 			if selected, agentErr := g.agentFor(group.AgentGroup); agentErr == nil && selected.Redact != nil {
 				detail = selected.Redact(detail)
 			}
@@ -214,6 +219,16 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 	}
 }
 
+// agentGroupFor chooses the agent tier for a new channel group. Group chats
+// use the restricted "group" tier; private chats use "main". Existing
+// channel_groups rows keep their stored binding.
+func agentGroupFor(msg channel.Message) string {
+	if msg.IsGroup {
+		return config.GroupGroup
+	}
+	return config.GroupMain
+}
+
 // converse routes one owner message through the conversation's session.
 func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, error) {
 	if g.Usage != nil {
@@ -225,7 +240,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 			return "", errors.New("waffle is paused")
 		}
 	}
-	group, err := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID)
+	group, err := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID, agentGroupFor(msg))
 	if err != nil {
 		return "", err
 	}
