@@ -90,6 +90,9 @@ type Memory struct {
 	// ReflectEvery is the idle-reflection poll interval under serve (#59).
 	// Empty defaults to "5m" when ReflectAfter is set.
 	ReflectEvery string `toml:"reflect_every"`
+	// ReflectEveryTurns, when > 0, also reflects after this many turns
+	// on active conversations that never go idle (#59).
+	ReflectEveryTurns int `toml:"reflect_every_turns"`
 }
 
 // Selfdev configures the approval and verification policy for upgrades.
@@ -418,6 +421,9 @@ type Provider struct {
 	// OpenAI, OpenRouter, Ollama, a running workweave/router, ...).
 	Name  string `toml:"name"`
 	Model string `toml:"model"`
+	// UtilityModel, when set, is used for summarization and reflection (#61)
+	// instead of Model. Empty keeps those calls on Model.
+	UtilityModel string `toml:"utility_model"`
 	// APIKey is a secret:// reference or empty to fall back to the
 	// provider's conventional environment variable. Never a raw key.
 	APIKey    string `toml:"api_key"`

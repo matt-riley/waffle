@@ -32,6 +32,7 @@ import (
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
+	"github.com/matt-riley/waffle/internal/workset"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
@@ -174,6 +175,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		go reflector.Loop(lifecycleCtx)
 		log.Info("idle reflection armed", "after", after, "every", every)
 	}
+	wsStore := &workset.Store{DB: st.DB}
 	go func() {
 		tick := time.NewTicker(time.Minute)
 		defer tick.Stop()
@@ -188,19 +190,26 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 				if _, err := retention.Sweep(lifecycleCtx); err != nil {
 					log.Error("retention sweep failed", "err", err)
 				}
+				// Working-set maintenance: drop unpinned model assumptions older than 7d (#70).
+				if n, err := wsStore.DropStaleAssumptionsAll(lifecycleCtx, 7*24*time.Hour); err != nil {
+					log.Error("working set maintenance failed", "err", err)
+				} else if n > 0 {
+					log.Info("working set maintenance", "dropped", n)
+				}
 			}
 		}
 	}()
 
 	gw := &gateway.Gateway{
-		Agent:         agents[config.GroupMain],
-		Agents:        agents,
-		Entities:      entities,
-		Sessions:      sessions,
-		Adapters:      adapters,
-		Log:           log,
-		Observability: obs,
-		Usage:         usagepkg.New(st),
+		Agent:             agents[config.GroupMain],
+		Agents:            agents,
+		Entities:          entities,
+		Sessions:          sessions,
+		Adapters:          adapters,
+		Log:               log,
+		Observability:     obs,
+		Usage:             usagepkg.New(st),
+		ReflectEveryTurns: cfg.Memory.ReflectEveryTurns,
 	}
 
 	// Scheduler: fire cron jobs while the gateway runs, delivering results

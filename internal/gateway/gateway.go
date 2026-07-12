@@ -39,6 +39,8 @@ type Gateway struct {
 	// MaxConcurrent bounds in-flight message handlers so a flooding
 	// channel can't spawn unbounded goroutines. Zero means the default.
 	MaxConcurrent int
+	// ReflectEveryTurns, when > 0, writes a session summary every N turns (#59).
+	ReflectEveryTurns int
 
 	mu     sync.Mutex
 	groups map[string]*groupLock // active per-conversation serialization
@@ -302,6 +304,14 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		if err := g.Sessions.AppendTurn(ctx, group.SessionID, newHistory[persisted]); err != nil {
 			g.Log.Error("persist turn", "err", err)
 			break
+		}
+	}
+	// Turn-count reflection for conversations that never go idle (#59).
+	if g.ReflectEveryTurns > 0 && runErr == nil {
+		if n, err := g.Sessions.TurnCount(ctx, group.SessionID); err == nil && n > 0 && n%g.ReflectEveryTurns == 0 {
+			if summary, err := session.Reflect(ctx, selected.Provider, newHistory, session.ReflectOptions{Model: selected.UtilityModel}); err == nil && summary != "" {
+				_ = g.Sessions.SetSummary(ctx, group.SessionID, summary)
+			}
 		}
 	}
 	if runErr != nil {

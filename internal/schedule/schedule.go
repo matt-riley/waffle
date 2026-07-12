@@ -326,6 +326,17 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		return "", runErr
 	}
 
+	// Reflect cron sessions when the job completes (#59).
+	if r.Sessions != nil && r.Agent != nil && r.Agent.Provider != nil {
+		model := r.Agent.Model
+		if r.Agent.UtilityModel != "" {
+			model = r.Agent.UtilityModel
+		}
+		if summary, err := session.Reflect(ctx, r.Agent.Provider, out, session.ReflectOptions{Model: model}); err == nil && summary != "" {
+			_ = r.Sessions.SetSummary(ctx, sess.ID, summary)
+		}
+	}
+
 	var reply string
 	for i := len(out) - 1; i >= 0; i-- {
 		if out[i].Role == llm.RoleAssistant {

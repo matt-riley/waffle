@@ -364,14 +364,43 @@ func vacuum(ctx context.Context, db *sql.DB) error {
 // SearchSummaries finds sessions whose summary or title matches all query
 // terms (simple LIKE AND; no FTS table for summaries).
 func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (hits []Hit, err error) {
-	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	terms := strings.Fields(strings.TrimSpace(query))
 	if len(terms) == 0 {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 4
 	}
+	// Prefer FTS index when present (#60); fall back to LIKE scan.
+	ftsTerms := make([]string, len(terms))
+	for i, t := range terms {
+		ftsTerms[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"`
+	}
 	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.title, s.summary, s.updated_at,
+		       snippet(sessions_fts, 0, '[', ']', ' … ', 24)
+		FROM sessions_fts
+		JOIN sessions s ON s.rowid = sessions_fts.rowid
+		WHERE sessions_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?`, strings.Join(ftsTerms, " "), limit)
+	if err == nil {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var h Hit
+			var updated string
+			if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &updated, &h.Snippet); err != nil {
+				return nil, err
+			}
+			if h.Snippet == "" {
+				h.Snippet = h.Summary
+			}
+			hits = append(hits, h)
+		}
+		return hits, rows.Err()
+	}
+	// Fallback when FTS table is missing (pre-migration).
+	rows, err = s.db.QueryContext(ctx, `
 		SELECT id, title, summary, updated_at FROM sessions
 		WHERE summary IS NOT NULL AND summary != ''
 		ORDER BY updated_at DESC LIMIT 200`)
@@ -388,7 +417,7 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 		hay := strings.ToLower(h.Title + " " + h.Summary)
 		ok := true
 		for _, term := range terms {
-			if !strings.Contains(hay, term) {
+			if !strings.Contains(hay, strings.ToLower(term)) {
 				ok = false
 				break
 			}
@@ -454,4 +483,11 @@ func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
+}
+
+// TurnCount returns how many turns a session has.
+func (s *Store) TurnCount(ctx context.Context, sessionID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, sessionID).Scan(&n)
+	return n, err
 }
