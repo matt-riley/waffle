@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -14,7 +15,68 @@ import (
 
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/instance"
 )
+
+func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	original := makeServeOwnerCoordinator
+	makeServeOwnerCoordinator = func() (instance.Coordinator, error) {
+		c := instance.Default(filepath.Join(home, "serve.lock"))
+		c.HeartbeatInterval = time.Millisecond
+		return c, nil
+	}
+	defer func() { makeServeOwnerCoordinator = original }()
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+	configBody := "[gateway]\nstatus_listen = \"" + addr + "\"\n[provider]\napi_key = \"test-key\"\n[agent]\nsubagents = false\nlearn = false\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+	lockPath := filepath.Join(home, "serve.lock")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(lockPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("serve owner record was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	writeServeOwnerRecord(t, lockPath, instance.Record{PID: 999, Owner: "stolen", Heartbeat: time.Now()})
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "serve ownership lost") {
+			t.Fatalf("serve ownership loss = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after ownership loss")
+	}
+}
+
+func writeServeOwnerRecord(t *testing.T, path string, record instance.Record) {
+	t.Helper()
+	b, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestServeRefusesLiveOwnerBeforeDatabaseMutation(t *testing.T) {
 	home := t.TempDir()

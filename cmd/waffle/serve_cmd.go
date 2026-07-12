@@ -47,6 +47,8 @@ type adapterFactory func(config.Config) ([]channel.Adapter, error)
 func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) (err error) {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancelOwnership := context.WithCancel(ctx)
+	defer cancelOwnership()
 	owner, err := acquireServeOwner(ctx)
 	if err != nil {
 		return err
@@ -54,6 +56,22 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	defer func() {
 		if releaseErr := owner.Release(); err == nil {
 			err = releaseErr
+		}
+	}()
+	ownerLoss := make(chan error, 1)
+	go func() {
+		select {
+		case loss := <-owner.Errors():
+			ownerLoss <- loss
+			cancelOwnership()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		select {
+		case loss := <-ownerLoss:
+			err = fmt.Errorf("serve ownership lost: %w", loss)
+		default:
 		}
 	}()
 

@@ -193,7 +193,8 @@ work before `waffle ws close`; the repository is the source of truth and close
 refuses unpushed work.
 
 `waffle serve` is the single owner of background work and in-memory broker
-tokens. It records its PID and a heartbeat in `~/.waffle/serve.lock`; a second
+tokens. It holds an OS advisory lock for its lifetime and records its PID and a
+heartbeat in `~/.waffle/serve.lock`; a second
 `serve` refuses to start, and `waffle ws open` refuses before changing the
 database or starting Docker while that owner is live. Use the gateway `/repo`
 command instead. A stale lock is reclaimed automatically once its heartbeat is

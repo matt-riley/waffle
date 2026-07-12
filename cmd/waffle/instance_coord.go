@@ -9,7 +9,7 @@ import (
 	"github.com/matt-riley/waffle/internal/instance"
 )
 
-func serveOwnerCoordinator() (instance.Coordinator, error) {
+var makeServeOwnerCoordinator = func() (instance.Coordinator, error) {
 	home, err := config.Home()
 	if err != nil {
 		return instance.Coordinator{}, err
@@ -18,7 +18,7 @@ func serveOwnerCoordinator() (instance.Coordinator, error) {
 }
 
 func acquireServeOwner(ctx context.Context) (*instance.Lease, error) {
-	coordinator, err := serveOwnerCoordinator()
+	coordinator, err := makeServeOwnerCoordinator()
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func acquireServeOwner(ctx context.Context) (*instance.Lease, error) {
 }
 
 func refuseWorkspaceOpenWhileServing() error {
-	coordinator, err := serveOwnerCoordinator()
+	coordinator, err := makeServeOwnerCoordinator()
 	if err != nil {
 		return err
 	}
@@ -39,9 +39,15 @@ func refuseWorkspaceOpenWhileServing() error {
 		return fmt.Errorf("check waffle serve owner: %w", err)
 	}
 	if record != nil {
+		listen := "disabled"
+		if path, pathErr := config.Path(); pathErr == nil {
+			if cfg, loadErr := config.Load(path); loadErr == nil && cfg.Broker.Listen != "" {
+				listen = cfg.Broker.Listen
+			}
+		}
 		return fmt.Errorf(
-			"waffle serve is running (pid %d); `waffle ws open` cannot share its in-memory broker tokens; open the repo through the gateway (/repo) instead",
-			record.PID)
+			"waffle serve is running (pid %d) and owns broker listen address %s; `waffle ws open` cannot share its in-memory broker tokens; open the repo through the gateway (/repo) instead",
+			record.PID, listen)
 	}
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -41,8 +40,10 @@ func Default(path string) Coordinator {
 type Lease struct {
 	coordinator Coordinator
 	record      Record
+	lock        *os.File
 	stop        chan struct{}
 	done        chan struct{}
+	errors      chan error
 }
 
 func (c Coordinator) Acquire(ctx context.Context) (*Lease, error) {
@@ -50,59 +51,57 @@ func (c Coordinator) Acquire(ctx context.Context) (*Lease, error) {
 	if err := os.MkdirAll(filepath.Dir(c.Path), 0o700); err != nil {
 		return nil, fmt.Errorf("create instance-lock directory: %w", err)
 	}
+	lock, err := os.OpenFile(c.Path+".guard", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open serve advisory lock: %w", err)
+	}
+	if err := lockFile(lock); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, ErrHeld) {
+			held, readErr := Read(c.Path)
+			if readErr == nil {
+				age := c.Now().Sub(held.Heartbeat)
+				return nil, fmt.Errorf("%w by pid %d (last heartbeat %s ago)", ErrHeld, held.PID, age.Round(time.Second))
+			}
+			return nil, ErrHeld
+		}
+		return nil, fmt.Errorf("acquire serve advisory lock: %w", err)
+	}
 	owner, err := ownerToken()
 	if err != nil {
+		_ = unlockFile(lock)
+		_ = lock.Close()
 		return nil, err
 	}
 	record := Record{PID: c.PID, Owner: owner, Heartbeat: c.Now().UTC()}
-	for attempts := 0; attempts < 4; attempts++ {
-		err := createRecord(c.Path, record)
-		if err == nil {
-			lease := &Lease{coordinator: c, record: record, stop: make(chan struct{}), done: make(chan struct{})}
-			go lease.run(ctx)
-			return lease, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("create serve owner lock: %w", err)
-		}
-		held, readErr := Read(c.Path)
-		if readErr != nil {
-			return nil, fmt.Errorf("read existing serve owner lock: %w", readErr)
-		}
-		age := c.Now().Sub(held.Heartbeat)
-		if age <= c.StaleAfter || processAlive(held.PID) {
-			return nil, fmt.Errorf("%w by pid %d (last heartbeat %s ago)", ErrHeld, held.PID, age.Round(time.Second))
-		}
-		// Re-read before unlinking so a heartbeat or replacement observed after
-		// the first read is never mistaken for the stale owner.
-		current, readErr := Read(c.Path)
-		if readErr != nil {
-			continue
-		}
-		if current.Owner != held.Owner || !current.Heartbeat.Equal(held.Heartbeat) {
-			continue
-		}
-		if err := os.Remove(c.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove stale serve owner lock: %w", err)
-		}
+	if err := replaceRecord(c.Path, record); err != nil {
+		_ = unlockFile(lock)
+		_ = lock.Close()
+		return nil, fmt.Errorf("write serve owner record: %w", err)
 	}
-	return nil, errors.New("serve owner lock changed repeatedly; retry")
+	lease := &Lease{coordinator: c, record: record, lock: lock, stop: make(chan struct{}), done: make(chan struct{}), errors: make(chan error, 1)}
+	go lease.run(ctx)
+	return lease, nil
 }
 
 func (c Coordinator) Check() (*Record, error) {
 	c = c.defaults()
-	record, err := Read(c.Path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	lock, err := os.OpenFile(c.Path+".guard", os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	age := c.Now().Sub(record.Heartbeat)
-	if age <= c.StaleAfter || processAlive(record.PID) {
-		return &record, nil
+	defer lock.Close()
+	if err := lockFile(lock); err == nil {
+		_ = unlockFile(lock)
+		return nil, nil
+	} else if !errors.Is(err, ErrHeld) {
+		return nil, err
 	}
-	return nil, nil
+	record, err := Read(c.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
 }
 
 func (c Coordinator) defaults() Coordinator {
@@ -132,10 +131,15 @@ func (l *Lease) run(ctx context.Context) {
 		case <-l.stop:
 			return
 		case <-ticker.C:
-			_ = l.heartbeat()
+			if err := l.heartbeat(); err != nil {
+				l.errors <- err
+				return
+			}
 		}
 	}
 }
+
+func (l *Lease) Errors() <-chan error { return l.errors }
 
 func (l *Lease) heartbeat() error {
 	current, err := Read(l.coordinator.Path)
@@ -158,15 +162,29 @@ func (l *Lease) Release() error {
 	<-l.done
 	current, err := Read(l.coordinator.Path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		unlockErr := unlockFile(l.lock)
+		closeErr := l.lock.Close()
+		return errors.Join(unlockErr, closeErr)
 	}
 	if err != nil {
-		return err
+		unlockErr := unlockFile(l.lock)
+		closeErr := l.lock.Close()
+		return errors.Join(err, unlockErr, closeErr)
 	}
 	if current.Owner != l.record.Owner {
-		return nil
+		_ = unlockFile(l.lock)
+		return l.lock.Close()
 	}
-	return os.Remove(l.coordinator.Path)
+	removeErr := os.Remove(l.coordinator.Path)
+	unlockErr := unlockFile(l.lock)
+	closeErr := l.lock.Close()
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	if unlockErr != nil {
+		return unlockErr
+	}
+	return closeErr
 }
 
 func Read(path string) (Record, error) {
@@ -220,9 +238,4 @@ func ownerToken() (string, error) {
 		return "", fmt.Errorf("generate instance owner token: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
-}
-
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

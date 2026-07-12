@@ -16,6 +16,9 @@ import (
 func TestWorkspaceOpenRefusesLiveServeBeforeMutation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WAFFLE_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[broker]\nlisten = \"127.0.0.1:9842\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	lease, err := instance.Default(filepath.Join(home, "serve.lock")).Acquire(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +30,7 @@ func TestWorkspaceOpenRefusesLiveServeBeforeMutation(t *testing.T) {
 	if err == nil {
 		t.Fatal("ws open succeeded while serve owner lock was held")
 	}
-	for _, want := range []string{"waffle serve", "gateway", "/repo"} {
+	for _, want := range []string{"waffle serve", "127.0.0.1:9842", "gateway", "/repo"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,7 +30,13 @@ func TestAcquireRefusesHeldLiveOwner(t *testing.T) {
 func TestAcquireDoesNotStealStaleHeartbeatFromLivePID(t *testing.T) {
 	now := time.Now()
 	path := filepath.Join(t.TempDir(), "serve.lock")
-	writeRecord(t, path, Record{PID: os.Getpid(), Owner: "live", Heartbeat: now.Add(-time.Hour)})
+	ownerNow := now.Add(-time.Hour)
+	owner := testCoordinator(path, os.Getpid(), func() time.Time { return ownerNow })
+	lease, err := owner.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
 	c := testCoordinator(path, os.Getpid(), func() time.Time { return now })
 	if _, err := c.Acquire(context.Background()); !errors.Is(err, ErrHeld) {
 		t.Fatalf("Acquire stale live PID = %v, want ErrHeld", err)
@@ -51,6 +59,56 @@ func TestAcquireRecoversStaleDeadOwner(t *testing.T) {
 	}
 	if got.PID != os.Getpid() || got.Owner == "dead" || !got.Heartbeat.Equal(now) {
 		t.Fatalf("recovered record = %#v", got)
+	}
+}
+
+func TestConcurrentStaleDeadTakeoverHasExactlyOneWinner(t *testing.T) {
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "serve.lock")
+	writeRecord(t, path, Record{PID: 99999999, Owner: "dead", Heartbeat: now.Add(-time.Hour)})
+	start := make(chan struct{})
+	var winners atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			lease, err := testCoordinator(path, os.Getpid(), func() time.Time { return now }).Acquire(context.Background())
+			if err == nil {
+				winners.Add(1)
+				t.Cleanup(func() { _ = lease.Release() })
+				return
+			}
+			if !errors.Is(err, ErrHeld) {
+				t.Errorf("takeover error = %v, want ErrHeld", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := winners.Load(); got != 1 {
+		t.Fatalf("stale takeover winners = %d, want exactly 1", got)
+	}
+}
+
+func TestHeartbeatOwnershipLossIsObservable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serve.lock")
+	c := testCoordinator(path, os.Getpid(), time.Now)
+	c.HeartbeatInterval = time.Millisecond
+	lease, err := c.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	writeRecord(t, path, Record{PID: 1234, Owner: "replacement", Heartbeat: time.Now()})
+	select {
+	case err := <-lease.Errors():
+		if !errors.Is(err, ErrHeld) {
+			t.Fatalf("ownership loss = %v, want ErrHeld", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ownership loss was not reported")
 	}
 }
 
