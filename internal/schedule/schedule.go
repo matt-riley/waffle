@@ -317,7 +317,7 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		runID, err = id.New("run-")
 		if err != nil {
 			log.Error("new observability run id", "err", err)
-		} else if err := r.Observability.Start(ctx, runID, sess.ID, "cron", "job"); err != nil {
+		} else if err := r.Observability.Start(ctx, runID, sess.ID, "cron", "job", j.Profile); err != nil {
 			log.Error("start observability run", "err", err)
 			runID = ""
 		}

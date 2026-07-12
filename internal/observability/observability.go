@@ -24,10 +24,10 @@ type Service struct {
 }
 
 type activeRun struct {
-	id, sessionID, source, phase string
-	startedAt                    time.Time
-	inputTokens, outputTokens    int
-	lastUsage                    llm.Usage
+	id, sessionID, source, phase, profile string
+	startedAt                             time.Time
+	inputTokens, outputTokens             int
+	lastUsage                             llm.Usage
 }
 
 // Snapshot is the complete local status representation.
@@ -43,6 +43,7 @@ type ActiveRun struct {
 	SessionID    string `json:"session_id"`
 	Source       string `json:"source"`
 	Phase        string `json:"phase"`
+	Profile      string `json:"profile,omitempty"`
 	ElapsedMS    int64  `json:"elapsed_ms"`
 	InputTokens  int    `json:"input_tokens"`
 	OutputTokens int    `json:"output_tokens"`
@@ -54,6 +55,7 @@ type RecentRun struct {
 	SessionID    string `json:"session_id"`
 	Source       string `json:"source"`
 	Phase        string `json:"phase"`
+	Profile      string `json:"profile,omitempty"`
 	Outcome      string `json:"outcome"`
 	RuntimeMS    int64  `json:"runtime_ms"`
 	InputTokens  int    `json:"input_tokens"`
@@ -124,15 +126,16 @@ func (s *Service) HealthSnapshot(ctx context.Context, staleAfter time.Duration) 
 	return Health{Healthy: healthy && dbOK, Adapters: adapters, Scheduler: SchedulerHealth{LastTick: lastTick.UTC().Format(time.RFC3339Nano), Stale: lastTick.IsZero() || now.Sub(lastTick) > staleAfter}, Database: dbOK}, nil
 }
 
-// Start registers a new active run.
-func (s *Service) Start(_ context.Context, id, sessionID, source, phase string) error {
+// Start registers a new active run. profile is the named agent profile (#71);
+// empty means the default (main) posture.
+func (s *Service) Start(_ context.Context, id, sessionID, source, phase, profile string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.active[id]; exists {
 		return fmt.Errorf("run %q is already active", id)
 	}
 	s.active[id] = &activeRun{
-		id: id, sessionID: sessionID, source: source, phase: phase, startedAt: s.now(),
+		id: id, sessionID: sessionID, source: source, phase: phase, profile: profile, startedAt: s.now(),
 	}
 	return nil
 }
@@ -163,10 +166,10 @@ func (s *Service) Finish(ctx context.Context, id, outcome string) error {
 	endedAt := s.now()
 	if _, err := s.store.DB.ExecContext(ctx, `
 		INSERT INTO run_metrics
-			(id, session_id, source, phase, outcome, started_at_ms, ended_at_ms, input_tokens, output_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, session_id, source, phase, outcome, started_at_ms, ended_at_ms, input_tokens, output_tokens, profile)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.id, run.sessionID, run.source, run.phase, outcome,
-		run.startedAt.UnixMilli(), endedAt.UnixMilli(), run.inputTokens, run.outputTokens); err != nil {
+		run.startedAt.UnixMilli(), endedAt.UnixMilli(), run.inputTokens, run.outputTokens, run.profile); err != nil {
 		return fmt.Errorf("persist run %q: %w", id, err)
 	}
 	delete(s.active, id)
@@ -181,7 +184,7 @@ func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	active := make([]ActiveRun, 0, len(s.active))
 	for _, run := range s.active {
 		active = append(active, ActiveRun{
-			ID: run.id, SessionID: run.sessionID, Source: run.source, Phase: run.phase,
+			ID: run.id, SessionID: run.sessionID, Source: run.source, Phase: run.phase, Profile: run.profile,
 			ElapsedMS:   now.Sub(run.startedAt).Milliseconds(),
 			InputTokens: run.inputTokens, OutputTokens: run.outputTokens,
 		})
@@ -191,7 +194,7 @@ func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 
 	rows, err := s.store.DB.QueryContext(ctx, `
 		SELECT id, session_id, source, phase, outcome,
-			ended_at_ms - started_at_ms, input_tokens, output_tokens
+			ended_at_ms - started_at_ms, input_tokens, output_tokens, profile
 		FROM run_metrics
 		ORDER BY ended_at_ms DESC, id ASC
 		LIMIT 20`)
@@ -207,7 +210,7 @@ func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	for rows.Next() {
 		var run RecentRun
 		if err := rows.Scan(&run.ID, &run.SessionID, &run.Source, &run.Phase, &run.Outcome,
-			&run.RuntimeMS, &run.InputTokens, &run.OutputTokens); err != nil {
+			&run.RuntimeMS, &run.InputTokens, &run.OutputTokens, &run.Profile); err != nil {
 			return Snapshot{}, fmt.Errorf("scan recent run: %w", err)
 		}
 		recent = append(recent, run)

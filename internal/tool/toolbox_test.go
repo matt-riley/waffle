@@ -72,6 +72,37 @@ func TestRestrict(t *testing.T) {
 	}
 }
 
+func TestDenialIncludesProfileName(t *testing.T) {
+	tb := NewRegistry(namedTool{"bash"}, namedTool{"read_file"})
+	r := Restrict(tb, Policy{
+		Deny:    []string{"bash"},
+		Profile: "reviewer",
+	})
+	_, err := r.Run(context.Background(), "bash", nil)
+	if err == nil {
+		t.Fatal("expected denial")
+	}
+	if !strings.Contains(err.Error(), `profile "reviewer"`) {
+		t.Fatalf("denial missing profile name: %v", err)
+	}
+	if !strings.Contains(err.Error(), "bash") {
+		t.Fatalf("denial missing tool name: %v", err)
+	}
+	// Allowed tool still runs.
+	if out, err := r.Run(context.Background(), "read_file", nil); err != nil || out != "ran:read_file" {
+		t.Fatalf("allowed = %q %v", out, err)
+	}
+	// Prefix denial also names the profile.
+	r2 := Restrict(NewRegistry(Bash{}), Policy{
+		DenyPrefixes: []string{"rm -rf"},
+		Profile:      "ops",
+	})
+	_, err = r2.Run(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
+	if err == nil || !strings.Contains(err.Error(), `profile "ops"`) {
+		t.Fatalf("prefix denial missing profile: %v", err)
+	}
+}
+
 func TestDenyPrefixes(t *testing.T) {
 	tb := NewRegistry(Bash{})
 	r := Restrict(tb, Policy{
@@ -104,6 +135,32 @@ func TestCheckActionDeny(t *testing.T) {
 	_, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
 	if err == nil || !strings.Contains(err.Error(), "no-rm") || !strings.Contains(err.Error(), "safer") {
 		t.Fatalf("want CheckAction denial with guidance, got %v", err)
+	}
+}
+
+func TestObserveSuccessAfterRun(t *testing.T) {
+	tb := NewRegistry(namedTool{"write_file"}, namedTool{"bash"})
+	var seen []string
+	r := Restrict(tb, Policy{
+		ObserveSuccess: func(ctx context.Context, name string, input json.RawMessage) {
+			seen = append(seen, name)
+		},
+	})
+	if _, err := r.Run(context.Background(), "write_file", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Denied tools must not observe.
+	rDeny := Restrict(tb, Policy{
+		Deny: []string{"bash"},
+		ObserveSuccess: func(ctx context.Context, name string, input json.RawMessage) {
+			t.Fatal("ObserveSuccess must not run on denial")
+		},
+	})
+	if _, err := rDeny.Run(context.Background(), "bash", json.RawMessage(`{"command":"echo"}`)); err == nil {
+		t.Fatal("expected deny")
+	}
+	if len(seen) != 1 || seen[0] != "write_file" {
+		t.Fatalf("seen = %v", seen)
 	}
 }
 

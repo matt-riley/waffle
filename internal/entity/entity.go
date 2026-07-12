@@ -215,9 +215,35 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string
 
 // SetProfile binds a named agent profile to a channel group (#71).
 // profile may be empty to clear. chat may be "channel:chat_id" or just chat_id
-// when unique.
+// when unique. Each change is written to profile_audit (old, new, channel, chat).
 func (s *Store) SetProfile(ctx context.Context, channel, chatID, profile string) error {
-	res, err := s.db.ExecContext(ctx, `
+	return s.SetProfileSource(ctx, channel, chatID, profile, "cli")
+}
+
+// SetProfileSource is SetProfile with an explicit audit source (e.g. "cli", "admin").
+func (s *Store) SetProfileSource(ctx context.Context, channel, chatID, profile, source string) error {
+	var old string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT profile FROM channel_groups WHERE channel = ? AND chat_id = ?`,
+		channel, chatID).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("no channel group for %s:%s", channel, chatID)
+	}
+	if err != nil {
+		return err
+	}
+	if old == profile {
+		return nil
+	}
+	if source == "" {
+		source = "cli"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
 		UPDATE channel_groups SET profile = ? WHERE channel = ? AND chat_id = ?`,
 		profile, channel, chatID)
 	if err != nil {
@@ -227,7 +253,57 @@ func (s *Store) SetProfile(ctx context.Context, channel, chatID, profile string)
 	if n == 0 {
 		return fmt.Errorf("no channel group for %s:%s", channel, chatID)
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO profile_audit (at, channel, chat_id, old_profile, new_profile, source)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		now(), channel, chatID, old, profile, source); err != nil {
+		return fmt.Errorf("profile audit: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ProfileAudits lists recent profile change rows for a channel:chat (newest first).
+func (s *Store) ProfileAudits(ctx context.Context, channel, chatID string, limit int) (out []ProfileAudit, err error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, at, channel, chat_id, old_profile, new_profile, source
+		FROM profile_audit
+		WHERE channel = ? AND chat_id = ?
+		ORDER BY id DESC
+		LIMIT ?`, channel, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	for rows.Next() {
+		var a ProfileAudit
+		var at string
+		if err := rows.Scan(&a.ID, &at, &a.Channel, &a.ChatID, &a.OldProfile, &a.NewProfile, &a.Source); err != nil {
+			return nil, err
+		}
+		if a.At, err = time.Parse(time.RFC3339Nano, at); err != nil && at != "" {
+			return nil, fmt.Errorf("parse profile_audit at: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ProfileAudit is one channel-group profile rebinding (#71).
+type ProfileAudit struct {
+	ID         int64
+	At         time.Time
+	Channel    string
+	ChatID     string
+	OldProfile string
+	NewProfile string
+	Source     string
 }
 
 // SetProfileByChat sets profile when chat_id uniquely identifies a row.

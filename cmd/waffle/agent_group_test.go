@@ -308,6 +308,115 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape"); err == nil {
 		t.Fatal("outside-root prompt accepted")
 	}
+	// Explicit empty system is allowed.
+	cfg.Agent.Profiles["empty-sys"] = config.AgentProfile{System: ""}
+	emptyA, cleanup4, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "empty-sys")
+	if err != nil {
+		t.Fatalf("empty system: %v", err)
+	}
+	cleanup4()
+	if emptyA.Profile != "empty-sys" {
+		t.Fatalf("profile name = %q", emptyA.Profile)
+	}
+}
+
+func TestProfileUtilityModelSelectionBuild(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "main-model"
+	cfg.Provider.UtilityModel = "cheap-model"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"defaultish": {System: "d", Model: "default"},
+		"cheap":      {System: "u", Model: "utility"},
+		"explicit":   {System: "e", Model: "claude-x"},
+	}
+	a, c1, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "defaultish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1()
+	if a.Model != "main-model" {
+		t.Fatalf("default model = %q", a.Model)
+	}
+	a, c2, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2()
+	if a.Model != "cheap-model" {
+		t.Fatalf("utility model = %q", a.Model)
+	}
+	a, c3, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "explicit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c3()
+	if a.Model != "claude-x" {
+		t.Fatalf("explicit model = %q", a.Model)
+	}
+	// Missing utility_model errors at build.
+	cfg.Provider.UtilityModel = ""
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap"); err == nil {
+		t.Fatal("missing utility_model accepted")
+	}
+}
+
+// TestWorkspaceOrChatProfileAffectsAgent proves chat --profile / buildAgentWithProfile
+// selects system prompt and toolbox (workspace surface uses the same builder) (#71).
+func TestWorkspaceOrChatProfileAffectsAgent(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "default-model"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"researcher": {
+			System: "You are a research specialist.",
+			Model:  "research-model",
+			Tools:  config.ToolPolicy{Allow: []string{"read_file", "fetch", "search", "recall"}, Deny: []string{"bash", "write_file", "edit_file"}},
+		},
+	}
+	// Chat path: same as waffle chat --profile researcher
+	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "researcher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if a.Profile != "researcher" {
+		t.Fatalf("Profile = %q", a.Profile)
+	}
+	if a.Model != "research-model" {
+		t.Fatalf("Model = %q", a.Model)
+	}
+	if !strings.Contains(a.System, "research specialist") {
+		t.Fatalf("system = %q", a.System)
+	}
+	for _, d := range a.Tools.Defs() {
+		if d.Name == "bash" || d.Name == "write_file" {
+			t.Errorf("researcher exposes %s", d.Name)
+		}
+	}
+	// Direct call to denied tool fails with profile name in denial.
+	_, err = a.Tools.Run(ctx, "bash", nil)
+	if err == nil || !strings.Contains(err.Error(), `profile "researcher"`) {
+		t.Fatalf("denial = %v", err)
+	}
 }
 
 // TestBuildGatewayAgentsBuildsProfiles ensures serve-time wiring pre-builds

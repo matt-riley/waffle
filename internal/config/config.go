@@ -57,7 +57,7 @@ type PolicyConfig struct {
 	Rules []PolicyRule `toml:"rules"`
 }
 
-// PolicyRule is one action-level allow/deny rule (#66).
+// PolicyRule is one action-level allow/deny/require rule (#66).
 type PolicyRule struct {
 	// Name is a stable audit label (required).
 	Name string `toml:"name"`
@@ -68,9 +68,13 @@ type PolicyRule struct {
 	Match string `toml:"match"`
 	// Regex matches the raw command string when set.
 	Regex string `toml:"regex"`
-	// Action is "allow" or "deny".
+	// Action is "allow", "deny", or "require".
 	Action string `toml:"action"`
-	// Guidance is included in deny messages when [sandbox] enforcer = "feedback".
+	// Requires is the predicate event (usually another rule's name) that must
+	// have succeeded after the last write for action=require rules.
+	Requires string `toml:"requires"`
+	// Guidance is included in deny messages when [sandbox] enforcer = "feedback"
+	// (and always used as the "because" text for require denials).
 	Guidance string `toml:"guidance"`
 }
 
@@ -161,9 +165,9 @@ type MCPServer struct {
 	Name    string   `toml:"name"`
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
-	// Execution is "host" or "sandbox". Sandbox execution is currently
-	// fail-closed by the agent builder until MCP can be wired into a
-	// constrained runner.
+	// Execution is "host" or "sandbox". Sandbox launches via the #77
+	// restricted executor (ConnectRestricted); when the agent group is
+	// docker mode the command is docker-wrapped (network none, allowlisted env).
 	Execution string `toml:"execution"`
 	// Groups limits this server to named agent groups; empty means all groups.
 	Groups []string `toml:"groups"`
@@ -335,6 +339,26 @@ func (c Config) Profile(name string) (AgentProfile, bool) {
 	}
 	p, ok := c.Agent.Profiles[name]
 	return p, ok || name == "main"
+}
+
+// ResolveProfileModel selects the provider model for a profile (#71).
+//
+//	"" or "default" → [provider].model
+//	"utility"       → [provider].utility_model (error if unset)
+//	any other value → used as an explicit model id on the same provider
+func (c Config) ResolveProfileModel(p AgentProfile) (string, error) {
+	m := strings.TrimSpace(p.Model)
+	switch m {
+	case "", "default":
+		return c.Provider.Model, nil
+	case "utility":
+		if strings.TrimSpace(c.Provider.UtilityModel) == "" {
+			return "", fmt.Errorf("profile model %q requires [provider] utility_model to be set", m)
+		}
+		return c.Provider.UtilityModel, nil
+	default:
+		return m, nil
+	}
 }
 
 // ValidProfileName reports whether name is an allowed profile slug (#71).
@@ -899,9 +923,12 @@ func validatePolicy(p PolicyConfig, enforcer string) error {
 			return fmt.Errorf("%s[%d]: name is required", label, i)
 		}
 		switch r.Action {
-		case "allow", "deny":
+		case "allow", "deny", "require":
 		default:
-			return fmt.Errorf("%s[%d] %q: action must be allow or deny, got %q", label, i, r.Name, r.Action)
+			return fmt.Errorf("%s[%d] %q: action must be allow, deny, or require, got %q", label, i, r.Name, r.Action)
+		}
+		if r.Action == "require" && strings.TrimSpace(r.Requires) == "" {
+			return fmt.Errorf("%s[%d] %q: require action needs non-empty requires", label, i, r.Name)
 		}
 		if r.Regex != "" {
 			if _, err := regexp.Compile(r.Regex); err != nil {

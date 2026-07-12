@@ -195,6 +195,18 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	} else {
 		add("sandbox runner", nil, "host mode (skipped)")
 	}
+
+	// MCP execution authorities (#77 / #79): list each server's name, groups,
+	// and execution authority (host / sandbox / restricted). Informational —
+	// config load already rejects illegal codeintel host/secret setups.
+	if len(cfg.MCP) == 0 {
+		add("mcp servers", nil, "none configured")
+	} else {
+		for _, s := range cfg.MCP {
+			add("mcp "+s.Name+" authority", nil, formatMCPDoctorInfo(s))
+		}
+	}
+
 	allOK := true
 	for _, c := range checks {
 		if !c.OK {
@@ -202,6 +214,31 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		}
 	}
 	return checks, allOK, nil
+}
+
+// formatMCPDoctorInfo reports groups and execution authority for doctor (#77).
+// Authority values:
+//   - host: execution host (or empty default); launch still uses BuildProcessEnv
+//   - sandbox: execution=sandbox — docker-wrapped when agent group is docker mode
+//   - restricted: execution=sandbox on host agent groups (ConnectRestricted + Dir)
+func formatMCPDoctorInfo(s config.MCPServer) string {
+	execution := s.Execution
+	if execution == "" {
+		execution = "host"
+	}
+	authority := "host"
+	switch execution {
+	case "sandbox":
+		// Runtime selects restricted (host groups) or sandbox/docker-wrap (docker groups).
+		authority = "sandbox|restricted"
+	case "host":
+		authority = "host"
+	}
+	scope := "all groups"
+	if len(s.Groups) > 0 {
+		scope = "groups=" + strings.Join(s.Groups, ",")
+	}
+	return fmt.Sprintf("execution=%s authority=%s %s env_allowlist=%d", execution, authority, scope, len(s.Env))
 }
 
 // sandboxRunnerCheck validates the docker-mode runner binary without starting

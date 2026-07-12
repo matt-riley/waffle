@@ -1,5 +1,9 @@
 // Package llmtest provides reusable fake LLM providers for offline tests
 // and the eval harness (#63).
+//
+// The primary type is Script: a scripted llm.Provider that returns canned
+// Complete responses in order, records every request, and powers deterministic
+// agent and eval tests without network access.
 package llmtest
 
 import (

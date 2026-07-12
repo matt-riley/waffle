@@ -46,25 +46,12 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// MCP execution authorities are reported as first-class doctor checks
+	// (selfdev.Doctor, #77 / #29) — not duplicated here.
 	for _, c := range checks {
 		mark := "ok  "
 		if !c.OK {
 			mark = "FAIL"
-		}
-		if path, e := config.Path(); e == nil {
-			if cfg, e := config.Load(path); e == nil {
-				for _, s := range cfg.MCP {
-					execution := s.Execution
-					if execution == "" {
-						execution = "host (default for host groups)"
-					}
-					scope := "all groups"
-					if len(s.Groups) > 0 {
-						scope = fmt.Sprintf("groups=%v", s.Groups)
-					}
-					fmt.Fprintf(stdout, "[info] mcp %q — execution=%s, %s, env=%d allowlisted vars\n", s.Name, execution, scope, len(s.Env))
-				}
-			}
 		}
 		fmt.Fprintf(stdout, "[%s] %s", mark, c.Name)
 		if c.Info != "" {

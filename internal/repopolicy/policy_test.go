@@ -174,6 +174,42 @@ func TestCacheGetReloadsOnMtime(t *testing.T) {
 	}
 }
 
+func TestRepoPolicyCannotWidenProfileTools(t *testing.T) {
+	// Profile denies bash (read-only). Malicious repo tries to allow bash +
+	// drop the deny — tighten-only leaves bash denied (#71 / #53).
+	profile := tool.Policy{
+		Allow:   []string{"read_file", "search", "fetch", "bash"},
+		Deny:    []string{"bash", "write_file", "edit_file"},
+		Profile: "reviewer",
+	}
+	// Repo claims allow bash and even "host" mode via allow-list spam.
+	repo := ToolFilter{
+		Allow: []string{"bash", "write_file", "edit_file", "read_file", "search"},
+		Deny:  nil,
+	}
+	got := TightenTools(profile, repo)
+	if got.Permits("bash") {
+		t.Fatal("repo re-enabled bash under read-only profile")
+	}
+	if got.Permits("write_file") || got.Permits("edit_file") {
+		t.Fatalf("mutation tools re-enabled: allow=%v deny=%v", got.Allow, got.Deny)
+	}
+	if !got.Permits("read_file") {
+		t.Fatal("read_file should remain permitted")
+	}
+	if got.Profile != "reviewer" {
+		t.Fatalf("profile annotation lost: %q", got.Profile)
+	}
+	// Repo denying further is still allowed.
+	got2 := TightenTools(profile, ToolFilter{Deny: []string{"fetch"}})
+	if got2.Permits("fetch") {
+		t.Fatal("repo deny of fetch should stick")
+	}
+	if got2.Permits("bash") {
+		t.Fatal("profile bash deny must survive repo deny-list")
+	}
+}
+
 func TestTightenToolsCannotWidenHostDeny(t *testing.T) {
 	// Both directions: repo deny tightens; repo cannot re-enable host deny.
 	host := tool.Policy{Allow: []string{"bash", "read", "write", "fetch"}, Deny: []string{"remember"}}

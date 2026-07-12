@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -349,4 +350,94 @@ func TestFullLearnRun(t *testing.T) {
 	}
 	// Second run on unchanged sessions after since watermark may mine nothing
 	// (sessions not updated after first run finished). That's OK.
+}
+
+func TestAcceptProposalGitCommit(t *testing.T) {
+	// Accepted learn proposals create a git commit when GitDir/workspace is a repo (#65).
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "git-learn.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	repo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=waffle-test",
+			"GIT_AUTHOR_EMAIL=waffle-test@example.com",
+			"GIT_COMMITTER_NAME=waffle-test",
+			"GIT_COMMITTER_EMAIL=waffle-test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "waffle-test@example.com")
+	runGit("config", "user.name", "waffle-test")
+	// Initial commit so the repo is non-empty before the skill write.
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("learn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README")
+	runGit("commit", "-m", "init")
+
+	ws := memory.Workspace{Dir: repo}
+	l := NewLearnerFromStore(st, session.New(st), ws)
+	l.GitDir = repo
+	before := map[string]int{"s1": 4, "s2": 4}
+	after := map[string]int{"s1": 0, "s2": 0}
+	l.Baseline = func(_ context.Context, id, _ string) (int, error) { return before[id], nil }
+	l.Score = func(_ context.Context, id, _ string) (int, error) { return after[id], nil }
+	prop := Proposal{
+		ID:          "prop-git",
+		RunID:       "run-git",
+		Surface:     SurfaceSkill,
+		PatternSig:  "no such file",
+		Name:        "recover-git",
+		Description: "recover missing path",
+		Body:        "1. create the missing path\n2. re-run the failing command carefully",
+		Status:      "proposed",
+	}
+	pat := FailurePattern{Class: "no such file", SessionIDs: []string{"s1", "s2"}}
+	out, err := l.PromoteProposal(ctx, prop, pat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "accepted" {
+		t.Fatalf("status = %q audit=%q", out.Status, out.Audit)
+	}
+	if !strings.Contains(out.Audit, "git commit:") {
+		t.Fatalf("expected git commit in audit, got %q", out.Audit)
+	}
+	logCmd := exec.Command("git", "-C", repo, "log", "-1", "--pretty=%s")
+	logOut, err := logCmd.CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	subj := strings.TrimSpace(string(logOut))
+	if !strings.Contains(subj, "learn: accept skill") || !strings.Contains(subj, "no such file") {
+		t.Fatalf("HEAD subject = %q, want learn accept skill commit", subj)
+	}
+	// No-repo path: audit notes stored-only when GitDir has no .git.
+	bare := t.TempDir()
+	l2 := NewLearnerFromStore(st, session.New(st), memory.Workspace{Dir: bare})
+	l2.Baseline = l.Baseline
+	l2.Score = l.Score
+	prop2 := prop
+	prop2.ID = "prop-nogit"
+	prop2.Name = "recover-nogit"
+	out2, err := l2.PromoteProposal(ctx, prop2, pat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2.Status != "accepted" {
+		t.Fatalf("no-git status = %q audit=%q", out2.Status, out2.Audit)
+	}
+	if !strings.Contains(out2.Audit, "no git repo") {
+		t.Fatalf("expected no-git audit note, got %q", out2.Audit)
+	}
 }

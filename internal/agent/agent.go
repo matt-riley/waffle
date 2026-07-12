@@ -30,6 +30,10 @@ type Agent struct {
 	// UtilityModel, when set, is used for summarization/reflection (#61).
 	UtilityModel string
 
+	// Profile is the named agent profile used to construct this agent (#71).
+	// Empty means the default (main) posture. Used for logs and tool denials.
+	Profile string
+
 	// MaxIterations bounds provider calls per Run — a runaway tool loop
 	// stops here instead of at the credit card. Default 50.
 	MaxIterations int

@@ -47,6 +47,9 @@ type Workspace struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	LastActive time.Time
+	// Profile is an optional named agent profile for runs in this workspace (#71).
+	// Empty uses the caller's default (main / chat --profile).
+	Profile string
 	// HookLog accumulates hook stdout/stderr for session debuggability (#54).
 	HookLog []hooks.Result
 }
@@ -172,6 +175,13 @@ func (m *Manager) ensureActiveRepoIndex(ctx context.Context) error {
 // cloned inside via the broker-backed credential helper. If a workspace
 // for the repo already exists (open or idle), it is resumed instead.
 func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbox.Client, error) {
+	return m.OpenWithProfile(ctx, repoArg, "")
+}
+
+// OpenWithProfile is Open with an optional named agent profile (#71).
+// profile is stored on new workspaces; resume preserves any existing bind.
+// Repo-owned WAFFLE.md cannot set or widen this profile.
+func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) (*Workspace, *sandbox.Client, error) {
 	repo, url, err := normalizeRepo(repoArg)
 	if err != nil {
 		return nil, nil, err
@@ -205,6 +215,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		SessionID:  sess.ID,
 		Status:     StatusOpen,
 		LastActive: time.Now().UTC(),
+		Profile:    strings.TrimSpace(profile),
 	}
 	ws.Container = "waffle-" + ws.ID
 	ws.Volume = "waffle-" + ws.ID
@@ -299,9 +310,9 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	}
 
 	if _, err := m.DB.ExecContext(ctx, `
-		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano)); err != nil {
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano), ws.Profile); err != nil {
 		// Concurrent Open raced us (or other insert error); clean up our
 		// side effects.
 		_ = client.Close()
@@ -802,14 +813,14 @@ func (m *Manager) setStatus(ctx context.Context, id, status string) error {
 // Get loads one workspace.
 func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
 		FROM workspaces WHERE id = ?`, id))
 }
 
 // ForRepo finds the non-closed, non-failed workspace for a repo.
 func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
 		FROM workspaces WHERE repo = ? AND status NOT IN ('closed', 'failed')`, repo))
 }
 
@@ -819,14 +830,14 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 // compromised session "cannot read another repo").
 func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
 		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
 }
 
 // List returns all workspaces, newest first.
 func (m *Manager) List(ctx context.Context) (out []Workspace, err error) {
 	rows, err := m.DB.QueryContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
 		FROM workspaces ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -853,7 +864,7 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	var created, updated string
 	var active string
 	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
-		&ws.SessionID, &ws.Status, &created, &updated, &active)
+		&ws.SessionID, &ws.Status, &created, &updated, &active, &ws.Profile)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkspaceNotFound
 	}

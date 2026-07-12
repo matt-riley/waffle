@@ -945,6 +945,36 @@ func TestNormalizeRepo(t *testing.T) {
 	}
 }
 
+func TestOpenWithProfileStoresOnWorkspace(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{}}
+	mgr, _ := newTestManager(t, tools)
+	ws, client, err := mgr.OpenWithProfile(ctx, "matt-riley/profiled", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if ws.Profile != "reviewer" {
+		t.Fatalf("profile = %q", ws.Profile)
+	}
+	again, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Profile != "reviewer" {
+		t.Fatalf("persisted profile = %q", again.Profile)
+	}
+	// Resume preserves profile (Open ignores new profile when existing).
+	resumed, client2, err := mgr.OpenWithProfile(ctx, "matt-riley/profiled", "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	if resumed.Profile != "reviewer" {
+		t.Fatalf("resume profile = %q, want stored reviewer", resumed.Profile)
+	}
+}
+
 func TestUnparsableRepoPolicyAtOpen(t *testing.T) {
 	// Unclosed front matter → Parse error at open (#53).
 	tools := &scriptedBash{outputs: map[string]string{

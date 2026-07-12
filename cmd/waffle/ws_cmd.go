@@ -58,8 +58,17 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 		return nil
 
 	case "open":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: waffle ws open <owner/repo>")
+		repoArg, profile, openParseErr := parseWorkspaceOpenArgs(args[1:])
+		if openParseErr != nil {
+			return openParseErr
+		}
+		if profile != "" {
+			if !config.ValidProfileName(profile) && profile != "main" {
+				return fmt.Errorf("invalid profile name %q", profile)
+			}
+			if _, ok := cfg.Profile(profile); !ok {
+				return fmt.Errorf("unknown agent profile %q", profile)
+			}
 		}
 		b, brokerURL, brokerErr := startWorkspaceBroker(ctx, cfg, st, stderr)
 		if brokerErr != nil {
@@ -70,7 +79,7 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 		if cfg.Workspace.Egress == "allowlist" {
 			mgr.ProxyURL = brokerURL + "/egress"
 		}
-		ws, client, openErr := mgr.Open(ctx, args[1])
+		ws, client, openErr := mgr.OpenWithProfile(ctx, repoArg, profile)
 		if openErr != nil {
 			return openErr
 		}
@@ -79,7 +88,11 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 				err = cerr
 			}
 		}()
-		fmt.Fprintf(stdout, "workspace %s open: %s cloned in container %s (image %s)\n", ws.ID, ws.Repo, ws.Container, ws.Image)
+		fmt.Fprintf(stdout, "workspace %s open: %s cloned in container %s (image %s)", ws.ID, ws.Repo, ws.Container, ws.Image)
+		if ws.Profile != "" {
+			fmt.Fprintf(stdout, " profile=%s", ws.Profile)
+		}
+		fmt.Fprintln(stdout)
 		fmt.Fprintf(stdout, "work on it from chat with: /repo %s\n", ws.Repo)
 		return nil
 
@@ -134,11 +147,39 @@ func parseWorkspaceCloseArgs(args []string) (id string, force bool, err error) {
 	return id, force, nil
 }
 
+// parseWorkspaceOpenArgs parses: waffle ws open <owner/repo> [--profile name]
+func parseWorkspaceOpenArgs(args []string) (repo, profile string, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--profile":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("usage: waffle ws open <owner/repo> [--profile name]")
+			}
+			i++
+			profile = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--profile="):
+			profile = strings.TrimSpace(strings.TrimPrefix(arg, "--profile="))
+		case strings.HasPrefix(arg, "-"):
+			return "", "", fmt.Errorf("unknown flag %q\nusage: waffle ws open <owner/repo> [--profile name]", arg)
+		case repo != "":
+			return "", "", fmt.Errorf("expected one repo, got %q and %q\nusage: waffle ws open <owner/repo> [--profile name]", repo, arg)
+		default:
+			repo = arg
+		}
+	}
+	if repo == "" {
+		return "", "", fmt.Errorf("usage: waffle ws open <owner/repo> [--profile name]")
+	}
+	return repo, profile, nil
+}
+
 func wsUsage(w io.Writer) {
 	fmt.Fprint(w, `Repo workspaces: a container per repository, git auth via the broker.
 
 Usage:
-  waffle ws open <owner/repo>    clone the repo into a fresh container
+  waffle ws open <owner/repo> [--profile name]
+                                 clone the repo into a fresh container
   waffle ws ls                   list workspaces
   waffle ws idle <id>            stop the container, keep the volume
   waffle ws close <id> [--force] tear down (refuses if work is unpushed)

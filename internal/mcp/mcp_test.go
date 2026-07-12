@@ -166,3 +166,219 @@ func TestBuildProcessEnvNoAmbientSecrets(t *testing.T) {
 		}
 	}
 }
+
+// envDumpServer is a helper MCP process that writes its environment to
+// $ENV_DUMP_FILE before speaking the fake protocol. Used to prove
+// ConnectRestricted never inherits ambient gateway secrets (#77 / #79).
+const envDumpServer = `#!/usr/bin/env bash
+if [[ -n "${ENV_DUMP_FILE:-}" ]]; then
+  env | sort > "$ENV_DUMP_FILE"
+fi
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id" ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id" ;;
+    *'"notifications/initialized"'*) : ;;
+  esac
+done
+`
+
+// TestConnectRestrictedNoAmbientSecrets launches a real child via
+// ConnectRestricted and asserts WAFFLE_HOME / GITHUB_TOKEN / age identity
+// are absent from the child environment even when set on the parent.
+func TestConnectRestrictedNoAmbientSecrets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash helper is unix-only")
+	}
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "child.env")
+	path := filepath.Join(dir, "env-server.sh")
+	if err := os.WriteFile(path, []byte(envDumpServer), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("WAFFLE_HOME", "/secret/waffle-home")
+	t.Setenv("WAFFLE_AGE_IDENTITY", "AGE-SECRET-KEY-leak")
+	t.Setenv("GITHUB_TOKEN", "ghp_should_not_leak")
+	t.Setenv("SAFE_VAR", "ok-value")
+	t.Setenv("ENV_DUMP_FILE", dump)
+
+	ctx := context.Background()
+	client, err := ConnectRestricted(ctx, Server{
+		Name:    "envdump",
+		Command: "bash",
+		Args:    []string{path},
+		Env:     []string{"SAFE_VAR", "ENV_DUMP_FILE"},
+	}, RestrictOpts{Dir: dir, Mode: "restricted"})
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("read child env dump: %v", err)
+	}
+	body := string(raw)
+	for _, leak := range []string{
+		"WAFFLE_HOME=",
+		"WAFFLE_AGE_IDENTITY=",
+		"GITHUB_TOKEN=",
+		"/secret/waffle-home",
+		"AGE-SECRET-KEY-leak",
+		"ghp_should_not_leak",
+	} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("child inherited ambient secret material %q:\n%s", leak, body)
+		}
+	}
+	if !strings.Contains(body, "SAFE_VAR=ok-value") {
+		t.Fatalf("allowlisted SAFE_VAR missing from child env:\n%s", body)
+	}
+	if !strings.Contains(body, "ENV_DUMP_FILE=") {
+		t.Fatalf("allowlisted ENV_DUMP_FILE missing from child env:\n%s", body)
+	}
+}
+
+// TestSandboxMCPUsesRestrictedExecutor is table-driven construction of the
+// launch command for sandbox vs host agent modes (#77 / #79).
+func TestSandboxMCPUsesRestrictedExecutor(t *testing.T) {
+	base := Server{
+		Name:    "codeintel",
+		Command: "gopls",
+		Args:    []string{"mcp"},
+		Env:     []string{"SAFE_VAR"},
+	}
+	t.Setenv("SAFE_VAR", "ok")
+	t.Setenv("GITHUB_TOKEN", "must-not-appear-in-docker-e")
+
+	cases := []struct {
+		name       string
+		execution  string
+		agentMode  string
+		workDir    string
+		image      string
+		network    string
+		wantCmd    string
+		wantMode   string
+		wantDir    string
+		wantSubstr []string // must appear in joined Args
+		denySubstr []string // must not appear
+	}{
+		{
+			name:      "sandbox+docker wraps docker run",
+			execution: "sandbox",
+			agentMode: "docker",
+			workDir:   "/ws/root",
+			image:     "waffle-sb:test",
+			network:   "none",
+			wantCmd:   "docker",
+			wantMode:  "sandbox",
+			wantDir:   "",
+			wantSubstr: []string{
+				"run", "-i", "--rm",
+				"--network", "none",
+				"-v", "/ws/root:/work", "-w", "/work",
+				"waffle-sb:test", "gopls", "mcp",
+				"-e", "SAFE_VAR=ok",
+			},
+			denySubstr: []string{"GITHUB_TOKEN", "must-not-appear"},
+		},
+		{
+			name:       "sandbox+host uses restricted dir",
+			execution:  "sandbox",
+			agentMode:  "host",
+			workDir:    "/ws/host",
+			wantCmd:    "gopls",
+			wantMode:   "restricted",
+			wantDir:    "/ws/host",
+			wantSubstr: []string{"mcp"},
+		},
+		{
+			name:      "host execution stays restricted env path",
+			execution: "host",
+			agentMode: "docker",
+			workDir:   "/ignored",
+			wantCmd:   "gopls",
+			wantMode:  "restricted",
+			wantDir:   "",
+		},
+		{
+			name:      "empty execution defaults host-restricted",
+			execution: "",
+			agentMode: "host",
+			wantCmd:   "gopls",
+			wantMode:  "restricted",
+		},
+		{
+			name:      "sandbox docker default image and network",
+			execution: "sandbox",
+			agentMode: "docker",
+			wantCmd:   "docker",
+			wantMode:  "sandbox",
+			wantSubstr: []string{
+				"--network", "none",
+				"debian:stable-slim", "gopls",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, opts := PlanLaunch(base, tc.execution, tc.agentMode, tc.workDir, tc.image, tc.network)
+			if got.Command != tc.wantCmd {
+				t.Fatalf("Command = %q, want %q (args=%v)", got.Command, tc.wantCmd, got.Args)
+			}
+			if opts.Mode != tc.wantMode {
+				t.Fatalf("Mode = %q, want %q", opts.Mode, tc.wantMode)
+			}
+			if opts.Dir != tc.wantDir {
+				t.Fatalf("Dir = %q, want %q", opts.Dir, tc.wantDir)
+			}
+			joined := strings.Join(append([]string{got.Command}, got.Args...), "\x00")
+			for _, sub := range tc.wantSubstr {
+				if !strings.Contains(joined, sub) {
+					t.Errorf("launch missing %q; args=%v", sub, got.Args)
+				}
+			}
+			for _, sub := range tc.denySubstr {
+				if strings.Contains(joined, sub) {
+					t.Errorf("launch must not contain %q; args=%v", sub, got.Args)
+				}
+			}
+			// Docker wrap must not leave original allowlist on the client Server.Env
+			// (env is baked into -e flags); host path keeps allowlist for BuildProcessEnv.
+			if got.Command == "docker" && len(got.Env) != 0 {
+				t.Fatalf("docker-wrapped Server.Env = %v, want nil/empty", got.Env)
+			}
+		})
+	}
+}
+
+func TestWrapDockerOnlyAllowlistedEnv(t *testing.T) {
+	t.Setenv("SAFE_VAR", "yes")
+	t.Setenv("WAFFLE_HOME", "/nope")
+	t.Setenv("GITHUB_TOKEN", "nope")
+	s := WrapDocker(Server{
+		Name:    "x",
+		Command: "my-mcp",
+		Args:    []string{"--stdio"},
+		Env:     []string{"SAFE_VAR"},
+	}, DockerWrapOpts{Image: "img:1", WorkDir: "/w"})
+	if s.Command != "docker" {
+		t.Fatalf("Command = %q", s.Command)
+	}
+	joined := strings.Join(s.Args, " ")
+	if !strings.Contains(joined, "-e SAFE_VAR=yes") {
+		t.Fatalf("missing allowlisted -e: %v", s.Args)
+	}
+	if strings.Contains(joined, "WAFFLE_HOME") || strings.Contains(joined, "GITHUB_TOKEN") || strings.Contains(joined, "/nope") {
+		t.Fatalf("secret leaked into docker args: %v", s.Args)
+	}
+}

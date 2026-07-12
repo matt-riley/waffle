@@ -236,3 +236,76 @@ func TestApplyCodeIntelCapsFiltersUnapproved(t *testing.T) {
 		t.Fatalf("executable path must not become a tool name deny: %v", pol.Deny)
 	}
 }
+
+// TestRepoPolicyCannotSelectUnapprovedCodeIntelCaps ensures applyCodeIntelCaps
+// rejects evil/unknown tool names from repo policy (#79 / #53).
+func TestRepoPolicyCannotSelectUnapprovedCodeIntelCaps(t *testing.T) {
+	evil := []string{
+		"/bin/evil",
+		"bash",
+		"rm -rf /",
+		"code_find_symbol; curl evil",
+		"not_a_real_cap",
+		"code_find_symbol", // only approved one
+	}
+	pol := applyCodeIntelCaps(tool.Policy{}, evil)
+	denied := map[string]bool{}
+	for _, d := range pol.Deny {
+		denied[d] = true
+	}
+	// Only the approved selected cap stays available; all other codeintel tools denied.
+	if denied["code_find_symbol"] {
+		t.Fatalf("approved selected cap denied: %v", pol.Deny)
+	}
+	for _, name := range []string{"code_references", "code_callers", "code_structure", "code_blast_radius", "code_suggest_tests"} {
+		if !denied[name] {
+			t.Fatalf("expected deny of unselected %q; deny=%v", name, pol.Deny)
+		}
+	}
+	for _, bad := range []string{"/bin/evil", "bash", "rm -rf /", "code_find_symbol; curl evil", "not_a_real_cap"} {
+		if denied[bad] {
+			t.Fatalf("unapproved name %q must not enter tool deny list as a capability: %v", bad, pol.Deny)
+		}
+	}
+}
+
+// TestDeniedMCPServerNotLaunched asserts that when every declared tool is
+// denied by policy, the server is filtered before Connect (no process start).
+func TestDeniedMCPServerNotLaunched(t *testing.T) {
+	s := config.MCPServer{
+		Name:  "evil",
+		Tools: []string{"hack", "pwn"},
+	}
+	// Full deny of declared tools → not permitted → buildAgent skips launch.
+	denyAll := tool.Policy{Deny: []string{"evil__hack", "evil__pwn"}}
+	if mcpServerPermitted(s, denyAll) {
+		t.Fatal("server with all tools denied must not be permitted for launch")
+	}
+
+	// Allow-list that omits server tools → not permitted.
+	allowOnlyBash := tool.Policy{Allow: []string{"bash"}}
+	if mcpServerPermitted(s, allowOnlyBash) {
+		t.Fatal("allow-list without MCP tools must not permit launch")
+	}
+
+	// One allowed tool → permitted (would launch).
+	allowOne := tool.Policy{Allow: []string{"evil__hack"}}
+	if !mcpServerPermitted(s, allowOne) {
+		t.Fatal("server with at least one permitted tool must be eligible")
+	}
+
+	// Undeclared tools remain eligible (back-compat; process may still start).
+	legacy := config.MCPServer{Name: "legacy"}
+	if !mcpServerPermitted(legacy, denyAll) {
+		t.Fatal("undeclared-tools server remains eligible for back-compat")
+	}
+
+	// Group filter: wrong group is excluded before launch.
+	scoped := config.MCPServer{Name: "scoped", Groups: []string{"cron"}, Tools: []string{"echo"}}
+	if mcpServerInGroup(scoped, "main") {
+		t.Fatal("server limited to cron must not be in main")
+	}
+	if !mcpServerInGroup(scoped, "cron") {
+		t.Fatal("server limited to cron must be in cron")
+	}
+}

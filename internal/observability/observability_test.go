@@ -58,7 +58,7 @@ func TestHealthHandlerReturns503ForStaleSubsystem(t *testing.T) {
 
 func TestRecordUsageDoesNotDoubleCountDuplicateCumulativeObservation(t *testing.T) {
 	ctx, svc, clock := testService(t)
-	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent"); err != nil {
+	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.RecordUsage(ctx, "run-1", llm.Usage{InputTokens: 10, OutputTokens: 4}); err != nil {
@@ -87,7 +87,7 @@ func TestRecordUsageDoesNotDoubleCountDuplicateCumulativeObservation(t *testing.
 
 func TestSnapshotReportsCompletedRunRuntimeAndTotals(t *testing.T) {
 	ctx, svc, clock := testService(t)
-	if err := svc.Start(ctx, "run-1", "session-1", "cron", "job"); err != nil {
+	if err := svc.Start(ctx, "run-1", "session-1", "cron", "job", "researcher"); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.RecordUsage(ctx, "run-1", llm.Usage{InputTokens: 3, OutputTokens: 7}); err != nil {
@@ -109,6 +109,9 @@ func TestSnapshotReportsCompletedRunRuntimeAndTotals(t *testing.T) {
 	if got.ID != "run-1" || got.SessionID != "session-1" || got.Source != "cron" || got.Phase != "job" || got.Outcome != "ok" {
 		t.Errorf("recent run = %+v", got)
 	}
+	if got.Profile != "researcher" {
+		t.Errorf("profile = %q, want researcher", got.Profile)
+	}
 	if got.RuntimeMS != 1200 || got.InputTokens != 3 || got.OutputTokens != 7 {
 		t.Errorf("metrics = runtime %dms, tokens %d/%d; want 1200ms, 3/7", got.RuntimeMS, got.InputTokens, got.OutputTokens)
 	}
@@ -116,7 +119,7 @@ func TestSnapshotReportsCompletedRunRuntimeAndTotals(t *testing.T) {
 
 func TestSnapshotReportsActiveElapsedRuntime(t *testing.T) {
 	ctx, svc, clock := testService(t)
-	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent"); err != nil {
+	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.RecordUsage(ctx, "run-1", llm.Usage{InputTokens: 1, OutputTokens: 2}); err != nil {

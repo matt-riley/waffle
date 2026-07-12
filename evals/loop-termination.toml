@@ -1,0 +1,3 @@
+name = "loop-termination"
+description = "Deterministic offline seed eval: loop-termination"
+tier = "deterministic"

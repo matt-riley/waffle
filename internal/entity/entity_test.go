@@ -124,6 +124,44 @@ func TestSetProfileOnChannelGroup(t *testing.T) {
 	}
 }
 
+func TestProfileChangeAudit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.GroupFor(ctx, "telegram", "99", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetProfileSource(ctx, "telegram", "99", "reviewer", "cli"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetProfileSource(ctx, "telegram", "99", "researcher", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// No-op same profile: no new audit row.
+	if err := s.SetProfileSource(ctx, "telegram", "99", "researcher", "cli"); err != nil {
+		t.Fatal(err)
+	}
+	audits, err := s.ProfileAudits(ctx, "telegram", "99", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 2 {
+		t.Fatalf("audits = %d, want 2 (noop not recorded): %+v", len(audits), audits)
+	}
+	// Newest first.
+	if audits[0].OldProfile != "reviewer" || audits[0].NewProfile != "researcher" || audits[0].Source != "admin" {
+		t.Fatalf("latest = %+v", audits[0])
+	}
+	if audits[1].OldProfile != "" || audits[1].NewProfile != "reviewer" || audits[1].Source != "cli" {
+		t.Fatalf("first = %+v", audits[1])
+	}
+	if audits[0].Channel != "telegram" || audits[0].ChatID != "99" {
+		t.Fatalf("channel/chat = %+v", audits[0])
+	}
+	if audits[0].At.IsZero() {
+		t.Fatal("timestamp missing")
+	}
+}
+
 func TestGroupForCreatesGroupChatOnRestrictedTier(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

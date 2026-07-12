@@ -1,0 +1,3 @@
+name = "summarize-preserves-fact"
+description = "Deterministic offline seed eval: summarize-preserves-fact"
+tier = "deterministic"

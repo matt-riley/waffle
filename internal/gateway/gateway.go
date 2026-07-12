@@ -468,7 +468,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		runID, err = id.New("run-")
 		if err != nil {
 			log.Error("new observability run id", "err", err)
-		} else if err := g.Observability.Start(ctx, runID, group.SessionID, "gateway", "agent"); err != nil {
+		} else if err := g.Observability.Start(ctx, runID, group.SessionID, "gateway", "agent", group.Profile); err != nil {
 			log.Error("start observability run", "err", err)
 			runID = ""
 		}

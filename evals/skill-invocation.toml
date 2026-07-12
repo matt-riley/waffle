@@ -1,0 +1,3 @@
+name = "skill-invocation"
+description = "Deterministic offline seed eval: skill-invocation"
+tier = "deterministic"

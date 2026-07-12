@@ -71,10 +71,10 @@ type Client struct {
 }
 
 // BuildProcessEnv constructs the restricted environment for an MCP child
-// process (#79). Only PATH (from the host) and explicitly allowlisted variable
-// names are included — never a copy of os.Environ(). Secret-bearing ambient
-// vars (WAFFLE_HOME, tokens, age identity, …) are excluded unless named in
-// allowlist (and codeintel config rejects secret-like names entirely).
+// process (#79 / #77). Only PATH (from the host) and explicitly allowlisted
+// variable names are included — never a copy of os.Environ(). Secret-bearing
+// ambient vars (WAFFLE_HOME, tokens, age identity, …) are excluded unless
+// named in allowlist (and codeintel config rejects secret-like names entirely).
 func BuildProcessEnv(allowlist []string) []string {
 	env := make([]string, 0, len(allowlist)+1)
 	if path, ok := os.LookupEnv("PATH"); ok {
@@ -91,12 +91,108 @@ func BuildProcessEnv(allowlist []string) []string {
 	return env
 }
 
+// RestrictOpts configures #77-compliant isolation for an MCP child process.
+type RestrictOpts struct {
+	// Dir is the working directory for the child (workspace root when known).
+	Dir string
+	// Mode is "restricted" (default) or "sandbox" for audit/docs.
+	Mode string
+}
+
+// DockerWrapOpts configures wrapping an MCP server as
+// `docker run -i --rm --network none` with only allowlisted env (#77 / #79).
+type DockerWrapOpts struct {
+	// Image is the container image (default: debian:stable-slim).
+	Image string
+	// Network is the docker network mode (default: "none").
+	Network string
+	// WorkDir is the host path mounted at /work (optional).
+	WorkDir string
+}
+
+// WrapDocker transforms s into a docker-run invocation that executes the
+// original command inside a network-restricted container. Environment is
+// only BuildProcessEnv(s.Env) as docker -e name=value pairs — never ambient
+// host secrets. The returned Server.Env is empty so ConnectRestricted only
+// passes PATH to the docker client process itself.
+func WrapDocker(s Server, opts DockerWrapOpts) Server {
+	if opts.Image == "" {
+		opts.Image = "debian:stable-slim"
+	}
+	if opts.Network == "" {
+		opts.Network = "none"
+	}
+	args := []string{"run", "-i", "--rm", "--network", opts.Network}
+	if opts.WorkDir != "" {
+		args = append(args, "-v", opts.WorkDir+":/work", "-w", "/work")
+	}
+	for _, e := range BuildProcessEnv(s.Env) {
+		args = append(args, "-e", e)
+	}
+	args = append(args, opts.Image, s.Command)
+	args = append(args, s.Args...)
+	return Server{
+		Name:    s.Name,
+		Command: "docker",
+		Args:    args,
+		Env:     nil,
+	}
+}
+
+// PlanLaunch decides the restricted launch form for an MCP server (#77 / #79).
+//
+//   - execution "sandbox" + agentMode "docker" → docker-wrapped command, Mode=sandbox
+//   - execution "sandbox" + host agent mode    → ConnectRestricted with Dir=workDir, Mode=restricted
+//   - execution "host" (or empty)              → ConnectRestricted without dir, Mode=restricted
+//
+// The returned Server is what should be passed to ConnectRestricted; env is
+// always BuildProcessEnv-only at process start.
+func PlanLaunch(s Server, execution, agentMode, workDir, image, network string) (Server, RestrictOpts) {
+	if execution == "" {
+		execution = "host"
+	}
+	opts := RestrictOpts{Mode: "restricted"}
+	out := s
+	if execution == "sandbox" {
+		if agentMode == "docker" {
+			out = WrapDocker(s, DockerWrapOpts{
+				Image:   image,
+				Network: network,
+				WorkDir: workDir,
+			})
+			opts.Mode = "sandbox"
+			return out, opts
+		}
+		opts.Dir = workDir
+		opts.Mode = "restricted"
+	}
+	return out, opts
+}
+
 // Connect launches the server process and performs the initialize
-// handshake. The child receives only BuildProcessEnv(s.Env) — no ambient
-// secret inheritance (#79).
+// handshake. Equivalent to ConnectRestricted with empty Dir — the child
+// receives only BuildProcessEnv(s.Env), never ambient secrets (#79 / #77).
 func Connect(ctx context.Context, s Server) (*Client, error) {
+	return ConnectRestricted(ctx, s, RestrictOpts{})
+}
+
+// ConnectRestricted launches the MCP server with #77-compliant isolation:
+//   - Environment is ONLY BuildProcessEnv(s.Env) — never os.Environ()
+//   - Working directory set to opts.Dir when non-empty
+//   - Extra file descriptors are not inherited (os/exec default; no ExtraFiles)
+//
+// Same handshake as Connect. opts.Mode defaults to "restricted" (audit label).
+func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Client, error) {
+	if opts.Mode == "" {
+		opts.Mode = "restricted"
+	}
 	cmd := exec.Command(s.Command, s.Args...)
 	cmd.Env = BuildProcessEnv(s.Env)
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
+	// os/exec does not pass ExtraFiles, so only stdin/stdout/stderr are
+	// inherited — ambient gateway FDs/secrets cannot leak via open descriptors.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -106,7 +202,7 @@ func Connect(ctx context.Context, s Server) (*Client, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("mcp %s: start %q: %w", s.Name, s.Command, err)
+		return nil, fmt.Errorf("mcp %s: start %q (mode=%s): %w", s.Name, s.Command, opts.Mode, err)
 	}
 	c := &Client{
 		name:    s.Name,

@@ -21,6 +21,43 @@ func TestRegistryPassesOffline(t *testing.T) {
 	if len(Registry()) < 6 {
 		t.Fatalf("want at least 6 seed evals, got %d", len(Registry()))
 	}
+	// Six seed names must be present exactly.
+	have := map[string]bool{}
+	for _, c := range Registry() {
+		have[c.Name] = true
+	}
+	for _, n := range SeedNames {
+		if !have[n] {
+			t.Fatalf("Registry missing seed %q", n)
+		}
+	}
+}
+
+func TestRegistryNamesMatchEvalsDir(t *testing.T) {
+	if err := EnsureTOMLCovered(""); err != nil {
+		t.Fatal(err)
+	}
+	names, err := DiscoverTOMLNames("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) < 6 {
+		t.Fatalf("want at least 6 evals/*.toml, got %v", names)
+	}
+	want := map[string]bool{}
+	for _, n := range SeedNames {
+		want[n] = true
+	}
+	for _, n := range names {
+		if !want[n] {
+			// Extra toml files must still be covered by Registry (EnsureTOMLCovered).
+			continue
+		}
+		delete(want, n)
+	}
+	if len(want) > 0 {
+		t.Fatalf("seed names missing from evals/*.toml: %v", want)
+	}
 }
 
 func TestEvalZeroNetworkGuard(t *testing.T) {

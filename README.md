@@ -21,10 +21,12 @@ What's here, by capability:
   destinations by default (including redirects). For deliberate local use,
   allow exact CIDRs or host:port destinations with
   `[tools.fetch] allow_private = ["192.168.1.0/24", "localhost:3000"]`.
-- **Memory** — every conversation persisted to SQLite with FTS5 search;
-  multi-tier `recall` (turns/summaries/notes/spills); `remember` /
-  `memory_update`; working set via `workspace_update`; tool spills with
-  `expand_output` / `expand_context`; `AGENT.md`/`USER.md`/`MEMORY.md`
+- **Memory** — three layers: (1) **transcript** (SQLite turns + FTS5
+  history/summaries), (2) **working set** (session-local goals/constraints
+  via `workspace_update`; not durable knowledge), (3) **MEMORY.md**
+  (durable owner notes across sessions). Multi-tier `recall`
+  (turns/summaries/notes/spills); `remember` / `memory_update`; tool spills
+  with `expand_output` / `expand_context`; `AGENT.md`/`USER.md`/`MEMORY.md`
   workspace files; sessions summarized on exit via the shared reflection
   prompt. Under `serve`, idle reflection runs when
   `[memory] reflect_after` is a positive duration (e.g. `"30m"`;
@@ -64,11 +66,14 @@ What's here, by capability:
   ```
 
   `waffle doctor` fails fast if the path is missing or not absolute.
-  Queue bind-mount stress: `go test -tags=sandbox_stress ./internal/sandbox -run Stress`
-  (see docs/plan.md). Zero-network agent checks: `waffle eval` (also run by
-  `mise run test` and `waffle upgrade` verify). Results are recorded in
-  SQLite; `waffle eval --history` lists them. Live provider evals are opt-in
-  via `WAFFLE_EVAL_LIVE=1` and are skipped without a configured provider.
+  Queue bind-mount stress and doctor probes: see
+  [docs/sandbox-queue.md](docs/sandbox-queue.md)
+  (`go test -tags=sandbox_stress ./internal/sandbox -run Stress`; optional
+  `-tags=sandbox_docker` when Docker is available). Zero-network agent checks:
+  `waffle eval` (also run by `mise run test` and `waffle upgrade` verify).
+  Results are recorded in SQLite; `waffle eval --history` lists them. Live
+  provider evals are opt-in via `WAFFLE_EVAL_LIVE=1` and are skipped without a
+  configured provider.
 
   Each sandbox and workspace container is limited by default to `2g` memory,
   two CPUs, and 512 processes, with `no-new-privileges`. Override these with
@@ -132,11 +137,13 @@ tools = ["echo"]        # optional; enables pre-launch policy filtering
 env = ["EXAMPLE_TOKEN"] # only these variables are passed to the child
 ```
 
-MCP processes run as the daemon user and are never made safe by a Docker
-agent group. A Docker group must explicitly opt a server into host execution
-by setting `execution = "host"` and listing that group; otherwise startup
-fails closed. `execution = "sandbox"` is reserved until MCP can be integrated
-with the constrained runner and currently fails closed.
+MCP processes never inherit the gateway ambient environment: children get
+only `PATH` plus an allowlisted `env` via `mcp.ConnectRestricted` (#77).
+`execution = "sandbox"` launches through that restricted executor; when the
+agent group is docker mode the command is docker-wrapped
+(`docker run -i --rm --network none`, work dir mount, allowlisted `-e` only).
+A Docker group that wants host MCP must set `execution = "host"` and list
+that group; otherwise host launch fails closed.
 - **Trust tiering** — agent groups carry their own sandbox mode and tool
   policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
   The owner's interactive sessions run on the `main` tier; unattended
@@ -145,7 +152,7 @@ with the constrained runner and currently fails closed.
   `bash` and memory writes by default**. Override only with an explicit
   `[agent.group.cron]` / `[agent.group.issue]` / `[agent.group.group]` tool
   policy. Action-level `[[policy.rule]]` tables match tool name + optional
-  bash prefix/regex with allow/deny and guidance; `[sandbox] enforcer`
+  bash prefix/regex with allow/deny/require and guidance; `[sandbox] enforcer`
   is `none` (default) or `feedback` (include guidance in denials). Decisions
   are audited in `policy_audit`. Bash matching is quote-aware but does **not**
   expand shell indirection — see [docs/plan.md](docs/plan.md).
@@ -194,6 +201,31 @@ name = "openai"
 base_url = "http://localhost:11434/v1"
 model = "qwen3:32b"
 ```
+
+### Named agent profiles
+
+Profiles are a **trust boundary** (system prompt, model, tools, sandbox), not
+just personality presets. With no `[agent.profile]` section, waffle behaves as
+today under the effective `main` profile — no migration required. See
+[`config.example.toml`](config.example.toml) for `main` / `researcher` /
+`reviewer` samples and [docs/plan.md](docs/plan.md) for composition with
+agent-group tiers (#33), repo `WAFFLE.md` (#53), action policy (#66), and
+subagent working-set broadcast (#68).
+
+```toml
+[agent.profile.reviewer]
+system = "You are a strict code reviewer."
+model = "default"   # or "utility" / an explicit model id
+sandbox = "docker"
+[agent.profile.reviewer.tools]
+allow = ["read_file", "search", "recall"]
+deny = ["bash", "write_file", "edit_file"]
+```
+
+Bind surfaces: `waffle session profile <channel:chat> <name>`,
+`waffle cron add … --profile name`, `waffle chat --profile name`,
+`waffle ws open owner/repo --profile name`. Repo policy can only tighten the
+selected profile.
 
 Start here:
 

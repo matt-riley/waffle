@@ -1,0 +1,3 @@
+name = "recall-planted-fact"
+description = "Deterministic offline seed eval: recall-planted-fact"
+tier = "deterministic"

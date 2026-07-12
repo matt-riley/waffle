@@ -37,10 +37,16 @@ type Policy struct {
 	DenyPrefixes []string
 	// Guidance is appended to action-level denial messages.
 	Guidance string
+	// Profile is the named agent profile enforcing this policy (#71).
+	// Included in tool-policy denial messages when set.
+	Profile string
 	// CheckAction, when set, runs after tool allow/deny and DenyPrefixes
 	// for finer-grained [[policy.rule]] evaluation (#66). Return a non-nil
 	// error to deny the call (message is shown to the model).
 	CheckAction func(ctx context.Context, name string, input json.RawMessage) error
+	// ObserveSuccess, when set, runs after a successful tool Run (#66).
+	// Used to record write/predicate events for action=require rules.
+	ObserveSuccess func(ctx context.Context, name string, input json.RawMessage)
 }
 
 // Permits reports whether the policy allows the named tool.
@@ -59,8 +65,10 @@ func (p Policy) Permits(name string) bool {
 }
 
 // IsZero reports whether the policy restricts nothing.
+// Profile alone does not make a policy non-zero (it only annotates denials).
 func (p Policy) IsZero() bool {
-	return len(p.Allow) == 0 && len(p.Deny) == 0 && len(p.DenyPrefixes) == 0 && p.CheckAction == nil
+	return len(p.Allow) == 0 && len(p.Deny) == 0 && len(p.DenyPrefixes) == 0 &&
+		p.CheckAction == nil && p.ObserveSuccess == nil
 }
 
 // Restrict applies a policy to a toolbox: denied tools disappear from Defs
@@ -90,7 +98,7 @@ func (r *restricted) Defs() []llm.Tool {
 
 func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
 	if !r.policy.Permits(name) {
-		return "", fmt.Errorf("tool %q is not permitted by policy", name)
+		return "", r.policy.denyTool(name)
 	}
 	if err := r.policy.checkCommand(name, input); err != nil {
 		return "", err
@@ -100,12 +108,16 @@ func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage
 			return "", err
 		}
 	}
-	return r.tb.Run(ctx, name, input)
+	out, err := r.tb.Run(ctx, name, input)
+	if err == nil && r.policy.ObserveSuccess != nil {
+		r.policy.ObserveSuccess(ctx, name, input)
+	}
+	return out, err
 }
 
 func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.RawMessage) (string, error) {
 	if !r.policy.Permits(name) {
-		return "", fmt.Errorf("tool %q is not permitted by policy", name)
+		return "", r.policy.denyTool(name)
 	}
 	if err := r.policy.checkCommand(name, input); err != nil {
 		return "", err
@@ -115,10 +127,31 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 			return "", err
 		}
 	}
+	var (
+		out string
+		err error
+	)
 	if tb, ok := r.tb.(CallerToolbox); ok {
-		return tb.RunWithID(ctx, id, name, input)
+		out, err = tb.RunWithID(ctx, id, name, input)
+	} else {
+		out, err = r.tb.Run(ctx, name, input)
 	}
-	return r.tb.Run(ctx, name, input)
+	if err == nil && r.policy.ObserveSuccess != nil {
+		r.policy.ObserveSuccess(ctx, name, input)
+	}
+	return out, err
+}
+
+// denyTool formats a tool-policy denial, including profile when set (#71).
+func (p Policy) denyTool(name string) error {
+	msg := fmt.Sprintf("tool %q is not permitted by policy", name)
+	if p.Profile != "" {
+		msg += fmt.Sprintf(" (profile %q)", p.Profile)
+	}
+	if p.Guidance != "" {
+		msg += " — " + p.Guidance
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // checkCommand enforces DenyPrefixes for bash (#66).
@@ -143,6 +176,9 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		}
 		if matchCommandPrefix(cmd, pref) {
 			msg := fmt.Sprintf("bash command denied by policy: prefix %q is not allowed", pref)
+			if p.Profile != "" {
+				msg += fmt.Sprintf(" (profile %q)", p.Profile)
+			}
 			if p.Guidance != "" {
 				msg += " — " + p.Guidance
 			}

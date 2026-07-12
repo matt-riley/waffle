@@ -59,18 +59,31 @@ opts in with a required MCP server.
 
 Code-intelligence MCP servers read arbitrary repo content and often run
 language tooling. They must **not** inherit the gateway's ambient environment
-or secrets:
+or secrets (#77 / #79):
 
-- Prefer `execution = "sandbox"` (workspace-scoped).
+- Prefer `execution = "sandbox"` (workspace-scoped restricted executor).
 - `env` is an allowlist of variable **names**; MCP children receive only
   `PATH` plus allowlisted values via `mcp.BuildProcessEnv` — never
   `os.Environ()`. Secret-like names (`TOKEN`, `SECRET`, `API_KEY`,
   `WAFFLE_AGE_IDENTITY`, …) are rejected for codeintel tool providers.
-- Host execution requires explicit `[codeintel] allow_host_mcp = true`.
-- **MCP-in-container is not wired yet.** When `execution = "sandbox"`,
-  waffle does **not** launch the MCP process on the host; the agent uses
-  the in-process `go/parser` text-fallback tools instead until full
-  MCP-in-sandbox lands. Host MCP is the restricted-env executor above.
+- **Every MCP launch** goes through `mcp.ConnectRestricted` (restricted
+  executor): allowlisted env only, optional working directory, no ambient
+  FD inheritance beyond stdio.
+- When `execution = "sandbox"`:
+  - **Host agent groups:** process runs on the host under
+    `ConnectRestricted` with `Dir` set to the workspace/work dir
+    (`Mode=restricted`).
+  - **Docker agent groups:** command is rewritten to
+    `docker run -i --rm --network none` (or `[sandbox] network`), with
+    `-v workDir:/work -w /work` when known, only allowlisted `-e` pairs
+    from `BuildProcessEnv`, and the sandbox image (`Mode=sandbox`).
+- Host execution (`execution = "host"`) still uses the restricted env path
+  but requires explicit `[codeintel] allow_host_mcp = true` for codeintel
+  servers. Docker agent groups additionally require `groups` to list that
+  group (explicit host opt-in).
+- If a codeintel MCP connect fails and `[codeintel] required` is false, the
+  agent keeps the in-process `go/parser` text-fallback tools. When required,
+  agent build fails.
 
 Repo policy (`WAFFLE.md`) may only **select host-approved capability IDs**
 from this list (`FilterCodeIntelCaps` + `ApprovedCapability`); it cannot

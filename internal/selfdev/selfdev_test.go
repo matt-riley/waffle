@@ -359,4 +359,61 @@ func TestDoctorIncludesSandboxChecksWhenDockerMode(t *testing.T) {
 		t.Error("sandbox runner should pass with configured binary")
 	}
 	// docker round-trip OK only when docker is available; do not require it.
+	// No MCP configured → informational check still present.
+	if _, ok := names["mcp servers"]; !ok {
+		t.Errorf("missing mcp servers check; got %v", names)
+	}
+}
+
+func TestDoctorReportsMCPExecutionAuthorities(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	cfg := `
+[[mcp]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+execution = "host"
+groups = ["main"]
+env = ["GITHUB_TOKEN"]
+
+[[mcp]]
+name = "codeintel"
+command = "true"
+execution = "sandbox"
+tools = ["definition"]
+`
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks, _, err := Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]string{}
+	for _, c := range checks {
+		if c.OK {
+			byName[c.Name] = c.Info
+		}
+	}
+	gh, ok := byName["mcp github authority"]
+	if !ok {
+		t.Fatalf("missing mcp github authority; checks=%v", byName)
+	}
+	if !strings.Contains(gh, "execution=host") || !strings.Contains(gh, "groups=main") || !strings.Contains(gh, "authority=host") {
+		t.Errorf("github authority info = %q", gh)
+	}
+	ci, ok := byName["mcp codeintel authority"]
+	if !ok {
+		t.Fatalf("missing mcp codeintel authority; checks=%v", byName)
+	}
+	if !strings.Contains(ci, "execution=sandbox") {
+		t.Errorf("codeintel authority info = %q", ci)
+	}
+	if !strings.Contains(ci, "authority=sandbox|restricted") {
+		t.Errorf("codeintel should report sandbox|restricted authority, got %q", ci)
+	}
+	if strings.Contains(ci, "not wired") {
+		t.Errorf("sandbox MCP is wired; stale note in %q", ci)
+	}
 }

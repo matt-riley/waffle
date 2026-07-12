@@ -461,6 +461,93 @@ max_iterations = 7
 	}
 }
 
+func TestProfileUtilityModelSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[provider]
+model = "main-model"
+utility_model = "cheap-model"
+
+[agent.profile.with-default]
+model = "default"
+system = "ok"
+
+[agent.profile.with-utility]
+model = "utility"
+system = "ok"
+
+[agent.profile.with-explicit]
+model = "claude-special"
+system = "ok"
+
+[agent.profile.empty-system]
+system = ""
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// default class
+	p, _ := cfg.Profile("with-default")
+	got, err := cfg.ResolveProfileModel(p)
+	if err != nil || got != "main-model" {
+		t.Fatalf("default → %q %v, want main-model", got, err)
+	}
+	// empty model also default
+	p, _ = cfg.Profile("empty-system")
+	got, err = cfg.ResolveProfileModel(p)
+	if err != nil || got != "main-model" {
+		t.Fatalf("empty model → %q %v", got, err)
+	}
+	// utility class
+	p, _ = cfg.Profile("with-utility")
+	got, err = cfg.ResolveProfileModel(p)
+	if err != nil || got != "cheap-model" {
+		t.Fatalf("utility → %q %v, want cheap-model", got, err)
+	}
+	// explicit
+	p, _ = cfg.Profile("with-explicit")
+	got, err = cfg.ResolveProfileModel(p)
+	if err != nil || got != "claude-special" {
+		t.Fatalf("explicit → %q %v", got, err)
+	}
+	// missing utility_model is a hard error
+	writeFile(t, path, `
+[provider]
+model = "main-model"
+
+[agent.profile.needs-util]
+model = "utility"
+`)
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ = cfg2.Profile("needs-util")
+	if _, err := cfg2.ResolveProfileModel(p); err == nil || !strings.Contains(err.Error(), "utility_model") {
+		t.Fatalf("want utility_model error, got %v", err)
+	}
+}
+
+func TestProfileEmptySystemAllowedMissingFileError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	// Explicit empty system is valid config.
+	writeFile(t, path, `
+[agent.profile.empty]
+system = ""
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := cfg.Profile("empty")
+	if !ok || p.System != "" {
+		t.Fatalf("empty profile = %+v ok=%v", p, ok)
+	}
+	// loadProfileSystem is in main; here we only assert config accepts system="".
+	// Missing prompt file is rejected at agent construction (see agent_group_test).
+}
+
 func TestIntakeConfigRejectsBadConcurrencyAndLabelRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `[[intake.github]]
@@ -536,6 +623,40 @@ action = "maybe"
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("bad action accepted")
+	}
+	// require without requires rejected.
+	writeFile(t, path, `
+[[policy.rule]]
+name = "need-tests"
+tool = "bash"
+match = "git commit"
+action = "require"
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("require without requires accepted")
+	}
+	// require with requires accepted.
+	writeFile(t, path, `
+[[policy.rule]]
+name = "go-test-green"
+tool = "bash"
+match = "go test"
+action = "allow"
+
+[[policy.rule]]
+name = "tests-before-commit"
+tool = "bash"
+match = "git commit"
+action = "require"
+requires = "go-test-green"
+guidance = "run go test after edits"
+`)
+	cfgReq, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfgReq.Policy.Rule) != 2 || cfgReq.Policy.Rule[1].Requires != "go-test-green" {
+		t.Fatalf("require rules = %+v", cfgReq.Policy.Rule)
 	}
 	// Bad enforcer rejected.
 	writeFile(t, path, "[sandbox]\nenforcer = \"hard\"\n")

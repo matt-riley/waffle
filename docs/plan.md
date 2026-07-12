@@ -159,10 +159,13 @@ and the host's proxy endpoints — never secrets, never the host filesystem.
 **Bind-mount / queue stress (#29).** Concurrent queue load is covered by
 `go test -tags=sandbox_stress ./internal/sandbox -run Stress` (optional env
 `WAFFLE_SANDBOX_STRESS=1`). That exercises the same SQLite inbound/outbound
-pair docker bind-mounts; it does not require Docker. `waffle doctor` checks
-the configured linux `runner_binary` when any tier uses docker mode, and
-skips a full container round-trip (image pull / daemon availability vary by
-host — treat docker smoke as a manual op).
+pair docker bind-mounts; it does not require Docker. With Docker available,
+`go test -tags=sandbox_docker ./internal/sandbox -run BindMount` runs the
+queue on a host path that is also bind-mounted into a container (skips if
+no daemon). See [docs/sandbox-queue.md](sandbox-queue.md). `waffle doctor`
+when any tier uses docker mode checks: linux `runner_binary`, host-FS queue
+round-trip, and (when the daemon is up) container + bind-mount write/read.
+MCP servers report execution authority (`host` / `sandbox|restricted`) as doctor checks.
 
 ### Repo workspaces ("work on this repo")
 
@@ -315,19 +318,74 @@ Optional `profile` on a job (#71) selects a named agent posture for that firing.
 
 ### Named agent profiles (#71)
 
-Profiles are a **trust boundary in config**, parallel to agent groups: each
-`[agent.profile.<slug>]` names system prompt, model, sandbox mode, and tool
-allow/deny for a posture (e.g. `reviewer`, `researcher`). Slugs are
-`[a-z0-9-]` up to 64 characters. With no profile section the effective posture
-is `main` (historical defaults). Deny always wins over allow, including
-`allow = ["*"]`. Unknown tool names in profile policies are rejected at load.
-Prompt files (`system = "@path.md"`) must resolve under `$WAFFLE_HOME`.
+Profiles are a **trust boundary in config**, not personality presets. Each
+`[agent.profile.<slug>]` names system prompt, model class, sandbox mode, tool
+allow/deny, and optional delegation allowlist for a posture (e.g. `reviewer`,
+`researcher`). Slugs are `[a-z0-9-]` up to 64 characters. With no profile
+section the effective posture is `main` (historical defaults — **no config
+migration required**; existing installs keep today's agent construction).
+Deny always wins over allow, including `allow = ["*"]`. Unknown tool names in
+profile policies are rejected at load. Prompt files (`system = "@path.md"`)
+must resolve under `$WAFFLE_HOME`; missing/unreadable/escaped paths are config
+errors at agent build. Explicit `system = ""` is allowed.
+
+Model selection on a profile:
+
+- `model = "default"` or omitted → `[provider].model`
+- `model = "utility"` → `[provider].utility_model` (error if unset)
+- any other value → explicit model id on the same provider
 
 `spawn_subagent` may pass `profile`; children can only **tighten** the parent
 toolbox. `allowed_children` on a parent profile limits which child profiles may
-be delegated. Channel groups bind a profile via
-`waffle session profile <channel:chat> <name>`; cron jobs accept
-`--profile name`.
+be delegated. Surface binds:
+
+| Surface | Bind |
+|---|---|
+| Channel groups | `waffle session profile <channel:chat> <name>` (audited) |
+| Cron jobs | `waffle cron add … --profile name` |
+| Chat REPL | `waffle chat --profile name` |
+| Repo workspaces | `waffle ws open owner/repo --profile name` (stored on workspace) |
+
+New channel groups default to empty profile → effective `main` via the profile
+registry. Runs record `profile` on `run_metrics`; tool-policy denials name the
+profile; channel profile rebinds write `profile_audit` (old, new, channel,
+chat, source, timestamp).
+
+**Relation to adjacent issues:**
+
+- **#33 (agent-group trust tiers):** groups (`main` / `group` / `cron` / `issue`)
+  are the *surface* trust tier (sandbox + baseline tool policy). Profiles are
+  *named postures* layered on top — a channel can be group-tier and still bind
+  `reviewer`. Profile tools cannot widen past the group ceiling when both apply.
+- **#53 (repo WAFFLE.md / AGENT.md):** repo policy is untrusted overlay. It may
+  only **tighten** the selected profile (allow-lists intersect; host/profile
+  deny always wins). A read-only profile cannot be escalated to host bash by
+  a malicious repo file.
+- **#66 (action-level policy):** `[[policy.rule]]` and deny prefixes compose
+  after profile tool allow/deny; denials can include profile name.
+- **#68 (working-set broadcast):** profile-targeted subagents still receive only
+  the read-only parent working-set snapshot; they never get `workspace_update`
+  or nested spawn.
+
+See `config.example.toml` for `main` / `researcher` / `reviewer` samples.
+
+### Working set & three memory/state layers (#67 / #70)
+
+**Three memory/state layers:**
+
+1. **Transcript** (session turns / SQLite history) — durable conversation
+   history and FTS recall across past turns and session summaries.
+2. **Working set** — active task state (goals, constraints, decisions,
+   assumptions, open questions) for the *current* session; maintained and
+   dropped with the session, not durable knowledge. Survives summarization
+   via `workspace_update` / pinned entries; idle maintenance may drop
+   unpinned model assumptions.
+3. **MEMORY.md** — durable owner knowledge across sessions (curated notes
+   with stable IDs, budgeted injection, `remember` / `memory_update` /
+   `recall` scope `notes`).
+
+Do not put transient task state in MEMORY.md, or durable preferences only
+in the working set.
 
 ### Subagent working-set broadcast (#68)
 
@@ -565,15 +623,35 @@ match = "rm -rf"          # quote-aware token prefix
 # regex = "^curl\\s+http:"  # optional raw-command regex
 action = "deny"
 guidance = "use safer cleanup"
+
+[[policy.rule]]
+name = "go-test-green"
+tool = "bash"
+match = "go test"
+action = "allow"          # successful match records a session event
+
+[[policy.rule]]
+name = "tests-before-commit"
+tool = "bash"
+match = "git commit"
+action = "require"
+requires = "go-test-green"
+guidance = "run `go test ./...` after your last edit and before committing"
 ```
 
-Unknown keys are rejected at load. Rules integrate with `tool.Restrict` /
-`restricted.Run` (after tool allow/deny and `deny_prefixes`). Bash matching
-splits the command respecting quotes; **shell indirection** (`eval`,
-variables, `$()`, aliases) is **not** expanded — prefix/regex policy is not
-a substitute for sandbox isolation. Decisions matching a rule are logged to
-`policy_audit` (session, rule, verdict). Layered trust: agent-group tool
-lists → action rules → sandbox executor.
+Unknown keys are rejected at load. Actions are `allow` | `deny` | `require`.
+A `require` rule blocks until its `requires` predicate event has occurred
+in-session after the most recent matching write (`write_file` / `edit_file`);
+successful allow-matched tools (and bash prefixes matching the requires key)
+record that event. Rules integrate with `tool.Restrict` / `restricted.Run`
+(after tool allow/deny and `deny_prefixes`); `ObserveSuccess` fires after a
+successful run. Bash matching splits the command respecting quotes; **shell
+indirection** (`eval`, variables, `$()`, aliases) is **not** expanded —
+prefix/regex policy is not a substitute for sandbox isolation. Decisions
+matching a rule are logged to `policy_audit` (session, rule, verdict).
+Subagent/workspace child policies may only *narrow* the parent (a child
+`allow` of a parent-denied match is rejected at construction). Layered
+trust: agent-group tool lists → action rules → sandbox executor.
 
 ## Decisions to make now
 

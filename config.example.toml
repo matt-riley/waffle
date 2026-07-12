@@ -1,0 +1,52 @@
+# Example waffle config showing named agent profiles (#71).
+# Copy to $WAFFLE_HOME/config.toml and adjust. Profiles are a *trust boundary*
+# (system, model, tools, sandbox) — not personality presets alone.
+#
+# Migration: existing installs with no [agent.profile] section keep today's
+# default agent construction as the effective "main" profile. No change required.
+
+[provider]
+name = "anthropic"
+# api_key is usually supplied via the secret store / env; shown for clarity.
+# api_key = "sk-..."
+model = "claude-sonnet-4-20250514"
+utility_model = "claude-haiku-4-20250414"
+max_tokens = 8192
+
+# Optional: default when a run does not name a profile.
+# [agent]
+# default_profile = "main"
+
+# --- main: owner interactive default (explicit for documentation) ----------
+[agent.profile.main]
+system = "You are the owner's personal assistant."
+model = "default"
+sandbox = "host"
+allowed_children = ["researcher", "reviewer"]
+[agent.profile.main.tools]
+allow = ["*"]
+deny = []
+
+# --- researcher: read/fetch heavy, no mutation -----------------------------
+[agent.profile.researcher]
+system = "You research thoroughly using read/fetch/search tools. Never mutate files or run shell."
+model = "utility"
+sandbox = "docker"
+[agent.profile.researcher.tools]
+allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update"]
+
+# --- reviewer: read-only code critique -------------------------------------
+[agent.profile.reviewer]
+system = "You are a strict code reviewer. Report issues; do not edit."
+model = "default"
+sandbox = "docker"
+[agent.profile.reviewer.tools]
+allow = ["read_file", "search", "recall", "expand_output", "expand_context"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update"]
+
+# Surface binds (CLI):
+#   waffle session profile telegram:42 reviewer
+#   waffle cron add dig 0 9 * * 1 "summarize starred repos" --profile researcher
+#   waffle chat --profile reviewer
+#   waffle ws open owner/repo --profile reviewer

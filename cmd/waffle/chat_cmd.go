@@ -53,6 +53,11 @@ type chat struct {
 	history   []llm.Message
 	persisted int // history[:persisted] is already in the database
 
+	// profileName is the named agent profile for this chat (#71); empty = main.
+	profileName string
+	// agentCleanup releases sandbox/MCP resources from the current agent.
+	agentCleanup func()
+
 	// workspace wiring, set up lazily by /repo.
 	cfg      config.Config
 	st       *store.Store
@@ -64,12 +69,22 @@ type chat struct {
 
 func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	continueLast := false
-	for _, a := range args {
-		switch a {
-		case "-c", "--continue":
+	profileName := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-c" || a == "--continue":
 			continueLast = true
+		case a == "--profile":
+			if i+1 >= len(args) {
+				return fmt.Errorf("usage: waffle chat [-c|--continue] [--profile name]")
+			}
+			i++
+			profileName = strings.TrimSpace(args[i])
+		case strings.HasPrefix(a, "--profile="):
+			profileName = strings.TrimSpace(strings.TrimPrefix(a, "--profile="))
 		default:
-			return fmt.Errorf("usage: waffle chat [-c|--continue]")
+			return fmt.Errorf("usage: waffle chat [-c|--continue] [--profile name]")
 		}
 	}
 
@@ -82,8 +97,16 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			err = cerr
 		}
 	}()
+	if profileName != "" {
+		if !config.ValidProfileName(profileName) && profileName != "main" {
+			return fmt.Errorf("invalid profile name %q", profileName)
+		}
+		if _, ok := cfg.Profile(profileName); !ok {
+			return fmt.Errorf("unknown agent profile %q", profileName)
+		}
+	}
 
-	c, cleanup, err := newChat(ctx, cfg, st, continueLast)
+	c, cleanup, err := newChat(ctx, cfg, st, continueLast, profileName)
 	if err != nil {
 		cleanup()
 		return err
@@ -240,6 +263,8 @@ func (c *chat) finish(ctx context.Context, stdout io.Writer) {
 // repoCommand opens (or resumes) a repo workspace and points the agent's
 // tools at its container. The chat switches to the workspace's session so
 // the conversation and the repo work live together.
+// Workspace profile (set via `ws open --profile`) overrides chat --profile
+// for this session; repo WAFFLE.md may only tighten the selected profile (#71/#53).
 func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer) error {
 	if repoArg == "" {
 		return errors.New("usage: /repo <owner/repo>")
@@ -254,7 +279,9 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 
 	mgr := newWorkspaceManager(c.cfg, c.st, c.wsBroker)
 	mgr.BrokerURL = c.wsURL
-	ws, client, err := mgr.Open(ctx, repoArg)
+	// Prefer chat profile when opening a new workspace so association is
+	// durable; resume paths keep the stored workspace profile.
+	ws, client, err := mgr.OpenWithProfile(ctx, repoArg, c.profileName)
 	if err != nil {
 		return err
 	}
@@ -263,10 +290,49 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 	}
 	c.wsClient = client
 
-	// Repo policy: untrusted body → system prompt; tools/egress already
-	// tightened on the manager during Open. Re-load for tool policy here (#53).
+	// Profile for this workspace run: workspace bind wins, else chat flag.
+	profileName := c.profileName
+	if ws.Profile != "" {
+		profileName = ws.Profile
+	}
+	// Rebuild from profile so toolbox/system match; then tighten with repo policy.
+	if profileName != "" && profileName != c.agent.Profile {
+		memWS, skills, loadErr := loadWorkspaceWithStore(c.st)
+		if loadErr != nil {
+			return loadErr
+		}
+		built, builtCleanup, buildErr := buildAgentWithProfile(ctx, c.cfg, memWS, skills, c.sessions, config.GroupMain, profileName)
+		if buildErr != nil {
+			return buildErr
+		}
+		if c.agentCleanup != nil {
+			c.agentCleanup()
+		}
+		c.agentCleanup = builtCleanup
+		c.agent = built
+		c.profileName = profileName
+	}
+
+	// Host (profile) tool policy is the ceiling; repo policy can only tighten.
 	hostPol := c.cfg.AgentPolicy(config.GroupMain)
-	toolPol := tool.Policy{Allow: hostPol.Allow, Deny: hostPol.Deny}
+	if profileName != "" {
+		if p, ok := c.cfg.Profile(profileName); ok {
+			if len(p.Tools.Allow) > 0 {
+				hostPol.Allow = p.Tools.Allow
+			}
+			if len(p.Tools.Deny) > 0 {
+				hostPol.Deny = appendUniqueStrings(hostPol.Deny, p.Tools.Deny...)
+			}
+		}
+	}
+	toolPol := tool.Policy{
+		Allow:   hostPol.Allow,
+		Deny:    hostPol.Deny,
+		Profile: c.agent.Profile,
+	}
+	if toolPol.Profile == "" {
+		toolPol.Profile = "main"
+	}
 	sysExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo)
 	if p, perr := mgr.LoadRepoPolicy(ctx, client); perr != nil {
 		return perr
@@ -284,15 +350,18 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 	hostTools := tool.Restrict(c.agent.Tools, toolPol)
 	boxed := tool.Restrict(tool.Combine(sandbox.NewQueueToolbox(client), hostTools), toolPol)
 	c.agent = &agent.Agent{
-		Provider:  c.agent.Provider,
-		Tools:     boxed,
-		System:    c.agent.System + sysExtra,
-		Model:     c.agent.Model,
-		MaxTokens: c.agent.MaxTokens,
-		Redact:    c.agent.Redact,
-		Spill:     c.agent.Spill,
-		Usage:     c.agent.Usage,
-		Limits:    c.agent.Limits,
+		Provider:      c.agent.Provider,
+		Tools:         boxed,
+		System:        c.agent.System + sysExtra,
+		Model:         c.agent.Model,
+		UtilityModel:  c.agent.UtilityModel,
+		Profile:       c.agent.Profile,
+		MaxTokens:     c.agent.MaxTokens,
+		MaxIterations: c.agent.MaxIterations,
+		Redact:        c.agent.Redact,
+		Spill:         c.agent.Spill,
+		Usage:         c.agent.Usage,
+		Limits:        c.agent.Limits,
 	}
 
 	// Continue the workspace's own session.
@@ -300,7 +369,11 @@ func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer
 	if err := c.switchToWorkspaceSession(ctx, ws.SessionID); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "(workspace %s: %s at /work/repo, image %s — session %s)\n", ws.ID, ws.Repo, ws.Image, ws.SessionID)
+	profNote := ""
+	if c.agent.Profile != "" && c.agent.Profile != "main" {
+		profNote = fmt.Sprintf(" profile=%s", c.agent.Profile)
+	}
+	fmt.Fprintf(stdout, "(workspace %s: %s at /work/repo, image %s — session %s%s)\n", ws.ID, ws.Repo, ws.Image, ws.SessionID, profNote)
 	return nil
 }
 
@@ -371,7 +444,7 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 	return cfg, st, nil
 }
 
-func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool) (*chat, func(), error) {
+func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool, profileName string) (*chat, func(), error) {
 	cleanup := func() {}
 	ws, skills, err := loadWorkspaceWithStore(st)
 	if err != nil {
@@ -379,12 +452,13 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 	}
 	sessions := session.New(st)
 
-	a, cleanup, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupMain)
+	a, agentCleanup, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupMain, profileName)
 	if err != nil {
 		return nil, cleanup, err
 	}
+	cleanup = agentCleanup
 
-	c := &chat{agent: a, sessions: sessions, skills: skills, cfg: cfg, st: st}
+	c := &chat{agent: a, sessions: sessions, skills: skills, cfg: cfg, st: st, profileName: profileName, agentCleanup: agentCleanup}
 	if continueLast {
 		if c.current, err = sessions.Latest(ctx); err != nil && !errors.Is(err, session.ErrNotFound) {
 			return nil, cleanup, err
@@ -416,7 +490,11 @@ func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, ski
 func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string) (*agent.Agent, func(), error) {
 	cleanup := func() {}
 	pol := cfg.AgentPolicy(group)
-	profile, _ := cfg.Profile(profileName)
+	profileName = strings.TrimSpace(profileName)
+	profile, ok := cfg.Profile(profileName)
+	if profileName != "" && profileName != "main" && !ok {
+		return nil, cleanup, fmt.Errorf("unknown agent profile %q", profileName)
+	}
 	if profile.Sandbox != "" {
 		pol.Mode = profile.Sandbox
 	}
@@ -436,19 +514,27 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	if profile.Tools.Guidance != "" {
 		guidance = profile.Tools.Guidance
 	}
+	// Effective profile name for denials/logs (empty → main).
+	effectiveProfile := strings.TrimSpace(profileName)
+	if effectiveProfile == "" {
+		effectiveProfile = "main"
+	}
 	toolPolicy := tool.Policy{
 		Allow:        pol.Allow,
 		Deny:         pol.Deny,
 		DenyPrefixes: denyPrefixes,
 		Guidance:     guidance,
+		Profile:      effectiveProfile,
 	}
 	// Action-level [[policy.rule]] evaluation + optional policy_audit (#66).
+	// require rules use a shared SessionEvents log (write → predicate → allow).
 	if policyRules := cfg.Policy.PolicyRules(); len(policyRules) > 0 {
 		rules := make([]policypkg.Rule, 0, len(policyRules))
 		for _, r := range policyRules {
 			rules = append(rules, policypkg.Rule{
 				Name: r.Name, Tool: r.Tool, Match: r.Match,
-				Regex: r.Regex, Action: r.Action, Guidance: r.Guidance,
+				Regex: r.Regex, Action: r.Action, Requires: r.Requires,
+				Guidance: r.Guidance,
 			})
 		}
 		engine := policypkg.NewEngineFromStore(&store.Store{DB: sessions.DB()}, rules, cfg.Sandbox.Enforcer)
@@ -458,6 +544,9 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 				return fmt.Errorf("%s", d.Message)
 			}
 			return nil
+		}
+		toolPolicy.ObserveSuccess = func(ctx context.Context, name string, input json.RawMessage) {
+			engine.ObserveSuccess(session.IDFromContext(ctx), name, input)
 		}
 	}
 	apiKey, redact, err := resolveAPIKey(cfg.Provider)
@@ -515,19 +604,19 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 
 	// Optional code intelligence (#79): in-process text-fallback tools.
 	// Absence is fine — agent keeps search/read. MCP codeintel servers are
-	// validated at config load (sandbox + no secret env). Sandbox MCP launch
-	// is not wired yet — execution=sandbox codeintel degrades to this
-	// go/parser fallback (see docs/code-intelligence.md).
+	// validated at config load and launched via ConnectRestricted (#77);
+	// when MCP is unavailable the agent keeps this go/parser fallback
+	// (see docs/code-intelligence.md).
 	var codeTools tool.Toolbox
+	codeIntelRoot := cfg.CodeIntel.Root
+	if codeIntelRoot == "" {
+		codeIntelRoot = cfg.Sandbox.WorkDir
+	}
+	if codeIntelRoot == "" {
+		codeIntelRoot, _ = os.Getwd()
+	}
 	if cfg.CodeIntelEnabled() {
-		root := cfg.CodeIntel.Root
-		if root == "" {
-			root = cfg.Sandbox.WorkDir
-		}
-		if root == "" {
-			root, _ = os.Getwd()
-		}
-		svc := codeintel.NewService(root, "", "")
+		svc := codeintel.NewService(codeIntelRoot, "", "")
 		codeTools = codeintel.Toolbox(svc)
 	} else if cfg.CodeIntel.Required {
 		return nil, cleanup, fmt.Errorf("codeintel.required but codeintel.enabled is false")
@@ -571,7 +660,14 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 
 	boxes := []tool.Toolbox{execTools, hostTools}
 	// MCP before codeintel fallback so a real language server wins on name clash.
-	// MCP servers contribute their tools (the long tail).
+	// MCP servers contribute their tools (the long tail). All launches use the
+	// #77 restricted executor (ConnectRestricted / BuildProcessEnv) — never
+	// ambient gateway env. execution=sandbox docker-wraps when the agent group
+	// is docker mode; host-mode groups use ConnectRestricted with work dir.
+	workDir := cfg.Sandbox.WorkDir
+	if workDir == "" {
+		workDir = codeIntelRoot
+	}
 	for _, s := range cfg.MCP {
 		if !mcpServerInGroup(s, group) || !mcpServerPermitted(s, toolPolicy) {
 			continue
@@ -581,32 +677,42 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			execution = "host"
 		}
 		isCodeIntel := strings.HasPrefix(strings.ToLower(s.Name), "codeintel") || mcpDeclaresCodeIntel(s.Tools)
-		if execution == "sandbox" {
-			// MCP-in-container is not wired yet (#79 / #77). Code-intelligence
-			// servers degrade to the in-process go/parser fallback already
-			// registered above; other servers fail closed (no ambient host launch).
-			if isCodeIntel {
+
+		// Host execution (including empty default) on a docker agent group
+		// requires explicit opt-in: execution must be the literal "host" and
+		// groups must include this group. Sandbox execution is the intended
+		// path for docker groups (#77 / #79).
+		if execution == "host" {
+			if isCodeIntel && !cfg.CodeIntel.AllowHostMCP {
+				return nil, cleanup, fmt.Errorf("mcp %q: code-intelligence host launch requires [codeintel] allow_host_mcp = true", s.Name)
+			}
+			if pol.Mode == "docker" && (s.Execution != "host" || !slices.Contains(s.Groups, group)) {
+				return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
+			}
+		}
+
+		srv := mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env}
+		network := cfg.Sandbox.Network
+		if network == "" {
+			network = "none"
+		}
+		launch, ropts := mcp.PlanLaunch(srv, execution, pol.Mode, workDir, cfg.Sandbox.Image, network)
+		client, err := mcp.ConnectRestricted(ctx, launch, ropts)
+		if err != nil {
+			// Codeintel MCP is optional unless required: degrade to go/parser
+			// fallback already registered above. Other servers fail closed.
+			if isCodeIntel && !cfg.CodeIntel.Required {
 				continue
 			}
-			return nil, cleanup, fmt.Errorf("mcp %q: sandbox execution is not available; refusing to launch it", s.Name)
-		}
-		// Host launch for codeintel requires allow_host_mcp (enforced at config
-		// load). Restricted executor: only declared Env allowlist + PATH — never
-		// os.Environ() (mcp.Connect / BuildProcessEnv).
-		if isCodeIntel && !cfg.CodeIntel.AllowHostMCP {
-			return nil, cleanup, fmt.Errorf("mcp %q: code-intelligence host launch requires [codeintel] allow_host_mcp = true", s.Name)
-		}
-		if pol.Mode == "docker" && (s.Execution != "host" || !slices.Contains(s.Groups, group)) {
-			return nil, cleanup, fmt.Errorf("mcp %q: docker group %q requires explicit host opt-in (execution = \"host\" and groups includes %q)", s.Name, group, group)
-		}
-		// Env is an allowlist of variable *names*; Connect never inherits ambient secrets.
-		client, err := mcp.Connect(ctx, mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
-		if err != nil {
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
 		}
 		closers = append(closers, func() { _ = client.Close() })
 		tb, err := client.Toolbox(ctx)
 		if err != nil {
+			_ = client.Close()
+			if isCodeIntel && !cfg.CodeIntel.Required {
+				continue
+			}
 			return nil, cleanup, fmt.Errorf("mcp %q tools: %w", s.Name, err)
 		}
 		boxes = append(boxes, tb)
@@ -615,9 +721,10 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		boxes = append(boxes, codeTools)
 	}
 
-	model := cfg.Provider.Model
-	if profile.Model != "" {
-		model = profile.Model
+	// Model selection: default | utility | explicit (#71).
+	model, err := cfg.ResolveProfileModel(profile)
+	if err != nil {
+		return nil, cleanup, err
 	}
 	maxTokens := cfg.Provider.MaxTokens
 	if profile.MaxTokens > 0 {
@@ -678,6 +785,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		System:        sys,
 		Model:         model,
 		UtilityModel:  cfg.Provider.UtilityModel,
+		Profile:       effectiveProfile,
 		MaxTokens:     maxTokens,
 		MaxIterations: maxIter,
 		Redact:        redact,
@@ -803,17 +911,27 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 		if name == "" || name == "main" {
 			continue
 		}
-		pol := tool.Policy{Allow: p.Tools.Allow, Deny: append(append([]string{}, p.Tools.Deny...), parentDeny...)}
+		pol := tool.Policy{
+			Allow:   p.Tools.Allow,
+			Deny:    append(append([]string{}, p.Tools.Deny...), parentDeny...),
+			Profile: name,
+		}
 		sys := p.System
 		if strings.HasPrefix(sys, "@") || strings.HasSuffix(sys, ".md") {
 			if loaded, err := loadProfileSystem(sys); err == nil {
 				sys = loaded
 			}
 		}
+		model, err := cfg.ResolveProfileModel(p)
+		if err != nil {
+			// Skip profiles that cannot resolve model; spawn will report unknown/error
+			// if selected. Prefer fail-open registry over failing parent build.
+			model = p.Model
+		}
 		cp := agent.ChildProfile{
 			Name:   name,
 			System: sys,
-			Model:  p.Model,
+			Model:  model,
 			Tools:  pol,
 		}
 		if p.MaxTokens > 0 {

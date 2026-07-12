@@ -237,10 +237,15 @@ func (p *Policy) PromptBlock() string {
 // Repo allow-lists can only narrow an existing host allow-list (or introduce
 // an allow-list when the host had none, which is still a tightening). Tools
 // the host denies cannot be re-enabled by the repo.
+// Host Profile/Guidance/DenyPrefixes are preserved for audit (#71).
 func TightenTools(host tool.Policy, repo ToolFilter) tool.Policy {
 	out := tool.Policy{
-		Allow: append([]string(nil), host.Allow...),
-		Deny:  append([]string(nil), host.Deny...),
+		Allow:        append([]string(nil), host.Allow...),
+		Deny:         append([]string(nil), host.Deny...),
+		DenyPrefixes: append([]string(nil), host.DenyPrefixes...),
+		Guidance:     host.Guidance,
+		Profile:      host.Profile,
+		CheckAction:  host.CheckAction,
 	}
 	// Host deny is authoritative: never drop a host deny entry.
 	for _, d := range repo.Deny {

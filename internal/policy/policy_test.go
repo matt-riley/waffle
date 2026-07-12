@@ -142,3 +142,122 @@ func TestAllowWhenNoMatch(t *testing.T) {
 		t.Fatal("expected allow")
 	}
 }
+
+func TestTestsBeforeCommitRequireE2E(t *testing.T) {
+	// Full tests-before-commit scenario (#66):
+	// edit → commit blocked → test passes → commit allowed → write again → commit denied.
+	e := NewEngine([]Rule{
+		{
+			Name:   "go-test-green",
+			Tool:   "bash",
+			Match:  "go test",
+			Action: ActionAllow,
+		},
+		{
+			Name:     "tests-before-commit",
+			Tool:     "bash",
+			Match:    "git commit",
+			Action:   ActionRequire,
+			Requires: "go-test-green",
+			Guidance: "run `go test ./...` after your last edit and before committing",
+		},
+	}, EnforcerFeedback)
+	const sess = "sess-require-e2e"
+	commitIn := json.RawMessage(`{"command":"git commit -m ok"}`)
+	testIn := json.RawMessage(`{"command":"go test ./..."}`)
+	writeIn := json.RawMessage(`{"path":"x.go","content":"package x"}`)
+
+	// 1. Simulate write_file success → Observe
+	e.ObserveSuccess(sess, "write_file", writeIn)
+
+	// 2. git commit Check → denied
+	d := e.CheckSession(sess, "bash", commitIn)
+	if d.Allowed {
+		t.Fatal("commit should be blocked after write without tests")
+	}
+	if !strings.Contains(d.Message, "tests-before-commit") {
+		t.Fatalf("deny message missing rule name: %q", d.Message)
+	}
+	if !strings.Contains(d.Message, "go test") {
+		t.Fatalf("deny message missing guidance: %q", d.Message)
+	}
+
+	// 3. go test success → Observe
+	e.ObserveSuccess(sess, "bash", testIn)
+
+	// 4. git commit Check → allowed
+	d = e.CheckSession(sess, "bash", commitIn)
+	if !d.Allowed {
+		t.Fatalf("commit should be allowed after green tests: %q", d.Message)
+	}
+
+	// 5. write again → commit denied again
+	e.ObserveSuccess(sess, "edit_file", writeIn)
+	d = e.CheckSession(sess, "bash", commitIn)
+	if d.Allowed {
+		t.Fatal("commit should be blocked again after subsequent edit")
+	}
+}
+
+func TestChildPolicyCannotWidenParent(t *testing.T) {
+	parent := []Rule{{
+		Name:   "no-curl",
+		Tool:   "bash",
+		Match:  "curl",
+		Action: ActionDeny,
+	}}
+	child := []Rule{{
+		Name:   "allow-curl",
+		Tool:   "bash",
+		Match:  "curl",
+		Action: ActionAllow,
+	}}
+	_, err := Narrow(parent, child)
+	if err == nil {
+		t.Fatal("expected child allow of parent-denied match to be rejected")
+	}
+	if !strings.Contains(err.Error(), "allow-curl") || !strings.Contains(err.Error(), "no-curl") {
+		t.Fatalf("error should name both rules: %v", err)
+	}
+
+	// Child denying further is fine (narrowing).
+	narrower := []Rule{{
+		Name:   "no-wget",
+		Tool:   "bash",
+		Match:  "wget",
+		Action: ActionDeny,
+	}}
+	merged, err := Narrow(parent, narrower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 2 {
+		t.Fatalf("merged len = %d", len(merged))
+	}
+
+	// Parent tool-only deny: child cannot allow that tool.
+	parentTool := []Rule{{Name: "no-bash", Tool: "bash", Action: ActionDeny}}
+	childAllow := []Rule{{Name: "yes-bash", Tool: "bash", Match: "echo", Action: ActionAllow}}
+	if _, err := Narrow(parentTool, childAllow); err == nil {
+		t.Fatal("child allow of parent-denied tool should fail")
+	}
+}
+
+func TestSessionEventsSatisfiedSinceWrite(t *testing.T) {
+	ev := NewSessionEvents()
+	if ev.SatisfiedSinceWrite("s", "k") {
+		t.Fatal("empty should be unsatisfied")
+	}
+	ev.NoteSatisfy("s", "k")
+	if !ev.SatisfiedSinceWrite("s", "k") {
+		t.Fatal("satisfy without write should hold")
+	}
+	ev.NoteWrite("s")
+	if ev.SatisfiedSinceWrite("s", "k") {
+		t.Fatal("write invalidates prior satisfy")
+	}
+	ev.NoteSatisfy("s", "k")
+	if !ev.SatisfiedSinceWrite("s", "k") {
+		t.Fatal("re-satisfy after write should hold")
+	}
+}
