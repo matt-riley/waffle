@@ -39,6 +39,8 @@ type Config struct {
 	Jobs      JobPolicy   `toml:"jobs"`
 	Tools     Tools       `toml:"tools"`
 	Memory    Memory      `toml:"memory"`
+	// Intake is board-driven GitHub issue watchers under waffle serve (#51).
+	Intake Intake `toml:"intake"`
 }
 
 // JobPolicy controls retries for unattended scheduled jobs. Durations use
@@ -140,10 +142,12 @@ type ToolPolicy struct {
 
 // GroupCron is the reserved group name for scheduled (cron) sessions, the
 // plan's canonical "risky context": unattended and often driven by external
-// content. GroupMain is the owner's interactive sessions.
+// content. GroupIssue is board-driven issue intake (#51), similarly untrusted.
+// GroupMain is the owner's interactive sessions.
 const (
-	GroupMain = "main"
-	GroupCron = "cron"
+	GroupMain  = "main"
+	GroupCron  = "cron"
+	GroupIssue = "issue"
 )
 
 // AgentPolicy resolves the effective sandbox mode and tool policy for a group.
@@ -178,9 +182,9 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 			r.Deny = g.Tools.Deny
 		}
 	}
-	// The unattended cron tier denies host bash by default; only an explicit
-	// cron tool policy opts out of that safety default.
-	if group == GroupCron && !explicitTools {
+	// Unattended tiers deny host bash and durable memory writes by default;
+	// only an explicit tool policy for that group opts out.
+	if (group == GroupCron || group == GroupIssue) && !explicitTools {
 		r.Deny = appendUnique(r.Deny, "bash")
 		r.Deny = appendUnique(r.Deny, "remember")
 		r.Deny = appendUnique(r.Deny, "distill_skill")
@@ -266,6 +270,36 @@ type Workspace struct {
 	Allowlist   []string `toml:"allowlist"`
 	IdleTimeout string   `toml:"idle_timeout"`
 	CloseTTL    string   `toml:"close_ttl"`
+	// Hooks are optional container shell commands at lifecycle points (#54).
+	Hooks WorkspaceHooks `toml:"hooks"`
+}
+
+// WorkspaceHooks are host-configured lifecycle commands (also overridable
+// per-repo via WAFFLE.md once #53 is present). Commands run inside the
+// workspace container, never on the host.
+type WorkspaceHooks struct {
+	AfterCreate  string `toml:"after_create"`
+	BeforeRun    string `toml:"before_run"`
+	AfterRun     string `toml:"after_run"`
+	BeforeRemove string `toml:"before_remove"`
+	// Timeout bounds each hook (Go duration); empty defaults to 5m.
+	Timeout string `toml:"timeout"`
+}
+
+// Intake configures board-driven GitHub issue watchers (#51).
+type Intake struct {
+	GitHub []GitHubWatch `toml:"github"`
+}
+
+// GitHubWatch is one per-repo issue watcher.
+type GitHubWatch struct {
+	Repo           string `toml:"repo"`
+	Label          string `toml:"label"`
+	MaxConcurrency int    `toml:"max_concurrency"`
+	Deliver        string `toml:"deliver"`
+	PollInterval   string `toml:"poll_interval"`
+	// Token is a secret:// reference or empty to use GITHUB_TOKEN / gh default.
+	Token string `toml:"token"`
 }
 
 // Store controls retention of conversation data. Zero means retain forever.
@@ -479,8 +513,31 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("mcp %q: execution must be \"host\" or \"sandbox\", got %q", s.Name, s.Execution)
 		}
 	}
+	if cfg.Workspace.Hooks.Timeout != "" {
+		if d, err := ParseDuration(cfg.Workspace.Hooks.Timeout); err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("workspace.hooks.timeout must be a positive duration, got %q", cfg.Workspace.Hooks.Timeout)
+		}
+	}
+	for i, w := range cfg.Intake.GitHub {
+		if w.Repo == "" {
+			return Config{}, fmt.Errorf("intake.github[%d]: repo is required", i)
+		}
+		if !repoRE.MatchString(w.Repo) {
+			return Config{}, fmt.Errorf("intake.github[%d]: repo must be owner/name, got %q", i, w.Repo)
+		}
+		if w.MaxConcurrency < 1 {
+			return Config{}, fmt.Errorf("intake.github[%d]: max_concurrency must be at least 1", i)
+		}
+		if w.PollInterval != "" {
+			if d, err := ParseDuration(w.PollInterval); err != nil || d <= 0 {
+				return Config{}, fmt.Errorf("intake.github[%d]: poll_interval must be a positive duration, got %q", i, w.PollInterval)
+			}
+		}
+	}
 	return cfg, nil
 }
+
+var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 
 func validateLimits(l Limits) error {
 	if l.TokensPerDay < 0 || l.RequestsPerHour < 0 {

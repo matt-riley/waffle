@@ -153,11 +153,54 @@ func TestAgentPolicyDefaults(t *testing.T) {
 	if !contains(cron.Deny, "bash") {
 		t.Errorf("cron deny = %v, want it to include bash", cron.Deny)
 	}
+	// Issue intake shares the restricted unattended defaults (#51).
+	issue := cfg.AgentPolicy(GroupIssue)
+	if !contains(issue.Deny, "bash") || !contains(issue.Deny, "remember") || !contains(issue.Deny, "distill_skill") {
+		t.Errorf("issue deny = %v, want bash/remember/distill_skill", issue.Deny)
+	}
 
 	// An unknown group falls back to the global sandbox policy (no bash deny).
 	other := cfg.AgentPolicy("adhoc")
 	if contains(other.Deny, "bash") {
 		t.Errorf("unknown group denied bash unexpectedly: %v", other.Deny)
+	}
+}
+
+func TestIntakeAndHooksConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[[intake.github]]
+repo = "acme/widgets"
+label = "agent-ok"
+max_concurrency = 2
+deliver = "telegram:1"
+poll_interval = "30s"
+
+[workspace.hooks]
+after_create = "go mod download"
+before_run = "git status"
+timeout = "2m"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Intake.GitHub) != 1 || cfg.Intake.GitHub[0].Repo != "acme/widgets" || cfg.Intake.GitHub[0].MaxConcurrency != 2 {
+		t.Fatalf("intake = %#v", cfg.Intake)
+	}
+	if cfg.Workspace.Hooks.AfterCreate != "go mod download" || cfg.Workspace.Hooks.Timeout != "2m" {
+		t.Fatalf("hooks = %#v", cfg.Workspace.Hooks)
+	}
+}
+
+func TestIntakeConfigRejectsBadRepo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `[[intake.github]]
+repo = "not-a-repo"
+max_concurrency = 1
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid repo error")
 	}
 }
 

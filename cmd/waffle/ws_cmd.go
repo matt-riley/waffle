@@ -11,6 +11,7 @@ import (
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/gitcred"
+	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/workspace"
@@ -162,12 +163,28 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	mgr.CPUs = cfg.Sandbox.CPUs
 	mgr.PIDs = cfg.Sandbox.PIDs
 	mgr.Disk = cfg.Sandbox.Disk
+	mgr.Hooks = workspaceHooksFromConfig(cfg)
 	if b != nil {
 		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return b.Mint(ctx, sessionID) }
 		mgr.RevokeSession = b.RevokeSession
 		mgr.BindGitScope = b.BindGitRepo
 	}
 	return mgr
+}
+
+func workspaceHooksFromConfig(cfg config.Config) hooks.Config {
+	h := hooks.Config{
+		AfterCreate:  cfg.Workspace.Hooks.AfterCreate,
+		BeforeRun:    cfg.Workspace.Hooks.BeforeRun,
+		AfterRun:     cfg.Workspace.Hooks.AfterRun,
+		BeforeRemove: cfg.Workspace.Hooks.BeforeRemove,
+	}
+	if cfg.Workspace.Hooks.Timeout != "" {
+		if d, err := config.ParseDuration(cfg.Workspace.Hooks.Timeout); err == nil {
+			h.Timeout = d
+		}
+	}
+	return h
 }
 
 // startWorkspaceBroker runs the credential broker for workspace git auth

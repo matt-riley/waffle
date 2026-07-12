@@ -18,7 +18,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/id"
+	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -41,10 +43,12 @@ type Workspace struct {
 	Container  string
 	Volume     string
 	SessionID  string
-	Status     string // open | idle | closed
+	Status     string // open | idle | closed | failed
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	LastActive time.Time
+	// HookLog accumulates hook stdout/stderr for session debuggability (#54).
+	HookLog []hooks.Result
 }
 
 // Statuses.
@@ -52,6 +56,7 @@ const (
 	StatusOpen   = "open"
 	StatusIdle   = "idle"
 	StatusClosed = "closed"
+	StatusFailed = "failed"
 )
 
 // Manager owns workspace lifecycle.
@@ -90,6 +95,9 @@ type Manager struct {
 	BindGitScope func(sessionID, repo string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
+	// Hooks are host-configured lifecycle commands (#54). Merged with
+	// repo-declared hooks from WAFFLE.md when present.
+	Hooks hooks.Config
 
 	// ensureOnce ensures the active-repo index is created only once per
 	// Manager (process lifetime) to avoid repeated DDL in hot path.
@@ -234,6 +242,20 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		}
 	}
 
+	// after_create hooks run inside the container; failure marks the
+	// workspace failed and refuses to hand it out as usable (#54).
+	if res, err := m.runHook(ctx, client, hooks.AfterCreate); err != nil {
+		ws.Status = StatusFailed
+		ws.HookLog = append(ws.HookLog, res)
+		_ = client.Close()
+		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
+		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+		m.revokeSession(sess.ID)
+		return nil, nil, err
+	} else if res.Output != "" || res.Err != nil {
+		ws.HookLog = append(ws.HookLog, res)
+	}
+
 	if _, err := m.DB.ExecContext(ctx, `
 		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -317,6 +339,52 @@ func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) 
 		return fmt.Errorf("%s: %s", cmd, strings.TrimSpace(out))
 	}
 	return nil
+}
+
+// hookConfig merges host hooks with a repo-declared WAFFLE.md/AGENT.md, if readable
+// from the container at /work/repo.
+func (m *Manager) hookConfig(ctx context.Context, client *sandbox.Client) hooks.Config {
+	cfg := m.Hooks
+	raw, err := m.bashOutput(ctx, client, "cat /work/repo/WAFFLE.md 2>/dev/null || cat /work/repo/AGENT.md 2>/dev/null || true")
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return cfg
+	}
+	p, err := repopolicy.Parse(raw)
+	if err != nil {
+		// Present-but-unparsable policy is fatal at open for sessions that
+		// load policy; for hooks merge we skip invalid repo hooks only.
+		return cfg
+	}
+	repo := hooks.Config{
+		AfterCreate:  p.Hooks.AfterCreate,
+		BeforeRun:    p.Hooks.BeforeRun,
+		AfterRun:     p.Hooks.AfterRun,
+		BeforeRemove: p.Hooks.BeforeRemove,
+	}
+	if p.Hooks.Timeout != "" {
+		if d, err := time.ParseDuration(p.Hooks.Timeout); err == nil {
+			repo.Timeout = d
+		}
+	}
+	return hooks.Merge(cfg, repo)
+}
+
+// runHook executes one lifecycle hook inside the workspace container.
+func (m *Manager) runHook(ctx context.Context, client *sandbox.Client, point hooks.Point) (hooks.Result, error) {
+	cfg := m.hookConfig(ctx, client)
+	ex := hooks.ClientExecutor{Exec: func(ctx context.Context, name string, input json.RawMessage) (string, bool, error) {
+		return client.Exec(ctx, name, input)
+	}}
+	res := hooks.Run(ctx, ex, cfg, point)
+	if res.Err != nil && hooks.Fatal(point) {
+		return res, res.Err
+	}
+	return res, nil
+}
+
+// RunHook is the public entry for before_run / after_run during issue intake.
+func (m *Manager) RunHook(ctx context.Context, client *sandbox.Client, point hooks.Point) (hooks.Result, error) {
+	return m.runHook(ctx, client, point)
 }
 
 func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd string) (string, error) {
@@ -479,6 +547,7 @@ type CloseReport struct {
 
 // Close tears the workspace down. When force is false and the tree is
 // dirty or has unpushed commits, it refuses and reports instead.
+// before_remove runs best-effort after safety checks and before teardown.
 func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
@@ -490,29 +559,42 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 
 	report := &CloseReport{}
 	wasIdle := ws.Status == StatusIdle
-	if !force {
-		var client *sandbox.Client
-		if wasIdle {
-			resumed, resumedClient, err := m.Resume(ctx, id)
-			if err != nil {
-				return report, fmt.Errorf("resume workspace for safety check: %w", err)
+	var client *sandbox.Client
+	if wasIdle {
+		resumed, resumedClient, err := m.Resume(ctx, id)
+		if err != nil {
+			if force {
+				// Force-close without a live container when resume fails.
+				goto teardown
 			}
-			ws = resumed
-			client = resumedClient
-		} else {
-			client, err = m.newClient(ws)
-			if err != nil {
-				return report, fmt.Errorf("connect workspace for safety check: %w", err)
-			}
+			return report, fmt.Errorf("resume workspace for safety check: %w", err)
 		}
+		ws = resumed
+		client = resumedClient
+	} else {
+		client, err = m.newClient(ws)
+		if err != nil {
+			if force {
+				goto teardown
+			}
+			return report, fmt.Errorf("connect workspace for safety check: %w", err)
+		}
+	}
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
+	if !force {
 		report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
 		if err == nil {
 			report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
 		}
-		_ = client.Close()
 		if err != nil {
 			if wasIdle {
+				_ = client.Close()
+				client = nil
 				if idleErr := m.Idle(ctx, id); idleErr != nil {
 					return report, fmt.Errorf("inspect workspace before close: %w (also failed to restore idle: %v)", err, idleErr)
 				}
@@ -521,6 +603,8 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
 			if wasIdle {
+				_ = client.Close()
+				client = nil
 				if idleErr := m.Idle(ctx, id); idleErr != nil {
 					return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard; also failed to restore idle: %v)", id, idleErr)
 				}
@@ -529,6 +613,14 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 		}
 	}
 
+	// before_remove is best-effort and must not block teardown (#54).
+	if client != nil {
+		_, _ = m.runHook(ctx, client, hooks.BeforeRemove)
+		_ = client.Close()
+		client = nil
+	}
+
+teardown:
 	if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
 		return report, err
 	}
@@ -558,11 +650,11 @@ func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
 		FROM workspaces WHERE id = ?`, id))
 }
 
-// ForRepo finds the non-closed workspace for a repo.
+// ForRepo finds the non-closed, non-failed workspace for a repo.
 func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
 		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
-		FROM workspaces WHERE repo = ? AND status != 'closed'`, repo))
+		FROM workspaces WHERE repo = ? AND status NOT IN ('closed', 'failed')`, repo))
 }
 
 // ForSession finds the non-closed workspace bound to a session, or

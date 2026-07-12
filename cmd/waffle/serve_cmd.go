@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,12 +22,14 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
+	"github.com/matt-riley/waffle/internal/intake"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/store"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
@@ -201,6 +205,14 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		schedDone <- serr
 	}()
 
+	// Issue intake watchers: board-driven dispatch under the restricted issue
+	// tier. Owned exclusively by this serve process (#48 / #51).
+	intakeDone := make(chan struct{})
+	go func() {
+		defer close(intakeDone)
+		runIntakeWatchers(lifecycleCtx, cfg, st, sessions, ws, skills, agents, serveBroker, adapterDeliverer(adapters), log)
+	}()
+
 	log.Info("waffle gateway starting", "channels", len(adapters))
 	err = gw.Run(ctx)
 
@@ -208,8 +220,72 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	// deferred cleanup tears down the shared sandbox executor and MCP
 	// clients a running cron job may still be using.
 	stop()
+	lifecycleCancel()
 	<-schedDone
+	<-intakeDone
 	return err
+}
+
+func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, sessions *session.Store, memWS memory.Workspace, skills []skill.Skill, agents map[string]*agent.Agent, b *broker.Broker, deliver schedule.Deliverer, log *slog.Logger) {
+	if len(cfg.Intake.GitHub) == 0 {
+		<-ctx.Done()
+		return
+	}
+	issueAgent, issueCleanup, err := ensureIssueAgent(ctx, cfg, memWS, skills, sessions, agents)
+	if err != nil {
+		log.Error("issue agent build failed", "err", err)
+		<-ctx.Done()
+		return
+	}
+	defer issueCleanup()
+
+	var brokerURL string
+	if b != nil && cfg.Broker.Listen != "" {
+		if _, port, err := net.SplitHostPort(cfg.Broker.Listen); err == nil {
+			brokerURL = "http://waffle-host:" + port
+		}
+	}
+	disp := &issueDispatcher{
+		cfg: cfg, st: st, sessions: sessions, skills: skills, memWS: memWS,
+		broker: b, brokerURL: brokerURL, agent: issueAgent, log: log,
+	}
+	claims := &intake.ClaimStore{DB: st.DB}
+	var wg sync.WaitGroup
+	for _, w := range cfg.Intake.GitHub {
+		wc := intake.WatchConfig{
+			Repo:           w.Repo,
+			Label:          w.Label,
+			MaxConcurrency: w.MaxConcurrency,
+			Deliver:        w.Deliver,
+			PollInterval:   parseOptionalDuration(w.PollInterval),
+		}
+		if wc.MaxConcurrency < 1 {
+			wc.MaxConcurrency = 1
+		}
+		token, _ := resolveSecretValue(w.Token, "GITHUB_TOKEN")
+		tr := &intake.GitHubTracker{Token: token}
+		if cfg.GitHub.App.BaseURL != "" {
+			// Tests / GHES: reuse app base as API root when set.
+			tr.BaseURL = strings.TrimRight(cfg.GitHub.App.BaseURL, "/")
+		}
+		watcher := &intake.Watcher{
+			Config:     wc,
+			Tracker:    tr,
+			Claims:     claims,
+			Dispatcher: disp,
+			Deliverer:  deliver,
+			Log:        log.With("intake_repo", w.Repo),
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Info("issue intake watcher starting", "repo", w.Repo, "label", w.Label)
+			if err := watcher.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("issue intake watcher stopped", "repo", w.Repo, "err", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func mustDuration(s string) time.Duration {
@@ -269,10 +345,17 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	if err != nil {
 		return nil, nil, cleanup, err
 	}
+	// Issue intake uses the restricted issue tier (#51); build it when any
+	// watcher is configured so toolbox policy is ready before the first tick.
+	if len(cfg.Intake.GitHub) > 0 {
+		if _, err := build(config.GroupIssue); err != nil {
+			return nil, nil, cleanup, err
+		}
+	}
 
 	groups := make([]string, 0, len(cfg.Agent.Groups))
 	for group := range cfg.Agent.Groups {
-		if group != config.GroupMain && group != config.GroupCron {
+		if group != config.GroupMain && group != config.GroupCron && group != config.GroupIssue {
 			groups = append(groups, group)
 		}
 	}

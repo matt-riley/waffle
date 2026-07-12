@@ -114,6 +114,36 @@ func TestConfiguredGatewayGroupBuildsRegistryEntry(t *testing.T) {
 	}
 }
 
+// TestBuildAgentIssueTierRestrictsTools is #51's security gate: issue-driven
+// runs must not expose host bash or durable memory writes.
+func TestBuildAgentIssueTierRestrictsTools(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = true
+	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupIssue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, d := range a.Tools.Defs() {
+		switch d.Name {
+		case "bash", "remember", "distill_skill":
+			t.Errorf("issue tier exposes %s", d.Name)
+		}
+	}
+}
+
 // TestBuildCronRunnerUsesCronTier guards the wiring: `waffle cron run` must
 // build its agent on the restricted cron tier (no host bash), matching what
 // the scheduler runs under `waffle serve` — not the owner's main tier.

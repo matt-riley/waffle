@@ -79,7 +79,11 @@ What's here, by capability:
   setup, and the loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
-  `spawn_subagent` delegates parallel work; MCP servers add their tools.
+  `[[intake.github]]` watchers poll labeled issues and dispatch restricted
+  workspace runs (board intake); `spawn_subagent` delegates parallel work;
+  MCP servers add their tools. Repo `WAFFLE.md` may tighten tool policy and
+  declare container lifecycle hooks (`after_create` / `before_run` /
+  `after_run` / `before_remove`).
 
 Session data is retained forever by default. `waffle session rm <id>` and
 `waffle forget <query>` require confirmation, update the FTS index, and run a
@@ -114,9 +118,11 @@ with the constrained runner and currently fails closed.
 - **Trust tiering** — agent groups carry their own sandbox mode and tool
   policy (`[agent.group.<name>]` with `sandbox` and `tools.allow`/`deny`).
   The owner's interactive sessions run on the `main` tier; unattended
-  scheduled jobs run on the `cron` tier, which **denies host `bash` by
-  default** — set `[agent.group.cron]` to override. The gateway and
-  scheduler run as separate agents so a cron prompt can't reach host shell.
+  scheduled jobs run on the `cron` tier and issue intake on the `issue`
+  tier — both **deny host `bash` and memory writes by default**. Override
+  only with an explicit `[agent.group.cron]` / `[agent.group.issue]` tool
+  policy. See [docs/plan.md](docs/plan.md) for the extension-surface map
+  (MCP for tools, fork for code; no embedded plugin runtime).
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.

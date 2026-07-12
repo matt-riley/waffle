@@ -287,6 +287,31 @@ sessions, so "email me a Monday summary of my starred repos" is one row.
 - All external content (messages, fetched pages, tool output) is treated as
   untrusted input, never as instructions.
 
+### Extension surfaces (decision record, issue #41)
+
+waffle already has three extension tiers that cover most "plugin" requests.
+**Do not invent a fourth in-process tool API.**
+
+| Need | Mechanism | Trust |
+|---|---|---|
+| Tools | **MCP servers** (`internal/mcp`) | out-of-process, policy-gated |
+| Prompt behavior | **Skills** (`SKILL.md`) | data, not code |
+| Code / adapters / providers | **Fork + `waffle upgrade`** | fully trusted, review-gated |
+| Workspace setup/teardown | **Container lifecycle hooks** (`[workspace.hooks]`, repo `WAFFLE.md`) | untrusted commands run *inside* the sandbox only (#54) |
+| Host-side message/tool transforms | *deferred* | would be in-process; see below |
+
+**Policy answers (decision checklist):**
+
+1. **≥2 concrete host-hook use cases today?** No — needs are speculative. Embedded runtime deferred.
+2. **Who would write hooks?** Owner-only if/when built (not shared/marketplace).
+3. **Initial hook points if built:** inbound message filter, tool-result transform only.
+4. **Failure policy:** filters fail *closed*; cosmetic transforms fail *open*.
+5. **Scope vs agent groups (#33):** per-group when introduced, never a global bypass of host policy.
+
+**Terminal state A (adopted):** tier map documented above; **no** Lua/JS/WASM engine dependency. Reopen only when ≥2 real owner-authored host-hook needs exist; then implement `hooks.Runner` with gopher-lua behind a waffle-defined interface (not a plugin marketplace). Distributable third-party plugins would require wazero/Extism and are explicitly *not* chosen now.
+
+Repo-versioned `WAFFLE.md`/`AGENT.md` (#53) and container lifecycle hooks (#54) are the supported repo extensibility path; issue-tracker intake (#51) is the third intake surface (with cron and chat).
+
 ## Repository layout
 
 ```
@@ -303,6 +328,9 @@ internal/secret/       Store iface; age+keyring backend; redaction; audit
 internal/skill/        SKILL.md discovery, indexing, learning loop
 internal/memory/       FTS5 store, curation, reflection/summarization
 internal/schedule/     cron persistence + runner
+internal/intake/       issue-tracker board intake (#51)
+internal/repopolicy/   repo WAFFLE.md tighten-only policy (#53)
+internal/hooks/        workspace lifecycle hooks in sandbox (#54)
 internal/store/        sqlite open/migrations (modernc.org/sqlite)
 docs/                  this plan, research notes, ADRs
 ```

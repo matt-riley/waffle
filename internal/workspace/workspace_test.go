@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
@@ -924,5 +925,46 @@ func TestNormalizeRepo(t *testing.T) {
 		if repo != c.repo || url != c.url {
 			t.Errorf("normalizeRepo(%q) = %q, %q", c.in, repo, url)
 		}
+	}
+}
+
+func TestAfterCreateHookFailureRefusesWorkspace(t *testing.T) {
+	tools := &scriptedBash{
+		outputs: map[string]string{},
+		failing: map[string]string{"go mod download": "hook boom"},
+	}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{AfterCreate: "go mod download"}
+	_, _, err := mgr.Open(context.Background(), "acme/widgets")
+	if err == nil {
+		t.Fatal("expected after_create failure")
+	}
+	if !strings.Contains(err.Error(), "after_create") && !strings.Contains(err.Error(), "hook") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := mgr.ForRepo(context.Background(), "acme/widgets"); !errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("ForRepo = %v", err)
+	}
+}
+
+func TestBeforeRemoveHookDoesNotBlockClose(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status": "",
+		"git log":    "",
+	}, failing: map[string]string{"cleanup.sh": "nope"}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.Hooks = hooks.Config{BeforeRemove: "./cleanup.sh"}
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Close(context.Background(), ws.ID, true); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !tools.ran("cleanup.sh") {
+		t.Fatal("before_remove did not run")
 	}
 }
