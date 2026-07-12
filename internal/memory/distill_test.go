@@ -16,7 +16,7 @@ func TestDistillWritesLoadableSkill(t *testing.T) {
 	out, err := tl.Run(context.Background(), json.RawMessage(`{
 		"name": "release-cli",
 		"description": "cut a new CLI release",
-		"body": "1. bump version\n2. tag\n3. push"
+		"body": "1. bump version\n2. tag the release\n3. push tags to origin"
 	}`))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -41,7 +41,7 @@ func TestDistillWritesLoadableSkill(t *testing.T) {
 	}
 
 	// Re-distilling updates in place.
-	out, err = tl.Run(context.Background(), json.RawMessage(`{"name":"release-cli","description":"d","body":"new steps"}`))
+	out, err = tl.Run(context.Background(), json.RawMessage(`{"name":"release-cli","description":"d","body":"1. new steps for release\n2. publish artifacts"}`))
 	if err != nil || !strings.Contains(out, "updated") {
 		t.Errorf("re-distill = %q, %v", out, err)
 	}
@@ -64,7 +64,7 @@ func TestDistillCreatesSkillsDir(t *testing.T) {
 	}
 	tl := DistillTool{WS: ws}
 	if _, err := tl.Run(context.Background(),
-		json.RawMessage(`{"name":"x","description":"d","body":"b"}`)); err != nil {
+		json.RawMessage(`{"name":"x","description":"d","body":"step one of a real procedure that is long enough"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(ws.SkillsDir(), "x", "SKILL.md")); err != nil {
@@ -78,7 +78,7 @@ func TestDistillQuotesAndNormalizesDescription(t *testing.T) {
 	if _, err := tl.Run(context.Background(), json.RawMessage(`{
 		"name":"quoted-skill",
 		"description":"release: prod\ncarefully",
-		"body":"step"
+		"body":"step one carefully then step two of the release"
 	}`)); err != nil {
 		t.Fatal(err)
 	}

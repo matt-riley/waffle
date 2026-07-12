@@ -58,6 +58,11 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 	if strings.TrimSpace(in.Body) == "" {
 		return "", errors.New("body is required")
 	}
+	// Validation gate (#65): reject empty/too-short skills and instruction-
+	// shaped bodies that look like prompt-injection payloads.
+	if err := validateSkillBody(in.Body); err != nil {
+		return "", err
+	}
 
 	gate := t.Gate
 	if gate == nil {
@@ -98,4 +103,25 @@ func (w Workspace) writeSkillCandidate(c Candidate) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// validateSkillBody enforces a minimal mechanical gate before distill writes (#65).
+func validateSkillBody(body string) error {
+	body = strings.TrimSpace(body)
+	if len(body) < 20 {
+		return errors.New("skill body too short to be a reusable procedure (need ≥20 chars)")
+	}
+	lower := strings.ToLower(body)
+	for _, bad := range []string{
+		"ignore previous instructions",
+		"ignore all prior",
+		"disregard system",
+		"you are now",
+		"<system>",
+	} {
+		if strings.Contains(lower, bad) {
+			return fmt.Errorf("skill body rejected by validation gate (matches %q)", bad)
+		}
+	}
+	return nil
 }

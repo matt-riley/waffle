@@ -244,7 +244,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 
 	// after_create hooks run inside the container; failure marks the
 	// workspace failed and refuses to hand it out as usable (#54).
-	if res, err := m.runHook(ctx, client, hooks.AfterCreate); err != nil {
+	if res, err := m.runHook(ctx, client, hooks.AfterCreate, ws.ID, ws.SessionID); err != nil {
 		ws.Status = StatusFailed
 		ws.HookLog = append(ws.HookLog, res)
 		_ = client.Close()
@@ -369,22 +369,47 @@ func (m *Manager) hookConfig(ctx context.Context, client *sandbox.Client) hooks.
 	return hooks.Merge(cfg, repo)
 }
 
-// runHook executes one lifecycle hook inside the workspace container.
-func (m *Manager) runHook(ctx context.Context, client *sandbox.Client, point hooks.Point) (hooks.Result, error) {
+// runHook executes one lifecycle hook inside the workspace container and
+// persists stdout/stderr to hook_logs for session debuggability (#54).
+func (m *Manager) runHook(ctx context.Context, client *sandbox.Client, point hooks.Point, workspaceID, sessionID string) (hooks.Result, error) {
 	cfg := m.hookConfig(ctx, client)
 	ex := hooks.ClientExecutor{Exec: func(ctx context.Context, name string, input json.RawMessage) (string, bool, error) {
 		return client.Exec(ctx, name, input)
 	}}
 	res := hooks.Run(ctx, ex, cfg, point)
+	m.persistHookLog(ctx, workspaceID, sessionID, res)
 	if res.Err != nil && hooks.Fatal(point) {
 		return res, res.Err
 	}
 	return res, nil
 }
 
+func (m *Manager) persistHookLog(ctx context.Context, workspaceID, sessionID string, res hooks.Result) {
+	if m.DB == nil || (res.Output == "" && res.Err == nil) {
+		return
+	}
+	hid, err := id.New("hook-")
+	if err != nil {
+		return
+	}
+	errText := ""
+	if res.Err != nil {
+		errText = res.Err.Error()
+	}
+	_, _ = m.DB.ExecContext(ctx, `
+		INSERT INTO hook_logs (id, workspace_id, session_id, point, output, error, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		hid, workspaceID, sessionID, string(res.Point), res.Output, errText, now())
+}
+
 // RunHook is the public entry for before_run / after_run during issue intake.
 func (m *Manager) RunHook(ctx context.Context, client *sandbox.Client, point hooks.Point) (hooks.Result, error) {
-	return m.runHook(ctx, client, point)
+	return m.runHook(ctx, client, point, "", "")
+}
+
+// RunHookFor records hook output against a workspace/session (#54).
+func (m *Manager) RunHookFor(ctx context.Context, client *sandbox.Client, point hooks.Point, workspaceID, sessionID string) (hooks.Result, error) {
+	return m.runHook(ctx, client, point, workspaceID, sessionID)
 }
 
 func (m *Manager) bashOutput(ctx context.Context, client *sandbox.Client, cmd string) (string, error) {
@@ -615,7 +640,7 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 
 	// before_remove is best-effort and must not block teardown (#54).
 	if client != nil {
-		_, _ = m.runHook(ctx, client, hooks.BeforeRemove)
+		_, _ = m.runHook(ctx, client, hooks.BeforeRemove, ws.ID, ws.SessionID)
 		_ = client.Close()
 		client = nil
 	}

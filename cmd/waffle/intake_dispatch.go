@@ -45,7 +45,7 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	defer func() { _ = client.Close() }()
 
 	// before_run: fatal on failure.
-	if res, err := mgr.RunHook(ctx, client, hooks.BeforeRun); err != nil {
+	if res, err := mgr.RunHookFor(ctx, client, hooks.BeforeRun, ws.ID, ws.SessionID); err != nil {
 		return "", err
 	} else if res.Output != "" {
 		d.log.Info("before_run hook", "output", res.Output)
@@ -105,7 +105,7 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	}
 
 	// after_run is best-effort.
-	if res, _ := mgr.RunHook(ctx, client, hooks.AfterRun); res.Err != nil {
+	if res, _ := mgr.RunHookFor(ctx, client, hooks.AfterRun, ws.ID, ws.SessionID); res.Err != nil {
 		d.log.Warn("after_run hook failed", "err", res.Err, "output", res.Output)
 	} else if res.Output != "" {
 		d.log.Info("after_run hook", "output", res.Output)

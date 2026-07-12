@@ -45,6 +45,8 @@ type Hooks struct {
 
 // Load reads WAFFLE.md or AGENT.md from repoRoot. Missing file returns (nil, nil).
 // A present but unparsable file returns an error (never silent skip).
+// Callers should re-Load on each session start / dispatch so mtime changes
+// apply without restarting serve (#53).
 func Load(repoRoot string) (*Policy, error) {
 	for _, name := range FileNames {
 		path := filepath.Join(repoRoot, name)
@@ -68,6 +70,37 @@ func Load(repoRoot string) (*Policy, error) {
 		return p, nil
 	}
 	return nil, nil
+}
+
+// Cache reloads policy when ModTime changes (#53 mtime reload).
+type Cache struct {
+	root string
+	pol  *Policy
+	mt   time.Time
+	path string
+}
+
+// NewCache watches repoRoot for WAFFLE.md/AGENT.md changes.
+func NewCache(repoRoot string) *Cache { return &Cache{root: repoRoot} }
+
+// Get returns the current policy, reloading when the file mtime advances.
+func (c *Cache) Get() (*Policy, error) {
+	if c == nil {
+		return nil, nil
+	}
+	p, err := Load(c.root)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		c.pol, c.mt, c.path = nil, time.Time{}, ""
+		return nil, nil
+	}
+	if c.pol != nil && c.path == p.Path && !p.ModTime.After(c.mt) {
+		return c.pol, nil
+	}
+	c.pol, c.mt, c.path = p, p.ModTime, p.Path
+	return p, nil
 }
 
 // Parse splits YAML-like front matter from the markdown body.
