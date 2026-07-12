@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -137,11 +138,15 @@ func (n namedTool) Run(context.Context, json.RawMessage) (string, error) {
 
 type recordingProvider struct {
 	onComplete func(llm.Request) llm.Response
+	mu         sync.Mutex
 	calls      int
 }
 
 func (p *recordingProvider) Complete(ctx context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.mu.Lock()
 	p.calls++
-	r := p.onComplete(req)
+	fn := p.onComplete
+	p.mu.Unlock()
+	r := fn(req)
 	return &r, nil
 }
