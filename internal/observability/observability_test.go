@@ -37,6 +37,25 @@ func TestStatusHandlerReturnsSnapshotJSONWithEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestHealthHandlerReturns503ForStaleSubsystem(t *testing.T) {
+	ctx, svc, clock := testService(t)
+	svc.MarkSchedulerTick()
+	svc.MarkAdapter("telegram")
+	*clock = clock.Add(3 * time.Minute)
+	recorder := httptest.NewRecorder()
+	NewHandler(svc).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil).WithContext(ctx))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	var health Health
+	if err := json.NewDecoder(recorder.Body).Decode(&health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Healthy || !health.Scheduler.Stale || !health.Adapters["telegram"].Stale {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
 func TestRecordUsageDoesNotDoubleCountDuplicateCumulativeObservation(t *testing.T) {
 	ctx, svc, clock := testService(t)
 	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent"); err != nil {

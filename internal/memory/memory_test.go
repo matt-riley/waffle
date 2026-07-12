@@ -100,6 +100,30 @@ func TestAppendNormalizesNewlines(t *testing.T) {
 	}
 }
 
+func TestMatchingAndRemovingMemoryLines(t *testing.T) {
+	ws := Workspace{Dir: t.TempDir()}
+	if err := os.WriteFile(ws.MemoryPath(), []byte("keep this\nremove this\nkeep too\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := ws.MatchingLines("remove")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "2:") {
+		t.Fatalf("matches = %v", lines)
+	}
+	if err := ws.RemoveLines([]int{2}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "remove this") || !strings.Contains(string(body), "keep this") {
+		t.Fatalf("memory = %q", body)
+	}
+}
+
 func TestRecallTool(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))

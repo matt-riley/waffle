@@ -27,6 +27,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
+	"github.com/matt-riley/waffle/internal/workspace"
 )
 
 func serveCmd(ctx context.Context, stderr io.Writer) error {
@@ -81,9 +82,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	defer cleanup()
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
+	var serveBroker *broker.Broker
 	if cfg.Broker.Listen != "" {
 		upstreams := brokerUpstreams(cfg)
 		b := broker.New(st, upstreams)
+		serveBroker = b
 		b.Usage = usagepkg.New(st)
 		l := cfg.LimitsFor(config.GroupMain)
 		b.Limits = usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
@@ -99,6 +102,58 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if err != nil {
 		return err
 	}
+	for _, adapter := range adapters {
+		obs.RegisterAdapter(adapter.Name())
+		if telegramAdapter, ok := adapter.(*telegram.Adapter); ok {
+			telegramAdapter.SetPollObserver(func() { obs.MarkAdapter(telegramAdapter.Name()) })
+		}
+	}
+	// Lifecycle sweeps are owned by this serve process only. CLI commands
+	// perform explicit operations but never start a background reaper.
+	lifecycleCtx, lifecycleCancel := context.WithCancel(ctx)
+	defer lifecycleCancel()
+	wsManager := newWorkspaceManager(cfg, st, nil)
+	if serveBroker != nil {
+		wsManager.MintToken = func(mintCtx context.Context, sessionID string) (string, error) {
+			return serveBroker.Mint(mintCtx, sessionID)
+		}
+		wsManager.RevokeSession = serveBroker.RevokeSession
+		wsManager.BindGitScope = serveBroker.BindGitRepo
+	}
+	idleTimeout := parseOptionalDuration(cfg.Workspace.IdleTimeout)
+	closeTTL := parseOptionalDuration(cfg.Workspace.CloseTTL)
+	wsReaper := &workspace.Reaper{Manager: wsManager, IdleTimeout: idleTimeout, CloseTTL: closeTTL, Notify: func(notifyCtx context.Context, ws workspace.Workspace, msg string) error {
+		target, ok, err := entities.TargetForSession(notifyCtx, ws.SessionID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := adapterDeliverer(adapters).Deliver(notifyCtx, target, msg); err != nil {
+				return err
+			}
+		} else {
+			log.Warn("workspace retained after TTL", "repo", ws.Repo, "message", msg)
+		}
+		return nil
+	}}
+	retention := session.RetentionSweep{Store: sessions, Retain: parseOptionalDuration(cfg.Store.Retain)}
+	go func() {
+		tick := time.NewTicker(time.Minute)
+		defer tick.Stop()
+		for {
+			select {
+			case <-lifecycleCtx.Done():
+				return
+			case <-tick.C:
+				if err := wsReaper.Sweep(lifecycleCtx); err != nil {
+					log.Error("workspace lifecycle sweep failed", "err", err)
+				}
+				if _, err := retention.Sweep(lifecycleCtx); err != nil {
+					log.Error("retention sweep failed", "err", err)
+				}
+			}
+		}
+	}()
 
 	gw := &gateway.Gateway{
 		Agent:         agents[config.GroupMain],
@@ -122,8 +177,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 			Log:           log,
 			Observability: obs,
 		},
-		Log:   log,
-		Usage: usagepkg.New(st),
+		Log:    log,
+		Usage:  usagepkg.New(st),
+		Health: obs,
 		Policy: schedule.RetryPolicy{
 			MaxAttempts:  cfg.Jobs.MaxAttempts,
 			BaseBackoff:  mustDuration(cfg.Jobs.BaseBackoff),
@@ -153,7 +209,15 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 }
 
 func mustDuration(s string) time.Duration {
-	d, _ := time.ParseDuration(s)
+	d, _ := config.ParseDuration(s)
+	return d
+}
+
+func parseOptionalDuration(s string) time.Duration {
+	if s == "" || s == "0" {
+		return 0
+	}
+	d, _ := config.ParseDuration(s)
 	return d
 }
 

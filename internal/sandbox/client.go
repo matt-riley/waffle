@@ -55,6 +55,9 @@ type Client struct {
 	healthGrace     time.Duration // heartbeat staleness threshold
 	probeTimeout    time.Duration // per-lastHealth-query cap
 	probeFailWindow time.Duration // consecutive probe-failure budget before presumed dead
+	// OnActivity is called when a request is queued or a result is received.
+	// It is optional and must not block the queue round trip.
+	OnActivity func()
 }
 
 // NewClient opens the host side of the queue in dir, creating inbound.db.
@@ -145,6 +148,9 @@ func (c *Client) Exec(ctx context.Context, useIDOrName string, args ...interface
 			`INSERT OR IGNORE INTO requests (tool_use_id, tool, input, created_at) VALUES (?, ?, ?, ?)`,
 			useID, name, string(input), time.Now().UTC().Format(time.RFC3339Nano))
 	}
+	if c.OnActivity != nil {
+		c.OnActivity()
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: enqueue: %w", err)
 	}
@@ -173,6 +179,9 @@ func (c *Client) Exec(ctx context.Context, useIDOrName string, args ...interface
 			Scan(&content, &isError)
 		pollCancel()
 		if qerr == nil {
+			if c.OnActivity != nil {
+				c.OnActivity()
+			}
 			return content, isError, nil
 		}
 		if !errors.Is(qerr, sql.ErrNoRows) && !errors.Is(qerr, context.DeadlineExceeded) && !errors.Is(qerr, context.Canceled) && !isBusyErr(qerr) {

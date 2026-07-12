@@ -34,16 +34,17 @@ var ErrWorkspaceNotFound = errors.New("workspace not found")
 
 // Workspace is one repo workspace.
 type Workspace struct {
-	ID        string
-	Repo      string // owner/name
-	URL       string
-	Image     string
-	Container string
-	Volume    string
-	SessionID string
-	Status    string // open | idle | closed
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Repo       string // owner/name
+	URL        string
+	Image      string
+	Container  string
+	Volume     string
+	SessionID  string
+	Status     string // open | idle | closed
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	LastActive time.Time
 }
 
 // Statuses.
@@ -180,12 +181,13 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		return nil, nil, fmt.Errorf("new workspace id: %w", err)
 	}
 	ws := &Workspace{
-		ID:        wsID,
-		Repo:      repo,
-		URL:       url,
-		Image:     m.DefaultImage,
-		SessionID: sess.ID,
-		Status:    StatusOpen,
+		ID:         wsID,
+		Repo:       repo,
+		URL:        url,
+		Image:      m.DefaultImage,
+		SessionID:  sess.ID,
+		Status:     StatusOpen,
+		LastActive: time.Now().UTC(),
 	}
 	ws.Container = "waffle-" + ws.ID
 	ws.Volume = "waffle-" + ws.ID
@@ -207,7 +209,7 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
-	client, err := sandbox.NewClient(m.queueDir(ws.ID))
+	client, err := m.newClient(ws)
 	if err != nil {
 		m.revokeSession(sess.ID)
 		return nil, nil, err
@@ -233,9 +235,9 @@ func (m *Manager) Open(ctx context.Context, repoArg string) (*Workspace, *sandbo
 	}
 
 	if _, err := m.DB.ExecContext(ctx, `
-		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now()); err != nil {
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano)); err != nil {
 		// Concurrent Open raced us (or other insert error); clean up our
 		// side effects.
 		_ = client.Close()
@@ -442,11 +444,31 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		}
 		ws.Status = StatusOpen
 	}
-	client, err := sandbox.NewClient(m.queueDir(ws.ID))
+	client, err := m.newClient(ws)
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := m.Touch(ctx, id); err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
 	return ws, client, nil
+}
+
+// Touch records activity so serve-owned lifecycle sweeps can distinguish an
+// active workspace from one that has been forgotten.
+func (m *Manager) Touch(ctx context.Context, id string) error {
+	_, err := m.DB.ExecContext(ctx, `UPDATE workspaces SET last_active = ?, updated_at = ? WHERE id = ?`, now(), now(), id)
+	return err
+}
+
+func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
+	client, err := sandbox.NewClient(m.queueDir(ws.ID))
+	if err != nil {
+		return nil, err
+	}
+	client.OnActivity = func() { _ = m.Touch(context.Background(), ws.ID) }
+	return client, nil
 }
 
 // CloseReport says what Close found before tearing down.
@@ -478,7 +500,7 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 			ws = resumed
 			client = resumedClient
 		} else {
-			client, err = sandbox.NewClient(m.queueDir(ws.ID))
+			client, err = m.newClient(ws)
 			if err != nil {
 				return report, fmt.Errorf("connect workspace for safety check: %w", err)
 			}
@@ -532,14 +554,14 @@ func (m *Manager) setStatus(ctx context.Context, id, status string) error {
 // Get loads one workspace.
 func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
 		FROM workspaces WHERE id = ?`, id))
 }
 
 // ForRepo finds the non-closed workspace for a repo.
 func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
 		FROM workspaces WHERE repo = ? AND status != 'closed'`, repo))
 }
 
@@ -549,14 +571,14 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 // compromised session "cannot read another repo").
 func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
 		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
 }
 
 // List returns all workspaces, newest first.
 func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
 	rows, err := m.DB.QueryContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
 		FROM workspaces ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -578,8 +600,9 @@ type scanner interface{ Scan(dest ...any) error }
 func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	var ws Workspace
 	var created, updated string
+	var active string
 	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
-		&ws.SessionID, &ws.Status, &created, &updated)
+		&ws.SessionID, &ws.Status, &created, &updated, &active)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkspaceNotFound
 	}
@@ -592,6 +615,12 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	}
 	if ws.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updated); parseErr != nil && updated != "" {
 		return nil, fmt.Errorf("parse workspace updated_at: %w", parseErr)
+	}
+	if ws.LastActive, parseErr = time.Parse(time.RFC3339Nano, active); parseErr != nil && active != "" {
+		return nil, fmt.Errorf("parse workspace last_active: %w", parseErr)
+	}
+	if active == "" {
+		ws.LastActive = ws.UpdatedAt
 	}
 	return &ws, nil
 }

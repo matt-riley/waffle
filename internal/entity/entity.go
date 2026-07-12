@@ -200,3 +200,17 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID string) (*Group, e
 	g.ID, _ = res.LastInsertId()
 	return g, nil
 }
+
+// TargetForSession returns the channel delivery target associated with a
+// conversation session, if it has one.
+func (s *Store) TargetForSession(ctx context.Context, sessionID string) (string, bool, error) {
+	var channel, chatID string
+	err := s.db.QueryRowContext(ctx, `SELECT channel, chat_id FROM channel_groups WHERE session_id = ?`, sessionID).Scan(&channel, &chatID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return channel + ":" + chatID, true, nil
+}

@@ -240,6 +240,182 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	}
 }
 
+func TestTouchPersistsWorkspaceActivity(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close() //nolint:errcheck
+	before := ws.LastActive
+	if err := mgr.Touch(context.Background(), ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastActive.IsZero() || got.LastActive.Equal(before) {
+		t.Fatalf("last_active = %q, before %q", got.LastActive, before)
+	}
+}
+
+func TestReaperIdlesOnlyStaleWorkspace(t *testing.T) {
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	old, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	r := &Reaper{Manager: mgr, IdleTimeout: time.Hour, Now: func() time.Time { return time.Now() }}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status = %q, want idle", got.Status)
+	}
+	if !strings.Contains(strings.Join(rt.events, "\n"), "stop "+old.Container) {
+		t.Fatalf("events = %v", rt.events)
+	}
+	resumed, resumedClient, err := mgr.Open(context.Background(), old.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumedClient.Close() //nolint:errcheck
+	if resumed.ID != old.ID || resumed.Status != StatusOpen {
+		t.Fatalf("resume = %+v", resumed)
+	}
+}
+
+func TestReaperLeavesRecentWorkspaceOpen(t *testing.T) {
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/recent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	r := &Reaper{Manager: mgr, IdleTimeout: time.Hour, Now: time.Now}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusOpen || strings.Contains(strings.Join(rt.events, "\n"), "stop "+ws.Container) {
+		t.Fatalf("status=%s events=%v", got.Status, rt.events)
+	}
+}
+
+func TestReaperClosesCleanTTLWorkspace(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/clean")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	r := &Reaper{Manager: mgr, CloseTTL: time.Hour, Now: time.Now}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusClosed {
+		t.Fatalf("status=%s, want closed", got.Status)
+	}
+}
+
+func TestReaperKeepsDirtyWorkspaceAndNotifies(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{"git status --porcelain": " M important.txt"}}
+	mgr, _ := newTestManager(t, tools)
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	var notified string
+	r := &Reaper{Manager: mgr, CloseTTL: time.Hour, Now: time.Now, Notify: func(_ context.Context, got Workspace, msg string) error { notified = got.ID + ":" + msg; return nil }}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == StatusClosed {
+		t.Fatal("dirty workspace was closed")
+	}
+	if notified == "" {
+		t.Fatal("dirty workspace did not notify")
+	}
+}
+
+func TestReaperClosesCleanWorkspaceWithoutForce(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	r := &Reaper{Manager: mgr, CloseTTL: time.Hour, Now: time.Now}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusClosed {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
+func TestReaperKeepsDirtyTTLWorkspaceAndNotifies(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{"git status --porcelain": " M important.txt"}}
+	mgr, _ := newTestManager(t, tools)
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close() //nolint:errcheck
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	notified := false
+	r := &Reaper{Manager: mgr, CloseTTL: time.Hour, Now: time.Now, Notify: func(_ context.Context, got Workspace, msg string) error {
+		notified = got.ID == ws.ID && strings.Contains(msg, "kept")
+		return nil
+	}}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == StatusClosed || !notified {
+		t.Fatalf("status=%s notified=%v", got.Status, notified)
+	}
+}
+
 func TestOpenRefreshesBrokerTokenForExistingWorkspace(t *testing.T) {
 	ctx := context.Background()
 	mgr, rt := newTestManager(t, &scriptedBash{})

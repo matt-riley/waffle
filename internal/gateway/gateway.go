@@ -158,6 +158,9 @@ func (g *Gateway) lockGroup(key string) func() {
 }
 
 func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
+	if g.Observability != nil {
+		g.Observability.MarkAdapter(msg.Channel)
+	}
 	log := g.Log.With("channel", msg.Channel, "chat", msg.ChatID)
 	adapter := g.adapter(msg.Channel)
 	if adapter == nil {

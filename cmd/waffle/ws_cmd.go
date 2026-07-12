@@ -10,6 +10,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/workspace"
@@ -194,7 +195,28 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	}
 	// Scope git credentials to the repo the requesting session opened.
 	mgr := newWorkspaceManager(cfg, st, nil)
-	b.GitCredential = gitCredentialFromSecrets(repoScopeResolver(b, mgr))
+	scope := repoScopeResolver(b, mgr)
+	if cfg.GitHub.App.PrivateKey != "" {
+		if !strings.HasPrefix(cfg.GitHub.App.PrivateKey, "secret://") {
+			_ = ln.Close()
+			return nil, "", fmt.Errorf("github app private_key must be a secret:// reference")
+		}
+		key, err := resolveSecretValue(cfg.GitHub.App.PrivateKey, "")
+		if err != nil {
+			_ = ln.Close()
+			return nil, "", fmt.Errorf("github app private key: %w", err)
+		}
+		app, err := gitcred.NewApp(cfg.GitHub.App.AppID, cfg.GitHub.App.InstallationID, []byte(key), cfg.GitHub.App.BaseURL, nil, nil)
+		if err != nil {
+			_ = ln.Close()
+			return nil, "", err
+		}
+		b.GitBackend = "github-app"
+		b.GitCredential = gitCredentialFromApp(scope, app)
+	} else {
+		b.GitBackend = "pat"
+		b.GitCredential = gitCredentialFromSecrets(scope)
+	}
 	go func() {
 		if err := b.ServeListener(ctx, ln); err != nil {
 			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
@@ -204,6 +226,22 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	// Containers reach the host through the host-gateway alias set up by
 	// the runtime (--add-host waffle-host:host-gateway).
 	return b, "http://waffle-host:" + port, nil
+}
+
+func gitCredentialFromApp(repoForSession func(context.Context, string) (string, error), app *gitcred.App) broker.GitCredentialFunc {
+	return func(ctx context.Context, sessionID, host, path string) (string, string, error) {
+		if host != "github.com" {
+			return "", "", fmt.Errorf("no credentials for host %q", host)
+		}
+		bound, err := repoForSession(ctx, sessionID)
+		if err != nil {
+			return "", "", fmt.Errorf("session is not bound to a repo workspace; refusing git credentials: %w", err)
+		}
+		if canonRepoPath(path) != canonRepoPath(bound) {
+			return "", "", fmt.Errorf("session is scoped to %q; refusing credentials for %q", bound, path)
+		}
+		return app.Credential(ctx, canonRepoPath(bound))
+	}
 }
 
 // repoScopeResolver resolves a session to the repo its git credentials are

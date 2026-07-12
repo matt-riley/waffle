@@ -28,6 +28,8 @@ type Config struct {
 	Sandbox   Sandbox     `toml:"sandbox"`
 	Broker    Broker      `toml:"broker"`
 	Workspace Workspace   `toml:"workspace"`
+	Store     Store       `toml:"store"`
+	GitHub    GitHub      `toml:"github"`
 	MCP       []MCPServer `toml:"mcp"`
 	Agent     Agent       `toml:"agent"`
 	Repo      Repo        `toml:"repo"`
@@ -46,6 +48,20 @@ type JobPolicy struct {
 	BaseBackoff  string `toml:"base_backoff"`
 	MaxBackoff   string `toml:"max_backoff"`
 	StallTimeout string `toml:"stall_timeout"`
+}
+
+// ParseDuration accepts Go durations plus a convenient whole-day suffix for
+// retention and lifecycle horizons (for example, "365d").
+func ParseDuration(value string) (time.Duration, error) {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(value)), "d") {
+		n := strings.TrimSpace(value)[:len(strings.TrimSpace(value))-1]
+		var days int64
+		if _, err := fmt.Sscan(n, &days); err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid day duration %q", value)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(value)
 }
 
 // Tools configures builtin tool network policy.
@@ -246,8 +262,27 @@ type Sandbox struct {
 // Workspace controls network egress for repository workspaces. Egress is
 // deny-by-default; allowlist routes HTTP(S) through the host broker.
 type Workspace struct {
-	Egress    string   `toml:"egress"`
-	Allowlist []string `toml:"allowlist"`
+	Egress      string   `toml:"egress"`
+	Allowlist   []string `toml:"allowlist"`
+	IdleTimeout string   `toml:"idle_timeout"`
+	CloseTTL    string   `toml:"close_ttl"`
+}
+
+// Store controls retention of conversation data. Zero means retain forever.
+type Store struct {
+	Retain string `toml:"retain"`
+}
+
+// GitHub configures optional GitHub App credentials for workspace git access.
+type GitHub struct {
+	App GitHubApp `toml:"app"`
+}
+
+type GitHubApp struct {
+	AppID          int64  `toml:"app_id"`
+	InstallationID int64  `toml:"installation_id"`
+	PrivateKey     string `toml:"private_key"`
+	BaseURL        string `toml:"base_url"`
 }
 
 // Broker configures the credential broker's HTTP listener; empty disables.
@@ -332,7 +367,8 @@ func Default() Config {
 			CPUs:    2,
 			PIDs:    512,
 		},
-		Workspace: Workspace{Egress: "none"},
+		Workspace: Workspace{Egress: "none", IdleTimeout: "30m", CloseTTL: "168h"},
+		Store:     Store{Retain: "0"},
 		Agent:     Agent{Subagents: true, Learn: true},
 		Memory:    Memory{WriteGate: "auto"},
 		Selfdev:   Selfdev{Approval: "manual", Verify: true},
@@ -406,7 +442,7 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("jobs.max_attempts must be at least 1")
 	}
 	for name, value := range map[string]string{"base_backoff": cfg.Jobs.BaseBackoff, "max_backoff": cfg.Jobs.MaxBackoff, "stall_timeout": cfg.Jobs.StallTimeout} {
-		if d, err := time.ParseDuration(value); err != nil || d <= 0 {
+		if d, err := ParseDuration(value); err != nil || d <= 0 {
 			return Config{}, fmt.Errorf("jobs.%s must be a positive duration, got %q", name, value)
 		}
 	}
@@ -420,6 +456,23 @@ func Load(path string) (Config, error) {
 	}
 	if err := validateWorkspaceEgress(cfg.Workspace); err != nil {
 		return Config{}, fmt.Errorf("workspace egress: %w", err)
+	}
+	for name, value := range map[string]string{"workspace.idle_timeout": cfg.Workspace.IdleTimeout, "workspace.close_ttl": cfg.Workspace.CloseTTL, "store.retain": cfg.Store.Retain} {
+		if value == "0" {
+			continue
+		}
+		if d, err := ParseDuration(value); err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("%s must be 0 or a positive duration, got %q", name, value)
+		}
+	}
+	app := cfg.GitHub.App
+	if app.AppID < 0 || app.InstallationID < 0 {
+		return Config{}, errors.New("github.app ids must be positive")
+	}
+	if app.AppID != 0 || app.InstallationID != 0 || app.PrivateKey != "" {
+		if app.AppID <= 0 || app.InstallationID <= 0 || app.PrivateKey == "" {
+			return Config{}, errors.New("github.app requires app_id, installation_id, and private_key")
+		}
 	}
 	for _, s := range cfg.MCP {
 		if s.Execution != "" && s.Execution != "host" && s.Execution != "sandbox" {

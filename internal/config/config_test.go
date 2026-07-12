@@ -39,6 +39,26 @@ func TestSandboxResourceLimits(t *testing.T) {
 	}
 }
 
+func TestLifecycleAndGitHubAppConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[workspace]\nidle_timeout = \"1h\"\nclose_ttl = \"48h\"\n[store]\nretain = \"365d\"\n[github.app]\napp_id = 42\ninstallation_id = 7\nprivate_key = \"secret://github/app-key\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Workspace.IdleTimeout != "1h" || cfg.Workspace.CloseTTL != "48h" || cfg.Store.Retain != "365d" || cfg.GitHub.App.AppID != 42 {
+		t.Fatalf("config = %+v", cfg)
+	}
+	writeFile(t, path, "[store]\nretain = \"banana\"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid retention accepted")
+	}
+	writeFile(t, path, "[github.app]\napp_id = 42\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("incomplete github app accepted")
+	}
+}
+
 func TestLoadOverridesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[gateway]\nlisten = \"127.0.0.1:9999\"\n")

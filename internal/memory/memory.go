@@ -27,6 +27,56 @@ type Workspace struct {
 	Dir string
 }
 
+// MatchingLines returns numbered memory lines containing all query terms.
+func (w Workspace) MatchingLines(query string) ([]string, error) {
+	body, err := os.ReadFile(w.MemoryPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for i, line := range strings.Split(string(body), "\n") {
+		lower := strings.ToLower(line)
+		match := true
+		for _, term := range terms {
+			if !strings.Contains(lower, term) {
+				match = false
+				break
+			}
+		}
+		if match {
+			out = append(out, fmt.Sprintf("%d:%s", i+1, line))
+		}
+	}
+	return out, nil
+}
+
+// RemoveLines removes exactly the supplied 1-based line numbers.
+func (w Workspace) RemoveLines(lines []int) error {
+	body, err := os.ReadFile(w.MemoryPath())
+	if err != nil {
+		return err
+	}
+	want := map[int]bool{}
+	for _, n := range lines {
+		want[n] = true
+	}
+	all := strings.Split(string(body), "\n")
+	kept := make([]string, 0, len(all))
+	for i, line := range all {
+		if !want[i+1] {
+			kept = append(kept, line)
+		}
+	}
+	return os.WriteFile(w.MemoryPath(), []byte(strings.Join(kept, "\n")), 0o600)
+}
+
 // DefaultAgent is the single agent group until the entity model (phase 3).
 const DefaultAgent = "main"
 

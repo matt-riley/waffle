@@ -32,6 +32,7 @@ type Adapter struct {
 	token   string
 	baseURL string
 	client  *http.Client
+	onPoll  func()
 }
 
 // New builds an adapter. baseURL may be empty for the real API.
@@ -50,6 +51,9 @@ func New(token, baseURL string) *Adapter {
 
 // Name implements channel.Adapter.
 func (a *Adapter) Name() string { return "telegram" }
+
+// SetPollObserver installs a callback invoked after each successful poll.
+func (a *Adapter) SetPollObserver(fn func()) { a.onPoll = fn }
 
 type update struct {
 	UpdateID int64 `json:"update_id"`
@@ -140,6 +144,9 @@ func (a *Adapter) getUpdates(ctx context.Context, offset int64) ([]update, error
 		})
 		cancel()
 		if err == nil {
+			if a.onPoll != nil {
+				a.onPoll()
+			}
 			var updates []update
 			if err := json.Unmarshal(raw, &updates); err != nil {
 				return nil, fmt.Errorf("telegram: parse updates: %w", err)

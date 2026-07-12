@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
@@ -111,6 +112,62 @@ func TestSearchFindsTextAndToolResults(t *testing.T) {
 	}
 	if hits, _ := s.Search(ctx, "", 5); hits != nil {
 		t.Errorf("empty query returned hits")
+	}
+}
+
+func TestDeleteRemovesSessionTurnsAndFTS(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.Create(ctx, "remove me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendTurn(ctx, sess.ID, llm.UserText("private forgettable phrase")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("deleted session still present")
+	}
+	hits, err := s.Search(ctx, "forgettable", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits after delete = %d", len(hits))
+	}
+}
+
+func TestRetainDeletesOnlyExpiredUnboundSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	old, err := s.Create(ctx, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano), old.ID); err != nil {
+		t.Fatal(err)
+	}
+	newer, _ := s.Create(ctx, "new")
+	n, err := s.Retain(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("deleted = %d, want 1", n)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id = ?`, newer.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("recent session deleted")
 	}
 }
 

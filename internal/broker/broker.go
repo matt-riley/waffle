@@ -64,6 +64,8 @@ type Broker struct {
 	// GitCredential, when set, enables the /git-credential face used by
 	// `waffle git-credential` inside workspace containers.
 	GitCredential GitCredentialFunc
+	// GitBackend is audit metadata, never a secret. Typical values are pat or github-app.
+	GitBackend string
 
 	mu       sync.Mutex
 	tokens   map[string]string // token → session id
@@ -346,7 +348,8 @@ func (b *Broker) serveGitCredential(w http.ResponseWriter, r *http.Request, toke
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	b.record(r.Context(), token, sessionID, "git-credential", host+"/"+path)
+	detail := "backend=" + b.GitBackend + " repo=" + path + " host=" + host
+	b.record(r.Context(), token, sessionID, "git-credential", detail)
 	w.Header().Set("Content-Type", "text/plain")
 	fmt.Fprintf(w, "username=%s\npassword=%s\n", user, pass)
 }

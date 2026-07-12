@@ -17,8 +17,10 @@ type Service struct {
 	store *store.Store
 	now   func() time.Time
 
-	mu     sync.Mutex
-	active map[string]*activeRun
+	mu            sync.Mutex
+	active        map[string]*activeRun
+	adapterLast   map[string]time.Time
+	schedulerLast time.Time
 }
 
 type activeRun struct {
@@ -64,7 +66,62 @@ func New(st *store.Store, now func() time.Time) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{store: st, now: now, active: make(map[string]*activeRun)}
+	return &Service{store: st, now: now, active: make(map[string]*activeRun), adapterLast: make(map[string]time.Time)}
+}
+
+// MarkAdapter records a successful adapter event. Adapter implementations can
+// call this on each successful poll or delivered inbound message.
+func (s *Service) MarkAdapter(name string) { s.mu.Lock(); s.adapterLast[name] = s.now(); s.mu.Unlock() }
+
+// RegisterAdapter adds an adapter to the liveness rollup before its first
+// successful event, so a never-started adapter is not reported healthy.
+func (s *Service) RegisterAdapter(name string) {
+	s.mu.Lock()
+	if _, ok := s.adapterLast[name]; !ok {
+		s.adapterLast[name] = time.Time{}
+	}
+	s.mu.Unlock()
+}
+func (s *Service) MarkSchedulerTick() { s.mu.Lock(); s.schedulerLast = s.now(); s.mu.Unlock() }
+
+type Health struct {
+	Healthy   bool                     `json:"healthy"`
+	Adapters  map[string]AdapterHealth `json:"adapters"`
+	Scheduler SchedulerHealth          `json:"scheduler"`
+	Database  bool                     `json:"database"`
+}
+type AdapterHealth struct {
+	LastSuccess string `json:"last_success"`
+	Stale       bool   `json:"stale"`
+}
+type SchedulerHealth struct {
+	LastTick string `json:"last_tick"`
+	Stale    bool   `json:"stale"`
+}
+
+// HealthSnapshot returns cheap liveness state. The database probe is run on
+// every request so a wedged store returns 503 rather than stale green JSON.
+func (s *Service) HealthSnapshot(ctx context.Context, staleAfter time.Duration) (Health, error) {
+	now := s.now()
+	s.mu.Lock()
+	adapters := make(map[string]AdapterHealth, len(s.adapterLast))
+	healthy := true
+	for name, last := range s.adapterLast {
+		h := AdapterHealth{LastSuccess: last.UTC().Format(time.RFC3339Nano), Stale: now.Sub(last) > staleAfter}
+		adapters[name] = h
+		healthy = healthy && !h.Stale
+	}
+	lastTick := s.schedulerLast
+	s.mu.Unlock()
+	if lastTick.IsZero() || now.Sub(lastTick) > staleAfter {
+		healthy = false
+	}
+	dbOK := true
+	if s.store == nil || s.store.DB.QueryRowContext(ctx, `SELECT 1`).Scan(new(int)) != nil {
+		dbOK = false
+		healthy = false
+	}
+	return Health{Healthy: healthy && dbOK, Adapters: adapters, Scheduler: SchedulerHealth{LastTick: lastTick.UTC().Format(time.RFC3339Nano), Stale: lastTick.IsZero() || now.Sub(lastTick) > staleAfter}, Database: dbOK}, nil
 }
 
 // Start registers a new active run.

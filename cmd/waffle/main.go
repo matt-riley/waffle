@@ -83,7 +83,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "chat":
 		return chatCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "session":
-		return sessionCmd(ctx, args[1:], stdout, stderr)
+		return sessionCmd(ctx, args[1:], stdin, stdout, stderr)
+	case "forget":
+		return forgetCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "usage":
 		return usageCmd(ctx, args[1:], stdout, stderr)
 	case "pause", "resume":
@@ -137,6 +139,7 @@ Commands:
   ws        manage repo workspaces (open/ls/idle/close)
   cron      manage scheduled jobs (add/ls/run/rm)
   session   list past sessions
+  forget    delete confirmed conversation and memory matches
   usage     show persisted token/request usage
   pause     pause new agent runs
   resume    resume agent runs

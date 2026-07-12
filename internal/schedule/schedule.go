@@ -354,6 +354,7 @@ type Scheduler struct {
 	// without a restart. Zero means DefaultReconcile.
 	Reconcile time.Duration
 	Usage     *usage.Store
+	Health    *observability.Service
 
 	mu         sync.Mutex
 	registered map[string]registration // job id -> live cron entry
@@ -410,6 +411,9 @@ func (s *Scheduler) reconcile(ctx context.Context, c *cron.Cron) error {
 	jobs, err := s.Store.List(ctx)
 	if err != nil {
 		return err
+	}
+	if s.Health != nil {
+		s.Health.MarkSchedulerTick()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

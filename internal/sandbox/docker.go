@@ -149,7 +149,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	args := dockerRunArgs(name, opts)
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
-		if opts.Disk != "" && storageOptUnsupported(string(out)) {
+		if opts.Disk != "" && StorageOptUnsupported(string(out)) {
 			opts.Disk = ""
 			out, err = exec.CommandContext(ctx, "docker", dockerRunArgs(name, opts)...).CombinedOutput()
 		}
@@ -171,7 +171,9 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	}, nil
 }
 
-func storageOptUnsupported(output string) bool {
+// StorageOptUnsupported reports a Docker error that means the configured
+// disk quota is unavailable for the active storage driver.
+func StorageOptUnsupported(output string) bool {
 	lower := strings.ToLower(output)
 	return strings.Contains(lower, "storage-opt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "unsupported"))
 }

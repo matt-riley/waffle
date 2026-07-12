@@ -71,6 +71,27 @@ func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
 	return err
 }
 
+// Get loads one session by id.
+func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
+	var sess Session
+	var created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var parseErr error
+	if sess.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, created); parseErr != nil && created != "" {
+		return nil, parseErr
+	}
+	if sess.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updated); parseErr != nil && updated != "" {
+		return nil, parseErr
+	}
+	return &sess, nil
+}
+
 // Latest returns the most recently updated session, or ErrNotFound.
 func (s *Store) Latest(ctx context.Context) (*Session, error) {
 	rows, err := s.list(ctx, 1)
@@ -232,11 +253,102 @@ func RepairWithReclaim(history []llm.Message, reclaim func([]string) (map[string
 
 // Hit is one recall search result.
 type Hit struct {
+	TurnID    int64
 	SessionID string
 	Title     string
 	Summary   string
 	Snippet   string
 	CreatedAt time.Time
+}
+
+// Delete removes a session and its turns atomically. The foreign-key cascade
+// and FTS delete trigger keep the searchable index consistent.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session binding: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return vacuum(ctx, s.db)
+}
+
+// DeleteTurns removes matching turn rows in one transaction.
+func (s *Store) DeleteTurns(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM turns WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close() //nolint:errcheck
+	for _, id := range ids {
+		if _, err := stmt.ExecContext(ctx, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return vacuum(ctx, s.db)
+}
+
+// Retain deletes sessions older than cutoff, excluding workspaces that are
+// still open or idle so lifecycle ownership remains valid.
+func (s *Store) Retain(ctx context.Context, cutoff time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	cut := cutoff.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ? AND id NOT IN (SELECT session_id FROM workspaces))`, cut); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE updated_at < ? AND id NOT IN (SELECT session_id FROM workspaces)`, cut)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if err := vacuum(ctx, s.db); err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+func vacuum(ctx context.Context, db *sql.DB) error {
+	var mode int
+	if err := db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return err
+	}
+	if mode == 2 {
+		_, err := db.ExecContext(ctx, `PRAGMA incremental_vacuum`)
+		return err
+	}
+	_, err := db.ExecContext(ctx, `VACUUM`)
+	return err
 }
 
 // Search runs a full-text query over all stored turns. The user-supplied
@@ -253,7 +365,7 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 		limit = 8
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.session_id, s.title, s.summary,
+		SELECT t.id, t.session_id, s.title, s.summary,
 		       snippet(turns_fts, 0, '[', ']', ' … ', 24),
 		       t.created_at
 		FROM turns_fts
@@ -270,7 +382,7 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 	for rows.Next() {
 		var h Hit
 		var created string
-		if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &h.Snippet, &created); err != nil {
+		if err := rows.Scan(&h.TurnID, &h.SessionID, &h.Title, &h.Summary, &h.Snippet, &created); err != nil {
 			return nil, err
 		}
 		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {

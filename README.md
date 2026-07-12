@@ -63,9 +63,36 @@ What's here, by capability:
   unrestricted network access is required. Allowlisted HTTP requests are
   token-authenticated, audited, and rejected if DNS resolves to private
   address space.
+  Under `waffle serve`, open workspaces stop after 30 minutes idle and close
+  after 168 hours only when clean; set `[workspace] idle_timeout` or
+  `close_ttl` to a Go duration, or `"0"` to disable. Dirty/unpushed work is
+  retained and reported. Configure `[github.app]` with secret-backed
+  `app_id`, `installation_id`, and `private_key` for one-hour,
+  repo-scoped installation tokens; without it, the documented PAT fallback is
+  used.
+- **Data lifecycle** — `waffle session rm <id>` and `waffle forget <query>`
+  delete live sessions/turn matches while keeping FTS consistent. Optional
+  `[store] retain = "365d"` runs under `serve`; `"0"` (the default) retains
+  forever. Deletion cannot remove provider logs, delivered messages, or old
+  backups.
+- **Deployment** — systemd and launchd service examples, headless identity
+  setup, and the loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
   `spawn_subagent` delegates parallel work; MCP servers add their tools.
+
+Session data is retained forever by default. `waffle session rm <id>` and
+`waffle forget <query>` require confirmation, update the FTS index, and run a
+SQLite `VACUUM`/incremental vacuum; opt-in
+retention runs only under `waffle serve`:
+
+```toml
+[store]
+retain = "365d" # "0" means forever (the default)
+```
+
+Deletion affects only the live waffle store. It cannot remove provider logs,
+already-delivered Telegram messages, or data in existing backups.
 
 MCP servers are configured explicitly in `config.toml`:
 

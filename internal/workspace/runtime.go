@@ -65,7 +65,7 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 		return err
 	}
 	if err := d.docker(ctx, workspaceRunArgs(opts)...); err != nil {
-		if opts.Disk != "" && strings.Contains(strings.ToLower(err.Error()), "storage-opt") && strings.Contains(strings.ToLower(err.Error()), "not supported") {
+		if opts.Disk != "" && sandbox.StorageOptUnsupported(err.Error()) {
 			opts.Disk = ""
 			return d.docker(ctx, workspaceRunArgs(opts)...)
 		}
