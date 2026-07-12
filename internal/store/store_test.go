@@ -57,7 +57,11 @@ func TestSnapshotCopiesLiveData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open snapshot: %v", err)
 	}
-	defer snap.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := snap.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 	var value string
 	if err := snap.DB.QueryRowContext(ctx,
 		`SELECT value FROM meta WHERE key = 'probe'`).Scan(&value); err != nil {
@@ -95,7 +99,11 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close() //nolint:errcheck // read-only test teardown
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	// The 0001 migration must have created meta and recorded itself.
 	if _, err := s.DB.ExecContext(ctx,
@@ -200,7 +208,11 @@ func TestMigrateAppliesOutOfOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	// Simulate branch A: versions 100 and 102 applied, leaving a hole at 101.
 	branchA := []migration{
@@ -259,7 +271,11 @@ func TestFTSSurvivesSessionDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {
@@ -306,7 +322,11 @@ func TestFTSSurvivesTurnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {

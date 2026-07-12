@@ -120,15 +120,18 @@ func (s *Store) Remove(ctx context.Context, id string) error {
 }
 
 // List returns all jobs.
-func (s *Store) List(ctx context.Context) ([]Job, error) {
+func (s *Store) List(ctx context.Context) (out []Job, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout
 		FROM jobs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var out []Job
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err != nil {

@@ -99,7 +99,7 @@ type wireChunk struct {
 }
 
 // Complete implements llm.Provider.
-func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
+func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (resp *llm.Response, err error) {
 	body, err := json.Marshal(p.toWire(req))
 	if err != nil {
 		return nil, err
@@ -117,7 +117,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.St
 	if err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
-	defer httpResp.Body.Close() //nolint:errcheck // read-only body
+	defer func() {
+		if cerr := httpResp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	if httpResp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))

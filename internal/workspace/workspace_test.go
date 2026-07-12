@@ -192,7 +192,11 @@ func newTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	rt := newFakeRuntime(tools)
 	mgr := NewManager(st, session.New(st), rt, t.TempDir())
 	mgr.ExecTimeout = 10 * time.Second
@@ -210,7 +214,11 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	if ws.Repo != "matt-riley/waffle" || ws.URL != "https://github.com/matt-riley/waffle.git" {
 		t.Errorf("ws = %+v", ws)
@@ -234,7 +242,11 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer client2.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client2.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	if ws2.ID != ws.ID {
 		t.Errorf("second open made a new workspace: %s vs %s", ws2.ID, ws.ID)
 	}
@@ -246,7 +258,11 @@ func TestTouchPersistsWorkspaceActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	before := ws.LastActive
 	if err := mgr.Touch(context.Background(), ws.ID); err != nil {
 		t.Fatal(err)
@@ -266,7 +282,9 @@ func TestReaperIdlesOnlyStaleWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +306,11 @@ func TestReaperIdlesOnlyStaleWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resumedClient.Close() //nolint:errcheck
+	defer func() {
+		if err := resumedClient.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	if resumed.ID != old.ID || resumed.Status != StatusOpen {
 		t.Fatalf("resume = %+v", resumed)
 	}
@@ -300,7 +322,9 @@ func TestReaperLeavesRecentWorkspaceOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	r := &Reaper{Manager: mgr, IdleTimeout: time.Hour, Now: time.Now}
 	if err := r.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
@@ -320,7 +344,9 @@ func TestReaperClosesCleanTTLWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +370,9 @@ func TestReaperKeepsDirtyWorkspaceAndNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +399,9 @@ func TestReaperClosesCleanWorkspaceWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +425,9 @@ func TestReaperKeepsDirtyTTLWorkspaceAndNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -426,14 +458,20 @@ func TestOpenRefreshesBrokerTokenForExistingWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // reopening with a new broker token
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	token = "wk_second"
 	resumed, client, err := mgr.Open(ctx, "matt-riley/waffle")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	if resumed.ID != ws.ID {
 		t.Fatalf("reopen created workspace %s, want %s", resumed.ID, ws.ID)
 	}
@@ -456,7 +494,11 @@ func TestOpenAdoptsDevcontainerImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	if ws.Image != "golang:1.25" {
 		t.Errorf("image = %q, want devcontainer image", ws.Image)
@@ -498,7 +540,9 @@ func TestIdleResumeCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // switching to resume
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	if err := mgr.Idle(ctx, ws.ID); err != nil {
 		t.Fatalf("Idle: %v", err)
@@ -512,7 +556,11 @@ func TestIdleResumeCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	defer client2.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client2.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	if resumed.Status != StatusOpen {
 		t.Errorf("resumed status = %s", resumed.Status)
 	}
@@ -534,7 +582,9 @@ func TestCloseRefusesUnpushedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // manager reconnects in Close
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	report, err := mgr.Close(ctx, ws.ID, false)
 	if err == nil {
@@ -567,7 +617,9 @@ func TestCloseRefusesCommitsWithoutUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // manager reconnects in Close
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	report, err := mgr.Close(ctx, ws.ID, false)
 	if err == nil {
@@ -589,7 +641,9 @@ func TestCloseAbortsWhenIdleWorkspaceCannotResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // manager reconnects in Close
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if err := mgr.Idle(ctx, ws.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +675,9 @@ func TestCloseRestoresIdleOnRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 	if err := mgr.Idle(ctx, ws.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +703,9 @@ func TestIdleRevokesWorkspaceSessionToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // switching to idle
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	if err := mgr.Idle(ctx, ws.ID); err != nil {
 		t.Fatal(err)
@@ -667,7 +725,9 @@ func TestCloseRevokesWorkspaceSessionToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close() //nolint:errcheck // manager reconnects in Close
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
 
 	if _, err := mgr.Close(ctx, ws.ID, true); err != nil {
 		t.Fatal(err)
@@ -699,7 +759,9 @@ func TestOpenConcurrentRaceResumesWinner(t *testing.T) {
 			ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
 			results[i].err = err
 			if client != nil {
-				client.Close() //nolint:errcheck // test cleanup
+				if err := client.Close(); err != nil {
+					t.Errorf("close client: %v", err)
+				}
 			}
 			results[i].ws = ws
 		}(i)

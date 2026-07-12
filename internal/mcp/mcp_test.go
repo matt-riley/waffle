@@ -34,7 +34,10 @@ func writeFakeServer(t *testing.T) string {
 		t.Skip("bash fake server is unix-only")
 	}
 	path := filepath.Join(t.TempDir(), "server.sh")
-	if err := os.WriteFile(path, []byte(fakeServer), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(fakeServer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -48,7 +51,11 @@ func TestConnectListAndCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	tb, err := client.Toolbox(ctx)
 	if err != nil {
@@ -80,7 +87,11 @@ func TestConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	tb, err := client.Toolbox(ctx)
 	if err != nil {
 		t.Fatalf("Toolbox: %v", err)

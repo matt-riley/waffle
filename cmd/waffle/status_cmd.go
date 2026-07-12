@@ -36,7 +36,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 // statusCmdWithClient fetches and renders a status snapshot. Its endpoint and
 // client are explicit so callers can use an in-process test server.
-func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Client, stdout io.Writer) error {
+func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Client, stdout io.Writer) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/status", nil)
 	if err != nil {
 		return fmt.Errorf("create status request: %w", err)
@@ -45,7 +45,11 @@ func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Clien
 	if err != nil {
 		return statusUnavailable(baseURL, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // read-only response body
+	defer func() {
+		if cerr := resp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return statusUnavailable(baseURL, fmt.Errorf("HTTP %s", resp.Status))
 	}

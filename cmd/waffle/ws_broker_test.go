@@ -25,14 +25,22 @@ func TestStartWorkspaceBrokerFailsFastOnBusyAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("close listener: %v", err)
+		}
+	}()
 	addr := held.Addr().String()
 
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	cfg := config.Config{}
 	cfg.Broker.Listen = addr
@@ -69,7 +77,11 @@ func TestStartWorkspaceBrokerBindsFreeAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	cfg := config.Config{}
 	cfg.Broker.Listen = addr
@@ -97,7 +109,11 @@ func TestRepoScopeResolverPrefersBrokerBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	b := broker.New(st, nil)
 	mgr := newWorkspaceManager(config.Config{}, st, nil)

@@ -10,21 +10,25 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 )
 
-func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
 	case "ls":
-		_, st, err := openConfigAndStore(ctx)
-		if err != nil {
-			return err
+		_, st, openErr := openConfigAndStore(ctx)
+		if openErr != nil {
+			return openErr
 		}
-		defer st.Close() //nolint:errcheck // read-only use
-		sessions, err := session.New(st).List(ctx, 20)
-		if err != nil {
-			return err
+		defer func() {
+			if cerr := st.Close(); err == nil {
+				err = cerr
+			}
+		}()
+		sessions, listErr := session.New(st).List(ctx, 20)
+		if listErr != nil {
+			return listErr
 		}
 		if len(sessions) == 0 {
 			fmt.Fprintln(stdout, "no sessions yet — start one with: waffle chat")
@@ -41,18 +45,22 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if len(args) != 2 {
 			return errors.New("usage: waffle session rm <id>")
 		}
-		_, st, err := openConfigAndStore(ctx)
-		if err != nil {
-			return err
+		_, st, openErr := openConfigAndStore(ctx)
+		if openErr != nil {
+			return openErr
 		}
-		defer st.Close() //nolint:errcheck
+		defer func() {
+			if cerr := st.Close(); err == nil {
+				err = cerr
+			}
+		}()
 		fmt.Fprintf(stdout, "Delete session %s and all its turns? [y/N] ", args[1])
 		if !confirmed(stdin) {
 			fmt.Fprintln(stdout, "cancelled")
 			return nil
 		}
-		if err := session.New(st).Delete(ctx, args[1]); err != nil {
-			return err
+		if delErr := session.New(st).Delete(ctx, args[1]); delErr != nil {
+			return delErr
 		}
 		fmt.Fprintln(stdout, "session deleted")
 		return nil

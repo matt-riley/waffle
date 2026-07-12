@@ -69,8 +69,12 @@ func Snapshot(ctx context.Context, src, dst string) (ok bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("open %s: %w", src, err)
 	}
-	defer db.Close() //nolint:errcheck // read-only handle
-	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
+	defer func() {
+		if cerr := db.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	if _, err = db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
 		return false, fmt.Errorf("snapshot %s: %w", src, err)
 	}
 	return true, nil
@@ -183,7 +187,11 @@ func appliedVersions(ctx context.Context, db *sql.DB) (set map[int]bool, max int
 	if err != nil {
 		return nil, 0, fmt.Errorf("read applied migrations: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	set = make(map[int]bool)
 	for rows.Next() {
 		var v int
@@ -215,7 +223,7 @@ func applyOne(ctx context.Context, db *sql.DB, m migration) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		return err
 	}

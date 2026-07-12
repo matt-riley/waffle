@@ -11,7 +11,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 )
 
-func forgetCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func forgetCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: waffle forget <query>")
 	}
@@ -20,7 +20,11 @@ func forgetCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	sessions := session.New(st)
 	hits, err := sessions.Search(ctx, query, 100)
 	if err != nil {

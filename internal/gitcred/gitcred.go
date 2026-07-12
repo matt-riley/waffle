@@ -22,7 +22,7 @@ const (
 
 // Get forwards a git credential request to the broker and returns the
 // response body (already in git's key=value format).
-func Get(ctx context.Context, brokerURL, token string, request io.Reader) (string, error) {
+func Get(ctx context.Context, brokerURL, token string, request io.Reader) (out string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -38,7 +38,11 @@ func Get(ctx context.Context, brokerURL, token string, request io.Reader) (strin
 	if err != nil {
 		return "", fmt.Errorf("git-credential: broker unreachable: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // read-only body
+	defer func() {
+		if cerr := resp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {

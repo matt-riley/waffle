@@ -43,7 +43,7 @@ func fetchAllowPrivateArgs(args []string) []string {
 
 // sandboxCmd offers `waffle sandbox exec` — a diagnostic client for a
 // running runner, and the harness for e2e-testing the queue protocol.
-func sandboxCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func sandboxCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err error) {
 	if len(args) < 1 || args[0] != "exec" {
 		fmt.Fprintln(stderr, "usage: waffle sandbox exec --queue <dir> <tool> <json-input>")
 		return errUsage
@@ -70,7 +70,11 @@ func sandboxCmd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
-	defer client.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := client.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	content, isError, err := client.Exec(ctx, positional[0], json.RawMessage(positional[1]))
 	if err != nil {

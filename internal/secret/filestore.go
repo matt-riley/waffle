@@ -81,7 +81,7 @@ func (s *FileStore) save(m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name()) //nolint:errcheck // no-op after rename
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return err

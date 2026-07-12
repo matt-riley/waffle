@@ -113,15 +113,18 @@ func (s *Store) Pair(ctx context.Context, channel, externalID, senderName, chatI
 }
 
 // Pairings lists pending pairing requests.
-func (s *Store) Pairings(ctx context.Context) ([]Pairing, error) {
+func (s *Store) Pairings(ctx context.Context) (out []Pairing, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT code, channel, external_id, sender_name, chat_id, created_at
 		FROM pairings ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var out []Pairing
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		var p Pairing
 		var created string
@@ -158,7 +161,7 @@ func (s *Store) Approve(ctx context.Context, code, name string) (*Identity, erro
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO identities (channel, external_id, name, created_at) VALUES (?, ?, ?, ?)`,
 		id.Channel, id.ExternalID, id.Name, now()); err != nil {

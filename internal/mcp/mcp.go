@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -124,11 +125,26 @@ func Connect(ctx context.Context, s Server) (*Client, error) {
 
 // Close terminates the server process.
 func (c *Client) Close() error {
-	_ = c.in.Close()
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+	var first error
+	if err := c.in.Close(); err != nil {
+		first = err
 	}
-	return c.cmd.Wait()
+	if c.cmd.Process != nil {
+		if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	if err := c.cmd.Wait(); err != nil {
+		// Kill makes Wait report *exec.ExitError (e.g. "signal: killed"); that
+		// is the expected outcome of an intentional shutdown, not a Close failure.
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // readLoop is the sole reader of the server's stdout. It routes each

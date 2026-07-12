@@ -139,7 +139,7 @@ func (w Workspace) appendCandidate(c Candidate) error {
 	}
 	line := fmt.Sprintf("- %s [trust=%s source=%s]: %s\n", time.Now().UTC().Format("2006-01-02"), c.Provenance.TrustClass, c.Provenance.SourceID, oneLine(c.Body))
 	if _, err := f.WriteString(line); err != nil {
-		f.Close() //nolint:errcheck // write already failed
+		_ = f.Close()
 		return err
 	}
 	return f.Close()

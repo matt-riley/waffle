@@ -130,7 +130,11 @@ func TestRecallTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 	sessions := session.New(st)
 
 	sess, _ := sessions.Create(ctx, "")

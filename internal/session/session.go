@@ -109,15 +109,18 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 	return s.list(ctx, limit)
 }
 
-func (s *Store) list(ctx context.Context, limit int) ([]Session, error) {
+func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, title, summary, created_at, updated_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var out []Session
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		var sess Session
 		var created, updated string
@@ -150,7 +153,7 @@ func (s *Store) AppendTurn(ctx context.Context, sessionID string, msg llm.Messag
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
 		VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM turns WHERE session_id = ?), ?, ?, ?, ?)`,
@@ -165,14 +168,17 @@ func (s *Store) AppendTurn(ctx context.Context, sessionID string, msg llm.Messag
 }
 
 // Turns loads a session's full history in order.
-func (s *Store) Turns(ctx context.Context, sessionID string) ([]llm.Message, error) {
+func (s *Store) Turns(ctx context.Context, sessionID string) (msgs []llm.Message, err error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT role, blocks FROM turns WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var msgs []llm.Message
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		var role, blocks string
 		if err := rows.Scan(&role, &blocks); err != nil {
@@ -268,7 +274,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id = ?`, id); err != nil {
 		return fmt.Errorf("delete session binding: %w", err)
 	}
@@ -287,7 +293,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 }
 
 // DeleteTurns removes matching turn rows in one transaction.
-func (s *Store) DeleteTurns(ctx context.Context, ids []int64) error {
+func (s *Store) DeleteTurns(ctx context.Context, ids []int64) (err error) {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -295,18 +301,22 @@ func (s *Store) DeleteTurns(ctx context.Context, ids []int64) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.PrepareContext(ctx, `DELETE FROM turns WHERE id = ?`)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close() //nolint:errcheck
+	defer func() {
+		if cerr := stmt.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for _, id := range ids {
 		if _, err := stmt.ExecContext(ctx, id); err != nil {
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	return vacuum(ctx, s.db)
@@ -319,7 +329,7 @@ func (s *Store) Retain(ctx context.Context, cutoff time.Time) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() { _ = tx.Rollback() }()
 	cut := cutoff.UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ? AND id NOT IN (SELECT session_id FROM workspaces))`, cut); err != nil {
 		return 0, err
@@ -353,7 +363,7 @@ func vacuum(ctx context.Context, db *sql.DB) error {
 
 // Search runs a full-text query over all stored turns. The user-supplied
 // query is quoted term-by-term so FTS5 operator syntax can't error out.
-func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, error) {
+func (s *Store) Search(ctx context.Context, query string, limit int) (hits []Hit, err error) {
 	terms := strings.Fields(query)
 	if len(terms) == 0 {
 		return nil, nil
@@ -377,8 +387,11 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var hits []Hit
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		var h Hit
 		var created string

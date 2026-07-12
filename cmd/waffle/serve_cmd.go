@@ -38,7 +38,7 @@ type adapterFactory func(config.Config) ([]channel.Adapter, error)
 
 // serveCmdWithAdapterFactory runs the serve command with an explicit adapter
 // factory so command lifecycle tests can use an in-memory channel.
-func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) error {
+func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) (err error) {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -46,7 +46,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	statusListener, err := net.Listen("tcp", cfg.Gateway.StatusListen)
 	if err != nil {

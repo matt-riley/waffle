@@ -82,7 +82,11 @@ func newTestSessions(t *testing.T) (*session.Store, *store.Store) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	return session.New(st), st
 }
 

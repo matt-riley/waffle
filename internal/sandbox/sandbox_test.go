@@ -79,7 +79,11 @@ func TestQueueRoundTrip(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -111,7 +115,11 @@ func TestRunnerResumesWithoutReexecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	// First runner answers one request, then stops.
 	r1ctx, r1cancel := context.WithCancel(ctx)
@@ -151,7 +159,11 @@ func TestShutdownStopsRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	if err := client.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
@@ -222,7 +234,11 @@ func TestRunnerEnforcesTruncationBeforeOutboundWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -248,7 +264,11 @@ func TestClientExecDetectsDeadRunnerEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	// Shrink the detection windows so the test stays fast (defaults are
 	// 10s per call / 60s cold-start allowance).
 	client.noHealthWait = 300 * time.Millisecond
@@ -287,7 +307,11 @@ func TestExecToleratesColdStartFirstHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	// Tiny per-Exec window (the old, buggy trigger) but a generous
 	// cold-start allowance anchored to client/container start.
 	client.noHealthWait = 200 * time.Millisecond
@@ -341,7 +365,11 @@ func TestExecPersistentProbeFailuresFailFast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	client.probeTimeout = 1 * time.Nanosecond
 	client.probeFailWindow = 500 * time.Millisecond
 
@@ -374,7 +402,11 @@ func TestExecDetectsDeadRunnerAfterTransientLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	client.noHealthWait = 100 * time.Millisecond
 	client.startupWait = 200 * time.Millisecond
 	client.probeTimeout = 100 * time.Millisecond
@@ -386,12 +418,20 @@ func TestExecDetectsDeadRunnerAfterTransientLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locker.Close() //nolint:errcheck
+	defer func() {
+		if err := locker.Close(); err != nil {
+			t.Errorf("close locker: %v", err)
+		}
+	}()
 	conn, err := locker.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close conn: %v", err)
+		}
+	}()
 	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
 		t.Fatalf("BEGIN EXCLUSIVE: %v", err)
 	}
@@ -423,7 +463,10 @@ func TestResolveRunnerBinaryExplicitWins(t *testing.T) {
 	defer func() { hostGOOS = restore }()
 
 	bin := filepath.Join(t.TempDir(), "waffle-linux")
-	if err := os.WriteFile(bin, []byte("elf"), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(bin, []byte("elf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ResolveRunnerBinary(bin)
@@ -453,7 +496,10 @@ func TestResolveRunnerBinaryRejectsBadExplicitPath(t *testing.T) {
 func TestValidateRunnerBinary(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "waffle-linux")
-	if err := os.WriteFile(file, []byte("x"), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateRunnerBinary(file); err != nil {
@@ -505,7 +551,11 @@ func TestDuplicateExecIsAbsorbedAndReclaimable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	first, _, err := client.Exec(ctx, "tool-call-1", "upper", json.RawMessage(`{"s":"once"}`))

@@ -20,7 +20,11 @@ func TestBuildAgentCronTierExcludesBash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 	sessions := session.New(st)
 	ws := memory.Workspace{Dir: t.TempDir()}
 
@@ -67,7 +71,11 @@ func TestConfiguredGatewayGroupBuildsRegistryEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	cfg := config.Default()
 	cfg.Provider.APIKey = "test-key"
@@ -116,7 +124,11 @@ func TestBuildCronRunnerUsesCronTier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	cfg := config.Default()
 	cfg.Provider.APIKey = "test-key"

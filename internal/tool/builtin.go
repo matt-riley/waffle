@@ -241,7 +241,7 @@ func (Fetch) Def() llm.Tool {
 	}
 }
 
-func (f Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (f Fetch) Run(ctx context.Context, input json.RawMessage) (result string, err error) {
 	var in struct {
 		URL string `json:"url"`
 	}
@@ -276,7 +276,11 @@ func (f Fetch) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close() //nolint:errcheck // read-only body
+	defer func() {
+		if cerr := resp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
@@ -486,12 +490,16 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	return Truncate(strings.Join(results, "\n"), OutputLimit), nil
 }
 
-func searchFile(ctx context.Context, path string, re *regexp.Regexp) ([]string, bool, error) {
+func searchFile(ctx context.Context, path string, re *regexp.Regexp) (matches []string, binary bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, false, err
 	}
-	defer f.Close() //nolint:errcheck // read-only file
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	sniff := make([]byte, searchBinarySniffBytes)
 	n, err := f.Read(sniff)
@@ -501,13 +509,12 @@ func searchFile(ctx context.Context, path string, re *regexp.Regexp) ([]string, 
 	if bytes.IndexByte(sniff[:n], 0) >= 0 {
 		return nil, true, nil
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return nil, false, err
 	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), searchMaxLineBytes)
-	var matches []string
 	line := 0
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -522,7 +529,7 @@ func searchFile(ctx context.Context, path string, re *regexp.Regexp) ([]string, 
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err = scanner.Err(); err != nil {
 		return nil, false, err
 	}
 	return matches, false, nil

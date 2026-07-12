@@ -23,7 +23,7 @@ func TestProxyInjectsRealKeyAndStripsToken(t *testing.T) {
 		if r.URL.Path != "/v1/messages" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		io.WriteString(w, `{"ok":true}`) //nolint:errcheck // test handler
+		_, _ = io.WriteString(w, `{"ok":true}`) // intentional discard in test handler
 	}))
 	defer upstream.Close()
 
@@ -46,7 +46,11 @@ func TestProxyInjectsRealKeyAndStripsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // test client
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close body: %v", err)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
@@ -78,7 +82,9 @@ func TestUnauthorizedAndRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close() //nolint:errcheck // test client
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close body: %v", err)
+	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no token status = %d", resp.StatusCode)
 	}
@@ -95,7 +101,9 @@ func TestUnauthorizedAndRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close() //nolint:errcheck // test client
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close body: %v", err)
+	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("revoked token status = %d", resp.StatusCode)
 	}
@@ -116,7 +124,9 @@ func TestUnknownUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close() //nolint:errcheck // test client
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close body: %v", err)
+	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
@@ -161,7 +171,11 @@ func openStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	return st
 }
 

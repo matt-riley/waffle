@@ -19,7 +19,11 @@ func TestHelperAgainstBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
 
 	b := broker.New(st, nil)
 	b.GitCredential = func(ctx context.Context, sessionID, host, path string) (string, string, error) {
@@ -59,7 +63,11 @@ func TestHelperAgainstBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close() //nolint:errcheck // test teardown
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close rows: %v", err)
+		}
+	}()
 	for rows.Next() {
 		var a string
 		if err := rows.Scan(&a); err != nil {

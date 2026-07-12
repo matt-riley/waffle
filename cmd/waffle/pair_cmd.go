@@ -10,7 +10,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 )
 
-func pairCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func pairCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err error) {
 	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
@@ -20,7 +20,11 @@ func pairCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // read-mostly, process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	entities := entity.New(st, session.New(st))
 
 	switch sub {

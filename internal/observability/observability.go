@@ -175,7 +175,7 @@ func (s *Service) Finish(ctx context.Context, id, outcome string) error {
 
 // Snapshot returns active runs, recent completed runs, and the stable empty
 // retry queue placeholder.
-func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
+func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	now := s.now()
 	s.mu.Lock()
 	active := make([]ActiveRun, 0, len(s.active))
@@ -198,7 +198,11 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read recent runs: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only result
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	recent := make([]RecentRun, 0)
 	for rows.Next() {
 		var run RecentRun
@@ -208,7 +212,7 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		recent = append(recent, run)
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return Snapshot{}, fmt.Errorf("read recent runs: %w", err)
 	}
 	return Snapshot{Active: active, Recent: recent, RetryQueue: make([]any, 0)}, nil

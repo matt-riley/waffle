@@ -55,7 +55,7 @@ type chat struct {
 	wsClient io.Closer
 }
 
-func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	continueLast := false
 	for _, a := range args {
 		switch a {
@@ -70,7 +70,11 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // read-mostly handle, process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	c, cleanup, err := newChat(ctx, cfg, st, continueLast)
 	if err != nil {

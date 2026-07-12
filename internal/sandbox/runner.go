@@ -21,19 +21,27 @@ type Runner struct {
 // Serve processes requests from the queue in dir until a shutdown request
 // arrives or ctx ends. Requests already answered in outbound.db are
 // skipped, so a restarted runner resumes exactly where it left off.
-func (r *Runner) Serve(ctx context.Context, dir string) error {
+func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 	out, err := openQueueDB(dir+"/"+outboundFile, outboundSchema)
 	if err != nil {
 		return err
 	}
-	defer out.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	// Same idempotent-schema trick as the client: whoever opens first
 	// creates the file; each side only ever writes its own.
 	in, err := openQueueDB(dir+"/"+inboundFile, inboundSchema)
 	if err != nil {
 		return err
 	}
-	defer in.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := in.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	var last int64
 	if err := out.QueryRowContext(ctx,

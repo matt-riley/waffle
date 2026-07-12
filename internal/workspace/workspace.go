@@ -576,15 +576,18 @@ func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace,
 }
 
 // List returns all workspaces, newest first.
-func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
+func (m *Manager) List(ctx context.Context) (out []Workspace, err error) {
 	rows, err := m.DB.QueryContext(ctx, `
 		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active
 		FROM workspaces ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
-	var out []Workspace
+	defer func() {
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	for rows.Next() {
 		ws, err := m.scanOne(rows)
 		if err != nil {

@@ -16,7 +16,7 @@ import (
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
-func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err error) {
 	if len(args) == 0 {
 		wsUsage(stderr)
 		return errUsage
@@ -24,7 +24,6 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var closeID string
 	var closeForce bool
 	if args[0] == "close" {
-		var err error
 		closeID, closeForce, err = parseWorkspaceCloseArgs(args[1:])
 		if err != nil {
 			return err
@@ -35,14 +34,18 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	switch args[0] {
 	case "ls":
 		mgr := newWorkspaceManager(cfg, st, nil)
-		list, err := mgr.List(ctx)
-		if err != nil {
-			return err
+		list, listErr := mgr.List(ctx)
+		if listErr != nil {
+			return listErr
 		}
 		if len(list) == 0 {
 			fmt.Fprintln(stdout, "no workspaces — open one with: waffle ws open <owner/repo>")
@@ -57,20 +60,24 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if len(args) != 2 {
 			return fmt.Errorf("usage: waffle ws open <owner/repo>")
 		}
-		b, brokerURL, err := startWorkspaceBroker(ctx, cfg, st, stderr)
-		if err != nil {
-			return err
+		b, brokerURL, brokerErr := startWorkspaceBroker(ctx, cfg, st, stderr)
+		if brokerErr != nil {
+			return brokerErr
 		}
 		mgr := newWorkspaceManager(cfg, st, b)
 		mgr.BrokerURL = brokerURL
 		if cfg.Workspace.Egress == "allowlist" {
 			mgr.ProxyURL = brokerURL + "/egress"
 		}
-		ws, client, err := mgr.Open(ctx, args[1])
-		if err != nil {
-			return err
+		ws, client, openErr := mgr.Open(ctx, args[1])
+		if openErr != nil {
+			return openErr
 		}
-		defer client.Close() //nolint:errcheck // process is exiting
+		defer func() {
+			if cerr := client.Close(); err == nil {
+				err = cerr
+			}
+		}()
 		fmt.Fprintf(stdout, "workspace %s open: %s cloned in container %s (image %s)\n", ws.ID, ws.Repo, ws.Container, ws.Image)
 		fmt.Fprintf(stdout, "work on it from chat with: /repo %s\n", ws.Repo)
 		return nil
@@ -80,20 +87,20 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("usage: waffle ws idle <id>")
 		}
 		mgr := newWorkspaceManager(cfg, st, nil)
-		if err := mgr.Idle(ctx, args[1]); err != nil {
-			return err
+		if idleErr := mgr.Idle(ctx, args[1]); idleErr != nil {
+			return idleErr
 		}
 		fmt.Fprintf(stdout, "workspace %s stopped; volume kept\n", args[1])
 		return nil
 
 	case "close":
 		mgr := newWorkspaceManager(cfg, st, nil)
-		report, err := mgr.Close(ctx, closeID, closeForce)
-		if err != nil {
+		report, closeErr := mgr.Close(ctx, closeID, closeForce)
+		if closeErr != nil {
 			if report != nil && (report.Dirty != "" || report.Unpushed != "") {
 				fmt.Fprintf(stderr, "dirty files:\n%s\nunpushed commits:\n%s\n", report.Dirty, report.Unpushed)
 			}
-			return err
+			return closeErr
 		}
 		fmt.Fprintf(stdout, "workspace %s closed\n", closeID)
 		return nil

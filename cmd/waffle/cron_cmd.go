@@ -8,7 +8,7 @@ import (
 	"github.com/matt-riley/waffle/internal/schedule"
 )
 
-func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err error) {
 	if len(args) == 0 {
 		cronUsage(stderr)
 		return errUsage
@@ -18,7 +18,11 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	defer st.Close() //nolint:errcheck // process is exiting
+	defer func() {
+		if cerr := st.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	jobs := schedule.NewStore(st)
 
 	switch args[0] {

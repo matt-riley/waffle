@@ -194,7 +194,10 @@ func TestCopyFile(t *testing.T) {
 func TestSandboxRunnerCheck(t *testing.T) {
 	// A configured, existing runner binary passes and is named in the info.
 	f := filepath.Join(t.TempDir(), "waffle-linux")
-	if err := os.WriteFile(f, []byte("binary"), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(f, []byte("binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f, 0o755); err != nil {
 		t.Fatal(err)
 	}
 

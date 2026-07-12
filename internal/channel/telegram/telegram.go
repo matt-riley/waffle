@@ -197,7 +197,7 @@ func (a *Adapter) Send(ctx context.Context, chatID, text string) error {
 	return nil
 }
 
-func (a *Adapter) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+func (a *Adapter) call(ctx context.Context, method string, params map[string]any) (result json.RawMessage, err error) {
 	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
@@ -213,7 +213,11 @@ func (a *Adapter) call(ctx context.Context, method string, params map[string]any
 	if err != nil {
 		return nil, fmt.Errorf("telegram: %s: %w", method, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // read-only body
+	defer func() {
+		if cerr := resp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	var api apiResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8*1024*1024)).Decode(&api); err != nil {

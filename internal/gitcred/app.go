@@ -103,7 +103,7 @@ func (a *App) Credential(ctx context.Context, repo string) (string, string, erro
 	return "x-access-token", token, nil
 }
 
-func (a *App) mint(ctx context.Context, repository string, now time.Time) (string, time.Time, error) {
+func (a *App) mint(ctx context.Context, repository string, now time.Time) (token string, expires time.Time, err error) {
 	jwt, err := a.jwt(now)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("sign github app JWT: %w", err)
@@ -121,7 +121,11 @@ func (a *App) mint(ctx context.Context, repository string, now time.Time) (strin
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("github app token request: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer func() {
+		if cerr := resp.Body.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode/100 != 2 {
 		return "", time.Time{}, fmt.Errorf("github app token request: %s: %s", resp.Status, strings.TrimSpace(string(raw)))

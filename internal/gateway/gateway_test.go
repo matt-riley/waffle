@@ -104,7 +104,11 @@ func newTestGateway(t *testing.T) (*Gateway, *fakeAdapter, *entity.Store, *sessi
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 	adapter := newFakeAdapter()
@@ -115,7 +119,7 @@ func newTestGateway(t *testing.T) (*Gateway, *fakeAdapter, *entity.Store, *sessi
 		Adapters: []channel.Adapter{adapter},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go gw.Run(ctx) //nolint:errcheck // stopped via cancel
+	go func() { _ = gw.Run(ctx) }()
 	return gw, adapter, entities, sessions, cancel
 }
 
@@ -143,7 +147,11 @@ func TestGatewayUsesPersistedAgentGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	sessions = session.New(st)
 	entities = entity.New(st, sessions)
 	gw := &Gateway{
@@ -168,7 +176,11 @@ func TestGatewayRecordsSessionRunAndLogsSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 	group, err := entities.GroupFor(ctx, "fake", "chat-1")
@@ -205,7 +217,11 @@ func TestGatewayRejectsUnavailablePersistedAgentGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 	if _, err := entities.GroupFor(ctx, "fake", "restricted-chat"); err != nil {
@@ -335,7 +351,11 @@ func TestGracefulShutdownPersistsTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
 	adapter := newFakeAdapter()

@@ -60,7 +60,11 @@ func TestCronAddRejectsMissingDeliverValueWithoutCreatingJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck // test teardown
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	jobs, err := schedule.NewStore(db).List(ctx)
 	if err != nil {
 		t.Fatal(err)

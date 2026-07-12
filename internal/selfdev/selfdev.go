@@ -128,7 +128,7 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	defer os.RemoveAll(tmp) //nolint:errcheck // temp dir
+	defer func() { _ = os.RemoveAll(tmp) }()
 	snapshot := filepath.Join(tmp, "waffle.db")
 	dbPath, err := config.DBPath()
 	if err != nil {
@@ -258,7 +258,7 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		return "", fmt.Errorf("build: %w", err)
 	}
 
-	defer os.Remove(built) //nolint:errcheck // best-effort cleanup
+	defer func() { _ = os.Remove(built) }()
 
 	// Gate on the *new* binary's own doctor.
 	out, err := exec.CommandContext(ctx, built, "doctor").CombinedOutput()
@@ -370,18 +370,22 @@ func commandOutput(ctx context.Context, dir, name string, args ...string) (strin
 	return string(out), err
 }
 
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close() //nolint:errcheck // read-only
+	defer func() {
+		if cerr := in.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close() //nolint:errcheck // copy already failed
+	if _, err = io.Copy(out, in); err != nil {
+		_ = out.Close()
 		return err
 	}
 	return out.Close()
