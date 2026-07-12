@@ -649,16 +649,17 @@ type Log struct {
 
 // Limits are optional safety budgets. Zero means unlimited.
 type Limits struct {
-	TokensPerDay    int               `toml:"tokens_per_day"`
-	RequestsPerHour int               `toml:"requests_per_hour"`
-	Groups          map[string]Limits `toml:"group"`
+	TokensPerDay          int               `toml:"tokens_per_day"`
+	RequestsPerHour       int               `toml:"requests_per_hour"`
+	AlertThresholdPercent int               `toml:"alert_threshold_percent"`
+	Groups                map[string]Limits `toml:"group"`
 }
 
 func (c Config) LimitsFor(group string) Limits {
 	if l, ok := c.Limits.Groups[group]; ok {
 		return l
 	}
-	return Limits{TokensPerDay: c.Limits.TokensPerDay, RequestsPerHour: c.Limits.RequestsPerHour}
+	return Limits{TokensPerDay: c.Limits.TokensPerDay, RequestsPerHour: c.Limits.RequestsPerHour, AlertThresholdPercent: c.Limits.AlertThresholdPercent}
 }
 
 // Default returns the configuration waffle runs with when no file exists.
@@ -849,6 +850,9 @@ var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 func validateLimits(l Limits) error {
 	if l.TokensPerDay < 0 || l.RequestsPerHour < 0 {
 		return errors.New("limits must be zero (unlimited) or positive")
+	}
+	if l.AlertThresholdPercent < 0 || l.AlertThresholdPercent > 100 {
+		return errors.New("alert_threshold_percent must be between 0 and 100")
 	}
 	for _, g := range l.Groups {
 		if err := validateLimits(g); err != nil {

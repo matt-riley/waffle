@@ -12,8 +12,9 @@ import (
 )
 
 type Limits struct {
-	TokensPerDay    int
-	RequestsPerHour int
+	TokensPerDay          int
+	RequestsPerHour       int
+	AlertThresholdPercent int
 }
 
 type Store struct{ db *sql.DB }
@@ -104,7 +105,11 @@ func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Ti
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, start).Scan(&used); err != nil {
 		return err
 	}
-	if l.TokensPerDay <= 0 || used*100 < l.TokensPerDay*80 {
+	threshold := l.AlertThresholdPercent
+	if threshold == 0 {
+		threshold = 80
+	}
+	if l.TokensPerDay <= 0 || used*100 < l.TokensPerDay*threshold {
 		return nil
 	}
 	key := strings.Join([]string{"usage-alert", session, "day", start}, ":")
@@ -116,7 +121,7 @@ func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Ti
 	if err != nil || n == 0 {
 		return err
 	}
-	if err := deliver(ctx, fmt.Sprintf("usage alert: session %s has used %d/%d daily tokens", session, used, l.TokensPerDay)); err != nil {
+	if err := deliver(ctx, fmt.Sprintf("usage alert: session %s crossed %d%% of daily token budget (%d/%d)", session, threshold, used, l.TokensPerDay)); err != nil {
 		_, _ = s.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM runtime_flags WHERE name=?`, key)
 		return err
 	}

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/session"
 )
 
 // Provenance records the evidence and authority behind a durable write.
@@ -42,6 +45,34 @@ type Gate struct {
 	WS     Workspace
 	Notify func(Candidate)
 	mu     sync.Mutex
+}
+
+type notifyKey struct{}
+
+// WithNotify attaches the owner-channel delivery callback for this run.
+func WithNotify(ctx context.Context, notify func(Candidate) error) context.Context {
+	return context.WithValue(ctx, notifyKey{}, notify)
+}
+
+func provenanceFromContext(ctx context.Context, p Provenance) Provenance {
+	o := session.OriginFromContext(ctx)
+	if p.SessionID == "" {
+		p.SessionID = o.SessionID
+	}
+	if p.Channel == "" {
+		p.Channel = o.Channel
+	}
+	p.UntrustedContext = p.UntrustedContext || o.Untrusted
+	if p.SourceKind == "" {
+		p.SourceKind = "model_inference"
+	}
+	if p.TrustClass == "" {
+		p.TrustClass = "model_derived"
+	}
+	if p.UntrustedContext {
+		p.TrustClass = "untrusted_derived"
+	}
+	return p
 }
 
 func (g *Gate) pendingPath(id string) string {
@@ -79,7 +110,7 @@ func (g *Gate) decide(c Candidate) (Candidate, error) {
 	return c, nil
 }
 
-func (g *Gate) submit(c Candidate, apply func() error) (Candidate, error) {
+func (g *Gate) submit(ctx context.Context, c Candidate, apply func() error) (Candidate, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c, err := g.decide(c)
@@ -89,9 +120,19 @@ func (g *Gate) submit(c Candidate, apply func() error) (Candidate, error) {
 	if err := apply(); err != nil {
 		return c, err
 	}
-	if g.Mode == "notify" && g.Notify != nil {
+	if c.Kind == "skill" {
+		c.Diff = "+ skill " + c.Name + "\n+ " + c.Body
+	} else {
 		c.Diff = "+ " + c.Body
+	}
+	if g.Mode == "notify" && g.Notify != nil {
 		g.Notify(c)
+	} else if g.Mode == "notify" {
+		if notify, _ := ctx.Value(notifyKey{}).(func(Candidate) error); notify != nil {
+			if err := notify(c); err != nil {
+				return c, err
+			}
+		}
 	}
 	return c, nil
 }

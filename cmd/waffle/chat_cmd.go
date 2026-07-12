@@ -793,7 +793,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		Usage:         usagepkg.New(&store.Store{DB: sessions.DB()}),
 		Limits: func() usagepkg.Limits {
 			l := cfg.LimitsFor(group)
-			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
+			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
 		}(),
 	}, cleanup, nil
 }

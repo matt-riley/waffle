@@ -173,6 +173,11 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		}
 
 		results := a.runTools(ctx, uses, hooks)
+		for j, use := range uses {
+			if use.Name == "fetch" && !results[j].IsError {
+				sesspkg.MarkUntrusted(ctx)
+			}
+		}
 		blocks := make([]llm.Block, len(results))
 		for j, res := range results {
 			blocks[j] = llm.Block{Type: llm.BlockToolResult, ToolResult: &res}

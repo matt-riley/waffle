@@ -461,6 +461,22 @@ max_iterations = 7
 	}
 }
 
+func TestUsageAlertThresholdConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[limits]\ntokens_per_day = 1000\nalert_threshold_percent = 65\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Limits.AlertThresholdPercent != 65 {
+		t.Fatalf("alert threshold = %d, want 65", cfg.Limits.AlertThresholdPercent)
+	}
+	writeFile(t, path, "[limits]\nalert_threshold_percent = 101\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "alert_threshold_percent") {
+		t.Fatalf("invalid alert threshold error = %v", err)
+	}
+}
+
 func TestProfileUtilityModelSelection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `

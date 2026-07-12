@@ -577,6 +577,7 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		return "", errors.New("note is required")
 	}
 	ws := t.workspace()
+	t.Provenance = provenanceFromContext(ctx, t.Provenance)
 	if dupID, found, err := ws.findDuplicateID(in.Note); err != nil {
 		return "", err
 	} else if found {
@@ -590,7 +591,7 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		gate = &Gate{Mode: "auto", WS: ws}
 	}
 	var noteID string
-	c, err := gate.submit(Candidate{Kind: "memory", Body: in.Note, Provenance: t.Provenance}, func() error {
+	c, err := gate.submit(ctx, Candidate{Kind: "memory", Body: in.Note, Provenance: t.Provenance}, func() error {
 		nid, err := ws.appendCandidate(Candidate{Body: in.Note, Provenance: t.Provenance})
 		if err != nil {
 			return err

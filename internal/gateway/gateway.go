@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/channel"
@@ -18,6 +19,7 @@ import (
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/usage"
@@ -473,20 +475,39 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 			runID = ""
 		}
 	}
-	ctx = agent.WithSession(ctx, group.SessionID)
+	ctx = session.WithOrigin(ctx, group.SessionID, msg.Channel)
+	ctx = memory.WithNotify(ctx, func(candidate memory.Candidate) error {
+		adapter := g.adapter(msg.Channel)
+		if adapter == nil {
+			return fmt.Errorf("no owner adapter %q", msg.Channel)
+		}
+		return adapter.Send(ctx, msg.ChatID, fmt.Sprintf("%s change:\n%s", candidate.Kind, candidate.Diff))
+	})
+	var alertErr error
 	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{
 		OnToolStart: func(use llm.ToolUse) {
 			log.Info("tool", "channel", msg.Channel, "chat", msg.ChatID, "name", use.Name)
 		},
 		OnUsage: func(usage llm.Usage) {
-			if runID == "" {
-				return
+			if runID != "" {
+				if err := g.Observability.RecordUsage(ctx, runID, usage); err != nil {
+					log.Error("record observability usage", "err", err)
+				}
 			}
-			if err := g.Observability.RecordUsage(ctx, runID, usage); err != nil {
-				log.Error("record observability usage", "err", err)
+			if g.Usage != nil && alertErr == nil {
+				alertErr = g.Usage.Alert(ctx, group.SessionID, selected.Limits, time.Now(), func(deliverCtx context.Context, notice string) error {
+					adapter := g.adapter(msg.Channel)
+					if adapter == nil {
+						return fmt.Errorf("no owner adapter %q", msg.Channel)
+					}
+					return adapter.Send(deliverCtx, msg.ChatID, notice)
+				})
 			}
 		},
 	})
+	if runErr == nil && alertErr != nil {
+		runErr = alertErr
+	}
 	if runID != "" {
 		outcome := "ok"
 		if runErr != nil {

@@ -90,10 +90,11 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 	if gate == nil {
 		gate = &Gate{Mode: "auto", WS: t.WS}
 	}
+	t.Provenance = provenanceFromContext(ctx, t.Provenance)
 	// Always write inactive until explicit activation (#65), and force review
 	// when write_gate is review (existing gate behavior).
 	candidate := Candidate{Kind: "skill", Name: in.Name, Description: in.Description, Body: in.Body, Provenance: t.Provenance}
-	c, err := gate.submit(candidate, func() error { return t.WS.writeSkillCandidate(candidate) })
+	c, err := gate.submit(ctx, candidate, func() error { return t.WS.writeSkillCandidate(candidate) })
 	if err != nil {
 		return "", err
 	}
