@@ -118,3 +118,17 @@ network, image-pull, or container-start failure is an infrastructure failure;
 it must not be recorded as behavioral acceptance evidence until rerun in a
 Docker-capable environment. The deterministic environment-isolation and launch
 planning tests remain mandatory even when this gate is skipped.
+
+The cron-group composition gate additionally constructs an explicit Docker
+cron policy, filters a fully denied server before launch, checks the planned
+container working directory/network and allowlisted environment, and—when the
+gate is enabled—performs MCP initialize/tools-list inside the container:
+
+```bash
+WAFFLE_TEST_DOCKER=1 go test ./cmd/waffle -run TestDockerCronGroupRestrictedMCP -count=1 -v
+```
+
+Without the environment variable, its deterministic authority/filter/env
+assertions run and the container portion reports SKIP. With the variable set,
+only a PASS is runtime evidence; missing Docker or image pull/start failures
+remain infrastructure failures and must not be described as a live pass.

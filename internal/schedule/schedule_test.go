@@ -149,6 +149,9 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("sessions = %d", len(list))
 	}
+	if list[0].Summary == "" {
+		t.Fatal("completed cron session was not reflected into a summary")
+	}
 	turns, _ := sessions.Turns(ctx, list[0].ID)
 	if len(turns) != 2 {
 		t.Errorf("turns = %d, want 2", len(turns))

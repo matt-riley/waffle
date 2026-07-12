@@ -132,3 +132,37 @@ func TestParseWorkPacketRejectsUnknownAndOversizedFields(t *testing.T) {
 		t.Fatalf("legacy packet: %+v %v", p, err)
 	}
 }
+
+func TestPacketRawLimitsAndOwnedPathValidation(t *testing.T) {
+	if _, err := ParseWorkPacket([]byte(`{"task":"` + strings.Repeat("x", MaxPacketRawBytes) + `"}`)); err == nil {
+		t.Fatal("aggregate work packet limit not enforced before decode")
+	}
+	for _, raw := range []string{
+		`{"task":"x","owned_paths":["../escape"]}`,
+		`{"task":"x","owned_paths":["/absolute"]}`,
+		`{"task":"x","owned_paths":["a/../../escape"]}`,
+		`{"task":"x","owned_paths":["` + strings.Repeat("p", MaxHandoffPathBytes+1) + `"]}`,
+		`{"task":"x","context_refs":["` + strings.Repeat("r", MaxHandoffPathBytes+1) + `"]}`,
+	} {
+		if _, err := ParseWorkPacket([]byte(raw)); err == nil {
+			t.Fatalf("unsafe/oversized packet path accepted: %.80q", raw)
+		}
+	}
+	if _, err := ParseHandoff("```json\n" + strings.Repeat(" ", MaxPacketRawBytes) + "\n```"); err == nil {
+		t.Fatal("aggregate handoff limit not enforced before decode")
+	}
+}
+
+func TestNormalizeHandoffRejectsOwnedPathTraversalBypass(t *testing.T) {
+	tests := []string{"pkg/../secret.txt", "../pkg/file.go", "/pkg/file.go"}
+	for _, changed := range tests {
+		h := NormalizeHandoff(Handoff{Status: "done", Summary: "x", FilesChanged: []string{changed}}, WorkPacket{Task: "x", OwnedPaths: []string{"pkg"}})
+		if h.Status == "done" || !strings.Contains(strings.Join(h.Reasons, "\n"), "needs_supervisor_review") {
+			t.Fatalf("changed path %q bypassed owned paths: %+v", changed, h)
+		}
+	}
+	h := NormalizeHandoff(Handoff{Status: "done", Summary: "x", FilesChanged: []string{"./pkg/a.go"}}, WorkPacket{Task: "x", OwnedPaths: []string{"pkg/./"}})
+	if h.Status != "done" {
+		t.Fatalf("normalized in-scope path rejected: %+v", h)
+	}
+}

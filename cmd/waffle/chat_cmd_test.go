@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -42,6 +44,57 @@ func TestSplitCommand(t *testing.T) {
 		if cmd != tt.cmd || args != tt.args {
 			t.Errorf("splitCommand(%q) = (%q, %q), want (%q, %q)", tt.line, cmd, args, tt.cmd, tt.args)
 		}
+	}
+}
+
+// TestDockerCronGroupRestrictedMCP is the inspectable #77.7 gate. Its
+// deterministic assertions always run; setting WAFFLE_TEST_DOCKER=1 also
+// starts the planned MCP inside Docker.
+func TestDockerCronGroupRestrictedMCP(t *testing.T) {
+	t.Setenv("SAFE_CRON_VALUE", "allowed")
+	t.Setenv("GITHUB_TOKEN", "must-not-leak")
+	cfg := config.Default()
+	cfg.Agent.Groups = map[string]config.AgentGroup{
+		config.GroupCron: {Sandbox: "docker", Tools: config.ToolPolicy{Allow: []string{"cronmcp__echo"}}},
+	}
+	pol := cfg.AgentPolicy(config.GroupCron)
+	if pol.Mode != "docker" {
+		t.Fatalf("cron authority = %q, want docker", pol.Mode)
+	}
+	allowed := config.MCPServer{Name: "cronmcp", Execution: "sandbox", Groups: []string{config.GroupCron}, Tools: []string{"echo"}, Env: []string{"SAFE_CRON_VALUE"}}
+	denied := config.MCPServer{Name: "denied", Execution: "sandbox", Groups: []string{config.GroupCron}, Tools: []string{"secret"}}
+	toolPolicy := tool.Policy{Allow: pol.Allow, Deny: pol.Deny}
+	if !mcpServerInGroup(allowed, config.GroupCron) || !mcpServerPermitted(allowed, toolPolicy) {
+		t.Fatal("approved cron MCP was not eligible")
+	}
+	if mcpServerPermitted(denied, toolPolicy) {
+		t.Fatal("fully denied cron MCP would be launched")
+	}
+	server := mcp.Server{Name: allowed.Name, Command: "sh", Args: []string{"-c", `while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); case "$line" in *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id";; *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id";; esac; done`}, Env: allowed.Env}
+	planned, opts := mcp.PlanLaunch(server, allowed.Execution, pol.Mode, t.TempDir(), "alpine:3.20", "none")
+	joined := strings.Join(planned.Args, "\x00")
+	for _, want := range []string{"docker", "--network", "none", "/work", "SAFE_CRON_VALUE=allowed", "alpine:3.20"} {
+		if want == "docker" {
+			if planned.Command != want {
+				t.Fatalf("command=%q want docker", planned.Command)
+			}
+		} else if !strings.Contains(joined, want) {
+			t.Fatalf("planned cron sandbox missing %q: %v", want, planned.Args)
+		}
+	}
+	if strings.Contains(joined, "GITHUB_TOKEN") || strings.Contains(joined, "must-not-leak") {
+		t.Fatalf("ambient secret leaked into cron container args: %v", planned.Args)
+	}
+	if os.Getenv("WAFFLE_TEST_DOCKER") != "1" {
+		t.Skip("deterministic cron MCP assertions passed; set WAFFLE_TEST_DOCKER=1 for container runtime")
+	}
+	client, err := mcp.ConnectRestricted(context.Background(), planned, opts)
+	if err != nil {
+		t.Fatalf("cron sandbox MCP runtime: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.Toolbox(context.Background()); err != nil {
+		t.Fatalf("cron sandbox tools/list: %v", err)
 	}
 }
 

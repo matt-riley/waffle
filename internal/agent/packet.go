@@ -17,6 +17,7 @@ const (
 	MaxHandoffTextBytes = 16 * 1024
 	MaxHandoffPathBytes = 4 * 1024
 	MaxHandoffItems     = 128
+	MaxPacketRawBytes   = 256 * 1024
 )
 
 // WorkPacket is the typed subagent task contract (#78).
@@ -59,6 +60,9 @@ type VerificationResult struct {
 // ParseWorkPacket strictly decodes the public spawn_subagent input. A task-only
 // legacy packet remains valid, while unknown fields and oversized input fail.
 func ParseWorkPacket(raw []byte) (WorkPacket, error) {
+	if len(raw) > MaxPacketRawBytes {
+		return WorkPacket{}, fmt.Errorf("work packet exceeds %d byte aggregate limit", MaxPacketRawBytes)
+	}
 	var p WorkPacket
 	if err := decodeStrictJSON(raw, &p); err != nil {
 		return WorkPacket{}, err
@@ -79,8 +83,17 @@ func ParseWorkPacket(raw []byte) (WorkPacket, error) {
 			return WorkPacket{}, fmt.Errorf("%s exceeds %d item limit", name, MaxHandoffItems)
 		}
 		for _, value := range values {
-			if err := boundedText(name, value, MaxHandoffTextBytes); err != nil {
+			limit := MaxHandoffTextBytes
+			if name == "owned_paths" || name == "context_refs" {
+				limit = MaxHandoffPathBytes
+			}
+			if err := boundedText(name, value, limit); err != nil {
 				return WorkPacket{}, err
+			}
+			if name == "owned_paths" {
+				if _, err := normalizeRelativePath(value); err != nil {
+					return WorkPacket{}, fmt.Errorf("owned path %q: %w", value, err)
+				}
 			}
 		}
 	}
@@ -139,6 +152,9 @@ func FramePacket(p WorkPacket) string {
 
 // ParseHandoff extracts a JSON handoff from assistant text.
 func ParseHandoff(text string) (Handoff, error) {
+	if len(text) > MaxPacketRawBytes {
+		return Handoff{}, fmt.Errorf("handoff exceeds %d byte aggregate limit", MaxPacketRawBytes)
+	}
 	raw := extractJSONBlock(text)
 	if raw == "" {
 		return Handoff{}, fmt.Errorf("no handoff JSON block")
@@ -174,7 +190,10 @@ func ParseHandoff(text string) (Handoff, error) {
 		if err := boundedText("changed path", path, MaxHandoffPathBytes); err != nil {
 			return Handoff{}, err
 		}
-		normalized := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(path, "./")))
+		normalized, err := normalizeRelativePath(path)
+		if err != nil {
+			return Handoff{}, fmt.Errorf("changed path %q: %w", path, err)
+		}
 		if _, ok := seenPaths[normalized]; ok {
 			return Handoff{}, fmt.Errorf("duplicate changed path %q", path)
 		}
@@ -265,14 +284,32 @@ func NormalizeHandoff(h Handoff, p WorkPacket) Handoff {
 }
 
 func pathUnderOwned(path string, owned []string) bool {
-	path = strings.TrimPrefix(path, "./")
+	path, err := normalizeRelativePath(path)
+	if err != nil {
+		return false
+	}
 	for _, o := range owned {
-		o = strings.TrimPrefix(o, "./")
+		o, err = normalizeRelativePath(o)
+		if err != nil {
+			continue
+		}
 		if path == o || strings.HasPrefix(path, strings.TrimSuffix(o, "/")+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizeRelativePath(value string) (string, error) {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	if value == "" || strings.HasPrefix(value, "/") || filepath.IsAbs(value) {
+		return "", fmt.Errorf("must be a non-empty relative path")
+	}
+	clean := filepath.ToSlash(filepath.Clean(value))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("must not escape its relative root")
+	}
+	return strings.TrimPrefix(clean, "./"), nil
 }
 
 // FormatHandoffResult renders the tool result with not-applied proposal marker.
