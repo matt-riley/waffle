@@ -1,5 +1,9 @@
 # Waffle Character Asset System Implementation Plan
 
+> Superseded after Task 2 by `2026-07-13-waffle-raster-character-system.md`.
+> The owner rejected the SVG production direction because it lost Waffle's
+> likeness and approved a raster-first replacement.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver Waffle's approved character canon, model and expression sheets, editable Motion Waffle vector master, three standalone SVG poses, transparent PNG previews, and a recorded QA decision.
@@ -174,7 +178,7 @@ Run: `git status --short -- .superpowers`
 
 Expected: no output because `/.superpowers/` is ignored.
 
-Run: `rg -n "share\.icloud\.com|0b3jA_|EXIF|GPS" assets tools mise.toml .gitignore`
+Run: `rg -n "share\.icloud\.com|icloudlinks|EXIF|GPS" assets tools mise.toml .gitignore`
 
 Expected: no matches.
 
@@ -202,7 +206,7 @@ State only that 11 owner-supplied photos and 3 owner-supplied videos were review
 
 - [ ] **Step 5: Review and commit**
 
-Run: `rg -n "share\.icloud\.com|0b3jA_|GPS" assets/brand/waffle`
+Run: `rg -n "share\.icloud\.com|icloudlinks|GPS" assets/brand/waffle`
 
 Expected: no matches.
 

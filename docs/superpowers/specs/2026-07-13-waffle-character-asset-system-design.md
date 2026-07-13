@@ -1,5 +1,9 @@
 # Waffle Character Asset System Design
 
+> Superseded on 2026-07-13 by the owner-approved raster pivot in
+> `2026-07-13-waffle-raster-character-system-design.md`. This document is retained
+> as the decision history for the rejected SVG-first approach.
+
 ## Summary
 
 Create a durable visual identity for Waffle, the project's orange-tabby mascot. The system will have two coordinated tiers:
