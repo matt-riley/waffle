@@ -8,6 +8,32 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const MAX_ELEMENTS = 500;
 const MAX_PATHS = 240;
 const POSE_IDS = ["silhouette", "face", "markings", "shading"];
+const URI_ATTRIBUTES = new Set([
+  "href",
+  "src",
+  "srcset",
+  "srcdoc",
+  "poster",
+  "data",
+  "action",
+  "formaction",
+  "cite",
+  "background",
+]);
+const NON_VECTOR_EMBEDDING_ELEMENTS = new Set([
+  "foreignobject",
+  "feimage",
+  "iframe",
+  "object",
+  "embed",
+  "img",
+  "audio",
+  "video",
+  "canvas",
+  "source",
+  "track",
+  "link",
+]);
 const PAINT_SERVER_ATTRIBUTES = new Set([
   "fill",
   "stroke",
@@ -81,6 +107,7 @@ function isExternalReference(value) {
 
 function validateReferences(attribute, value) {
   const lowerAttribute = attribute.toLowerCase();
+  const localAttribute = lowerAttribute.split(":").at(-1);
   const stringValue = String(value).trim();
   const lowerValue = stringValue.toLowerCase();
 
@@ -94,7 +121,7 @@ function validateReferences(attribute, value) {
     throw new Error(`inline event handlers are forbidden: ${attribute}`);
   }
   if (
-    (lowerAttribute === "href" || lowerAttribute === "xlink:href") &&
+    (URI_ATTRIBUTES.has(localAttribute) || lowerAttribute === "xml:base") &&
     isExternalReference(stringValue)
   ) {
     throw new Error(`external asset URLs are forbidden: ${attribute}`);
@@ -131,7 +158,8 @@ function inspectTree(nodes) {
       }
 
       const [tagName, children] = entry;
-      const localName = tagName.split(":").at(-1).toLowerCase();
+      const localTagName = tagName.split(":").at(-1);
+      const localName = localTagName.toLowerCase();
       elementCount += 1;
       if (localName === "path") pathCount += 1;
       if (localName === "image") {
@@ -139,6 +167,11 @@ function inspectTree(nodes) {
       }
       if (localName === "script") {
         throw new Error("script elements are forbidden");
+      }
+      if (NON_VECTOR_EMBEDDING_ELEMENTS.has(localName)) {
+        throw new Error(
+          `non-vector embedding elements are forbidden: ${localTagName}`,
+        );
       }
 
       const attributes = node[":@"] ?? {};
