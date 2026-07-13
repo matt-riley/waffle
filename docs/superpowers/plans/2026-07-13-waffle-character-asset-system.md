@@ -15,7 +15,7 @@
 - AI-generated concepts are disposable derivatives; production assets must be manually reconstructed as editable vector shapes.
 - Personal photos, videos, their expiring share URL, and identifying metadata must never be committed.
 - Production SVGs must not contain `<image>`, `<script>`, inline event handlers, external asset URLs, or embedded raster data; the standard SVG XML namespace is allowed.
-- Hero Waffle and the Rive rig are outside this milestone.
+- Hero Waffle and the layered-SVG animation runtime are outside this milestone.
 - Do not advance past a creative review gate without explicit owner approval.
 - Run `mise run fmt`, `mise run vet`, `mise run lint`, and `mise run test` before declaring the milestone complete.
 
@@ -282,7 +282,7 @@ git commit -m "feat: add Waffle model sheet"
 **Interfaces:**
 
 - Consumes: approved three-quarter model-sheet view and canon palette.
-- Produces: named rig-ready groups and six approved facial states used by pose and later Rive work.
+- Produces: named animation-ready groups and six approved facial states used by poses and later layered-SVG animation work.
 
 - [ ] **Step 1: Add a failing structural fixture test for the motion master**
 
@@ -446,4 +446,4 @@ git commit -m "docs: approve Waffle static asset milestone"
 
 ## Completion Boundary
 
-Stop after Task 6. The next design/plan cycle covers Hero Waffle, Rive rigging, documentation-site integration, and Remotion promo compositions. Do not add `.riv`, video, site framework, or Hero Waffle files during this plan.
+Stop after Task 6. The next design/plan cycle covers Hero Waffle, layered-SVG animation with the Web Animations API and optional Motion helpers, documentation-site integration, and Remotion or Blender promo compositions. Do not add animation runtime code, video, site framework, or Hero Waffle files during this plan.

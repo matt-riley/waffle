@@ -13,7 +13,7 @@ Both tiers derive from one approved character canon and layered vector source of
 
 - Make Waffle recognizably based on the real cat rather than a generic orange tabby.
 - Produce consistent, editable SVG poses for future documentation.
-- Prepare the character structure for a reusable Rive rig.
+- Prepare the character structure for reusable layered-SVG animation.
 - Support later raster, interactive web, and promotional-video outputs without redrawing the identity from scratch.
 - Preserve provenance while keeping personal reference photographs out of Git.
 
@@ -21,7 +21,7 @@ Both tiers derive from one approved character canon and layered vector source of
 
 - Building the documentation site.
 - Completing the polished hero recreation.
-- Creating the Rive rig or promotional videos.
+- Creating the documentation animation runtime or promotional videos.
 - Choosing the documentation site's framework or visual design.
 - Generating a large pose library before the character canon is approved.
 
@@ -56,7 +56,7 @@ The system has three upstream layers:
 2. **Character model sheet:** canonical proportions, markings, palette, expressions, and do/don't rules.
 3. **Layered vector master:** named, editable shapes for anatomy, facial features, markings, and shading.
 
-The vector master feeds both Hero Waffle and Motion Waffle. Motion Waffle then supplies standalone SVG poses and, in a later phase, the Rive rig. Downstream exports may include optimized SVG, transparent PNG/WebP, `.riv`, MP4, WebM, GIF, or image sequences.
+The vector master feeds both Hero Waffle and Motion Waffle. Motion Waffle then supplies standalone SVG poses and, in a later phase, code-driven animation of the same named SVG groups. Downstream exports may include optimized SVG, transparent PNG/WebP, MP4, WebM, GIF, or image sequences.
 
 The vector master is the production source of truth. AI-generated concepts, raster traces, optimized exports, and rendered video frames are derivatives and must never overwrite it.
 
@@ -72,7 +72,7 @@ The first milestone delivers:
 6. Standalone SVG exports and transparent PNG previews.
 7. A QA contact sheet comparing the character against the private references and seed illustration.
 
-The hero recreation and Rive rig begin only after this milestone is accepted.
+The hero recreation and animation implementation begin only after this milestone is accepted.
 
 ## Production Workflow
 
@@ -104,7 +104,7 @@ Export standalone SVG and transparent PNG previews. Validate consistent view box
 
 ### 5. Animation preparation
 
-Keep the head, ears, eyes, eyelids, muzzle/mouth, torso, limbs, paws, and tail separable. Establish useful pivots and avoid baked overlaps that prevent natural joint movement. The first Rive prototype should test only idle breathing, blinking, ear movement, and tail movement before more complex actions.
+Keep the head, ears, eyes, eyelids, muzzle/mouth, torso, limbs, paws, and tail separable. Establish useful pivots and avoid baked overlaps that prevent natural joint movement. The first layered-SVG prototype should use the browser's Web Animations API, with Motion as an optional ergonomic wrapper, and test only idle breathing, blinking, ear movement, and tail movement before more complex actions.
 
 ## Repository Organization
 
@@ -123,7 +123,7 @@ assets/brand/waffle/
 │   └── curled.svg
 ├── exports/
 │   └── png/
-└── animation/              # Added with the later Rive milestone
+└── animation/              # Added with the later code-driven animation milestone
 ```
 
 Do not store personal cat media under this tree. Large proprietary editor files should not become required build inputs. If later binary animation or video sources grow materially, evaluate Git LFS before committing them.
@@ -139,7 +139,7 @@ The first milestone is accepted when:
 - SVGs contain editable, logically named groups rather than a flattened embedded bitmap;
 - SVGs render consistently in current Chromium, Firefox, and Safari engines;
 - transparent PNG previews have clean edges and no matte fringe;
-- the motion master has separable parts and plausible pivots for the planned Rive prototype; and
+- the motion master has separable parts and plausible pivots for the planned layered-SVG prototype; and
 - the QA sheet records approval or a specific revision request for every deliverable.
 
 Reject work that shows marking drift, inconsistent eye colour, generic-tabby substitution, excessive SVG complexity, muddy detail at documentation sizes, broken browser rendering, or anatomy that cannot be rigged cleanly.
@@ -149,21 +149,21 @@ Reject work that shows marking drift, inconsistent eye colour, generic-tabby sub
 After the static milestone is approved:
 
 1. recreate the detailed Hero Waffle using the approved canon;
-2. import and rig Motion Waffle in Rive;
+2. build a small animation controller around Motion Waffle's named SVG groups;
 3. add idle, blink, sit, stand, walk, wave, think, success, warning, and sleepy states incrementally;
-4. expose selected animations through Rive's web runtime for the documentation site; and
-5. use Rive's renderer or compose character animation, narration, typography, and product captures in Remotion for promotional videos.
+4. expose selected animations through the native Web Animations API, optionally using Motion for sequencing and spring ergonomics; and
+5. reuse the same SVG groups for promotional videos, using Remotion while its licensing remains appropriate for the project or Blender as the permanently free and open-source fallback.
 
-Rive is preferred because it imports SVG, supports bones, constraints, animation timelines, and state machines, provides web runtimes, and can export traditional video or image formats on applicable paid plans. Remotion remains a later composition layer rather than the character-rig source.
+This architecture deliberately avoids a required animation-editor subscription. The layered SVG remains the character source of truth; browser and video animation are code or scene derivatives rather than proprietary rig files. The tradeoff is that pivots, easing, and state transitions are authored in code instead of a visual rigging timeline.
 
 ## Research References
 
 - [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/)
-- [Rive: Design vs Animate Mode](https://rive.app/docs/editor/fundamentals/design-vs-animate-mode)
-- [Rive: Exporting for Video and Static Design](https://rive.app/docs/editor/exporting/exporting-for-video-and-static-design)
-- [Rive Web Runtime: State Machine Playback](https://rive.app/docs/runtimes/web/state-machines)
+- [MDN: Web Animations API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Animations_API)
+- [Motion: animate](https://motion.dev/docs/animate)
+- [Motion source and license](https://github.com/motiondivision/motion)
 - [Remotion Fundamentals](https://www.remotion.dev/docs/the-fundamentals)
 - [Remotion Rendering](https://www.remotion.dev/docs/render)
-- [Adobe Character Animator Puppet Artwork](https://helpx.adobe.com/adobe-character-animator/desktop/creating-and-controlling-puppets/puppet.html)
+- [Blender License](https://www.blender.org/about/license/)
 
-Adobe Character Animator remains a possible specialist tool for dialogue-heavy, webcam-performed videos, but it is not the source of truth because it does not serve the static-SVG and interactive-documentation requirements as directly as the vector-plus-Rive workflow.
+Blender remains the no-subscription fallback for visually authored video animation and rendering. Remotion is the preferred code-composition option only while its project licensing remains appropriate; neither tool replaces the layered SVG source of truth.
