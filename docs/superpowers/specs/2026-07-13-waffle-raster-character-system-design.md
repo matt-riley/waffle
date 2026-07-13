@@ -52,7 +52,8 @@ The milestone delivers:
 3. a transparent neutral-standing composite master;
 4. neutral, curious, pleased, focused, startled, and sleepy standalone
    expression renders;
-5. standing, sitting, and curled transparent poses;
+5. standing, sitting, and curled transparent poses plus standing and sitting
+   airplane-ear variants;
 6. one small idle sprite proof covering breathing, blink, ear twitch, and tail
    motion; and
 7. an approval record with identity, transparency, dimensions, alignment,
@@ -88,7 +89,9 @@ assets/brand/waffle/
 ├── poses/
 │   ├── standing.png
 │   ├── sitting.png
-│   └── curled.png
+│   ├── curled.png
+│   ├── standing-airplane-ears.png
+│   └── sitting-airplane-ears.png
 ├── animation/
 │   └── idle/
 │       ├── manifest.json

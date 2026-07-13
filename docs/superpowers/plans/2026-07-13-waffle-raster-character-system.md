@@ -143,16 +143,22 @@ Remotion/Blender project files, or Hero Waffle in this plan.
 
 - Create: `assets/brand/waffle/poses/sitting.png`
 - Create: `assets/brand/waffle/poses/curled.png`
+- Create: `assets/brand/waffle/poses/standing-airplane-ears.png`
+- Create: `assets/brand/waffle/poses/sitting-airplane-ears.png`
 
 - [ ] Create transparent sitting and curled poses from the approved standing
   master and model sheet. Do not reuse the rejected geometric SVG render.
+- [ ] Create standing and sitting airplane-ear variants from their approved
+  base poses. Hold both ears naturally sideways and slightly back; expressions
+  should read curious/mischievous and mildly unimpressed respectively, never
+  frightened, aggressive, or anatomically flattened.
 - [ ] Use Task 5's flat `#0000ff` chroma-key prompt, installed matte-removal
   command, validation, one `--edge-contract 1` retry, and explicit approval gate
   before any CLI native-transparency fallback.
 - [ ] Validate RGBA, dimensions, transparent corners, and small-size legibility.
 - [ ] Present 800px, 320px, 160px, and 64px reviews on light and dark
   backgrounds. Obtain explicit owner approval.
-- [ ] Add both poses to `manifest.json` and commit as
+- [ ] Add all four poses to `manifest.json` and commit as
   `feat: add Waffle raster documentation poses`.
 
 ---
