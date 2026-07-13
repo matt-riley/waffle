@@ -515,9 +515,9 @@ func parseTrailingUsage(body []byte) llm.Usage {
 	if json.NewDecoder(bytes.NewReader(rest[colon+1:])).Decode(&raw) != nil {
 		return llm.Usage{}
 	}
-	input := maxJSONInt(raw, "input_tokens", "prompt_tokens")
+	input := billedInputTokens(raw)
 	output := maxJSONInt(raw, "output_tokens", "completion_tokens")
-	if input+output == 0 {
+	if input == 0 && output == 0 {
 		input = maxJSONInt(raw, "total_tokens")
 	}
 	return llm.Usage{InputTokens: input, OutputTokens: output}
@@ -615,9 +615,9 @@ func walkUsage(value any, result *llm.Usage) {
 		return
 	}
 	if raw, ok := m["usage"].(map[string]any); ok {
-		input := maxJSONInt(raw, "input_tokens", "prompt_tokens")
+		input := billedInputTokens(raw)
 		output := maxJSONInt(raw, "output_tokens", "completion_tokens")
-		if input+output == 0 {
+		if input == 0 && output == 0 {
 			input = maxJSONInt(raw, "total_tokens")
 		}
 		if input > result.InputTokens {
@@ -634,12 +634,40 @@ func walkUsage(value any, result *llm.Usage) {
 
 func maxJSONInt(m map[string]any, keys ...string) int {
 	best := 0
+	maxInt := int(^uint(0) >> 1)
 	for _, key := range keys {
-		if n, ok := m[key].(float64); ok && int(n) > best {
-			best = int(n)
+		if n, ok := m[key].(float64); ok && n > 0 {
+			if n >= float64(maxInt) {
+				return maxInt
+			}
+			if candidate := int(n); candidate > best {
+				best = candidate
+			}
 		}
 	}
 	return best
+}
+
+// billedInputTokens follows Anthropic's billing contract: cached input is
+// additive, not an alternative observation. OpenAI-compatible prompt_tokens
+// remains an alias of input_tokens when cache fields are absent.
+func billedInputTokens(m map[string]any) int {
+	_, hasCreation := m["cache_creation_input_tokens"]
+	_, hasRead := m["cache_read_input_tokens"]
+	if !hasCreation && !hasRead {
+		return maxJSONInt(m, "input_tokens", "prompt_tokens")
+	}
+	total := maxJSONInt(m, "input_tokens")
+	total = saturatingAdd(total, maxJSONInt(m, "cache_creation_input_tokens"))
+	return saturatingAdd(total, maxJSONInt(m, "cache_read_input_tokens"))
+}
+
+func saturatingAdd(a, b int) int {
+	maxInt := int(^uint(0) >> 1)
+	if b > maxInt-a {
+		return maxInt
+	}
+	return a + b
 }
 
 func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sessionID string) {

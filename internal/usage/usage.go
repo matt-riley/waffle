@@ -70,7 +70,7 @@ func (s *Store) Check(ctx context.Context, session string, l Limits, now time.Ti
 	if err != nil {
 		return err
 	}
-	if l.TokensPerDay > 0 && in+out+reserved >= l.TokensPerDay {
+	if l.TokensPerDay > 0 && reachesLimit(l.TokensPerDay, in, out, reserved) {
 		return fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
 	}
 	if l.RequestsPerHour > 0 {
@@ -117,8 +117,8 @@ func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, 
 		return 0, err
 	}
 	if l.TokensPerDay > 0 {
-		remaining := l.TokensPerDay - in - out - alreadyReserved
-		if remaining <= 0 {
+		remaining, ok := remainingAllowance(l.TokensPerDay, in, out, alreadyReserved)
+		if !ok {
 			return 0, fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
 		}
 		reserved = declared
@@ -155,9 +155,17 @@ func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, 
 // trustworthy final provider usage. A zero usage observation is not final and
 // intentionally leaves the reservation charged.
 func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now time.Time, reserved int, actual llm.Usage) error {
-	if session == "" || actual.InputTokens+actual.OutputTokens <= 0 {
+	if session == "" || (actual.InputTokens <= 0 && actual.OutputTokens <= 0) {
 		return nil
 	}
+	input, output := actual.InputTokens, actual.OutputTokens
+	if input < 0 {
+		input = 0
+	}
+	if output < 0 {
+		output = 0
+	}
+	maxInt := int(^uint(0) >> 1)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -167,8 +175,13 @@ func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now 
 		name string
 		d    time.Duration
 	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
-		res, err := tx.ExecContext(ctx, `UPDATE usage SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,reserved_tokens=MAX(0,reserved_tokens-?)
-			WHERE session_id=? AND period=? AND period_start=?`, actual.InputTokens, actual.OutputTokens, reserved, session, p.name, period(now, p.d))
+		res, err := tx.ExecContext(ctx, `UPDATE usage SET
+			input_tokens=CASE WHEN input_tokens > ? THEN ? ELSE input_tokens+? END,
+			output_tokens=CASE WHEN output_tokens > ? THEN ? ELSE output_tokens+? END,
+			reserved_tokens=MAX(0,reserved_tokens-?)
+			WHERE session_id=? AND period=? AND period_start=?`,
+			maxInt-input, maxInt, input, maxInt-output, maxInt, output,
+			reserved, session, p.name, period(now, p.d))
 		if err != nil {
 			return err
 		}
@@ -180,6 +193,24 @@ func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now 
 		}
 	}
 	return tx.Commit()
+}
+
+func reachesLimit(limit int, values ...int) bool {
+	_, ok := remainingAllowance(limit, values...)
+	return !ok
+}
+
+func remainingAllowance(limit int, values ...int) (int, bool) {
+	remaining := limit
+	for _, value := range values {
+		if value >= remaining {
+			return 0, false
+		}
+		if value > 0 {
+			remaining -= value
+		}
+	}
+	return remaining, remaining > 0
 }
 
 // AddTokensAt adds returned provider usage without counting a second request.

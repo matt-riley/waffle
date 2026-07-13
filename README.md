@@ -263,8 +263,9 @@ plus a conservative text-prompt bound. Missing or invalid maxima, external
 image/file inputs, provider-side context references, and unknown request
 extensions reserve the remaining daily allowance. Only an explicitly completed
 provider stream replaces the reservation with actual usage; aborted, partial,
-or unmetered requests keep it charged. `waffle pause` stops new agent calls
-(including cron and broker traffic); `waffle resume` re-enables them.
+or unmetered requests keep it charged. Anthropic actual usage includes base,
+cache-creation, and cache-read input tokens. `waffle pause` stops new agent
+calls (including cron and broker traffic); `waffle resume` re-enables them.
 
 ### Group chat posture
 

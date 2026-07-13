@@ -134,6 +134,37 @@ func TestMissingDeclaredMaximumReservesRemainingAllowance(t *testing.T) {
 	}
 }
 
+func TestReconcileReservationSaturatesPersistedCounters(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	if err := u.AddRequestAt(ctx, "saturated", llm.Usage{InputTokens: 1, OutputTokens: 2}, now); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := u.ReserveRequestAt(ctx, "saturated", Limits{}, now, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if err := u.ReconcileReservationAt(ctx, "saturated", now, reserved, llm.Usage{InputTokens: maxInt, OutputTokens: maxInt}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := u.List(ctx, "saturated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.InputTokens != maxInt || row.OutputTokens != maxInt {
+			t.Fatalf("row did not saturate as integers: %+v", row)
+		}
+	}
+}
+
 func TestAlertThresholdDeliversOncePerPeriod(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))

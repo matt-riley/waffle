@@ -469,6 +469,112 @@ func TestProxyAccountsStreamingUsageOnce(t *testing.T) {
 	}
 }
 
+func TestAnthropicJSONCacheUsageConsumesFullDailyBudget(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}`)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "anthropic", BaseURL: upstream.URL, Header: "x-api-key", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 100}
+	token, _ := b.Mint(context.Background(), "anthropic-json-cache")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	do := func(max int) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", strings.NewReader(fmt.Sprintf(`{"max_tokens":%d}`, max)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := do(70); got != http.StatusOK {
+		t.Fatalf("first status=%d", got)
+	}
+	if got := do(30); got != http.StatusTooManyRequests {
+		t.Fatalf("cached follow-up status=%d", got)
+	}
+	assertDayUsage(t, b.Usage, "anthropic-json-cache", 65, 0)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls=%d", got)
+	}
+}
+
+func TestAnthropicSSECacheUsageConsumesFullDailyBudget(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30,\"output_tokens\":0}}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "anthropic", BaseURL: upstream.URL, Header: "x-api-key", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 100}
+	token, _ := b.Mint(context.Background(), "anthropic-sse-cache")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	do := func(max int) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", strings.NewReader(fmt.Sprintf(`{"max_tokens":%d}`, max)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := do(70); got != http.StatusOK {
+		t.Fatalf("first status=%d", got)
+	}
+	if got := do(30); got != http.StatusTooManyRequests {
+		t.Fatalf("cached follow-up status=%d", got)
+	}
+	assertDayUsage(t, b.Usage, "anthropic-sse-cache", 65, 0)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls=%d", got)
+	}
+}
+
+func TestProviderUsageCacheSumSaturatesAndPreservesOpenAIAliases(t *testing.T) {
+	openAI := parseProviderUsage([]byte(`{"usage":{"input_tokens":7,"prompt_tokens":9,"completion_tokens":5}}`))
+	if openAI.InputTokens != 9 || openAI.OutputTokens != 5 {
+		t.Fatalf("OpenAI aliases changed: %+v", openAI)
+	}
+	maxInt := int(^uint(0) >> 1)
+	anthropic := parseProviderUsage([]byte(`{"usage":{"input_tokens":9e100,"cache_creation_input_tokens":9e100,"cache_read_input_tokens":9e100,"output_tokens":1}}`))
+	if anthropic.InputTokens != maxInt || anthropic.OutputTokens != 1 {
+		t.Fatalf("Anthropic saturation failed: %+v", anthropic)
+	}
+}
+
+func assertDayUsage(t *testing.T, u *usage.Store, session string, actual, reserved int) {
+	t.Helper()
+	rows, err := u.List(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Period == "day" {
+			if got := row.InputTokens + row.OutputTokens; got != actual || row.ReservedTokens != reserved {
+				t.Fatalf("day actual=%d reserved=%d rows=%+v", got, row.ReservedTokens, rows)
+			}
+			return
+		}
+	}
+	t.Fatalf("day usage row missing: %+v", rows)
+}
+
 func TestSSEResponseWriterDoesNotRetainResponseBody(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Content-Type", "text/event-stream")

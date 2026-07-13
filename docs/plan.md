@@ -128,8 +128,9 @@ maxima, external image/file inputs, provider-side context handles, and unknown
 request extensions reserve the remaining allowance because their token cost
 cannot be bounded locally. Only explicitly completed streams reconcile
 trustworthy final usage; aborted or partial streams retain their reservation.
-SSE usage is observed incrementally without retaining the bounded JSON response
-prefix or tail.
+Anthropic reconciliation sums base, cache-creation, and cache-read input token
+fields. SSE usage is observed incrementally without retaining the bounded JSON
+response prefix or tail.
 
 ### Tools
 
