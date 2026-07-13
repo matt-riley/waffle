@@ -18,6 +18,22 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestJobRetryPolicyParsesWithFireOnceDefaults(t *testing.T) {
+	defaults := Default().Jobs
+	if defaults.MaxAttempts != 1 || defaults.BaseBackoff != "10s" || defaults.MaxBackoff != "10m" || defaults.StallTimeout != "5m" {
+		t.Fatalf("job defaults=%+v", defaults)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[jobs]\nmax_attempts = 4\nbase_backoff = \"2s\"\nmax_backoff = \"30s\"\nstall_timeout = \"45s\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Jobs.MaxAttempts != 4 || cfg.Jobs.BaseBackoff != "2s" || cfg.Jobs.MaxBackoff != "30s" || cfg.Jobs.StallTimeout != "45s" {
+		t.Fatalf("jobs=%+v", cfg.Jobs)
+	}
+}
+
 func TestDefaultSandboxImageIncludesWorkspaceTools(t *testing.T) {
 	if got := Default().Sandbox.Image; got != "buildpack-deps:bookworm-scm" {
 		t.Fatalf("Sandbox.Image = %q, want default image containing Git", got)

@@ -57,6 +57,33 @@ func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{MaxAttempts: 1, BaseBackoff: 10 * time.Second, MaxBackoff: 10 * time.Minute, StallTimeout: 5 * time.Minute}
 }
 
+// Clock and Timer isolate retry and stall lifecycle timing from wall time.
+// Production uses realClock; tests advance a manual clock without sleeping.
+type Clock interface {
+	Now() time.Time
+	NewTimer(time.Duration) Timer
+}
+
+type Timer interface {
+	C() <-chan time.Time
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+type realClock struct{}
+type realTimer struct{ *time.Timer }
+
+func (realClock) Now() time.Time                 { return time.Now() }
+func (realClock) NewTimer(d time.Duration) Timer { return realTimer{time.NewTimer(d)} }
+func (t realTimer) C() <-chan time.Time          { return t.Timer.C }
+
+func clockOrReal(c Clock) Clock {
+	if c != nil {
+		return c
+	}
+	return realClock{}
+}
+
 func (p RetryPolicy) normalized() RetryPolicy {
 	d := DefaultRetryPolicy()
 	if p.MaxAttempts > 0 {
@@ -236,6 +263,8 @@ type Runner struct {
 	// Learn runs the single reserved internal cron action `/learn`. It is a
 	// closed callback, not a general command dispatcher.
 	Learn func(context.Context) (string, error)
+	// Clock drives the stall watchdog. Nil uses wall time.
+	Clock Clock
 }
 
 // Run executes one job now: fresh session, agent turn, deliver the reply.
@@ -296,7 +325,7 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		default:
 		}
 	}
-	timer := time.NewTimer(policy.StallTimeout)
+	timer := clockOrReal(r.Clock).NewTimer(policy.StallTimeout)
 	defer timer.Stop()
 	watchCtx := runCtx
 	go func() {
@@ -305,12 +334,12 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 			case <-activity:
 				if !timer.Stop() {
 					select {
-					case <-timer.C:
+					case <-timer.C():
 					default:
 					}
 				}
 				timer.Reset(policy.StallTimeout)
-			case <-timer.C:
+			case <-timer.C():
 				cancel()
 				return
 			case <-watchCtx.Done():
@@ -355,7 +384,10 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		}
 	}()
 
+	// Keep transcript/tool provenance on the real session while all attempts
+	// of one unattended job share a durable accounting identity.
 	runCtx = agent.WithSession(runCtx, sess.ID)
+	runCtx = usage.WithBudgetKey(runCtx, j.ID)
 	out, runErr := a.Run(runCtx, history, agent.Hooks{
 		OnText:      func(string) { pulse() },
 		OnToolStart: func(llm.ToolUse) { pulse() },
@@ -426,9 +458,14 @@ type Scheduler struct {
 	// Parser is optional and primarily permits deterministic scheduler tests;
 	// production uses the package's standard five-field parser.
 	Parser cron.ScheduleParser
+	// Clock drives retry deadlines. Nil uses wall time.
+	Clock Clock
 
 	mu         sync.Mutex
 	registered map[string]registration // job id -> live cron entry
+	runMu      sync.Mutex
+	inFlight   map[string]bool
+	runs       sync.WaitGroup
 }
 
 // registration is one job's live cron entry plus the definition it was
@@ -452,6 +489,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.registered = make(map[string]registration)
 	s.mu.Unlock()
+	s.runMu.Lock()
+	s.inFlight = make(map[string]bool)
+	s.runMu.Unlock()
 
 	cronParser := s.Parser
 	if cronParser == nil {
@@ -470,6 +510,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			stopCtx := c.Stop()
 			<-stopCtx.Done()
+			s.runs.Wait()
 			return nil
 		case <-tick.C:
 			if err := s.reconcile(ctx, c); err != nil {
@@ -506,12 +547,19 @@ func (s *Scheduler) reconcile(ctx context.Context, c *cron.Cron) error {
 			delete(s.registered, j.ID)
 		}
 		job := j
-		entry, err := c.AddFunc(job.Cron, func() { s.fire(ctx, job) })
+		entry, err := c.AddFunc(job.Cron, func() { s.startFire(ctx, job) })
 		if err != nil {
 			s.Log.Error("skip job with bad cron", "job", job.ID, "err", err)
 			continue
 		}
 		s.registered[job.ID] = registration{entry: entry, job: job}
+		if !job.NextRetry.IsZero() {
+			s.runs.Add(1)
+			go func() {
+				defer s.runs.Done()
+				s.startFire(ctx, job)
+			}()
+		}
 	}
 	for id, reg := range s.registered {
 		if !seen[id] {
@@ -539,6 +587,27 @@ func (s *Scheduler) registeredIDs() []string {
 	return ids
 }
 
+// startFire is a per-job in-process lease. Cron callbacks, retry recovery,
+// and reconciliation may race, but only one lifecycle loop can own a job.
+func (s *Scheduler) startFire(ctx context.Context, j Job) {
+	s.runMu.Lock()
+	if s.inFlight == nil {
+		s.inFlight = make(map[string]bool)
+	}
+	if s.inFlight[j.ID] {
+		s.runMu.Unlock()
+		return
+	}
+	s.inFlight[j.ID] = true
+	s.runMu.Unlock()
+	defer func() {
+		s.runMu.Lock()
+		delete(s.inFlight, j.ID)
+		s.runMu.Unlock()
+	}()
+	s.fire(ctx, j)
+}
+
 func (s *Scheduler) fire(ctx context.Context, j Job) {
 	if s.Usage != nil {
 		paused, err := s.Usage.Paused(ctx)
@@ -546,10 +615,36 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 			return
 		}
 	}
-	if current, err := s.Store.Get(context.WithoutCancel(ctx), j.ID); err == nil &&
-		!current.NextRetry.IsZero() && time.Now().Before(current.NextRetry) {
+	current, err := s.Store.Get(context.WithoutCancel(ctx), j.ID)
+	if err != nil {
+		s.Log.Error("load job before firing", "job", j.ID, "err", err)
 		return
 	}
+	clock := clockOrReal(s.Clock)
+	for !current.NextRetry.IsZero() && clock.Now().Before(current.NextRetry) {
+		timer := clock.NewTimer(current.NextRetry.Sub(clock.Now()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C():
+		}
+		current, err = s.Store.Get(context.WithoutCancel(ctx), j.ID)
+		if err != nil {
+			s.Log.Error("reload job at retry deadline", "job", j.ID, "err", err)
+			return
+		}
+	}
+	if !current.Enabled {
+		return
+	}
+	if s.Usage != nil {
+		paused, err := s.Usage.Paused(ctx)
+		if err != nil || paused {
+			return
+		}
+	}
+	j = *current
 	s.Log.Info("job firing", "job", j.ID, "name", j.Name)
 	policy := s.Policy.normalized()
 	if j.MaxAttempts > 1 || policy.MaxAttempts == 1 {
@@ -565,6 +660,9 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		policy.StallTimeout = j.StallTimeout
 	}
 	attempt := 1
+	if !current.NextRetry.IsZero() {
+		attempt = current.Attempt + 1
+	}
 	for {
 		if err := s.Store.startAttempt(context.WithoutCancel(ctx), j.ID, attempt); err != nil {
 			s.Log.Error("record job attempt failed", "job", j.ID, "err", err)
@@ -597,14 +695,18 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 				break
 			}
 		}
-		next := time.Now().Add(delay)
-		_ = s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, fmt.Sprintf("retrying: %v", err), next)
-		timer := time.NewTimer(delay)
+		next := clock.Now().Add(delay)
+		status := fmt.Sprintf("retrying: %v", err)
+		if strings.HasPrefix(err.Error(), "stalled after ") {
+			status = "Stalled"
+		}
+		_ = s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, status, next)
+		timer := clock.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
+		case <-timer.C():
 		}
 		attempt++
 	}

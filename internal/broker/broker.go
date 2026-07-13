@@ -8,9 +8,11 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,8 +73,19 @@ type Broker struct {
 	tokens   map[string]string // token → session id
 	sessions map[string]string // session id → current token
 	gitScope map[string]string // session id → bound repo (owner/name)
+	limits   map[string]usage.Limits
+	budgets  map[string]string
 	Usage    *usage.Store
 	Limits   usage.Limits
+	// Now is injectable for deterministic budget-boundary tests.
+	Now func() time.Time
+}
+
+func (b *Broker) now() time.Time {
+	if b.Now != nil {
+		return b.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // New builds a broker over the given upstreams; st may be nil to skip
@@ -84,6 +97,8 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		tokens:    map[string]string{},
 		sessions:  map[string]string{},
 		gitScope:  map[string]string{},
+		limits:    map[string]usage.Limits{},
+		budgets:   map[string]string{},
 	}
 
 	if st != nil {
@@ -128,6 +143,16 @@ func (b *Broker) SetEgress(targets []EgressTarget) {
 
 // Mint issues a wk_ session token bound to sessionID.
 func (b *Broker) Mint(ctx context.Context, sessionID string) (string, error) {
+	return b.mint(ctx, sessionID, "", usage.Limits{}, false)
+}
+
+// MintScoped issues a token with a group-specific limit and stable accounting
+// identity. The concrete session remains the authorization/audit identity.
+func (b *Broker) MintScoped(ctx context.Context, sessionID, budgetKey string, limits usage.Limits) (string, error) {
+	return b.mint(ctx, sessionID, budgetKey, limits, true)
+}
+
+func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits usage.Limits, scoped bool) (string, error) {
 	raw, err := id.NewBytes(16)
 	if err != nil {
 		return "", fmt.Errorf("mint broker token: %w", err)
@@ -139,6 +164,16 @@ func (b *Broker) Mint(ctx context.Context, sessionID string) (string, error) {
 	}
 	b.tokens[token] = sessionID
 	b.sessions[sessionID] = token
+	if scoped {
+		b.limits[sessionID] = limits
+		if budgetKey == "" {
+			budgetKey = sessionID
+		}
+		b.budgets[sessionID] = budgetKey
+	} else {
+		delete(b.limits, sessionID)
+		delete(b.budgets, sessionID)
+	}
 	b.mu.Unlock()
 	b.record(ctx, token, sessionID, "mint", "")
 	return token, nil
@@ -150,6 +185,8 @@ func (b *Broker) Revoke(token string) {
 	if sessionID := b.tokens[token]; sessionID != "" && b.sessions[sessionID] == token {
 		delete(b.sessions, sessionID)
 		delete(b.gitScope, sessionID)
+		delete(b.limits, sessionID)
+		delete(b.budgets, sessionID)
 	}
 	delete(b.tokens, token)
 	b.mu.Unlock()
@@ -163,6 +200,8 @@ func (b *Broker) RevokeSession(sessionID string) {
 		delete(b.sessions, sessionID)
 	}
 	delete(b.gitScope, sessionID)
+	delete(b.limits, sessionID)
+	delete(b.budgets, sessionID)
 	b.mu.Unlock()
 }
 
@@ -193,6 +232,21 @@ func (b *Broker) session(token string) string {
 	return b.tokens[token]
 }
 
+func (b *Broker) usageScope(token string) (sessionID, budgetKey string, limits usage.Limits) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	sessionID = b.tokens[token]
+	budgetKey = sessionID
+	limits = b.Limits
+	if scoped, ok := b.limits[sessionID]; ok {
+		limits = scoped
+	}
+	if key := b.budgets[sessionID]; key != "" {
+		budgetKey = key
+	}
+	return
+}
+
 // ServeHTTP implements the broker's HTTP face: /<upstream>/<path>, bearer
 // wk_ token required.
 func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -205,20 +259,23 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sessionID := ""
+	budgetKey := ""
+	limits := b.Limits
 	if strings.HasPrefix(token, "wk_") {
-		sessionID = b.session(token)
+		sessionID, budgetKey, limits = b.usageScope(token)
 	}
 	if sessionID == "" {
 		b.record(r.Context(), token, "", "denied", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	requestAt := b.now()
 	if b.Usage != nil {
 		if paused, err := b.Usage.Paused(r.Context()); err != nil || paused {
 			http.Error(w, "waffle is paused", http.StatusTooManyRequests)
 			return
 		}
-		if err := b.Usage.Check(r.Context(), sessionID, b.Limits, time.Now()); err != nil {
+		if err := b.Usage.Check(r.Context(), budgetKey, limits, requestAt); err != nil {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
@@ -242,13 +299,192 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	b.record(r.Context(), token, sessionID, "proxy", name+"/"+rest)
 	if b.Usage != nil {
-		if err := b.Usage.AddRequest(r.Context(), sessionID, llm.Usage{}); err != nil {
-			http.Error(w, "usage accounting failed", 500)
+		if err := b.Usage.ReserveRequestAt(r.Context(), budgetKey, limits, requestAt); err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "usage limit exceeded") {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 	}
 	r.URL.Path = "/" + rest
-	proxy.ServeHTTP(w, r)
+	capture := &usageResponseWriter{ResponseWriter: w}
+	proxy.ServeHTTP(capture, r)
+	if b.Usage != nil {
+		if err := b.Usage.AddTokensAt(context.WithoutCancel(r.Context()), budgetKey, capture.providerUsage(), requestAt); err != nil {
+			b.record(context.WithoutCancel(r.Context()), token, sessionID, "usage-error", err.Error())
+		}
+	}
+}
+
+const maxUsageCaptureBytes = 4 << 20
+
+// usageResponseWriter preserves streaming semantics while retaining only a
+// bounded copy for post-response token accounting.
+type usageResponseWriter struct {
+	http.ResponseWriter
+	body       bytes.Buffer
+	tail       []byte
+	ssePending []byte
+	sseUsage   llm.Usage
+}
+
+func (w *usageResponseWriter) Write(p []byte) (int, error) {
+	if strings.Contains(strings.ToLower(w.Header().Get("Content-Type")), "text/event-stream") {
+		w.consumeSSE(p)
+	}
+	if remaining := maxUsageCaptureBytes - w.body.Len(); remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = w.body.Write(p[:remaining])
+	}
+	const tailLimit = 64 << 10
+	if len(p) >= tailLimit {
+		w.tail = append(w.tail[:0], p[len(p)-tailLimit:]...)
+	} else {
+		w.tail = append(w.tail, p...)
+		if len(w.tail) > tailLimit {
+			copy(w.tail, w.tail[len(w.tail)-tailLimit:])
+			w.tail = w.tail[:tailLimit]
+		}
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *usageResponseWriter) providerUsage() llm.Usage {
+	if strings.Contains(strings.ToLower(w.Header().Get("Content-Type")), "text/event-stream") {
+		return w.sseUsage
+	}
+	result := parseProviderUsage(w.body.Bytes())
+	mergeUsage(&result, parseTrailingUsage(w.tail))
+	return result
+}
+
+func parseTrailingUsage(body []byte) llm.Usage {
+	i := bytes.LastIndex(body, []byte(`"usage"`))
+	if i < 0 {
+		return llm.Usage{}
+	}
+	rest := body[i+len(`"usage"`):]
+	colon := bytes.IndexByte(rest, ':')
+	if colon < 0 {
+		return llm.Usage{}
+	}
+	var raw map[string]any
+	if json.NewDecoder(bytes.NewReader(rest[colon+1:])).Decode(&raw) != nil {
+		return llm.Usage{}
+	}
+	input := maxJSONInt(raw, "input_tokens", "prompt_tokens")
+	output := maxJSONInt(raw, "output_tokens", "completion_tokens")
+	if input+output == 0 {
+		input = maxJSONInt(raw, "total_tokens")
+	}
+	return llm.Usage{InputTokens: input, OutputTokens: output}
+}
+
+func mergeUsage(dst *llm.Usage, src llm.Usage) {
+	if src.InputTokens > dst.InputTokens {
+		dst.InputTokens = src.InputTokens
+	}
+	if src.OutputTokens > dst.OutputTokens {
+		dst.OutputTokens = src.OutputTokens
+	}
+}
+
+func (w *usageResponseWriter) consumeSSE(p []byte) {
+	w.ssePending = append(w.ssePending, p...)
+	for {
+		i := bytes.IndexByte(w.ssePending, '\n')
+		if i < 0 {
+			if len(w.ssePending) > 1<<20 {
+				w.ssePending = w.ssePending[:0]
+			}
+			return
+		}
+		line := bytes.TrimSpace(w.ssePending[:i])
+		w.ssePending = w.ssePending[i+1:]
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		observeProviderUsage(data, &w.sseUsage)
+	}
+}
+
+func (w *usageResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func parseProviderUsage(body []byte) llm.Usage {
+	var result llm.Usage
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		observeProviderUsage(trimmed, &result)
+		return result
+	}
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if !bytes.Equal(data, []byte("[DONE]")) {
+			observeProviderUsage(data, &result)
+		}
+	}
+	return result
+}
+
+func observeProviderUsage(raw []byte, result *llm.Usage) {
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		walkUsage(value, result)
+	}
+}
+
+func walkUsage(value any, result *llm.Usage) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		if list, ok := value.([]any); ok {
+			for _, item := range list {
+				walkUsage(item, result)
+			}
+		}
+		return
+	}
+	if raw, ok := m["usage"].(map[string]any); ok {
+		input := maxJSONInt(raw, "input_tokens", "prompt_tokens")
+		output := maxJSONInt(raw, "output_tokens", "completion_tokens")
+		if input+output == 0 {
+			input = maxJSONInt(raw, "total_tokens")
+		}
+		if input > result.InputTokens {
+			result.InputTokens = input
+		}
+		if output > result.OutputTokens {
+			result.OutputTokens = output
+		}
+	}
+	for _, child := range m {
+		walkUsage(child, result)
+	}
+}
+
+func maxJSONInt(m map[string]any, keys ...string) int {
+	best := 0
+	for _, key := range keys {
+		if n, ok := m[key].(float64); ok && int(n) > best {
+			best = int(n)
+		}
+	}
+	return best
 }
 
 func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sessionID string) {

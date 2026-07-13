@@ -99,3 +99,31 @@ func TestCronAddPersistsDeliveryOutsidePrompt(t *testing.T) {
 		t.Fatalf("stored job deliver=%q prompt=%q", jobs[0].Deliver, jobs[0].Prompt)
 	}
 }
+
+func TestCronListRendersPersistedAttemptAndNextRetry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(home, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := schedule.NewStore(st).Add(ctx, "retrying", "0 9 * * *", "work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.Exec(`UPDATE jobs SET attempt=2,max_attempts=4,next_retry='2026-07-13T10:11:12Z',last_status='Stalled' WHERE id=?`, j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	var stdout, stderr bytes.Buffer
+	if err := cronCmd(ctx, []string{"ls"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"attempt=2/4", "next-retry=2026-07-13 10:11:12", "last=Stalled"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("output missing %q: %s", want, stdout.String())
+		}
+	}
+}

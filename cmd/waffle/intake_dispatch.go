@@ -173,6 +173,12 @@ type prodIssueOpener struct {
 
 func (o *prodIssueOpener) Open(ctx context.Context, repo string) (issueRunSession, error) {
 	mgr := newWorkspaceManager(o.cfg, o.st, o.broker)
+	if o.broker != nil {
+		limits := brokerLimits(o.cfg, config.GroupIssue)
+		mgr.MintToken = func(mintCtx context.Context, sessionID string) (string, error) {
+			return o.broker.MintScoped(mintCtx, sessionID, sessionID, limits)
+		}
+	}
 	mgr.BrokerURL = o.brokerURL
 	ws, client, err := mgr.Open(ctx, repo)
 	if err != nil {

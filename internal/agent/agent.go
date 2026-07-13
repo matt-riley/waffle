@@ -114,15 +114,15 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	if maxIter <= 0 {
 		maxIter = 50
 	}
-	var usage llm.Usage
+	var cumulativeUsage llm.Usage
 	observeUsage := func(callUsage llm.Usage) {
-		usage.InputTokens += callUsage.InputTokens
-		usage.OutputTokens += callUsage.OutputTokens
+		cumulativeUsage.InputTokens += callUsage.InputTokens
+		cumulativeUsage.OutputTokens += callUsage.OutputTokens
 		if a.Usage != nil {
-			_ = a.Usage.AddRequest(ctx, sessionID(ctx), callUsage)
+			_ = a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, sessionID(ctx)), callUsage)
 		}
 		if hooks.OnUsage != nil {
-			hooks.OnUsage(usage)
+			hooks.OnUsage(cumulativeUsage)
 		}
 	}
 
@@ -133,7 +133,7 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 			} else if paused {
 				return history, errors.New("waffle is paused")
 			}
-			if err := a.Usage.Check(ctx, sessionID(ctx), a.Limits, time.Now()); err != nil {
+			if err := a.Usage.Check(ctx, usage.BudgetKey(ctx, sessionID(ctx)), a.Limits, time.Now()); err != nil {
 				return history, err
 			}
 		}

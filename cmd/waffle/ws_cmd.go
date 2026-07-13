@@ -14,6 +14,7 @@ import (
 	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
@@ -222,11 +223,19 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 		}
 	}
 	if b != nil {
-		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return b.Mint(ctx, sessionID) }
+		limits := brokerLimits(cfg, config.GroupMain)
+		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) {
+			return b.MintScoped(ctx, sessionID, sessionID, limits)
+		}
 		mgr.RevokeSession = b.RevokeSession
 		mgr.BindGitScope = b.BindGitRepo
 	}
 	return mgr
+}
+
+func brokerLimits(cfg config.Config, group string) usagepkg.Limits {
+	l := cfg.LimitsFor(group)
+	return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
 }
 
 func workspaceHooksFromConfig(cfg config.Config) hooks.Config {

@@ -125,8 +125,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		b := broker.New(st, upstreams)
 		serveBroker = b
 		b.Usage = usagepkg.New(st)
-		l := cfg.LimitsFor(config.GroupMain)
-		b.Limits = usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour}
+		b.Limits = brokerLimits(cfg, config.GroupMain)
 		go func() {
 			if err := b.Serve(ctx, cfg.Broker.Listen); err != nil {
 				log.Error("broker stopped", "err", err)
@@ -151,8 +150,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	defer lifecycleCancel()
 	wsManager := newWorkspaceManager(cfg, st, nil)
 	if serveBroker != nil {
+		limits := brokerLimits(cfg, config.GroupMain)
 		wsManager.MintToken = func(mintCtx context.Context, sessionID string) (string, error) {
-			return serveBroker.Mint(mintCtx, sessionID)
+			return serveBroker.MintScoped(mintCtx, sessionID, sessionID, limits)
 		}
 		wsManager.RevokeSession = serveBroker.RevokeSession
 		wsManager.BindGitScope = serveBroker.BindGitRepo

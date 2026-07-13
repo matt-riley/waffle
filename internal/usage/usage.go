@@ -94,6 +94,75 @@ func (s *Store) AddRequestAt(ctx context.Context, session string, u llm.Usage, n
 	return s.addAt(ctx, session, u, now.UTC(), true)
 }
 
+// ReserveRequestAt atomically checks both caps and records one request. This
+// prevents concurrent broker calls from all passing a check-before-increment
+// race. Returned provider tokens are added later with AddTokensAt.
+func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, now time.Time) (err error) {
+	if session == "" {
+		return nil
+	}
+	now = now.UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var in, out int
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0)
+		FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, period(now, 24*time.Hour)).Scan(&in, &out); err != nil {
+		return err
+	}
+	if l.TokensPerDay > 0 && in+out >= l.TokensPerDay {
+		return fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
+	}
+	var requests int
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(requests),0) FROM usage
+		WHERE session_id=? AND period='hour' AND period_start=?`, session, period(now, time.Hour)).Scan(&requests); err != nil {
+		return err
+	}
+	if l.RequestsPerHour > 0 && requests >= l.RequestsPerHour {
+		return fmt.Errorf("usage limit exceeded: hourly request budget (%d)", l.RequestsPerHour)
+	}
+	for _, p := range []struct {
+		name string
+		d    time.Duration
+	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
+			VALUES (?, ?, ?, 1, 0, 0)
+			ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1`, session, p.name, period(now, p.d)); err != nil {
+			return err
+		}
+	}
+	err = tx.Commit()
+	return err
+}
+
+// AddTokensAt adds returned provider usage without counting a second request.
+// It is used by streaming proxies that reserve the request before forwarding
+// and only learn token totals when the response completes.
+func (s *Store) AddTokensAt(ctx context.Context, session string, u llm.Usage, now time.Time) error {
+	if session == "" || (u.InputTokens == 0 && u.OutputTokens == 0) {
+		return nil
+	}
+	for _, p := range []struct {
+		name string
+		d    time.Duration
+	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+		_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
+			VALUES (?, ?, ?, 0, ?, ?)
+			ON CONFLICT(session_id,period,period_start) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens`,
+			session, p.name, period(now, p.d), u.InputTokens, u.OutputTokens)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Alert delivers one notice when a configured budget reaches 80 percent.
 // A durable flag suppresses repeat notices for the same session and period.
 func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Time, deliver func(context.Context, string) error) error {

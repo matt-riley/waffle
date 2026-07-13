@@ -9,9 +9,212 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/usage"
 )
+
+func TestProxyAccountsReturnedProviderUsageAndEnforcesBothCaps(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":5}}`)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "openai", BaseURL: upstream.URL, Header: "Authorization", Value: "Bearer real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 12, RequestsPerHour: 2}
+	b.Now = func() time.Time { return time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC) }
+	token, err := b.Mint(context.Background(), "budget-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	do := func() *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp
+	}
+	if got := do().StatusCode; got != http.StatusOK {
+		t.Fatalf("first status=%d", got)
+	}
+	rows, err := b.Usage.List(context.Background(), "budget-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests, tokens int
+	for _, row := range rows {
+		if row.Period == "day" {
+			requests += row.Requests
+			tokens += row.InputTokens + row.OutputTokens
+		}
+	}
+	if requests != 1 || tokens != 12 {
+		t.Fatalf("requests=%d tokens=%d rows=%+v", requests, tokens, rows)
+	}
+	if got := do().StatusCode; got != http.StatusTooManyRequests {
+		t.Fatalf("token-capped status=%d", got)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls=%d", calls)
+	}
+
+	// A separate identity proves the request cap is enforced independently.
+	b.Limits = usage.Limits{RequestsPerHour: 1}
+	token, err = b.Mint(context.Background(), "budget-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := do().StatusCode; got != http.StatusOK {
+		t.Fatalf("request first status=%d", got)
+	}
+	if got := do().StatusCode; got != http.StatusTooManyRequests {
+		t.Fatalf("request-capped status=%d", got)
+	}
+}
+
+func TestProxyAccountsStreamingUsageOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n")
+		// Usage commonly arrives only in the final event. Keep it accountable
+		// even after a response much larger than the bounded JSON capture.
+		filler := strings.Repeat("x", 1024)
+		for range maxUsageCaptureBytes/len(filler) + 2 {
+			_, _ = io.WriteString(w, "data: {\"delta\":\""+filler+"\"}\n\n")
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "anthropic", BaseURL: upstream.URL, Header: "x-api-key", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Now = func() time.Time { return time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC) }
+	token, _ := b.Mint(context.Background(), "stream-budget")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	rows, err := b.Usage.List(context.Background(), "stream-budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests, tokens int
+	for _, row := range rows {
+		if row.Period == "day" {
+			requests += row.Requests
+			tokens += row.InputTokens + row.OutputTokens
+		}
+	}
+	if requests != 1 || tokens != 13 {
+		t.Fatalf("requests=%d tokens=%d rows=%+v", requests, tokens, rows)
+	}
+}
+
+func TestProxyAccountsTrailingUsageInLargeJSONResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"`)
+		_, _ = io.WriteString(w, strings.Repeat("x", maxUsageCaptureBytes+1024))
+		_, _ = io.WriteString(w, `"}}],"usage":{"input_tokens":11,"output_tokens":6}}`)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "openai", BaseURL: upstream.URL, Header: "Authorization", Value: "Bearer real"}})
+	b.Usage = usage.New(st)
+	token, _ := b.Mint(context.Background(), "large-json")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	rows, err := b.Usage.List(context.Background(), "large-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokens int
+	for _, row := range rows {
+		if row.Period == "day" {
+			tokens += row.InputTokens + row.OutputTokens
+		}
+	}
+	if tokens != 17 {
+		t.Fatalf("tokens=%d rows=%+v", tokens, rows)
+	}
+}
+
+func TestScopedTokenUsesItsGroupLimitAndBudgetKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "p", BaseURL: upstream.URL, Header: "Authorization", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 100}
+	scoped, err := b.MintScoped(context.Background(), "session-issue", "issue-budget", usage.Limits{TokensPerDay: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainToken, err := b.Mint(context.Background(), "session-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	do := func(token string) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if do(scoped) != http.StatusOK {
+		t.Fatal("issue first request failed")
+	}
+	scopedRetry, err := b.MintScoped(context.Background(), "session-issue-retry", "issue-budget", usage.Limits{TokensPerDay: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if do(scopedRetry) != http.StatusTooManyRequests {
+		t.Fatal("issue override was not enforced")
+	}
+	mainFirst, mainSecond := do(mainToken), do(mainToken)
+	if mainFirst != http.StatusOK || mainSecond != http.StatusOK {
+		t.Fatal("main default was incorrectly tightened")
+	}
+	rows, err := b.Usage.List(context.Background(), "issue-budget")
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("stable scoped budget rows=%v err=%v", rows, err)
+	}
+}
 
 func TestGitCredentialDenialAuditNamesRequestedAndBoundRepo(t *testing.T) {
 	st := openStore(t)

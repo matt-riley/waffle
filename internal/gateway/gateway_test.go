@@ -650,6 +650,108 @@ func TestGracefulShutdownPersistsTurn(t *testing.T) {
 	}
 }
 
+type drainBlockingProvider struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+type cancelEmitAdapter struct {
+	mu   sync.Mutex
+	sent int
+}
+
+func (a *cancelEmitAdapter) Name() string { return "cancel-race" }
+func (a *cancelEmitAdapter) Run(ctx context.Context, inbound chan<- channel.Message) error {
+	<-ctx.Done()
+	inbound <- channel.Message{Channel: a.Name(), ChatID: "buffered", SenderID: "stranger", Text: "too late"}
+	return nil
+}
+func (a *cancelEmitAdapter) Send(context.Context, string, string) error {
+	a.mu.Lock()
+	a.sent++
+	a.mu.Unlock()
+	return nil
+}
+
+func TestGatewayCanceledContextDoesNotAcceptBufferedMessage(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	a := &cancelEmitAdapter{}
+	gw := &Gateway{Agent: &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"}, Entities: entity.New(st, session.New(st)), Sessions: session.New(st), Adapters: []channel.Adapter{a}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for range 200 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := gw.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.mu.Lock()
+	sent := a.sent
+	a.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("accepted %d buffered messages after cancellation", sent)
+	}
+}
+
+func (p *drainBlockingProvider) Complete(ctx context.Context, _ llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	close(p.started)
+	<-ctx.Done()
+	close(p.canceled)
+	return nil, ctx.Err()
+}
+
+func TestGracefulShutdownBoundsHungHandlerDrain(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	adapter := newFakeAdapter()
+	provider := &drainBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: provider, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities, Sessions: sessions, Adapters: []channel.Adapter{adapter},
+		DrainTimeout: 20 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gw.Run(ctx) }()
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "hung", SenderID: "owner", Text: "pair"}
+	adapter.waitForReply(t, "hung", 1)
+	pending, err := entities.Pairings(context.Background())
+	if err != nil || len(pending) == 0 {
+		t.Fatalf("pairings=%v err=%v", pending, err)
+	}
+	if _, err := entities.Approve(context.Background(), pending[0].Code, "Matt"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "hung", SenderID: "owner", Text: "hang"}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not start")
+	}
+	cancel()
+	select {
+	case <-provider.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("drain context was not canceled")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway remained blocked after drain timeout")
+	}
+}
+
 func TestCompletedConversationReleasesGroupLock(t *testing.T) {
 	gw, adapter, entities, _, cancel := newTestGateway(t)
 	defer cancel()

@@ -53,6 +53,9 @@ type Gateway struct {
 	MaxConcurrent int
 	// ReflectEveryTurns, when > 0, writes a session summary every N turns (#59).
 	ReflectEveryTurns int
+	// DrainTimeout bounds shutdown waiting for accepted handlers. The timeout
+	// starts only after shutdown begins; zero uses DefaultDrainTimeout.
+	DrainTimeout time.Duration
 
 	mu     sync.Mutex
 	groups map[string]*groupLock // active per-conversation serialization
@@ -116,6 +119,10 @@ type groupLock struct {
 // memory.
 const defaultMaxConcurrent = 8
 
+// DefaultDrainTimeout gives accepted work a useful grace period while
+// ensuring a wedged provider or tool cannot retain gateway ownership forever.
+const DefaultDrainTimeout = 30 * time.Second
+
 // Run starts every adapter and processes inbound messages until ctx ends.
 func (g *Gateway) Run(ctx context.Context) error {
 	if g.Log == nil {
@@ -147,14 +154,36 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 	sem := make(chan struct{}, maxConcurrent)
 	var handlers sync.WaitGroup
+	drainCtx, cancelDrain := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelDrain()
 
 	for {
 		select {
 		case <-ctx.Done():
 			adapters.Wait() // adapters stop feeding inbound
-			handlers.Wait() // in-flight handlers finish
-			return nil
+			drained := make(chan struct{})
+			go func() {
+				handlers.Wait()
+				close(drained)
+			}()
+			timeout := g.DrainTimeout
+			if timeout <= 0 {
+				timeout = DefaultDrainTimeout
+			}
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case <-drained:
+				return nil
+			case <-timer.C:
+				cancelDrain()
+				g.Log.Warn("gateway handler drain timed out", "timeout", timeout)
+				return nil
+			}
 		case msg := <-inbound:
+			if ctx.Err() != nil {
+				continue
+			}
 			// Acquire a slot before spawning: under a flood this blocks the
 			// loop (applying backpressure) instead of piling up goroutines.
 			select {
@@ -162,12 +191,15 @@ func (g *Gateway) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				continue
 			}
+			if ctx.Err() != nil {
+				<-sem
+				continue
+			}
 			handlers.Add(1)
 			// Detach from the shutdown context so that handlers already
 			// accepted can run to completion and persist their turn even
 			// after ctx is canceled.  Adapters are stopped by ctx; new
 			// messages are rejected above; only the drain path reaches here.
-			drainCtx := context.WithoutCancel(ctx)
 			go func(msg channel.Message) {
 				defer handlers.Done()
 				defer func() { <-sem }()
