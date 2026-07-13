@@ -41,7 +41,7 @@ func (d *PolicyDenial) Error() string {
 	if msg == "" {
 		msg = "tool call denied by policy"
 	}
-	if d.Profile != "" && !strings.Contains(msg, "profile ") {
+	if d.Profile != "" {
 		msg += fmt.Sprintf(" (profile %q)", d.Profile)
 	}
 	if d.Source != "" {

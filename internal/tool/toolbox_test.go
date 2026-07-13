@@ -103,6 +103,28 @@ func TestDenialIncludesProfileName(t *testing.T) {
 	}
 }
 
+func TestPolicyDenialAppendsAuthoritativeProfileDespiteMisleadingGuidance(t *testing.T) {
+	tb := NewRegistry(namedTool{"bash"})
+	r := Restrict(tb, Policy{
+		Deny:     []string{"bash"},
+		Profile:  "reviewer",
+		Guidance: `the legacy profile "attacker" may request an exception`,
+	})
+	_, err := r.Run(context.Background(), "bash", json.RawMessage(`{"command":"echo PRIVATE_TOOL_INPUT"}`))
+	if err == nil {
+		t.Fatal("expected denial")
+	}
+	denial := err.Error()
+	for _, want := range []string{`profile "reviewer"`, `policy source "tool_policy"`, `rule "deny"`} {
+		if !strings.Contains(denial, want) {
+			t.Fatalf("denial missing authoritative %q: %s", want, denial)
+		}
+	}
+	if strings.Contains(denial, "PRIVATE_TOOL_INPUT") {
+		t.Fatalf("tool input leaked into denial: %s", denial)
+	}
+}
+
 func TestDenyPrefixes(t *testing.T) {
 	tb := NewRegistry(Bash{})
 	r := Restrict(tb, Policy{
