@@ -1,6 +1,6 @@
 # Waffle Character Canon
 
-This document defines the identity constraints shared by Hero Waffle and Motion Waffle. The layered vector master is the production source of truth; generated studies and rendered exports are derivatives.
+This document defines the identity constraints shared by Hero Waffle and Motion Waffle. The approved raster model sheet, production composites, and manifests are the repository source of truth; generated studies, rejected vector attempts, and rendered animation frames are derivatives.
 
 ## Character identity
 
@@ -36,9 +36,9 @@ These tokens are the initial construction palette. They may be visually tuned on
 | `nose` | `#D98278` | Nose and restrained inner-ear accents |
 | `outline` | `#613619` | Structural outline and darkest fur definition |
 
-## Vector construction ratios
+## Illustration construction ratios
 
-These are **vector construction ratios**, not biological measurements. They keep the stylized character consistent across views and poses.
+These are **illustration construction ratios**, not biological measurements. They keep the stylized character consistent across views, poses, and raster animation frames.
 
 | Feature | Ratio |
 | --- | --- |
