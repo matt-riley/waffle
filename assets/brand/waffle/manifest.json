@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "id": "waffle-model-sheet",
+      "file": "canon/model-sheet.png",
+      "role": "canonical four-view raster model sheet",
+      "width": 1774,
+      "height": 887,
+      "alphaPolicy": "opaque",
+      "provenance": "Built-in image generation from the approved character canon and owner-approved visual references; sanitized locally"
+    },
+    {
+      "id": "waffle-standing",
+      "file": "poses/standing.png",
+      "role": "neutral three-quarter standing master",
+      "width": 1536,
+      "height": 1024,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and character canon; chroma removed and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-neutral",
+      "file": "canon/expressions/neutral.png",
+      "role": "neutral expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-curious",
+      "file": "canon/expressions/curious.png",
+      "role": "curious expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-pleased",
+      "file": "canon/expressions/pleased.png",
+      "role": "pleased expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-focused",
+      "file": "canon/expressions/focused.png",
+      "role": "focused expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-startled",
+      "file": "canon/expressions/startled.png",
+      "role": "startled expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-expression-sleepy",
+      "file": "canon/expressions/sleepy.png",
+      "role": "sleepy expression portrait",
+      "width": 768,
+      "height": 768,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    }
+  ]
+}
