@@ -24,3 +24,12 @@ run = "gofmt -l . && test -z \"$(gofmt -l .)\""
 
 [tasks.lint]
 run = "golangci-lint run ./..."
+
+[tasks.brand-install]
+run = "pnpm --dir tools/brand-assets install --frozen-lockfile"
+
+[tasks.brand-check]
+run = "pnpm --dir tools/brand-assets test && node tools/brand-assets/validate-svg.mjs assets/brand/waffle/canon/model-sheet.svg assets/brand/waffle/canon/expression-sheet.svg assets/brand/waffle/source/waffle-motion-master.svg assets/brand/waffle/poses/standing.svg assets/brand/waffle/poses/sitting.svg assets/brand/waffle/poses/curled.svg"
+
+[tasks.brand-render]
+run = "node tools/brand-assets/render-all.mjs"

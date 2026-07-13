@@ -1,0 +1,16 @@
+{
+  "name": "waffle-brand-assets",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "test": "node --test",
+    "validate": "node validate-svg.mjs",
+    "render": "node render-svg.mjs"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "fast-xml-parser": "5.9.3",
+    "pngjs": "7.0.0"
+  }
+}

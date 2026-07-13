@@ -3,6 +3,8 @@
 /bin/
 /dist/
 /.worktrees/
+/.superpowers/
+/tools/brand-assets/node_modules/
 
 # local state that must never be committed
 *.age
