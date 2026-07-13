@@ -16,6 +16,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llmtest"
+	policypkg "github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
@@ -109,6 +110,73 @@ func TestProfileStructuredLogsProviderToolAndDenialWithoutInput(t *testing.T) {
 	}
 	if strings.Contains(body, "PRIVATE_PROMPT") || strings.Contains(body, "SECRET_PROMPT") {
 		t.Fatalf("prompt/tool input leaked into logs: %s", body)
+	}
+}
+
+func TestProfileDenialLogsEffectivePolicySourceAndRuleWithoutInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		policy     tool.Policy
+		wantSource string
+		wantRule   string
+	}{
+		{
+			name:       "generic tool policy",
+			policy:     tool.Policy{Deny: []string{"bash"}, Profile: "reviewer"},
+			wantSource: "tool_policy",
+			wantRule:   "deny",
+		},
+		{
+			name: "action rule",
+			policy: tool.Policy{Profile: "reviewer", CheckAction: func(_ context.Context, name string, input json.RawMessage) error {
+				engine := policypkg.NewEngine([]policypkg.Rule{{Name: "no-private-bash", Tool: "bash", Action: policypkg.ActionDeny}}, policypkg.EnforcerNone)
+				decision := engine.Check(name, input)
+				if decision.Allowed {
+					return nil
+				}
+				return tool.NewPolicyDenial("reviewer", "policy.rule", decision.Rule, decision.Message)
+			}},
+			wantSource: "policy.rule",
+			wantRule:   "no-private-bash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			p := &llmtest.Script{Responses: []llm.Response{
+				llmtest.ToolCall("bash", "denied", `{"command":"echo SECRET_TOOL_INPUT"}`),
+				llmtest.Text("done"),
+			}}
+			a := &Agent{
+				Provider: p,
+				Tools:    tool.Restrict(tool.NewRegistry(namedToolForLog{}), tt.policy),
+				Model:    "m",
+				Profile:  "reviewer",
+				Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+			}
+			history, err := a.Run(context.Background(), []llm.Message{llm.UserText("PRIVATE_PROMPT")}, Hooks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := logs.String()
+			for _, want := range []string{`msg="tool call denied"`, "profile=reviewer", "policy_source=" + tt.wantSource, "rule=" + tt.wantRule} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("logs missing %q: %s", want, body)
+				}
+			}
+			if strings.Contains(body, "PRIVATE_PROMPT") || strings.Contains(body, "SECRET_TOOL_INPUT") {
+				t.Fatalf("prompt/tool input leaked into logs: %s", body)
+			}
+			denial := history[2].Blocks[0].ToolResult.Content
+			for _, want := range []string{`profile "reviewer"`, `policy source "` + tt.wantSource + `"`, `rule "` + tt.wantRule + `"`} {
+				if !strings.Contains(denial, want) {
+					t.Fatalf("denial missing %q: %s", want, denial)
+				}
+			}
+			if strings.Contains(denial, "SECRET_TOOL_INPUT") {
+				t.Fatalf("tool input leaked into denial: %s", denial)
+			}
+		})
 	}
 }
 

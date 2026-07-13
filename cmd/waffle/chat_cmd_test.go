@@ -94,6 +94,142 @@ func TestWorksetCommandInspectsAndCorrectsPersistedState(t *testing.T) {
 	}
 }
 
+func TestChatContinueResumesCurrentSessionWorkset(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "continued")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workset.Store{DB: st.DB}
+	if _, err := ws.Add(ctx, sess.ID, workset.KindGoal, "resume this exact goal", workset.SourceUser, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Provider.APIKey = ""
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	c, cleanup, err := newChat(ctx, cfg, st, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if c.current.ID != sess.ID {
+		t.Fatalf("chat -c current session = %s, want %s", c.current.ID, sess.ID)
+	}
+	entries, err := ws.List(ctx, c.current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Body != "resume this exact goal" {
+		t.Fatalf("chat -c current working set = %+v", entries)
+	}
+}
+
+func TestResetStartsEmptyWorksetAndPreservesOldSessionState(t *testing.T) {
+	ctx := context.Background()
+	sessions, st := newTestSessions(t)
+	old, err := sessions.Create(ctx, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workset.Store{DB: st.DB}
+	if _, err := ws.Add(ctx, old.ID, workset.KindGoal, "keep old goal", workset.SourceUser, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Add(ctx, old.ID, workset.KindAssumption, "drop stale guess", workset.SourceModel, false); err != nil {
+		t.Fatal(err)
+	}
+	c := &chat{sessions: sessions, st: st, current: old, history: []llm.Message{llm.UserText("old")}, persisted: 1}
+	dropped, err := c.resetSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 1 || c.current.ID == old.ID || len(c.history) != 0 || c.persisted != 0 {
+		t.Fatalf("reset dropped=%d current=%s history=%d persisted=%d", dropped, c.current.ID, len(c.history), c.persisted)
+	}
+	oldEntries, err := ws.List(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldEntries) != 1 || oldEntries[0].Body != "keep old goal" {
+		t.Fatalf("old session working set after reset = %+v", oldEntries)
+	}
+	currentEntries, err := ws.List(ctx, c.current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(currentEntries) != 0 {
+		t.Fatalf("new session working set after reset = %+v", currentEntries)
+	}
+}
+
+func TestWorkspaceSessionSwitchSelectsItsWorkset(t *testing.T) {
+	ctx := context.Background()
+	sessions, st := newTestSessions(t)
+	current, err := sessions.Create(ctx, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceSession, err := sessions.Create(ctx, "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workset.Store{DB: st.DB}
+	if _, err := ws.Add(ctx, current.ID, workset.KindGoal, "chat goal", workset.SourceUser, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Add(ctx, workspaceSession.ID, workset.KindConstraint, "workspace constraint", workset.SourceSystem, true); err != nil {
+		t.Fatal(err)
+	}
+	c := &chat{sessions: sessions, current: current}
+	if err := c.switchToWorkspaceSession(ctx, workspaceSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := ws.List(ctx, c.current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].Body != "workspace constraint" {
+		t.Fatalf("active workspace working set = %+v", active)
+	}
+	original, err := ws.List(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(original) != 1 || original[0].Body != "chat goal" {
+		t.Fatalf("original chat working set after switch = %+v", original)
+	}
+}
+
+func TestSessionDeletionClearsStoredWorkset(t *testing.T) {
+	ctx := context.Background()
+	sessions, st := newTestSessions(t)
+	sess, err := sessions.Create(ctx, "delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workset.Store{DB: st.DB}
+	if _, err := ws.Add(ctx, sess.ID, workset.KindFact, "delete with session", workset.SourceUser, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ws.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("deleted session working set = %+v", entries)
+	}
+}
+
 // TestDockerCronGroupRestrictedMCP is the inspectable #77.7 gate. Its
 // deterministic assertions always run; setting WAFFLE_TEST_DOCKER=1 also
 // starts the planned MCP inside Docker.

@@ -136,10 +136,13 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	// Subagent toolboxes must never include workspace_update or spawn (#68).
 	childTools := t.Tools
 	if childTools != nil {
-		deny := tool.Policy{Deny: []string{"workspace_update", "spawn_subagent"}}
+		childProfile := effectiveProfile(profileName)
+		deny := tool.Policy{Deny: []string{"workspace_update", "spawn_subagent"}, Profile: childProfile}
 		if !profile.Tools.IsZero() {
 			// Tighten-only: apply profile policy, then force parent denials.
-			childTools = tool.Restrict(childTools, profile.Tools)
+			profilePolicy := profile.Tools
+			profilePolicy.Profile = childProfile
+			childTools = tool.Restrict(childTools, profilePolicy)
 		}
 		childTools = tool.Restrict(childTools, deny)
 	}
@@ -148,7 +151,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	if p.ReadOnly && childTools != nil {
 		childTools = tool.Restrict(childTools, tool.Policy{Deny: []string{
 			"write_file", "edit_file", "bash", "workspace_update", "remember", "distill_skill", "memory_update",
-		}})
+		}, Profile: effectiveProfile(profileName)})
 	}
 
 	model := t.Model
@@ -176,6 +179,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		Redact:        t.Redact,
 		Spill:         t.Spill,
 		MaxIterations: 30,
+		Profile:       effectiveProfile(profileName),
 		Log:           t.Log,
 	}
 	runCtx := ctx

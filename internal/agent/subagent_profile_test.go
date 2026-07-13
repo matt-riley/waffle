@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
@@ -85,6 +88,79 @@ func TestProfileTargetingStillEnforcesSubagentDepthLimit(t *testing.T) {
 	if _, err := toolUnderTest.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"reviewer"}`)); err == nil || !strings.Contains(err.Error(), "depth limit") {
 		t.Fatalf("profile-targeted depth error=%v", err)
 	}
+}
+
+func TestProfileTargetedSubagentsRespectConcurrencyLimit(t *testing.T) {
+	provider := &blockingProfileProvider{
+		started: make(chan struct{}, maxSubagentConcurrency+4),
+		release: make(chan struct{}),
+	}
+	spawn := SubagentTool{
+		Provider: provider,
+		Tools:    tool.NewRegistry(),
+		Model:    "m",
+		Profiles: map[string]ChildProfile{"reviewer": {System: "review"}},
+	}
+	a := &Agent{Tools: tool.NewRegistry(spawn)}
+	uses := make([]llm.ToolUse, maxSubagentConcurrency+4)
+	for i := range uses {
+		uses[i] = llm.ToolUse{ID: fmt.Sprintf("child-%d", i), Name: "spawn_subagent", Input: json.RawMessage(`{"task":"review","profile":"reviewer"}`)}
+	}
+	done := make(chan []llm.ToolResult, 1)
+	go func() { done <- a.runTools(context.Background(), uses, Hooks{}) }()
+
+	for i := 0; i < maxSubagentConcurrency; i++ {
+		select {
+		case <-provider.started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d profile-targeted children started", i)
+		}
+	}
+	select {
+	case <-provider.started:
+		t.Fatalf("more than %d profile-targeted children started concurrently", maxSubagentConcurrency)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(provider.release)
+	select {
+	case results := <-done:
+		for i, result := range results {
+			if result.IsError {
+				t.Fatalf("result %d: %+v", i, result)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("profile-targeted children did not finish")
+	}
+	if got := provider.max.Load(); got != maxSubagentConcurrency {
+		t.Fatalf("max concurrent children = %d, want %d", got, maxSubagentConcurrency)
+	}
+}
+
+type blockingProfileProvider struct {
+	started chan struct{}
+	release chan struct{}
+	active  atomic.Int32
+	max     atomic.Int32
+}
+
+func (p *blockingProfileProvider) Complete(context.Context, llm.Request, llm.StreamFunc) (*llm.Response, error) {
+	active := p.active.Add(1)
+	defer p.active.Add(-1)
+	for {
+		maximum := p.max.Load()
+		if active <= maximum || p.max.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	p.started <- struct{}{}
+	<-p.release
+	return &llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+			Type: llm.BlockText, Text: "```json\n{\"status\":\"done\",\"summary\":\"reviewed\"}\n```",
+		}}},
+	}, nil
 }
 
 func TestSubagentSpawnLogIncludesChildProfileWithoutTask(t *testing.T) {

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,6 +24,48 @@ type Toolbox interface {
 type CallerToolbox interface {
 	Toolbox
 	RunWithID(context.Context, string, string, json.RawMessage) (string, error)
+}
+
+// PolicyDenial carries safe, structured audit metadata for a denied tool
+// call. Message is returned to the model; profile, source, and rule are
+// configuration identifiers and must never contain tool input.
+type PolicyDenial struct {
+	Profile string
+	Source  string
+	Rule    string
+	Message string
+}
+
+func (d *PolicyDenial) Error() string {
+	msg := d.Message
+	if msg == "" {
+		msg = "tool call denied by policy"
+	}
+	if d.Profile != "" && !strings.Contains(msg, "profile ") {
+		msg += fmt.Sprintf(" (profile %q)", d.Profile)
+	}
+	if d.Source != "" {
+		msg += fmt.Sprintf(" [policy source %q", d.Source)
+		if d.Rule != "" {
+			msg += fmt.Sprintf("; rule %q", d.Rule)
+		}
+		msg += "]"
+	}
+	return msg
+}
+
+// NewPolicyDenial constructs a denial with audit-safe policy provenance.
+func NewPolicyDenial(profile, source, rule, message string) error {
+	return &PolicyDenial{Profile: profile, Source: source, Rule: rule, Message: message}
+}
+
+// PolicyDenialDetails extracts structured policy provenance from err.
+func PolicyDenialDetails(err error) (profile, source, rule string, ok bool) {
+	var denial *PolicyDenial
+	if !errors.As(err, &denial) {
+		return "", "", "", false
+	}
+	return denial.Profile, denial.Source, denial.Rule, true
 }
 
 // Policy is an allow/deny tool filter. Policy is enforced host-side —
@@ -145,13 +188,14 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 // denyTool formats a tool-policy denial, including profile when set (#71).
 func (p Policy) denyTool(name string) error {
 	msg := fmt.Sprintf("tool %q is not permitted by policy", name)
-	if p.Profile != "" {
-		msg += fmt.Sprintf(" (profile %q)", p.Profile)
-	}
 	if p.Guidance != "" {
 		msg += " — " + p.Guidance
 	}
-	return fmt.Errorf("%s", msg)
+	rule := "allow"
+	if slices.Contains(p.Deny, name) {
+		rule = "deny"
+	}
+	return NewPolicyDenial(p.Profile, "tool_policy", rule, msg)
 }
 
 // checkCommand enforces DenyPrefixes for bash (#66).
@@ -176,13 +220,10 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		}
 		if matchCommandPrefix(cmd, pref) {
 			msg := fmt.Sprintf("bash command denied by policy: prefix %q is not allowed", pref)
-			if p.Profile != "" {
-				msg += fmt.Sprintf(" (profile %q)", p.Profile)
-			}
 			if p.Guidance != "" {
 				msg += " — " + p.Guidance
 			}
-			return fmt.Errorf("%s", msg)
+			return NewPolicyDenial(p.Profile, "tool_policy", "deny_prefix", msg)
 		}
 	}
 	return nil

@@ -146,17 +146,13 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			return nil
 		case line == "/reset":
 			c.finish(ctx, stdout)
-			// Drop unpinned model assumptions from the old session's working set (#70).
-			if c.st != nil && c.current != nil {
-				wsStore := &workset.Store{DB: c.st.DB}
-				if n, dropErr := wsStore.DropUnpinnedModelAssumptions(ctx, c.current.ID); dropErr == nil && n > 0 {
-					fmt.Fprintf(stdout, "%s(dropped %d unpinned model assumptions)%s\n", dim, n, reset)
-				}
+			dropped, resetErr := c.resetSession(ctx)
+			if resetErr != nil {
+				return resetErr
 			}
-			if c.current, err = c.sessions.Create(ctx, ""); err != nil {
-				return err
+			if dropped > 0 {
+				fmt.Fprintf(stdout, "%s(dropped %d unpinned model assumptions)%s\n", dim, dropped, reset)
 			}
-			c.history, c.persisted = nil, 0
 			fmt.Fprintf(stdout, "(new session %s)\n", c.current.ID)
 			continue
 		case line == "/help":
@@ -192,6 +188,26 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			fmt.Fprintf(stderr, "\nwaffle: %v\n", err)
 		}
 	}
+}
+
+// resetSession implements /reset working-set ownership: stale unpinned model
+// assumptions are removed from the old session, other old entries remain
+// stored there, and the new session starts with an empty set.
+func (c *chat) resetSession(ctx context.Context) (int, error) {
+	dropped := 0
+	if c.st != nil && c.current != nil {
+		wsStore := &workset.Store{DB: c.st.DB}
+		if n, err := wsStore.DropUnpinnedModelAssumptions(ctx, c.current.ID); err == nil {
+			dropped = n
+		}
+	}
+	current, err := c.sessions.Create(ctx, "")
+	if err != nil {
+		return 0, err
+	}
+	c.current = current
+	c.history, c.persisted = nil, 0
+	return dropped, nil
 }
 
 func (c *chat) worksetCommand(ctx context.Context, args string) (string, error) {
@@ -598,7 +614,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		toolPolicy.CheckAction = func(ctx context.Context, name string, input json.RawMessage) error {
 			d := engine.CheckAndAuditSession(ctx, session.IDFromContext(ctx), name, input)
 			if !d.Allowed {
-				return fmt.Errorf("%s", d.Message)
+				return tool.NewPolicyDenial(effectiveProfile, "policy.rule", d.Rule, d.Message)
 			}
 			return nil
 		}

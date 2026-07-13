@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,6 +318,42 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 	cleanup4()
 	if emptyA.Profile != "empty-sys" {
 		t.Fatalf("profile name = %q", emptyA.Profile)
+	}
+}
+
+func TestBuildAgentActionRuleDenialIncludesProfileProvenanceWithoutInput(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"reviewer": {System: "review", Tools: config.ToolPolicy{Allow: []string{"read_file"}}},
+	}
+	cfg.Policy.Rule = []config.PolicyRule{{Name: "no-private-read", Tool: "read_file", Action: "deny"}}
+	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	_, err = a.Tools.Run(ctx, "read_file", json.RawMessage(`{"path":"PRIVATE_INPUT_PATH"}`))
+	if err == nil {
+		t.Fatal("action rule allowed read_file")
+	}
+	denial := err.Error()
+	for _, want := range []string{`profile "reviewer"`, `policy source "policy.rule"`, `rule "no-private-read"`} {
+		if !strings.Contains(denial, want) {
+			t.Fatalf("denial missing %q: %s", want, denial)
+		}
+	}
+	if strings.Contains(denial, "PRIVATE_INPUT_PATH") {
+		t.Fatalf("tool input leaked into denial: %s", denial)
 	}
 }
 

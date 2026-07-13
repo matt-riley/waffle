@@ -246,7 +246,18 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 // RunAttempt executes one numbered attempt. Retries add context to the
 // prompt while the first attempt remains byte-for-byte compatible.
 func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, error) {
+	log := r.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	profileName := j.Profile
+	if profileName == "" {
+		profileName = "main"
+	}
+	log = log.With("job_id", j.ID, "profile", profileName)
 	if j.Prompt == "/learn" {
+		log.Info("cron run started")
+		defer log.Info("cron run finished")
 		if r.Learn == nil {
 			return "", fmt.Errorf("cron: reserved /learn action is not configured")
 		}
@@ -319,15 +330,7 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	if err := r.Sessions.AppendTurn(ctx, sess.ID, history[0]); err != nil {
 		return "", err
 	}
-	log := r.Log
-	if log == nil {
-		log = slog.Default()
-	}
-	profileName := j.Profile
-	if profileName == "" {
-		profileName = "main"
-	}
-	log = log.With("session_id", sess.ID, "job_id", j.ID, "profile", profileName)
+	log = log.With("session_id", sess.ID)
 	log.Info("cron run started")
 	defer log.Info("cron run finished")
 

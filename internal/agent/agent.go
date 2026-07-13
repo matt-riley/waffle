@@ -266,10 +266,16 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	}
 	if a.Log != nil {
 		event := "tool call finished"
-		if res.IsError && (strings.Contains(res.Content, "not permitted") || strings.Contains(res.Content, "policy")) {
+		attrs := []any{"profile", effectiveProfile(a.Profile), "tool", use.Name, "error", res.IsError}
+		_, source, rule, policyDenied := tool.PolicyDenialDetails(err)
+		if res.IsError && (policyDenied || strings.Contains(res.Content, "not permitted") || strings.Contains(res.Content, "policy")) {
 			event = "tool call denied"
+			if !policyDenied {
+				source, rule = "tool_error", "unspecified"
+			}
+			attrs = append(attrs, "policy_source", source, "rule", rule)
 		}
-		a.Log.Info(event, "profile", effectiveProfile(a.Profile), "tool", use.Name, "error", res.IsError)
+		a.Log.Info(event, attrs...)
 	}
 	if a.Redact != nil {
 		res.Content = a.Redact(res.Content)

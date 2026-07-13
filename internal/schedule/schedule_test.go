@@ -163,23 +163,34 @@ func TestRunnerReservedLearnJobDeliversDigestWithoutAgentDispatch(t *testing.T) 
 	st := newTestStore(t)
 	cap := &captureDeliverer{}
 	p := &recordingProvider{}
+	var logs bytes.Buffer
 	runner := &Runner{
 		Agent:     &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
 		Sessions:  session.New(st),
 		Deliverer: cap,
+		Log:       slog.New(slog.NewTextHandler(&logs, nil)),
 		Learn: func(context.Context) (string, error) {
-			return "waffle learn digest\npatterns=2 accepted=1", nil
+			return "PRIVATE_LEARN_DIGEST\npatterns=2 accepted=1", nil
 		},
 	}
-	reply, err := runner.Run(ctx, Job{Name: "learn-daily", Prompt: "/learn", Deliver: "telegram:900"})
+	reply, err := runner.Run(ctx, Job{ID: "job-learn", Name: "learn-daily", Prompt: "/learn", Deliver: "telegram:900", Profile: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != cap.text || cap.target != "telegram:900" || !strings.Contains(reply, "learn digest") {
+	if reply != cap.text || cap.target != "telegram:900" || !strings.Contains(reply, "PRIVATE_LEARN_DIGEST") {
 		t.Fatalf("reply=%q delivered=%q target=%q", reply, cap.text, cap.target)
 	}
 	if len(p.reqs) != 0 {
 		t.Fatalf("reserved learn job reached agent provider: %d calls", len(p.reqs))
+	}
+	body := logs.String()
+	for _, want := range []string{`msg="cron run started"`, `msg="cron run finished"`, "job_id=job-learn", "profile=reviewer"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("reserved learn logs missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "/learn") || strings.Contains(body, "PRIVATE_LEARN_DIGEST") {
+		t.Fatalf("reserved learn input/output leaked into logs: %s", body)
 	}
 }
 
