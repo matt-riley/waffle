@@ -29,7 +29,7 @@ func TestReserveRequestAtAtomicallyEnforcesConcurrentCap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if err := u.ReserveRequestAt(ctx, "concurrent", Limits{RequestsPerHour: 1}, now); err == nil {
+			if _, err := u.ReserveRequestAt(ctx, "concurrent", Limits{RequestsPerHour: 1}, now, 0, false); err == nil {
 				mu.Lock()
 				allowed++
 				mu.Unlock()
@@ -40,6 +40,97 @@ func TestReserveRequestAtAtomicallyEnforcesConcurrentCap(t *testing.T) {
 	wg.Wait()
 	if allowed != 1 {
 		t.Fatalf("allowed=%d want 1", allowed)
+	}
+}
+
+func TestTokenReservationsAreAtomicDurableAndReconciled(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+	st, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	limits := Limits{TokensPerDay: 100, RequestsPerHour: 10}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var reservations []int
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			reserved, err := u.ReserveRequestAt(ctx, "streams", limits, now, 60, false)
+			if err == nil {
+				mu.Lock()
+				reservations = append(reservations, reserved)
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if len(reservations) != 1 || reservations[0] != 60 {
+		t.Fatalf("reservations=%v", reservations)
+	}
+
+	// No reconciliation models an aborted stream: its reservation stays charged.
+	if _, err := u.ReserveRequestAt(ctx, "streams", limits, now, 50, false); err == nil {
+		t.Fatal("aborted reservation did not protect cap")
+	}
+	if err := u.ReconcileReservationAt(ctx, "streams", now, 60, llm.Usage{InputTokens: 4, OutputTokens: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if reserved, err := u.ReserveRequestAt(ctx, "streams", limits, now, 90, false); err != nil || reserved != 90 {
+		t.Fatalf("lower actual usage did not restore capacity: reserved=%d err=%v", reserved, err)
+	}
+
+	rows, err := u.List(ctx, "streams")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var day Row
+	for _, row := range rows {
+		if row.Period == "day" {
+			day = row
+		}
+	}
+	if day.InputTokens+day.OutputTokens != 10 || day.ReservedTokens != 90 || day.Requests != 2 {
+		t.Fatalf("day=%+v", day)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u = New(st)
+	if _, err := u.ReserveRequestAt(ctx, "streams", limits, now.Add(24*time.Hour), 100, false); err != nil {
+		t.Fatalf("new day did not reset reservation budget: %v", err)
+	}
+}
+
+func TestMissingDeclaredMaximumReservesRemainingAllowance(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	reserved, err := u.ReserveRequestAt(ctx, "unknown", Limits{TokensPerDay: 100}, now, 0, true)
+	if err != nil || reserved != 100 {
+		t.Fatalf("reserved=%d err=%v", reserved, err)
+	}
+	if _, err := u.ReserveRequestAt(ctx, "unknown", Limits{TokensPerDay: 100}, now, 1, false); err == nil {
+		t.Fatal("remaining allowance reservation was bypassed")
 	}
 }
 

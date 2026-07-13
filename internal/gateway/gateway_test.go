@@ -655,6 +655,162 @@ type drainBlockingProvider struct {
 	canceled chan struct{}
 }
 
+type nonCooperativeAdapter struct {
+	release chan struct{}
+}
+
+func (a *nonCooperativeAdapter) Name() string { return "stuck-adapter" }
+func (a *nonCooperativeAdapter) Run(context.Context, chan<- channel.Message) error {
+	<-a.release
+	return nil
+}
+func (a *nonCooperativeAdapter) Send(context.Context, string, string) error { return nil }
+
+func TestGatewayBoundsNonCooperativeAdapterShutdown(t *testing.T) {
+	a := &nonCooperativeAdapter{release: make(chan struct{})}
+	gw := &Gateway{Agent: &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"}, Adapters: []channel.Adapter{a}, DrainTimeout: 20 * time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gw.Run(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(a.release)
+		t.Fatal("non-cooperative adapter blocked shutdown")
+	}
+	close(a.release)
+}
+
+type cancelCleanupProvider struct {
+	started    chan struct{}
+	canceled   chan struct{}
+	finish     chan struct{}
+	cleaned    chan struct{}
+	cleanup    func() error
+	cleanupErr chan error
+}
+
+func (p *cancelCleanupProvider) Complete(ctx context.Context, _ llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	close(p.started)
+	<-ctx.Done()
+	close(p.canceled)
+	<-p.finish
+	if p.cleanup != nil {
+		p.cleanupErr <- p.cleanup()
+	}
+	close(p.cleaned)
+	return nil, ctx.Err()
+}
+
+func TestGatewayWaitsForContextAwareHandlerCleanupAfterCancel(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	adapter := newFakeAdapter()
+	p := &cancelCleanupProvider{started: make(chan struct{}), canceled: make(chan struct{}), finish: make(chan struct{}), cleaned: make(chan struct{}), cleanup: st.DB.Ping, cleanupErr: make(chan error, 1)}
+	gw := &Gateway{Agent: &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}, Entities: entities, Sessions: sessions, Adapters: []channel.Adapter{adapter}, DrainTimeout: 20 * time.Millisecond, PostCancelGrace: 200 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gw.Run(ctx) }()
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "cleanup", SenderID: "owner", Text: "pair"}
+	adapter.waitForReply(t, "cleanup", 1)
+	pending, _ := entities.Pairings(context.Background())
+	if _, err := entities.Approve(context.Background(), pending[0].Code, "Matt"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "cleanup", SenderID: "owner", Text: "run"}
+	select {
+	case <-p.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider not started")
+	}
+	cancel()
+	select {
+	case <-p.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("handler context not canceled")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("gateway returned before handler cleanup: %v", err)
+	default:
+	}
+	close(p.finish)
+	select {
+	case <-p.cleaned:
+	case <-time.After(time.Second):
+		t.Fatal("provider cleanup did not finish")
+	}
+	if err := <-p.cleanupErr; err != nil {
+		t.Fatalf("handler cleanup observed closed store: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway did not return after cleanup")
+	}
+	// Closing shared storage after Run is now ordered after handler exit.
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB.Ping(); err == nil {
+		t.Fatal("test store remained open")
+	}
+}
+
+func TestGatewayHoldsResourcesForTrulyNonCooperativeHandler(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	adapter := newFakeAdapter()
+	p := &slowProvider{inFlight: make(chan struct{}), ready: make(chan struct{})}
+	gw := &Gateway{Agent: &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}, Entities: entities, Sessions: sessions, Adapters: []channel.Adapter{adapter}, DrainTimeout: 10 * time.Millisecond, PostCancelGrace: 10 * time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gw.Run(ctx) }()
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "noncoop", SenderID: "owner", Text: "pair"}
+	adapter.waitForReply(t, "noncoop", 1)
+	pending, _ := entities.Pairings(context.Background())
+	if _, err := entities.Approve(context.Background(), pending[0].Code, "Matt"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "noncoop", SenderID: "owner", Text: "run"}
+	<-p.inFlight
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("returned while non-cooperative handler could still use resources: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := st.DB.Ping(); err != nil {
+		t.Fatalf("shared store was not held open: %v", err)
+	}
+	close(p.ready)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway did not return after non-cooperative handler exited")
+	}
+}
+
 type cancelEmitAdapter struct {
 	mu   sync.Mutex
 	sent int

@@ -298,8 +298,16 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.record(r.Context(), token, sessionID, "proxy", name+"/"+rest)
+	declared, reserveRemaining, inspectErr := inspectDeclaredTokenMaximum(r)
+	if inspectErr != nil {
+		http.Error(w, "invalid provider request body", http.StatusBadRequest)
+		return
+	}
+	reserved := 0
 	if b.Usage != nil {
-		if err := b.Usage.ReserveRequestAt(r.Context(), budgetKey, limits, requestAt); err != nil {
+		var err error
+		reserved, err = b.Usage.ReserveRequestAt(r.Context(), budgetKey, limits, requestAt, declared, reserveRemaining)
+		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "usage limit exceeded") {
 				status = http.StatusTooManyRequests
@@ -312,10 +320,135 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	capture := &usageResponseWriter{ResponseWriter: w}
 	proxy.ServeHTTP(capture, r)
 	if b.Usage != nil {
-		if err := b.Usage.AddTokensAt(context.WithoutCancel(r.Context()), budgetKey, capture.providerUsage(), requestAt); err != nil {
+		if err := b.Usage.ReconcileReservationAt(context.WithoutCancel(r.Context()), budgetKey, requestAt, reserved, capture.providerUsage()); err != nil {
 			b.record(context.WithoutCancel(r.Context()), token, sessionID, "usage-error", err.Error())
 		}
 	}
+}
+
+const maxRequestInspectBytes = 1 << 20
+
+type replayReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r replayReadCloser) Close() error { return r.closer.Close() }
+
+// inspectDeclaredTokenMaximum reads a bounded prefix and restores the body.
+// For textual JSON requests, the body byte length is a conservative upper
+// bound on input tokens, so the returned reservation covers both that prompt
+// bound and the declared output maximum. A missing, invalid, or oversized
+// declaration reserves the remaining daily allowance.
+func inspectDeclaredTokenMaximum(r *http.Request) (declared int, reserveRemaining bool, err error) {
+	if r.Body == nil {
+		return 0, true, nil
+	}
+	original := r.Body
+	prefix, err := io.ReadAll(io.LimitReader(original, maxRequestInspectBytes+1))
+	if err != nil {
+		return 0, true, err
+	}
+	if len(prefix) > maxRequestInspectBytes {
+		r.Body = replayReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), original), closer: original}
+		return 0, true, nil
+	}
+	_ = original.Close()
+	r.Body = io.NopCloser(bytes.NewReader(prefix))
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(prefix, &payload) != nil {
+		return 0, true, nil
+	}
+	found := false
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		raw, ok := payload[key]
+		if !ok {
+			continue
+		}
+		found = true
+		var n int
+		if json.Unmarshal(raw, &n) != nil || n <= 0 {
+			return 0, true, nil
+		}
+		if n > declared {
+			declared = n
+		}
+	}
+	if !found {
+		return 0, true, nil
+	}
+	var value any
+	if json.Unmarshal(prefix, &value) != nil || !isSelfContainedProviderPayload(payload) || hasExternalTokenSource(value) {
+		return 0, true, nil
+	}
+	if declared > int(^uint(0)>>1)-len(prefix) {
+		return 0, true, nil
+	}
+	return declared + len(prefix), false, nil
+}
+
+// isSelfContainedProviderPayload allowlists top-level fields whose input is
+// carried in this request. Unknown provider extensions are conservative: they
+// may be server-side context handles whose token cost is not represented by
+// the request bytes.
+func isSelfContainedProviderPayload(payload map[string]json.RawMessage) bool {
+	for key := range payload {
+		switch strings.ToLower(key) {
+		case "model", "messages", "input", "prompt", "instructions", "system",
+			"max_tokens", "max_completion_tokens", "temperature", "top_p", "top_k",
+			"n", "stream", "stream_options", "stop", "stop_sequences", "tools",
+			"tool_choice", "parallel_tool_calls", "response_format", "metadata", "user",
+			"reasoning", "thinking", "service_tier", "store", "verbosity", "modalities",
+			"prediction", "frequency_penalty", "presence_penalty", "seed", "logprobs",
+			"top_logprobs", "logit_bias":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// hasExternalTokenSource identifies inputs whose billed token count is not
+// bounded by the JSON bytes forwarded through the broker (for example a
+// remote image URL or provider-side file ID). These requests reserve the
+// remaining allowance instead of relying on the textual-body upper bound.
+func hasExternalTokenSource(value any) bool {
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			if hasExternalTokenSource(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, child := range v {
+			lowerKey := strings.ToLower(key)
+			correlationID := lowerKey == "tool_use_id" || lowerKey == "tool_call_id" || lowerKey == "call_id"
+			if !correlationID && (strings.HasSuffix(lowerKey, "_id") || strings.HasSuffix(lowerKey, "_ids") || strings.HasSuffix(lowerKey, "_url")) {
+				return true
+			}
+			switch lowerKey {
+			case "image_url", "file_id", "file_url", "audio_url", "video_url":
+				return true
+			case "type":
+				if kind, ok := child.(string); ok {
+					switch strings.ToLower(kind) {
+					case "text", "input_text", "output_text", "message", "function", "custom",
+						"tool_use", "tool_result", "thinking", "redacted_thinking", "json_schema",
+						"json_object", "function_call", "function_call_output", "auto", "any", "tool",
+						"none", "ephemeral", "grammar", "regex", "object", "array", "string",
+						"number", "integer", "boolean", "null":
+					default:
+						return true
+					}
+				}
+			}
+			if hasExternalTokenSource(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const maxUsageCaptureBytes = 4 << 20
@@ -324,15 +457,18 @@ const maxUsageCaptureBytes = 4 << 20
 // bounded copy for post-response token accounting.
 type usageResponseWriter struct {
 	http.ResponseWriter
-	body       bytes.Buffer
-	tail       []byte
-	ssePending []byte
-	sseUsage   llm.Usage
+	body          bytes.Buffer
+	tail          []byte
+	ssePending    []byte
+	sseUsage      llm.Usage
+	sseFinalUsage bool
+	sseComplete   bool
 }
 
 func (w *usageResponseWriter) Write(p []byte) (int, error) {
 	if strings.Contains(strings.ToLower(w.Header().Get("Content-Type")), "text/event-stream") {
 		w.consumeSSE(p)
+		return w.ResponseWriter.Write(p)
 	}
 	if remaining := maxUsageCaptureBytes - w.body.Len(); remaining > 0 {
 		if remaining > len(p) {
@@ -355,6 +491,9 @@ func (w *usageResponseWriter) Write(p []byte) (int, error) {
 
 func (w *usageResponseWriter) providerUsage() llm.Usage {
 	if strings.Contains(strings.ToLower(w.Header().Get("Content-Type")), "text/event-stream") {
+		if !w.sseComplete {
+			return llm.Usage{}
+		}
 		return w.sseUsage
 	}
 	result := parseProviderUsage(w.body.Bytes())
@@ -409,10 +548,26 @@ func (w *usageResponseWriter) consumeSSE(p []byte) {
 			continue
 		}
 		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		if len(data) == 0 {
+			continue
+		}
+		if bytes.Equal(data, []byte("[DONE]")) {
+			w.sseComplete = w.sseFinalUsage
 			continue
 		}
 		observeProviderUsage(data, &w.sseUsage)
+		var event struct {
+			Type  string          `json:"type"`
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(data, &event) == nil {
+			if len(event.Usage) > 0 && (event.Type == "" || event.Type == "message_delta") {
+				w.sseFinalUsage = true
+			}
+			if event.Type == "message_stop" {
+				w.sseComplete = w.sseFinalUsage
+			}
+		}
 	}
 }
 

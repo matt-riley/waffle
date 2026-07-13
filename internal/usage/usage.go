@@ -64,13 +64,13 @@ func (s *Store) Check(ctx context.Context, session string, l Limits, now time.Ti
 	if session == "" {
 		return nil
 	}
-	var requests, in, out int
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(requests),0),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0)
-		FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, period(now, 24*time.Hour)).Scan(&requests, &in, &out)
+	var requests, in, out, reserved int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(requests),0),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(reserved_tokens),0)
+		FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, period(now, 24*time.Hour)).Scan(&requests, &in, &out, &reserved)
 	if err != nil {
 		return err
 	}
-	if l.TokensPerDay > 0 && in+out >= l.TokensPerDay {
+	if l.TokensPerDay > 0 && in+out+reserved >= l.TokensPerDay {
 		return fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
 	}
 	if l.RequestsPerHour > 0 {
@@ -96,49 +96,90 @@ func (s *Store) AddRequestAt(ctx context.Context, session string, u llm.Usage, n
 
 // ReserveRequestAt atomically checks both caps and records one request. This
 // prevents concurrent broker calls from all passing a check-before-increment
-// race. Returned provider tokens are added later with AddTokensAt.
-func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, now time.Time) (err error) {
+// race. A trustworthy final usage observation reconciles the reservation.
+func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, now time.Time, declared int, reserveRemaining bool) (reserved int, err error) {
 	if session == "" {
-		return nil
+		return 0, nil
 	}
 	now = now.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() {
 		if err != nil {
 			_ = tx.Rollback()
 		}
 	}()
-	var in, out int
-	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0)
-		FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, period(now, 24*time.Hour)).Scan(&in, &out); err != nil {
-		return err
+	var in, out, alreadyReserved int
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(reserved_tokens),0)
+		FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, period(now, 24*time.Hour)).Scan(&in, &out, &alreadyReserved); err != nil {
+		return 0, err
 	}
-	if l.TokensPerDay > 0 && in+out >= l.TokensPerDay {
-		return fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
+	if l.TokensPerDay > 0 {
+		remaining := l.TokensPerDay - in - out - alreadyReserved
+		if remaining <= 0 {
+			return 0, fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
+		}
+		reserved = declared
+		if reserveRemaining {
+			reserved = remaining
+		}
+		if reserved < 0 || reserved > remaining {
+			return 0, fmt.Errorf("usage limit exceeded: daily token budget (%d)", l.TokensPerDay)
+		}
 	}
 	var requests int
 	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(requests),0) FROM usage
 		WHERE session_id=? AND period='hour' AND period_start=?`, session, period(now, time.Hour)).Scan(&requests); err != nil {
-		return err
+		return 0, err
 	}
 	if l.RequestsPerHour > 0 && requests >= l.RequestsPerHour {
-		return fmt.Errorf("usage limit exceeded: hourly request budget (%d)", l.RequestsPerHour)
+		return 0, fmt.Errorf("usage limit exceeded: hourly request budget (%d)", l.RequestsPerHour)
 	}
 	for _, p := range []struct {
 		name string
 		d    time.Duration
 	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
-			VALUES (?, ?, ?, 1, 0, 0)
-			ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1`, session, p.name, period(now, p.d)); err != nil {
-			return err
+		if _, err = tx.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,reserved_tokens)
+			VALUES (?, ?, ?, 1, 0, 0, ?)
+			ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,reserved_tokens=reserved_tokens+excluded.reserved_tokens`, session, p.name, period(now, p.d), reserved); err != nil {
+			return 0, err
 		}
 	}
 	err = tx.Commit()
-	return err
+	return reserved, err
+}
+
+// ReconcileReservationAt replaces a durable pre-dispatch reservation with
+// trustworthy final provider usage. A zero usage observation is not final and
+// intentionally leaves the reservation charged.
+func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now time.Time, reserved int, actual llm.Usage) error {
+	if session == "" || actual.InputTokens+actual.OutputTokens <= 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, p := range []struct {
+		name string
+		d    time.Duration
+	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+		res, err := tx.ExecContext(ctx, `UPDATE usage SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,reserved_tokens=MAX(0,reserved_tokens-?)
+			WHERE session_id=? AND period=? AND period_start=?`, actual.InputTokens, actual.OutputTokens, reserved, session, p.name, period(now, p.d))
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("usage reservation missing for %s %s", session, p.name)
+		}
+	}
+	return tx.Commit()
 }
 
 // AddTokensAt adds returned provider usage without counting a second request.
@@ -171,7 +212,7 @@ func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Ti
 	}
 	var used int
 	start := period(now, 24*time.Hour)
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, start).Scan(&used); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens+output_tokens+reserved_tokens),0) FROM usage WHERE session_id=? AND period='day' AND period_start=?`, session, start).Scan(&used); err != nil {
 		return err
 	}
 	threshold := l.AlertThresholdPercent
@@ -198,12 +239,12 @@ func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Ti
 }
 
 type Row struct {
-	SessionID, Period, PeriodStart      string
-	Requests, InputTokens, OutputTokens int
+	SessionID, Period, PeriodStart                      string
+	Requests, InputTokens, OutputTokens, ReservedTokens int
 }
 
 func (s *Store) List(ctx context.Context, session string) (out []Row, err error) {
-	q := `SELECT session_id,period,period_start,requests,input_tokens,output_tokens FROM usage`
+	q := `SELECT session_id,period,period_start,requests,input_tokens,output_tokens,reserved_tokens FROM usage`
 	args := []any{}
 	if session != "" {
 		q += ` WHERE session_id=?`
@@ -221,7 +262,7 @@ func (s *Store) List(ctx context.Context, session string) (out []Row, err error)
 	}()
 	for rows.Next() {
 		var r Row
-		if err := rows.Scan(&r.SessionID, &r.Period, &r.PeriodStart, &r.Requests, &r.InputTokens, &r.OutputTokens); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.Period, &r.PeriodStart, &r.Requests, &r.InputTokens, &r.OutputTokens, &r.ReservedTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

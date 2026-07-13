@@ -56,6 +56,10 @@ type Gateway struct {
 	// DrainTimeout bounds shutdown waiting for accepted handlers. The timeout
 	// starts only after shutdown begins; zero uses DefaultDrainTimeout.
 	DrainTimeout time.Duration
+	// PostCancelGrace bounds the wait for context-aware handler cleanup after
+	// DrainTimeout cancels accepted work. A truly non-cooperative handler is
+	// then awaited to keep shared resources alive rather than closing under it.
+	PostCancelGrace time.Duration
 
 	mu     sync.Mutex
 	groups map[string]*groupLock // active per-conversation serialization
@@ -122,6 +126,7 @@ const defaultMaxConcurrent = 8
 // DefaultDrainTimeout gives accepted work a useful grace period while
 // ensuring a wedged provider or tool cannot retain gateway ownership forever.
 const DefaultDrainTimeout = 30 * time.Second
+const DefaultPostCancelGrace = 5 * time.Second
 
 // Run starts every adapter and processes inbound messages until ctx ends.
 func (g *Gateway) Run(ctx context.Context) error {
@@ -160,11 +165,15 @@ func (g *Gateway) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			adapters.Wait() // adapters stop feeding inbound
-			drained := make(chan struct{})
+			adaptersDone := make(chan struct{})
+			go func() {
+				adapters.Wait()
+				close(adaptersDone)
+			}()
+			handlersDone := make(chan struct{})
 			go func() {
 				handlers.Wait()
-				close(drained)
+				close(handlersDone)
 			}()
 			timeout := g.DrainTimeout
 			if timeout <= 0 {
@@ -172,14 +181,42 @@ func (g *Gateway) Run(ctx context.Context) error {
 			}
 			timer := time.NewTimer(timeout)
 			defer timer.Stop()
-			select {
-			case <-drained:
-				return nil
-			case <-timer.C:
-				cancelDrain()
-				g.Log.Warn("gateway handler drain timed out", "timeout", timeout)
-				return nil
+			adaptersFinished, handlersFinished := false, false
+			for !adaptersFinished || !handlersFinished {
+				select {
+				case <-adaptersDone:
+					adaptersFinished = true
+					adaptersDone = nil
+				case <-handlersDone:
+					handlersFinished = true
+					handlersDone = nil
+				case <-timer.C:
+					cancelDrain()
+					if !adaptersFinished {
+						g.Log.Warn("gateway adapter drain timed out", "timeout", timeout)
+					}
+					if handlersFinished {
+						return nil
+					}
+					grace := g.PostCancelGrace
+					if grace <= 0 {
+						grace = DefaultPostCancelGrace
+					}
+					graceTimer := time.NewTimer(grace)
+					select {
+					case <-handlersDone:
+						graceTimer.Stop()
+						return nil
+					case <-graceTimer.C:
+						// Go cannot kill a goroutine safely. Keep shared resources
+						// alive until a handler that ignored cancellation exits.
+						g.Log.Error("gateway handler ignored cancellation; holding resources", "grace", grace)
+						<-handlersDone
+						return nil
+					}
+				}
 			}
+			return nil
 		case msg := <-inbound:
 			if ctx.Err() != nil {
 				continue

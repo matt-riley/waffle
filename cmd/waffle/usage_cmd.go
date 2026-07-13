@@ -26,7 +26,7 @@ func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) (err er
 		return err
 	}
 	for _, r := range rows {
-		fmt.Fprintf(out, "%s %s requests=%d input=%d output=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.OutputTokens)
+		fmt.Fprintf(out, "%s %s requests=%d input=%d output=%d reserved=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.OutputTokens, r.ReservedTokens)
 	}
 	return nil
 }
