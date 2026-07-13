@@ -68,7 +68,7 @@ The first milestone delivers:
 2. A model sheet with front, three-quarter, profile, and rear/top marking views.
 3. An expression sheet covering neutral, curious, pleased, focused, startled, and sleepy states.
 4. Three Motion Waffle poses: neutral standing, sitting, and curled/resting.
-5. A named, layered vector source suitable for clean SVG export and later rigging.
+5. A named, layered vector source suitable for clean SVG export and later animation.
 6. Standalone SVG exports and transparent PNG previews.
 7. A QA contact sheet comparing the character against the private references and seed illustration.
 
@@ -142,7 +142,7 @@ The first milestone is accepted when:
 - the motion master has separable parts and plausible pivots for the planned layered-SVG prototype; and
 - the QA sheet records approval or a specific revision request for every deliverable.
 
-Reject work that shows marking drift, inconsistent eye colour, generic-tabby substitution, excessive SVG complexity, muddy detail at documentation sizes, broken browser rendering, or anatomy that cannot be rigged cleanly.
+Reject work that shows marking drift, inconsistent eye colour, generic-tabby substitution, excessive SVG complexity, muddy detail at documentation sizes, broken browser rendering, or anatomy that cannot be animated cleanly.
 
 ## Later Phases
 
@@ -152,7 +152,7 @@ After the static milestone is approved:
 2. build a small animation controller around Motion Waffle's named SVG groups;
 3. add idle, blink, sit, stand, walk, wave, think, success, warning, and sleepy states incrementally;
 4. expose selected animations through the native Web Animations API, optionally using Motion for sequencing and spring ergonomics; and
-5. reuse the same SVG groups for promotional videos, using Remotion while its licensing remains appropriate for the project or Blender as the permanently free and open-source fallback.
+5. reuse the same SVG groups for promotional videos, using Remotion while its licensing remains appropriate for the project or Blender as the free and open-source fallback.
 
 This architecture deliberately avoids a required animation-editor subscription. The layered SVG remains the character source of truth; browser and video animation are code or scene derivatives rather than proprietary rig files. The tradeoff is that pivots, easing, and state transitions are authored in code instead of a visual rigging timeline.
 

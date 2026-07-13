@@ -446,4 +446,4 @@ git commit -m "docs: approve Waffle static asset milestone"
 
 ## Completion Boundary
 
-Stop after Task 6. The next design/plan cycle covers Hero Waffle, layered-SVG animation with the Web Animations API and optional Motion helpers, documentation-site integration, and Remotion or Blender promo compositions. Do not add animation runtime code, video, site framework, or Hero Waffle files during this plan.
+Stop after Task 6. The next design/plan cycle covers Hero Waffle, layered-SVG animation with the Web Animations API and optional Motion helpers, documentation-site integration, and Remotion or Blender promo compositions. Do not add animation code, Remotion or Blender project files, rendered video, site framework, or Hero Waffle files during this plan.
