@@ -1,38 +1,53 @@
 # Waffle Brand Assets
 
-This tree contains Waffle's reviewed production artwork and deterministic exports. The editable, layered SVG master is the source of truth. Generated studies, optimized copies, PNG previews, and video frames are derivatives and must never overwrite it.
+This tree contains Waffle's reviewed raster artwork and machine-readable delivery contracts. Approved high-resolution RGBA PNG composites and schema-versioned JSON manifests are the repository source of truth. The raster architecture preserves Waffle's soft illustration style and likeness instead of reducing her to geometric vector shapes.
 
 ## Directory roles
 
-- `canon/` holds the character rules, non-identifying reference review, model sheet, and expression sheet.
-- `source/` holds the layered Motion Waffle vector master.
-- `poses/` holds standalone production SVG poses derived from the master.
-- `exports/png/` holds deterministic transparent previews rendered from committed SVGs.
-- `qa/` records review-gate decisions and verification evidence.
+- `canon/` holds character rules, the non-identifying reference review, the approved raster model sheet, its generation record, and standalone expressions.
+- `poses/` holds the approved transparent standing, sitting, and curled composites.
+- `animation/idle/` holds the deterministic standing seed, normalized sprite frames, and the animation manifest.
+- `manifest.json` declares every static production asset's role, dimensions, alpha policy, and privacy-safe provenance.
+- `qa/` records owner decisions and technical verification evidence.
 
-Private photos, videos, generated concept studies, share details, and identifying metadata belong only in the ignored `.superpowers/` workspace. They must never be copied into this tree or committed. Production SVGs must remain editable vector geometry and may not embed raster images or external assets.
+Private photos, videos, generated concept studies, share details, rejected vector studies, editor working files, and identifying metadata belong only in the ignored `.superpowers/` workspace. They must never be copied into this tree or committed. Optional editor files are not required to use or validate the production package.
+
+The general-purpose SVG validator remains under `tools/brand-assets/` for other artwork, but SVG is not a Waffle production format.
 
 ## Commands
 
 ```sh
 mise run brand-install
 mise run brand-check
-mise run brand-render
 ```
 
 - `brand-install` restores the pinned asset-tool dependencies from the lockfile.
-- `brand-check` runs the tool tests and validates every production SVG for required structure, safety, and complexity limits.
-- `brand-render` regenerates the committed transparent PNG previews from the SVG sources.
+- `brand-check` runs all brand-tool tests, then validates the static and idle manifests when they exist. It is safe during early stages when no raster deliverables exist yet.
+
+Production helpers are explicit so they never overwrite an approved master:
+
+```sh
+node tools/brand-assets/sanitize-png.mjs input.png output.png
+node tools/brand-assets/resize-raster.mjs input.png output.png WIDTH HEIGHT
+node tools/brand-assets/build-sprite-edit-canvas.mjs seed.png canvas.png
+node tools/brand-assets/normalize-sprite-strip.mjs strip.png frames/ seed.png
+node tools/brand-assets/validate-raster.mjs assets/brand/waffle/manifest.json
+```
+
+Sanitization decodes and re-encodes RGBA pixels before validation, dropping ancillary metadata. The sprite helpers use deterministic bilinear resizing, one shared scale, a bottom-centre anchor, and a locked first frame.
+
+Static `manifest.json` files use schema version 1. Every asset requires `id`, `file`, `role`, `width`, `height`, `alphaPolicy`, and `provenance`. Idle manifests additionally declare numeric `canvas` and `anchor` objects, a boolean `loop`, a local `seed`, and ordered frames with a local `file` and positive numeric `durationMs`.
 
 ## Review gates
 
 | Gate | Status |
 | --- | --- |
-| Character identity, initial palette, and construction ratios | Approved |
-| Silhouette and proportions | Not started |
-| Face and expression language | Not started |
-| Marking placement and tuned palette | Not started |
-| Model-sheet views | Not started |
-| Final static poses | Not started |
+| Character canon, palette, and construction ratios | Approved |
+| Balanced visual direction | Approved |
+| Vector studies | Rejected; preserved privately for review evidence |
+| Raster model-sheet likeness and cross-view consistency | Not started |
+| Neutral master likeness and expression language | Not started |
+| Standing, sitting, and curled documentation poses | Not started |
+| Idle proof and final package | Not started |
 
-Do not advance a creative stage until its preceding gate is explicitly approved. Palette values in `canon/character-canon.md` remain initial until the marking review gate.
+Do not advance a creative stage until its preceding gate is explicitly approved. Passing file validation is never evidence that Waffle's identity is acceptable.
