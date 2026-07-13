@@ -18,6 +18,56 @@ const svg = (
   attributes = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"',
 ) =>
   `<svg ${attributes}>${body}</svg>`;
+const EXPECTED_MODEL_IDS = [
+  "view-front",
+  "front-silhouette",
+  "front-face",
+  "front-markings",
+  "front-shading",
+  "view-three-quarter",
+  "three-quarter-silhouette",
+  "three-quarter-face",
+  "three-quarter-markings",
+  "three-quarter-shading",
+  "view-profile",
+  "profile-silhouette",
+  "profile-face",
+  "profile-markings",
+  "profile-shading",
+  "view-rear-top",
+  "rear-top-silhouette",
+  "rear-top-face",
+  "rear-top-markings",
+  "rear-top-shading",
+];
+const EXPECTED_EXPRESSION_IDS = [
+  "neutral",
+  "curious",
+  "pleased",
+  "focused",
+  "startled",
+  "sleepy",
+];
+const EXPECTED_MOTION_MASTER_IDS = [
+  "tail",
+  "torso",
+  "rear-leg-left",
+  "rear-leg-right",
+  "front-leg-left",
+  "front-leg-right",
+  "head",
+  "ear-left",
+  "ear-right",
+  "eye-left",
+  "eye-right",
+  "eyelids",
+  "muzzle",
+  "mouth",
+  "whiskers",
+  "markings",
+  "shading",
+];
+const EXPECTED_POSE_IDS = ["silhouette", "face", "markings", "shading"];
 
 async function temporarySvg(t, markup, filename = "fixture.svg") {
   const directory = await mkdtemp(pathModule.join(tmpdir(), "waffle-svg-"));
@@ -82,6 +132,22 @@ const rejectionCases = [
     /external asset URLs are forbidden: style/,
   ],
   [
+    "external CSS @import values",
+    svg('<style>@import "https://example.com/theme.css";</style>'),
+    /external CSS @import references are forbidden/,
+  ],
+  [
+    "external CSS @import url values",
+    svg('<style>@import url("https://example.com/theme.css");</style>'),
+    /external CSS @import references are forbidden/,
+  ],
+  [
+    "external XML stylesheet processing instructions",
+    '<?xml-stylesheet type="text/css" href="https://example.com/theme.css"?>' +
+      svg("<path/>"),
+    /external XML stylesheet references are forbidden/,
+  ],
+  [
     "external paint-server values",
     svg('<path fill="https://example.com/paint"/>'),
     /external asset URLs are forbidden: fill/,
@@ -124,22 +190,53 @@ for (const [name, markup, expected] of rejectionCases) {
   });
 }
 
-for (const filename of [
-  "model-sheet.svg",
-  "expression-sheet.svg",
-  "waffle-motion-master.svg",
-  "standing.svg",
-  "sitting.svg",
-  "curled.svg",
-]) {
-  test(`enforces the ${filename} filename policy`, async (t) => {
-    const path = await temporarySvg(t, svg("<g/>"), filename);
-    const result = spawnSync(process.execPath, [validatorPath, path], {
-      encoding: "utf8",
-    });
+const filenamePolicies = [
+  ["model-sheet.svg", EXPECTED_MODEL_IDS],
+  ["expression-sheet.svg", EXPECTED_EXPRESSION_IDS],
+  ["waffle-motion-master.svg", EXPECTED_MOTION_MASTER_IDS],
+  ["standing.svg", EXPECTED_POSE_IDS],
+  ["sitting.svg", EXPECTED_POSE_IDS],
+  ["curled.svg", EXPECTED_POSE_IDS],
+];
 
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /required IDs are absent:/);
+const svgWithIds = (ids) => svg(ids.map((id) => `<g id="${id}"/>`).join(""));
+
+for (const [filename, expectedIds] of filenamePolicies) {
+  test(`enforces the exact ${filename} ID policy`, async (t) => {
+    const completePath = await temporarySvg(
+      t,
+      svgWithIds(expectedIds),
+      filename,
+    );
+    const completeResult = spawnSync(
+      process.execPath,
+      [validatorPath, completePath],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(completeResult.status, 0, completeResult.stderr);
+    assert.match(completeResult.stdout, /^PASS /);
+
+    for (const missingId of expectedIds) {
+      const missingPath = await temporarySvg(
+        t,
+        svgWithIds(expectedIds.filter((id) => id !== missingId)),
+        filename,
+      );
+      const result = spawnSync(process.execPath, [validatorPath, missingPath], {
+        encoding: "utf8",
+      });
+
+      assert.notEqual(
+        result.status,
+        0,
+        `${filename} accepted without ${missingId}`,
+      );
+      assert.match(
+        result.stderr,
+        new RegExp(`required IDs are absent: ${missingId}(?:,|\\n|$)`),
+      );
+    }
   });
 }
 

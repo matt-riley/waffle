@@ -105,6 +105,18 @@ function isExternalReference(value) {
   return value !== "" && !value.startsWith("#");
 }
 
+function validateCssImports(value) {
+  const imports = value.matchAll(
+    /@import\s+(?:url\(\s*)?(?:(['"])(.*?)\1|([^'"\s;)]+))/giu,
+  );
+  for (const match of imports) {
+    const reference = (match[2] ?? match[3]).trim();
+    if (isExternalReference(reference)) {
+      throw new Error("external CSS @import references are forbidden");
+    }
+  }
+}
+
 function validateReferences(attribute, value) {
   const lowerAttribute = attribute.toLowerCase();
   const localAttribute = lowerAttribute.split(":").at(-1);
@@ -132,10 +144,33 @@ function validateReferences(attribute, value) {
   ) {
     throw new Error(`external asset URLs are forbidden: ${attribute}`);
   }
+  if (lowerAttribute === "style" || lowerAttribute === "style-content") {
+    validateCssImports(stringValue);
+  }
 
   for (const match of stringValue.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/giu)) {
     if (isExternalReference(match[2].trim())) {
       throw new Error(`external asset URLs are forbidden: ${attribute}`);
+    }
+  }
+}
+
+function validateProcessingInstructions(nodes) {
+  for (const node of nodes) {
+    const stylesheetKey = Object.keys(node).find(
+      (key) => key.toLowerCase() === "?xml-stylesheet",
+    );
+    if (stylesheetKey) {
+      const href = String(node[":@"]?.href ?? "").trim();
+      if (isExternalReference(href)) {
+        throw new Error("external XML stylesheet references are forbidden");
+      }
+    }
+
+    for (const [key, children] of Object.entries(node)) {
+      if (!isMetadataKey(key) && Array.isArray(children)) {
+        validateProcessingInstructions(children);
+      }
     }
   }
 }
@@ -146,13 +181,14 @@ function inspectTree(nodes) {
   const ids = [];
   const seenIds = new Set();
 
-  function visit(items) {
+  function visit(items, parentName = "") {
     for (const node of items) {
       const entry = elementEntry(node);
       if (!entry) {
         const text = node["#text"];
         if (typeof text === "string") {
-          validateReferences("text", text);
+          const source = parentName === "style" ? "style-content" : "text";
+          validateReferences(source, text);
         }
         continue;
       }
@@ -184,7 +220,7 @@ function inspectTree(nodes) {
         validateReferences(attribute, value);
       }
 
-      if (Array.isArray(children)) visit(children);
+      if (Array.isArray(children)) visit(children, localName);
     }
   }
 
@@ -200,6 +236,7 @@ export async function validateSvg(path, requirements = {}) {
   }
 
   const document = parser.parse(markup);
+  validateProcessingInstructions(document);
   const rootNode = document.find((node) => elementEntry(node));
   const rootEntry = rootNode && elementEntry(rootNode);
   if (!rootEntry || rootEntry[0] !== "svg") {
