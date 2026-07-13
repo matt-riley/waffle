@@ -288,9 +288,14 @@ The pipeline, using only machinery that already exists by Phase 5:
    `"ci"`, or `"auto-patch"`, with `verify = true` by default and optional
    `protected` path prefixes. Auto-patch refuses protected paths and the
    self-development gate/config/doctor code. Git is the audit trail either
-   way — every self-modification is a commit that can be read, reverted, and
+   way. Before checkout, a structured reviewer examines the candidate diff
+   for task fit and weakened gates. It uses `[provider].utility_model` when
+   configured (falling back to the primary model), and writes findings plus
+   the reviewed commit SHA to `$WAFFLE_HOME/selfdev-reviews.jsonl`. A
+   `blocker` finding stops both manual and auto-patch upgrades. Every
+   self-modification is therefore a commit that can be read, reverted, and
    merged with upstream. `waffle upgrade --no-verify` is an explicitly unsafe
-   escape hatch for emergency recovery.
+   escape hatch for emergency recovery; it does not bypass review.
 4. **Deploy.** `waffle upgrade` builds the new binary from the approved
    ref, runs `waffle doctor` against it (self-check: config parses, DB
    migrates on a copy, secret store round-trips, providers reachable), then

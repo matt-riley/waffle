@@ -2,6 +2,7 @@ package selfdev
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,234 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/llmtest"
 )
+
+func writeUpgradeFixture(t *testing.T, brokenTest, brokenEval bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module upgradefixture\n\ngo 1.25\n",
+		"cmd/waffle/main.go": `package main
+import "os"
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "eval" { ` + map[bool]string{true: `_, _ = os.Stderr.WriteString("FAIL broken-eval: expected pass\\n"); os.Exit(1)`, false: `_, _ = os.Stdout.WriteString("PASS fixture-eval\\n")`}[brokenEval] + ` }
+}
+`,
+		"fixture_test.go": "package fixture\nimport \"testing\"\nfunc TestFixture(t *testing.T) { " + map[bool]string{true: `t.Fatal("deliberate failing test output")`, false: ``}[brokenTest] + " }\n",
+	}
+	for name, body := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestUpgradeIntoFailingTestShowsOutputAndDoesNotSwap(t *testing.T) {
+	dir := writeUpgradeFixture(t, true, false)
+	target := filepath.Join(t.TempDir(), "waffle")
+	if err := os.WriteFile(target, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	_, err := upgradeInto(context.Background(), dir, target, &output, true)
+	if err == nil || !strings.Contains(output.String(), "deliberate failing test output") {
+		t.Fatalf("upgradeInto err=%v output=%q, want failing test output", err, output.String())
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil || string(got) != "original" {
+		t.Fatalf("target swapped: %q err=%v", got, readErr)
+	}
+}
+
+func TestUpgradeIntoBrokenEvalShowsOutputAndDoesNotSwap(t *testing.T) {
+	dir := writeUpgradeFixture(t, false, true)
+	target := filepath.Join(t.TempDir(), "waffle")
+	if err := os.WriteFile(target, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	_, err := upgradeInto(context.Background(), dir, target, &output, true)
+	if err == nil || !strings.Contains(output.String(), "FAIL broken-eval") {
+		t.Fatalf("upgradeInto err=%v output=%q, want broken eval output", err, output.String())
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "original" {
+		t.Fatalf("target swapped: %q", got)
+	}
+}
+
+func TestVerifyMissingLintWarnsWithoutFailing(t *testing.T) {
+	dir := writeUpgradeFixture(t, false, false)
+	var output strings.Builder
+	if err := verifyRepo(context.Background(), dir, &output); err != nil {
+		t.Fatalf("verifyRepo: %v\n%s", err, output.String())
+	}
+	if _, err := exec.LookPath("golangci-lint"); err != nil && !strings.Contains(output.String(), "lint gate skipped") {
+		t.Fatalf("missing lint warning absent: %q", output.String())
+	}
+}
+
+func TestVerifyReportsEachFailingMechanicalGate(t *testing.T) {
+	for _, failing := range []string{"vet", "test", "lint"} {
+		t.Run(failing, func(t *testing.T) {
+			bin := t.TempDir()
+			goScript := "#!/bin/sh\nif [ \"$1\" = \"" + failing + "\" ]; then echo '" + failing + " gate output'; exit 9; fi\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(goScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			lintScript := "#!/bin/sh\n" + map[bool]string{true: "echo 'lint gate output'; exit 9\n", false: "exit 0\n"}[failing == "lint"]
+			if err := os.WriteFile(filepath.Join(bin, "golangci-lint"), []byte(lintScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			var output strings.Builder
+			err := verifyRepo(context.Background(), t.TempDir(), &output)
+			if err == nil || !strings.Contains(output.String(), failing+" gate output") {
+				t.Fatalf("err=%v output=%q", err, output.String())
+			}
+		})
+	}
+}
+
+func TestDoctorReportsLintGateUnarmed(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	checks, _, err := Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range checks {
+		if check.Name == "golangci-lint gate" {
+			if !check.OK || !strings.Contains(check.Info, "not installed") || !strings.Contains(check.Info, "skipped") {
+				t.Fatalf("lint check = %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("doctor omitted golangci-lint gate")
+}
+
+func TestReviewerUsesUtilityModelAndReturnsStructuredFindings(t *testing.T) {
+	p := &llmtest.Script{Responses: []llm.Response{llmtest.Text(`[{"severity":"blocker","file":"internal/selfdev/selfdev.go","summary":"gate weakened"}]`)}}
+	r := Reviewer{Provider: p, Model: "cheap-review-model"}
+	findings, err := r.Review(context.Background(), "diff --git a/x b/x", "fix gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Requests) != 1 || p.Requests[0].Model != "cheap-review-model" {
+		t.Fatalf("review request = %+v", p.Requests)
+	}
+	if len(findings) != 1 || findings[0].Severity != SeverityBlocker || findings[0].File == "" {
+		t.Fatalf("findings = %+v", findings)
+	}
+}
+
+func TestReviewerModelUsesConfiguredUtilityModel(t *testing.T) {
+	p := config.Provider{Model: "generation-model", UtilityModel: "configured-utility-model"}
+	if got := reviewerModel(p); got != "configured-utility-model" {
+		t.Fatalf("reviewerModel = %q, want configured utility model", got)
+	}
+}
+
+func TestReviewGatePersistsSHAAndBlocksManualAndAutoPatch(t *testing.T) {
+	for _, approval := range []string{"manual", "auto-patch"} {
+		t.Run(approval, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "reviews.jsonl")
+			findings := []Finding{{Severity: SeverityBlocker, File: "x.go", Summary: "unsafe"}}
+			err := enforceReview(logPath, ReviewRecord{CommitSHA: "abc123", Approval: approval, Findings: findings})
+			if err == nil || !strings.Contains(err.Error(), "blocker") {
+				t.Fatalf("enforceReview = %v", err)
+			}
+			raw, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var got ReviewRecord
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.CommitSHA != "abc123" || len(got.Findings) != 1 {
+				t.Fatalf("persisted = %+v", got)
+			}
+		})
+	}
+}
+
+func TestUpgradeReviewerBlockerStopsManualAndAutoPatch(t *testing.T) {
+	for _, approval := range []string{"manual", "auto-patch"} {
+		t.Run(approval, func(t *testing.T) {
+			var requestedModel string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Model string `json:"model"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				requestedModel = body.Model
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"[{\\\"severity\\\":\\\"blocker\\\",\\\"file\\\":\\\"change.go\\\",\\\"summary\\\":\\\"unsafe\\\"}]\"}}]}\n\n")
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			}))
+			defer srv.Close()
+
+			home := t.TempDir()
+			t.Setenv("WAFFLE_HOME", home)
+			cfg := "[provider]\nname = \"openai\"\nmodel = \"generation\"\nutility_model = \"utility-review\"\napi_key = \"test-key\"\nbase_url = \"" + srv.URL + "/v1\"\n"
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			dir := t.TempDir()
+			git := func(args ...string) string {
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			git("init", "-q", "-b", "base")
+			if err := os.WriteFile(filepath.Join(dir, "base.go"), []byte("package fixture\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			git("add", ".")
+			git("commit", "-qm", "base")
+			git("checkout", "-qb", "candidate")
+			if err := os.WriteFile(filepath.Join(dir, "change.go"), []byte("package fixture\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			git("add", ".")
+			git("commit", "-qm", "candidate")
+			sha := git("rev-parse", "HEAD")
+			git("checkout", "-q", "base")
+
+			_, err := UpgradeWithOptions(context.Background(), dir, "candidate", io.Discard, false, approval, nil)
+			if err == nil || !strings.Contains(err.Error(), "blocker") {
+				t.Fatalf("UpgradeWithOptions = %v", err)
+			}
+			if requestedModel != "utility-review" {
+				t.Fatalf("review model = %q", requestedModel)
+			}
+			raw, readErr := os.ReadFile(filepath.Join(home, "selfdev-reviews.jsonl"))
+			if readErr != nil || !strings.Contains(string(raw), sha) {
+				t.Fatalf("review log=%q err=%v, want SHA %s", raw, readErr, sha)
+			}
+			if branch := git("branch", "--show-current"); branch != "base" {
+				t.Fatalf("blocker allowed checkout to %q", branch)
+			}
+		})
+	}
+}
 
 func TestProviderCheck(t *testing.T) {
 	openAIServer := func(t *testing.T, handler http.HandlerFunc) *httptest.Server {

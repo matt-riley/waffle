@@ -394,6 +394,9 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 				return "", err
 			}
 		}
+		if err := reviewCandidate(ctx, repoDir, ref, approval); err != nil {
+			return "", err
+		}
 		// Trailing "--" marks end of pathspecs; with the ref already
 		// validated it is belt-and-braces against option injection and
 		// does not change checkout semantics for a branch/tag/sha.
@@ -402,6 +405,12 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		}
 	}
 
+	return upgradeInto(ctx, repoDir, self, stderr, verify)
+}
+
+// upgradeInto verifies and builds a checkout before replacing target. Keeping
+// target explicit makes the no-swap boundary integration-testable.
+func upgradeInto(ctx context.Context, repoDir, target string, stderr io.Writer, verify bool) (string, error) {
 	if verify {
 		if err := verifyRepo(ctx, repoDir, stderr); err != nil {
 			return "", err
@@ -427,23 +436,23 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		return "", fmt.Errorf("new binary failed doctor:\n%s", out)
 	}
 
-	backup := self + ".prev"
-	if err := copyFile(self, backup); err != nil {
+	backup := target + ".prev"
+	if err := copyFile(target, backup); err != nil {
 		return "", fmt.Errorf("back up current binary: %w", err)
 	}
 	// Rename within the same directory is atomic; a crash mid-swap leaves
 	// either the old or the new binary, never a truncated one.
-	staged := self + ".new"
+	staged := target + ".new"
 	if err := copyFile(built, staged); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(staged, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.Rename(staged, self); err != nil {
+	if err := os.Rename(staged, target); err != nil {
 		return "", fmt.Errorf("swap binary: %w", err)
 	}
-	return self, nil
+	return target, nil
 }
 
 func verifyRepo(ctx context.Context, repoDir string, stderr io.Writer) error {
