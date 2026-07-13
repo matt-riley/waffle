@@ -346,6 +346,9 @@ func TestGatewayRecordsSessionRunAndLogsSessionID(t *testing.T) {
 	if !strings.Contains(logs.String(), "session_id="+group.SessionID) {
 		t.Errorf("logs missing session_id: %s", logs.String())
 	}
+	if !strings.Contains(logs.String(), "profile=main") || !strings.Contains(logs.String(), `msg="gateway run finished"`) {
+		t.Errorf("logs missing profile/end dispatch: %s", logs.String())
+	}
 }
 
 func TestGatewayRejectsUnavailablePersistedAgentGroup(t *testing.T) {

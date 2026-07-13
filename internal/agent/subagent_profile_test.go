@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +84,25 @@ func TestProfileTargetingStillEnforcesSubagentDepthLimit(t *testing.T) {
 	}
 	if _, err := toolUnderTest.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"reviewer"}`)); err == nil || !strings.Contains(err.Error(), "depth limit") {
 		t.Fatalf("profile-targeted depth error=%v", err)
+	}
+}
+
+func TestSubagentSpawnLogIncludesChildProfileWithoutTask(t *testing.T) {
+	var logs bytes.Buffer
+	toolUnderTest := SubagentTool{
+		Provider: oneShotProvider{reply: "ok"}, Tools: tool.NewRegistry(), Model: "m",
+		Profiles: map[string]ChildProfile{"reviewer": {System: "review"}},
+		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	if _, err := toolUnderTest.Run(context.Background(), json.RawMessage(`{"task":"PRIVATE_SUBTASK","profile":"reviewer"}`)); err != nil {
+		t.Fatal(err)
+	}
+	body := logs.String()
+	if !strings.Contains(body, `msg="subagent spawn"`) || !strings.Contains(body, "profile=reviewer") {
+		t.Fatalf("logs=%s", body)
+	}
+	if strings.Contains(body, "PRIVATE_SUBTASK") {
+		t.Fatalf("task leaked into logs: %s", body)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -61,6 +62,7 @@ type SubagentTool struct {
 	Persist func(ctx context.Context, parentSession, childSession string, packet WorkPacket, handoff Handoff) error
 	// NewChildSession creates a session for the child when Persist is set.
 	NewChildSession func(ctx context.Context, title string) (sessionID string, err error)
+	Log             *slog.Logger
 }
 
 func (t SubagentTool) Def() llm.Tool {
@@ -109,6 +111,9 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		}
 		profile = cp
 		profile.Name = profileName
+	}
+	if t.Log != nil {
+		t.Log.Info("subagent spawn", "profile", effectiveProfile(profileName))
 	}
 
 	sys := "You are a waffle subagent handling one self-contained task. Do the work with your tools and end with a concise report of what you found or did. You have no access to the parent conversation."
@@ -171,6 +176,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		Redact:        t.Redact,
 		Spill:         t.Spill,
 		MaxIterations: 30,
+		Log:           t.Log,
 	}
 	runCtx := ctx
 	if childSession != "" {

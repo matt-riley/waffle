@@ -458,11 +458,13 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	if log == nil {
 		log = slog.Default()
 	}
-	log = log.With("session_id", group.SessionID)
-	if group.Profile != "" {
-		log = log.With("profile", group.Profile)
+	profileName := group.Profile
+	if profileName == "" {
+		profileName = "main"
 	}
+	log = log.With("session_id", group.SessionID, "profile", profileName)
 	log.Info("gateway run started")
+	defer log.Info("gateway run finished")
 
 	var runID string
 	if g.Observability != nil {

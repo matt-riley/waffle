@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type Agent struct {
 	Redact func(string) string
 	Usage  *usage.Store
 	Limits usage.Limits
+	Log    *slog.Logger
 
 	// SummaryCache avoids re-summarizing the same prefix within a process (#61).
 	// Keyed by session id + prefix length fingerprint.
@@ -147,6 +149,9 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 				system = extraSystem
 			}
 		}
+		if a.Log != nil {
+			a.Log.Info("provider call", "profile", effectiveProfile(a.Profile), "model", a.Model)
+		}
 		resp, err := a.Provider.Complete(ctx, llm.Request{
 			Model:     a.Model,
 			System:    system,
@@ -244,6 +249,9 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 }
 
 func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
+	if a.Log != nil {
+		a.Log.Info("tool call started", "profile", effectiveProfile(a.Profile), "tool", use.Name)
+	}
 	var out string
 	var err error
 	if caller, ok := a.Tools.(tool.CallerToolbox); ok {
@@ -255,6 +263,13 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	if err != nil {
 		res.Content = fmt.Sprintf("error: %v", err)
 		res.IsError = true
+	}
+	if a.Log != nil {
+		event := "tool call finished"
+		if res.IsError && (strings.Contains(res.Content, "not permitted") || strings.Contains(res.Content, "policy")) {
+			event = "tool call denied"
+		}
+		a.Log.Info(event, "profile", effectiveProfile(a.Profile), "tool", use.Name, "error", res.IsError)
 	}
 	if a.Redact != nil {
 		res.Content = a.Redact(res.Content)
@@ -279,6 +294,13 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 		res.Content = tool.Truncate(res.Content, tool.OutputLimit)
 	}
 	return res
+}
+
+func effectiveProfile(profile string) string {
+	if strings.TrimSpace(profile) == "" {
+		return "main"
+	}
+	return profile
 }
 
 // recentWindow is the number of trailing messages to keep verbatim for

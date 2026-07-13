@@ -337,6 +337,9 @@ func TestRunnerRecordsCronRunAndLogsSessionAndJobIDs(t *testing.T) {
 	if !strings.Contains(logs.String(), "session_id="+snapshot.Recent[0].SessionID) || !strings.Contains(logs.String(), "job_id="+job.ID) {
 		t.Errorf("logs missing run context: %s", logs.String())
 	}
+	if !strings.Contains(logs.String(), "profile=main") || !strings.Contains(logs.String(), `msg="cron run finished"`) {
+		t.Errorf("logs missing profile/end event: %s", logs.String())
+	}
 }
 
 func TestSchedulerReconcilesJobChanges(t *testing.T) {

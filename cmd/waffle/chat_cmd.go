@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -804,6 +805,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			Redact:              redact,
 			BroadcastWorkingSet: true,
 			WorkingSetBroadcast: "", // filled below if non-empty at build time; runtime inject via note
+			Log:                 slog.Default(),
 		}
 		// Pointer wrapper freezes working-set broadcast across parallel
 		// spawn_subagent calls in one turn (#68).
@@ -851,6 +853,7 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			l := cfg.LimitsFor(group)
 			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
 		}(),
+		Log: slog.Default(),
 	}, cleanup, nil
 }
 

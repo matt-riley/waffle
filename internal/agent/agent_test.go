@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -88,6 +90,34 @@ func TestRunPlainAnswer(t *testing.T) {
 		t.Errorf("system not passed through")
 	}
 }
+
+func TestProfileStructuredLogsProviderToolAndDenialWithoutInput(t *testing.T) {
+	var logs bytes.Buffer
+	p := &llmtest.Script{Responses: []llm.Response{
+		llmtest.ToolCall("bash", "denied", `{"command":"echo SECRET_PROMPT"}`),
+		llmtest.Text("done"),
+	}}
+	a := &Agent{Provider: p, Tools: tool.Restrict(tool.NewRegistry(namedToolForLog{}), tool.Policy{Deny: []string{"bash"}}), Model: "m", Profile: "reviewer", Log: slog.New(slog.NewTextHandler(&logs, nil))}
+	if _, err := a.Run(context.Background(), []llm.Message{llm.UserText("PRIVATE_PROMPT")}, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	body := logs.String()
+	for _, want := range []string{"msg=\"provider call\"", "msg=\"tool call started\"", "msg=\"tool call denied\"", "profile=reviewer", "tool=bash"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "PRIVATE_PROMPT") || strings.Contains(body, "SECRET_PROMPT") {
+		t.Fatalf("prompt/tool input leaked into logs: %s", body)
+	}
+}
+
+type namedToolForLog struct{}
+
+func (namedToolForLog) Def() llm.Tool {
+	return llm.Tool{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+func (namedToolForLog) Run(context.Context, json.RawMessage) (string, error) { return "ran", nil }
 
 func TestRunToolLoop(t *testing.T) {
 	echo := &echoTool{}

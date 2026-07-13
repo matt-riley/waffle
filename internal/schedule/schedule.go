@@ -323,11 +323,13 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	if log == nil {
 		log = slog.Default()
 	}
-	log = log.With("session_id", sess.ID, "job_id", j.ID)
-	if j.Profile != "" {
-		log = log.With("profile", j.Profile)
+	profileName := j.Profile
+	if profileName == "" {
+		profileName = "main"
 	}
+	log = log.With("session_id", sess.ID, "job_id", j.ID, "profile", profileName)
 	log.Info("cron run started")
+	defer log.Info("cron run finished")
 
 	var runID string
 	if r.Observability != nil {
