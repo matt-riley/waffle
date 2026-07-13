@@ -90,7 +90,7 @@ func (c Coordinator) Check() (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lockFile(lock); err == nil {
 		_ = unlockFile(lock)
 		return nil, nil

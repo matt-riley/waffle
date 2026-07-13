@@ -135,7 +135,7 @@ func TestDisasterRecoveryRestoresSessionsMemoryJobsAndSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restored.Close()
+	defer func() { _ = restored.Close() }()
 	for table, want := range map[string]string{"sessions": "session-dr", "jobs": "job-dr"} {
 		var got string
 		if err := restored.DB.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE id = ?", want).Scan(&got); err != nil {

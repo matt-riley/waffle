@@ -23,7 +23,7 @@ func TestWorkspaceOpenRefusesLiveServeBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 
 	var stdout, stderr bytes.Buffer
 	err = run(context.Background(), []string{"ws", "open", "owner/repo"}, strings.NewReader(""), &stdout, &stderr)

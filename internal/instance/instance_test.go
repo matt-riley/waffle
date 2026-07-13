@@ -19,7 +19,7 @@ func TestAcquireRefusesHeldLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 
 	second := testCoordinator(path, os.Getpid(), time.Now)
 	if _, err := second.Acquire(context.Background()); !errors.Is(err, ErrHeld) {
@@ -36,7 +36,7 @@ func TestAcquireDoesNotStealStaleHeartbeatFromLivePID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 	c := testCoordinator(path, os.Getpid(), func() time.Time { return now })
 	if _, err := c.Acquire(context.Background()); !errors.Is(err, ErrHeld) {
 		t.Fatalf("Acquire stale live PID = %v, want ErrHeld", err)
@@ -52,7 +52,7 @@ func TestAcquireRecoversStaleDeadOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire stale dead owner: %v", err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestHeartbeatOwnershipLossIsObservable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 	writeRecord(t, path, Record{PID: 1234, Owner: "replacement", Heartbeat: time.Now()})
 	select {
 	case err := <-lease.Errors():

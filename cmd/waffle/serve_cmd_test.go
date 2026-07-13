@@ -85,7 +85,7 @@ func TestServeRefusesLiveOwnerBeforeDatabaseMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
+	defer func() { _ = lease.Release() }()
 	err = serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 		t.Fatal("adapter factory called while owner lock held")
 		return nil, nil

@@ -16,7 +16,7 @@ func TestAlertThresholdDeliversOncePerPeriod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	u := New(st)
 	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	var notices []string
