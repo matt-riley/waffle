@@ -14,6 +14,7 @@ import (
 
 // ChildProfile is a named specialist posture for spawn_subagent (#71).
 // Tools may only tighten the parent's toolbox (deny more / narrow allow).
+// Explicit allow entries outside the parent toolbox reject the profile.
 type ChildProfile struct {
 	// Name is recorded in handoff/logs.
 	Name string
@@ -22,7 +23,8 @@ type ChildProfile struct {
 	System string
 	// Model overrides the parent model when non-empty.
 	Model string
-	// Tools is intersected with the parent toolbox (tighten-only).
+	// Tools is intersected with the parent toolbox (tighten-only); explicit
+	// allow entries outside the parent toolbox are rejected before child setup.
 	Tools tool.Policy
 	// MaxTokens overrides parent when > 0.
 	MaxTokens int
@@ -111,6 +113,9 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		}
 		profile = cp
 		profile.Name = profileName
+		if widened := profileWideningTool(t.Tools, profile.Tools); widened != "" {
+			return "", fmt.Errorf("profile %q requests tool %q outside the parent toolbox", profileName, widened)
+		}
 	}
 	if t.Log != nil {
 		t.Log.Info("subagent spawn", "profile", effectiveProfile(profileName))
@@ -228,6 +233,34 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		_ = t.Persist(context.WithoutCancel(ctx), sessionID(ctx), childSession, p, h)
 	}
 	return FormatHandoffResult(h), nil
+}
+
+func profileWideningTool(parent tool.Toolbox, policy tool.Policy) string {
+	if parent == nil || len(policy.Allow) == 0 {
+		return ""
+	}
+	available := make(map[string]struct{})
+	for _, def := range parent.Defs() {
+		available[def.Name] = struct{}{}
+	}
+	wildcard := false
+	for _, name := range policy.Allow {
+		if name == "*" {
+			wildcard = true
+			continue
+		}
+		if _, ok := available[name]; !ok {
+			return name
+		}
+	}
+	if wildcard {
+		for _, name := range []string{"write_file", "edit_file", "bash", "workspace_update", "remember", "memory_update", "distill_skill"} {
+			if _, ok := available[name]; !ok && policy.Permits(name) {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken string) (Handoff, error) {

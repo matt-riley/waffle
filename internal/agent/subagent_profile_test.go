@@ -183,57 +183,62 @@ func TestSubagentSpawnLogIncludesChildProfileWithoutTask(t *testing.T) {
 }
 
 func TestSpawnSubagentProfileCannotWidenTools(t *testing.T) {
-	// Parent only has read_file; profile tries to allow bash — bash must not run
-	// even if profile allow includes it (tighten-only intersect with parent toolbox).
-	ran := false
-	bash := namedTool{n: "bash", run: func() { ran = true }}
-	parentTB := tool.NewRegistry(namedTool{n: "read_file"})
-	var offered []string
-	calls := 0
+	providerCalls := 0
 	tl := SubagentTool{
-		Provider: &recordingProvider{onComplete: func(req llm.Request) llm.Response {
-			calls++
-			if calls == 1 {
-				offered = offered[:0]
-				for _, d := range req.Tools {
-					offered = append(offered, d.Name)
-				}
-				// First turn: ask for bash — must fail as unknown/not permitted.
-				return llm.Response{
-					StopReason: llm.StopToolUse,
-					Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
-						{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "1", Name: "bash", Input: json.RawMessage(`{}`)}},
-					}},
-				}
-			}
-			return llm.Response{
-				StopReason: llm.StopEndTurn,
-				Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
-					{Type: llm.BlockText, Text: "```json\n{\"status\":\"done\",\"summary\":\"ok\"}\n```"},
-				}},
-			}
+		Provider: &recordingProvider{onComplete: func(llm.Request) llm.Response {
+			providerCalls++
+			return llm.Response{}
 		}},
-		Tools: parentTB,
+		Tools: tool.NewRegistry(namedTool{n: "read_file"}),
 		Model: "m",
 		Profiles: map[string]ChildProfile{
 			"evil": {Tools: tool.Policy{Allow: []string{"bash", "read_file"}}},
 		},
 	}
-	_ = bash
-	out, err := tl.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"evil"}`))
-	if err != nil {
-		t.Fatal(err)
+	_, err := tl.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"evil"}`))
+	if err == nil || !strings.Contains(err.Error(), `profile "evil"`) || !strings.Contains(err.Error(), "bash") {
+		t.Fatalf("widening profile error = %v", err)
 	}
-	if ran {
-		t.Fatal("bash must not run under parent-restricted tools")
+	if providerCalls != 0 {
+		t.Fatalf("provider called %d times; widening must be rejected before construction", providerCalls)
 	}
-	for _, n := range offered {
-		if n == "bash" {
-			t.Fatalf("bash must not appear in child tool defs; offered=%v", offered)
-		}
+}
+
+func TestReadOnlyParentRejectsWriteCapableChildProfile(t *testing.T) {
+	providerCalls := 0
+	tl := SubagentTool{
+		Provider: &recordingProvider{onComplete: func(llm.Request) llm.Response {
+			providerCalls++
+			return llm.Response{}
+		}},
+		Tools: tool.NewRegistry(namedTool{n: "read_file"}, namedTool{n: "search"}),
+		Model: "m",
+		Profiles: map[string]ChildProfile{
+			"writer": {Tools: tool.Policy{Allow: []string{"read_file", "write_file"}}},
+		},
 	}
-	if !strings.Contains(out, "ok") && !strings.Contains(out, "error") && !strings.Contains(out, "unknown") {
-		t.Logf("out=%q", out)
+
+	_, err := tl.Run(context.Background(), json.RawMessage(`{"task":"edit files","profile":"writer"}`))
+	if err == nil || !strings.Contains(err.Error(), `profile "writer"`) || !strings.Contains(err.Error(), "write_file") {
+		t.Fatalf("write-capable child error = %v", err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("provider called %d times; child must be rejected before construction", providerCalls)
+	}
+}
+
+func TestReadOnlyParentRejectsWildcardWriteCapableChildProfile(t *testing.T) {
+	tl := SubagentTool{
+		Provider: oneShotProvider{reply: "must not run"},
+		Tools:    tool.NewRegistry(namedTool{n: "read_file"}, namedTool{n: "search"}),
+		Model:    "m",
+		Profiles: map[string]ChildProfile{
+			"writer": {Tools: tool.Policy{Allow: []string{"*"}}},
+		},
+	}
+	_, err := tl.Run(context.Background(), json.RawMessage(`{"task":"edit files","profile":"writer"}`))
+	if err == nil || !strings.Contains(err.Error(), "write_file") {
+		t.Fatalf("wildcard write-capable child error = %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/workspace"
 )
 
 // TestBuildAgentCronTierExcludesBash is the headline of #33: an unattended
@@ -309,6 +311,20 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape"); err == nil {
 		t.Fatal("outside-root prompt accepted")
 	}
+	// A path under WAFFLE_HOME that cannot be read as a prompt file also errors.
+	unreadable := filepath.Join(home, "prompt-directory")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Agent.Profiles["unreadable"] = config.AgentProfile{System: "@" + unreadable}
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "unreadable"); err == nil {
+		t.Fatal("unreadable prompt path accepted")
+	}
+	// The selected profile's sandbox posture reaches agent construction.
+	cfg.Agent.Profiles["bad-sandbox"] = config.AgentProfile{System: "x", Sandbox: "invalid-mode"}
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "bad-sandbox"); err == nil || !strings.Contains(err.Error(), "invalid-mode") {
+		t.Fatalf("profile sandbox posture error = %v", err)
+	}
 	// Explicit empty system is allowed.
 	cfg.Agent.Profiles["empty-sys"] = config.AgentProfile{System: ""}
 	emptyA, cleanup4, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "empty-sys")
@@ -318,6 +334,52 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 	cleanup4()
 	if emptyA.Profile != "empty-sys" {
 		t.Fatalf("profile name = %q", emptyA.Profile)
+	}
+}
+
+func TestDefaultMainProfilePreservesAgentConstruction(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Provider.Model = "default-model"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	ws := memory.Workspace{Dir: t.TempDir()}
+	sessions := session.New(st)
+
+	legacy, cleanupLegacy, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupLegacy()
+	profiled, cleanupProfiled, err := buildAgentWithProfile(ctx, cfg, ws, nil, sessions, config.GroupMain, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupProfiled()
+
+	if fmt.Sprintf("%T", legacy.Provider) != fmt.Sprintf("%T", profiled.Provider) || legacy.Model != profiled.Model || legacy.System != profiled.System ||
+		legacy.MaxTokens != profiled.MaxTokens || legacy.MaxIterations != profiled.MaxIterations ||
+		(legacy.Redact == nil) != (profiled.Redact == nil) {
+		t.Fatalf("default main changed agent construction: legacy=%+v profiled=%+v", legacy, profiled)
+	}
+	if legacy.Redact != nil && legacy.Redact("test-key visible") != profiled.Redact("test-key visible") {
+		t.Fatal("default main changed redactor behavior")
+	}
+	legacyDefs, profiledDefs := legacy.Tools.Defs(), profiled.Tools.Defs()
+	if len(legacyDefs) != len(profiledDefs) {
+		t.Fatalf("toolbox size changed: legacy=%d profiled=%d", len(legacyDefs), len(profiledDefs))
+	}
+	for i := range legacyDefs {
+		if legacyDefs[i].Name != profiledDefs[i].Name {
+			t.Fatalf("toolbox changed at %d: legacy=%q profiled=%q", i, legacyDefs[i].Name, profiledDefs[i].Name)
+		}
 	}
 }
 
@@ -407,8 +469,8 @@ func TestProfileUtilityModelSelectionBuild(t *testing.T) {
 	}
 }
 
-// TestWorkspaceOrChatProfileAffectsAgent proves chat --profile / buildAgentWithProfile
-// selects system prompt and toolbox (workspace surface uses the same builder) (#71).
+// TestWorkspaceOrChatProfileAffectsAgent proves a stored workspace profile (or
+// chat --profile) selects the system prompt and toolbox used by the run (#71).
 func TestWorkspaceOrChatProfileAffectsAgent(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("WAFFLE_HOME", t.TempDir())
@@ -429,8 +491,8 @@ func TestWorkspaceOrChatProfileAffectsAgent(t *testing.T) {
 			Tools:  config.ToolPolicy{Allow: []string{"read_file", "fetch", "search", "recall"}, Deny: []string{"bash", "write_file", "edit_file"}},
 		},
 	}
-	// Chat path: same as waffle chat --profile researcher
-	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "researcher")
+	bound := workspace.Workspace{Profile: "researcher"}
+	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, bound.Profile)
 	if err != nil {
 		t.Fatal(err)
 	}

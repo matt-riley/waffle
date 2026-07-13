@@ -564,6 +564,45 @@ system = ""
 	// Missing prompt file is rejected at agent construction (see agent_group_test).
 }
 
+func TestProfileDocumentationAcceptance(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	plan := read("../../docs/plan.md")
+	readme := read("../../README.md")
+	example := read("../../config.example.toml")
+
+	for _, want := range []string{
+		"Profiles are a **trust boundary in config**, not personality presets",
+		"system prompt, model class, sandbox mode, tool",
+		"allowed_children",
+		"**#33 (agent-group trust tiers):**",
+		"**#53 (repo WAFFLE.md / AGENT.md):**",
+		"**#66 (action-level policy):**",
+		"**#68 (working-set broadcast):**",
+		"migration required**",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("docs/plan.md missing %q", want)
+		}
+	}
+	for _, want := range []string{"trust boundary", "effective `main` profile", "no migration required", "#33", "#53", "#66", "#68"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README.md missing %q", want)
+		}
+	}
+	for _, want := range []string{"[agent.profile.main]", "[agent.profile.researcher]", "[agent.profile.reviewer]", "No change required"} {
+		if !strings.Contains(example, want) {
+			t.Errorf("config.example.toml missing %q", want)
+		}
+	}
+}
+
 func TestIntakeConfigRejectsBadConcurrencyAndLabelRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `[[intake.github]]

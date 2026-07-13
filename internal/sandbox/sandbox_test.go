@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,25 @@ func (bigOutputTool) Def() llm.Tool {
 func (bigOutputTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
 	// > OutputLimit to exercise runner truncation before the DB write.
 	return strings.Repeat("X", 100*1024) + "END", nil
+}
+
+type sideEffectCountingTool struct {
+	executions *atomic.Int32
+}
+
+func (sideEffectCountingTool) Def() llm.Tool {
+	return llm.Tool{Name: "count-side-effect", InputSchema: json.RawMessage(`{"type":"object","properties":{"result":{"type":"string"}}}`)}
+}
+
+func (t sideEffectCountingTool) Run(_ context.Context, input json.RawMessage) (string, error) {
+	t.executions.Add(1)
+	var in struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil {
+		return "", err
+	}
+	return in.Result, nil
 }
 
 // startRunner runs a Runner against dir until the test ends.
@@ -582,6 +602,48 @@ func TestDuplicateExecIsAbsorbedAndReclaimable(t *testing.T) {
 	}
 	if got["tool-call-1"].Content != "ONCE" || len(got) != 1 {
 		t.Fatalf("reclaim = %#v", got)
+	}
+}
+
+func TestDuplicateToolUseIDExecutesSideEffectExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	var executions atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		r := &Runner{Tools: tool.NewRegistry(sideEffectCountingTool{executions: &executions})}
+		done <- r.Serve(ctx, dir)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("runner did not stop")
+		}
+	})
+
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	execCtx, execCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer execCancel()
+
+	first, _, err := client.Exec(execCtx, "duplicate-side-effect", "count-side-effect", json.RawMessage(`{"result":"first"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := client.Exec(execCtx, "duplicate-side-effect", "count-side-effect", json.RawMessage(`{"result":"must-not-run"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "first" || second != first {
+		t.Fatalf("duplicate results = %q, %q", first, second)
+	}
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("tool executions = %d, want exactly 1", got)
 	}
 }
 
