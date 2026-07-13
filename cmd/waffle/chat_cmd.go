@@ -986,11 +986,14 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 		if name == "" || name == "main" {
 			continue
 		}
-		pol := tool.Policy{
-			Allow:   p.Tools.Allow,
-			Deny:    append(append([]string{}, p.Tools.Deny...), parentDeny...),
+		requestedTools := tool.Policy{
+			Allow:   append([]string{}, p.Tools.Allow...),
+			Deny:    append([]string{}, p.Tools.Deny...),
 			Profile: name,
 		}
+		effectiveTools := requestedTools
+		effectiveTools.Allow = append([]string{}, requestedTools.Allow...)
+		effectiveTools.Deny = append(append([]string{}, requestedTools.Deny...), parentDeny...)
 		sys := p.System
 		if strings.HasPrefix(sys, "@") || strings.HasSuffix(sys, ".md") {
 			if loaded, err := loadProfileSystem(sys); err == nil {
@@ -1004,10 +1007,11 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 			model = p.Model
 		}
 		cp := agent.ChildProfile{
-			Name:   name,
-			System: sys,
-			Model:  model,
-			Tools:  pol,
+			Name:           name,
+			System:         sys,
+			Model:          model,
+			Tools:          effectiveTools,
+			RequestedTools: requestedTools,
 		}
 		if p.MaxTokens > 0 {
 			cp.MaxTokens = p.MaxTokens

@@ -26,6 +26,10 @@ type ChildProfile struct {
 	// Tools is intersected with the parent toolbox (tighten-only); explicit
 	// allow entries outside the parent toolbox are rejected before child setup.
 	Tools tool.Policy
+	// RequestedTools preserves the profile's configured policy before parent
+	// denials are inherited. Widening checks use this policy so narrowing cannot
+	// erase an explicit request for capabilities the parent does not have.
+	RequestedTools tool.Policy
 	// MaxTokens overrides parent when > 0.
 	MaxTokens int
 }
@@ -113,7 +117,13 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		}
 		profile = cp
 		profile.Name = profileName
-		if widened := profileWideningTool(t.Tools, profile.Tools); widened != "" {
+		requestedTools := profile.RequestedTools
+		if requestedTools.IsZero() {
+			// Preserve compatibility for callers that construct ChildProfile
+			// directly rather than through config policy resolution.
+			requestedTools = profile.Tools
+		}
+		if widened := profileWideningTool(t.Tools, requestedTools); widened != "" {
 			return "", fmt.Errorf("profile %q requests tool %q outside the parent toolbox", profileName, widened)
 		}
 	}

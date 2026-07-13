@@ -11,11 +11,28 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
+
+type configuredProfileProvider struct {
+	calls int
+}
+
+func (p *configuredProfileProvider) Complete(context.Context, llm.Request, llm.StreamFunc) (*llm.Response, error) {
+	p.calls++
+	return &llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+			Type: llm.BlockText,
+			Text: "```json\n{\"status\":\"done\",\"summary\":\"read only\"}\n```",
+		}}},
+	}, nil
+}
 
 // TestBuildAgentCronTierExcludesBash is the headline of #33: an unattended
 // cron-group agent must not carry host bash, while the owner's main-group
@@ -334,6 +351,55 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 	cleanup4()
 	if emptyA.Profile != "empty-sys" {
 		t.Fatalf("profile name = %q", emptyA.Profile)
+	}
+}
+
+func TestWorkingSetSubagentRejectsConfiguredWriteCapableProfiles(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"wildcard-writer": {
+			Tools: config.ToolPolicy{Allow: []string{"*"}},
+		},
+		"explicit-writer": {
+			Tools: config.ToolPolicy{Allow: []string{"read_file", "write_file"}},
+		},
+		"reader": {
+			Tools: config.ToolPolicy{Allow: []string{"read_file", "search"}},
+		},
+	}
+	provider := &configuredProfileProvider{}
+	spawn := &workingSetSubagent{
+		inner: agent.SubagentTool{
+			Provider: provider,
+			Tools:    tool.NewRegistry(tool.ReadFile{}, tool.Search{}),
+			Model:    "test-model",
+		},
+		cfg: cfg,
+		parentDeny: []string{
+			"write_file", "edit_file", "bash", "workspace_update",
+			"remember", "memory_update", "distill_skill",
+		},
+	}
+
+	for _, profile := range []string{"wildcard-writer", "explicit-writer"} {
+		_, err := spawn.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"task":"inspect","profile":%q}`, profile)))
+		if err == nil || !strings.Contains(err.Error(), "outside the parent toolbox") {
+			t.Fatalf("profile %q widening error = %v", profile, err)
+		}
+	}
+	if provider.calls != 0 {
+		t.Fatalf("write-capable profiles reached child construction: provider calls = %d", provider.calls)
+	}
+
+	result, err := spawn.Run(context.Background(), json.RawMessage(`{"task":"inspect","profile":"reader"}`))
+	if err != nil {
+		t.Fatalf("read-only profile rejected: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("read-only profile provider calls = %d, want 1", provider.calls)
+	}
+	if !strings.Contains(result, `"status": "done"`) {
+		t.Fatalf("read-only profile result = %s", result)
 	}
 }
 
