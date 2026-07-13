@@ -28,7 +28,7 @@ mise run brand-render
 
 | Gate | Status |
 | --- | --- |
-| Character identity, initial palette, and construction ratios | Awaiting owner approval |
+| Character identity, initial palette, and construction ratios | Approved |
 | Silhouette and proportions | Not started |
 | Face and expression language | Not started |
 | Marking placement and tuned palette | Not started |
