@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -120,6 +120,21 @@ test("builds a square chroma-key edit canvas with the seed in slot one", async (
   assert.deepEqual(blue(6, 7), [0, 0, 255, 255]);
 });
 
+test("edit canvas composites transparent and partial-alpha seed pixels over opaque blue", async (t) => {
+  const directory = await workspace(t);
+  const seed = await writePng(path.join(directory, "seed.png"), 2, 2, (x) =>
+    x === 0 ? [240, 120, 20, 0] : [240, 120, 20, 128]);
+  const output = path.join(directory, "canvas.png");
+
+  const result = run("build-sprite-edit-canvas.mjs", seed, output, "1", "2", "4");
+
+  assert.equal(result.status, 0, result.stderr);
+  const canvas = await decode(output);
+  const pixel = (x, y) => [...canvas.data.subarray((y * 4 + x) * 4, (y * 4 + x) * 4 + 4)];
+  assert.deepEqual(pixel(1, 1), [0, 0, 255, 255]);
+  assert.deepEqual(pixel(2, 1), [120, 60, 137, 255]);
+});
+
 test("normalizes strip frames with one shared scale and bottom-centre anchor", async (t) => {
   const directory = await workspace(t);
   const strip = await writePng(path.join(directory, "strip.png"), 12, 12, (x, y) => {
@@ -215,6 +230,34 @@ test("rejects idle frames with dimensions different from the canvas", async (t) 
   const result = run("validate-raster.mjs", fixture.manifestPath);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /frame 2 dimensions 5x4 do not match canvas 4x4/);
+});
+
+test("rejects an idle frame symlink that resolves outside the manifest directory", async (t) => {
+  const fixture = await idleFixture(t);
+  const outside = await workspace(t);
+  const external = await writePng(path.join(outside, "external.png"), 4, 4, (x, y) =>
+    x === 1 && y > 0 ? [220, 120, 20, 255] : [0, 0, 0, 0]);
+  await rm(path.join(fixture.directory, "frames/frame-02.png"));
+  await symlink(external, path.join(fixture.directory, "frames/frame-02.png"));
+
+  const result = run("validate-raster.mjs", fixture.manifestPath);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /frame 2 file must resolve inside the manifest directory/);
+});
+
+test("rejects an idle seed symlink that resolves outside the manifest directory", async (t) => {
+  const fixture = await idleFixture(t);
+  const outside = await workspace(t);
+  const external = await writePng(path.join(outside, "external.png"), 4, 4, (x, y) =>
+    x === 2 && y > 0 ? [220, 120, 20, 255] : [0, 0, 0, 0]);
+  await rm(path.join(fixture.directory, "seed.png"));
+  await symlink(external, path.join(fixture.directory, "seed.png"));
+
+  const result = run("validate-raster.mjs", fixture.manifestPath);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /seed must resolve inside the manifest directory/);
 });
 
 test("rejects an idle frame 01 that does not match the seed pixels", async (t) => {

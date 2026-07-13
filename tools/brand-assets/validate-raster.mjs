@@ -1,4 +1,4 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -22,6 +22,18 @@ function safeRelativePath(base, relative, label) {
   const prefix = `${path.resolve(base)}${path.sep}`;
   if (!resolved.startsWith(prefix)) throw new Error(`${label} must stay inside the manifest directory`);
   return resolved;
+}
+
+async function physicallyContainedPath(base, relative, label) {
+  const lexicalPath = safeRelativePath(base, relative, label);
+  const [physicalBase, physicalPath] = await Promise.all([
+    realpath(base),
+    realpath(lexicalPath),
+  ]);
+  if (!physicalPath.startsWith(`${physicalBase}${path.sep}`)) {
+    throw new Error(`${label} must resolve inside the manifest directory`);
+  }
+  return physicalPath;
 }
 
 export function inspectPngBuffer(buffer) {
@@ -113,7 +125,7 @@ export async function validateAssetManifest(manifestPath) {
   const directory = path.dirname(manifestPath);
   const seen = new Set();
   const pending = [];
-  let totalBytes = 0;
+  const files = new Map();
 
   for (const [index, asset] of manifest.assets.entries()) {
     if (!asset || typeof asset !== "object" || Array.isArray(asset)) throw new Error(`asset ${index + 1} must be an object`);
@@ -129,21 +141,23 @@ export async function validateAssetManifest(manifestPath) {
     if (!positiveNumber(asset.width) || !positiveNumber(asset.height)) throw new Error(`asset ${label} width and height must be positive numbers`);
     if (!ALPHA_POLICIES.has(asset.alphaPolicy)) throw new Error(`unknown alphaPolicy: ${asset.alphaPolicy}`);
     if (typeof asset.role !== "string" || typeof asset.provenance !== "string") throw new Error(`asset ${label} role and provenance must be strings`);
-    const file = safeRelativePath(directory, asset.file, `asset ${label} file`);
+    let file;
     try {
+      file = await physicallyContainedPath(directory, asset.file, `asset ${label} file`);
       const fileStat = await stat(file);
-      totalBytes += fileStat.size;
+      files.set(file, fileStat.size);
     } catch (error) {
       if (error.code === "ENOENT") throw new Error(`asset file does not exist: ${asset.file}`);
       throw error;
     }
     pending.push({ asset, file });
   }
+  const totalBytes = [...files.values()].reduce((sum, bytes) => sum + bytes, 0);
   if (totalBytes > MAX_MILESTONE_BYTES) throw new Error(`manifest assets exceed ${MAX_MILESTONE_BYTES}-byte budget`);
   for (const { asset, file } of pending) {
     await validatePng(file, { width: asset.width, height: asset.height, alphaPolicy: asset.alphaPolicy });
   }
-  return { kind: "assets", count: manifest.assets.length, bytes: totalBytes };
+  return { kind: "assets", count: manifest.assets.length, bytes: totalBytes, files };
 }
 
 export async function validateIdleManifest(manifestPath) {
@@ -162,6 +176,7 @@ export async function validateIdleManifest(manifestPath) {
   if (!Array.isArray(manifest.frames) || manifest.frames.length === 0) throw new Error("frames must be a non-empty array");
   const directory = path.dirname(manifestPath);
   const files = [];
+  const productionFiles = new Map();
   let durationMs = 0;
   const validatedFrames = [];
   for (const [index, frame] of manifest.frames.entries()) {
@@ -171,9 +186,10 @@ export async function validateIdleManifest(manifestPath) {
     if (!positiveNumber(frame.durationMs)) throw new Error(`frame ${index + 1} durationMs must be a positive number`);
     files.push(frame.file);
     durationMs += frame.durationMs;
-    const file = safeRelativePath(directory, frame.file, `frame ${index + 1} file`);
+    let file;
     let result;
     try {
+      file = await physicallyContainedPath(directory, frame.file, `frame ${index + 1} file`);
       result = await validatePng(file, {
         width: manifest.canvas.width,
         height: manifest.canvas.height,
@@ -187,20 +203,22 @@ export async function validateIdleManifest(manifestPath) {
       }
       throw error;
     }
+    productionFiles.set(file, result.bytes);
     validatedFrames.push(result);
   }
   const sorted = [...files].sort((left, right) => left.localeCompare(right));
   if (new Set(files).size !== files.length || files.some((file, index) => file !== sorted[index])) {
     throw new Error("frame files must be ordered and unique");
   }
-  const seedFile = safeRelativePath(directory, manifest.seed, "seed");
+  const seedFile = await physicallyContainedPath(directory, manifest.seed, "seed");
   const seed = await validatePng(seedFile, {
     width: manifest.canvas.width,
     height: manifest.canvas.height,
     alphaPolicy: "transparent-corners",
   });
+  productionFiles.set(seedFile, seed.bytes);
   if (!validatedFrames[0].pixels.equals(seed.pixels)) throw new Error("frame 01 pixels do not match seed");
-  return { kind: "idle", count: manifest.frames.length, durationMs };
+  return { kind: "idle", count: manifest.frames.length, durationMs, files: productionFiles };
 }
 
 export async function validateManifest(manifestPath) {
@@ -214,6 +232,7 @@ async function main(args) {
   const optional = args[0] === "--optional";
   const paths = optional ? args.slice(1) : args;
   if (paths.length === 0) throw new Error("usage: validate-raster.mjs [--optional] <manifest.json...>");
+  const productionFiles = new Map();
   for (const manifestPath of paths) {
     if (optional) {
       try {
@@ -227,9 +246,15 @@ async function main(args) {
       }
     }
     const result = await validateManifest(manifestPath);
+    for (const [file, bytes] of result.files) productionFiles.set(file, bytes);
     if (result.kind === "assets") console.log(`PASS ${manifestPath} assets=${result.count} bytes=${result.bytes}`);
     else console.log(`PASS ${manifestPath} frames=${result.count} durationMs=${result.durationMs}`);
   }
+  const uniquePngBytes = [...productionFiles.values()].reduce((sum, bytes) => sum + bytes, 0);
+  if (uniquePngBytes > MAX_MILESTONE_BYTES) {
+    throw new Error(`combined production PNGs exceed ${MAX_MILESTONE_BYTES}-byte budget`);
+  }
+  console.log(`TOTAL uniquePngBytes=${uniquePngBytes}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

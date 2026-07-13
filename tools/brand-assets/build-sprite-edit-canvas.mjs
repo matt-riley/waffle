@@ -28,7 +28,19 @@ export async function buildSpriteEditCanvas(seedPath, outputPath, options = {}) 
   }
   const originX = Math.floor((canvasSize - slots * slotSize) / 2);
   const originY = Math.floor((canvasSize - slotSize) / 2);
-  PNG.bitblt(seed, canvas, 0, 0, slotSize, slotSize, originX, originY);
+  for (let y = 0; y < slotSize; y += 1) {
+    for (let x = 0; x < slotSize; x += 1) {
+      const sourceOffset = (y * slotSize + x) * 4;
+      const targetOffset = ((originY + y) * canvasSize + originX + x) * 4;
+      const alpha = seed.data[sourceOffset + 3] / 255;
+      canvas.data[targetOffset] = Math.round(seed.data[sourceOffset] * alpha);
+      canvas.data[targetOffset + 1] = Math.round(seed.data[sourceOffset + 1] * alpha);
+      canvas.data[targetOffset + 2] = Math.round(
+        seed.data[sourceOffset + 2] * alpha + 255 * (1 - alpha),
+      );
+      canvas.data[targetOffset + 3] = 255;
+    }
+  }
   await mkdir(path.dirname(outputPath), { recursive: true });
   await writeFile(outputPath, PNG.sync.write(canvas));
   return { width: canvasSize, height: canvasSize, originX, originY };
