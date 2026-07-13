@@ -443,3 +443,90 @@ Source snapshot: `docs/acceptance-audit/issues.json`
 | #79.9 | Absence/failure of code intelligence degrades cleanly to the current `search`/`read` workflow; it cannot prevent an otherwise valid workspace from running unless explicitly configured as required by the host. | pass | `evalCodeIntelFallback`; agent toolbox with failing `code_find_symbol`, native `search`/`read_file` | `TestCodeIntelFailureFallsBackToNativeSearchRead`; eval `codeintel_symbol_over_broad_read` now requires failed codeintel, successful native search/read, and completed run | n/a | `go test ./internal/codeintel ./internal/mcp ./internal/eval ./internal/repopolicy ./cmd/waffle -count=1`; `go run ./cmd/waffle eval`; full `go test ./... -count=1` PASS |
 | #79.10 | One deterministic agent eval (#63) demonstrates reduced broad-file loading for a caller-sensitive Go change while still verifying against current source. | pass | `evalCodeIntelSymbol`; current-source read/search assertions; `TestCacheStaleAfterEdit` freshness proof | eval `codeintel_symbol_over_broad_read`; `TestCacheStaleAfterEdit` ensures current authoritative source | n/a | `go test ./internal/codeintel ./internal/mcp ./internal/eval ./internal/repopolicy ./cmd/waffle -count=1`; `go run ./cmd/waffle eval`; full `go test ./... -count=1` PASS |
 | #79.11 | `docs/plan.md` records the architectural decision: structural code intelligence belongs behind MCP/workspace tooling, not in Waffle’s core storage/runtime. | pass | `docs/plan.md` code-intelligence decision; eval `codeintel_symbol_over_broad_read` | manual `docs/plan.md` decision inspection; eval `codeintel_symbol_over_broad_read` asserts no `noise.go` broad-load result | documentation inspected against current code | `go test ./internal/codeintel ./internal/mcp ./internal/eval ./internal/repopolicy ./cmd/waffle -count=1`; `go run ./cmd/waffle eval`; full `go test ./... -count=1` PASS |
+
+## Final verification
+
+Verification was run on 2026-07-13 against the fully reconciled matrix.
+
+| Command | Result |
+|---|---|
+| `mise run fmt` | PASS; no unformatted Go files. |
+| `mise run build` | PASS; produced `bin/waffle`. |
+| `mise run vet` | PASS. |
+| `mise run test` | PASS; all race-enabled package tests and 11/11 deterministic evaluations passed. |
+| `mise run lint` | PASS; `golangci-lint run ./...` reported `0 issues` after cleanup-return findings were handled explicitly. |
+| `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1` | PASS. |
+| `go test -tags=sandbox_docker ./internal/sandbox -run BindMount -count=1` | PASS at the command gate; supplemental verbose output recorded two infrastructure skips because Docker is not in `PATH`. |
+| `go test -v -tags=sandbox_docker ./internal/sandbox -run BindMount -count=1` | PASS with `TestDockerBindMountContainerRunnerStress` and `TestDockerBindMountKillMidWriteIntegrity` both SKIP: `docker not in PATH; run on macOS Docker Desktop for VirtioFS evidence`. No positive Docker Desktop runtime result is claimed. |
+
+### Per-issue criterion totals
+
+| Issue | Pass | Not applicable | Total |
+|---|---:|---:|---:|
+| #8 | 2 | 1 | 3 |
+| #9 | 2 | 0 | 2 |
+| #10 | 3 | 0 | 3 |
+| #11 | 5 | 0 | 5 |
+| #12 | 3 | 0 | 3 |
+| #13 | 3 | 0 | 3 |
+| #14 | 3 | 0 | 3 |
+| #15 | 3 | 0 | 3 |
+| #16 | 2 | 0 | 2 |
+| #17 | 4 | 0 | 4 |
+| #18 | 2 | 0 | 2 |
+| #19 | 7 | 0 | 7 |
+| #20 | 6 | 0 | 6 |
+| #21 | 2 | 0 | 2 |
+| #22 | 2 | 0 | 2 |
+| #23 | 8 | 0 | 8 |
+| #24 | 8 | 0 | 8 |
+| #25 | 6 | 0 | 6 |
+| #26 | 2 | 0 | 2 |
+| #27 | 1 | 0 | 1 |
+| #28 | 2 | 0 | 2 |
+| #29 | 7 | 0 | 7 |
+| #32 | 7 | 0 | 7 |
+| #33 | 10 | 0 | 10 |
+| #34 | 7 | 0 | 7 |
+| #35 | 7 | 0 | 7 |
+| #36 | 6 | 0 | 6 |
+| #37 | 7 | 0 | 7 |
+| #38 | 9 | 0 | 9 |
+| #39 | 6 | 0 | 6 |
+| #40 | 8 | 0 | 8 |
+| #41 | 10 | 5 | 15 |
+| #42 | 6 | 0 | 6 |
+| #43 | 7 | 0 | 7 |
+| #44 | 7 | 0 | 7 |
+| #45 | 5 | 0 | 5 |
+| #46 | 6 | 0 | 6 |
+| #47 | 7 | 0 | 7 |
+| #48 | 6 | 0 | 6 |
+| #49 | 7 | 0 | 7 |
+| #50 | 7 | 0 | 7 |
+| #51 | 9 | 0 | 9 |
+| #52 | 8 | 0 | 8 |
+| #53 | 7 | 0 | 7 |
+| #54 | 7 | 0 | 7 |
+| #55 | 8 | 0 | 8 |
+| #58 | 9 | 0 | 9 |
+| #59 | 9 | 0 | 9 |
+| #60 | 7 | 0 | 7 |
+| #61 | 7 | 0 | 7 |
+| #62 | 8 | 0 | 8 |
+| #63 | 8 | 0 | 8 |
+| #64 | 7 | 0 | 7 |
+| #65 | 8 | 0 | 8 |
+| #66 | 8 | 0 | 8 |
+| #67 | 17 | 0 | 17 |
+| #68 | 7 | 0 | 7 |
+| #69 | 9 | 0 | 9 |
+| #70 | 5 | 0 | 5 |
+| #71 | 38 | 0 | 38 |
+| #72 | 0 | 0 | 0 |
+| #77 | 7 | 0 | 7 |
+| #78 | 11 | 0 | 11 |
+| #79 | 11 | 0 | 11 |
+| **Total** | **433** | **6** | **439** |
+
+Issue #72 is present in the source snapshot but has no checkbox or explicit completion criterion, so it has zero matrix rows.
