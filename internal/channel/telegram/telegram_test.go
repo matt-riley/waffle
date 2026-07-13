@@ -297,6 +297,12 @@ func TestAddressedToBotHelpers(t *testing.T) {
 	if addressedToBot(&tgMessage{Text: "nope"}, 99, "waffle_bot") {
 		t.Error("plain text should not address bot")
 	}
+	if !addressedToBot(&tgMessage{Text: "ask @Waffle_Bot instead"}, 99, "waffle_bot") {
+		t.Error("plain-text mention should address bot")
+	}
+	if addressedToBot(&tgMessage{Text: "ask @waffle_bot_backup instead"}, 99, "waffle_bot") {
+		t.Error("username prefix should not address bot")
+	}
 }
 
 func TestSendSplitsLongMessages(t *testing.T) {

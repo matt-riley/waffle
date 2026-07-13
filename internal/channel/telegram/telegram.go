@@ -226,7 +226,6 @@ func addressedToBot(m *tgMessage, botID int64, botUser string) bool {
 	if botUser == "" && botID == 0 {
 		return false
 	}
-	needle := "@" + strings.ToLower(botUser)
 	for _, e := range m.Entities {
 		switch e.Type {
 		case "mention":
@@ -246,7 +245,7 @@ func addressedToBot(m *tgMessage, botID int64, botUser string) bool {
 		}
 	}
 	// Fallback: plain-text @username (entities missing in some proxies).
-	if botUser != "" && strings.Contains(strings.ToLower(m.Text), needle) {
+	if botUser != "" && regexp.MustCompile(`(?i)@`+regexp.QuoteMeta(botUser)+`\b`).MatchString(m.Text) {
 		return true
 	}
 	return false
