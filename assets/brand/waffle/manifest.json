@@ -72,6 +72,42 @@
       "height": 768,
       "alphaPolicy": "transparent-corners",
       "provenance": "Built-in image generation from the approved model sheet and neutral portrait reference; chroma removed, resized, and sanitized locally"
+    },
+    {
+      "id": "waffle-sitting",
+      "file": "poses/sitting.png",
+      "role": "neutral three-quarter sitting documentation pose",
+      "width": 1254,
+      "height": 1254,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved standing master and model sheet; chroma removed and sanitized locally"
+    },
+    {
+      "id": "waffle-curled",
+      "file": "poses/curled.png",
+      "role": "alert curled resting documentation pose",
+      "width": 1536,
+      "height": 1024,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in image generation from the approved standing master and model sheet; chroma removed and sanitized locally"
+    },
+    {
+      "id": "waffle-standing-airplane-ears",
+      "file": "poses/standing-airplane-ears.png",
+      "role": "playful standing airplane-ear documentation pose",
+      "width": 1536,
+      "height": 1024,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in identity-preserving image edit from the approved standing master and model sheet; chroma removed and sanitized locally"
+    },
+    {
+      "id": "waffle-sitting-airplane-ears",
+      "file": "poses/sitting-airplane-ears.png",
+      "role": "mildly unimpressed sitting airplane-ear documentation pose",
+      "width": 1254,
+      "height": 1254,
+      "alphaPolicy": "transparent-corners",
+      "provenance": "Built-in identity-preserving image edit from the approved sitting pose and model sheet; chroma removed and sanitized locally"
     }
   ]
 }
