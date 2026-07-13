@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/id"
 )
@@ -108,8 +107,8 @@ func (s *Store) Add(ctx context.Context, sessionID string, kind, body, source st
 	if body == "" {
 		return nil, errors.New("body is required")
 	}
-	if utf8.RuneCountInString(body) > MaxEntryBytes {
-		return nil, fmt.Errorf("entry exceeds %d rune cap", MaxEntryBytes)
+	if len(body) > MaxEntryBytes {
+		return nil, fmt.Errorf("entry exceeds %d byte cap", MaxEntryBytes)
 	}
 	entries, err := s.List(ctx, sessionID)
 	if err != nil {
@@ -118,9 +117,9 @@ func (s *Store) Add(ctx context.Context, sessionID string, kind, body, source st
 	if len(entries) >= s.maxEntries() {
 		return nil, fmt.Errorf("working set full (%d entries); drop or replace an entry first", s.maxEntries())
 	}
-	total := utf8.RuneCountInString(body)
+	total := len(body)
 	for _, e := range entries {
-		total += utf8.RuneCountInString(e.Body)
+		total += len(e.Body)
 	}
 	if total > s.maxBytes() {
 		return nil, fmt.Errorf("working set would exceed %d byte budget", s.maxBytes())
@@ -225,12 +224,15 @@ func ValidateProposal(p Proposal) error {
 		if strings.TrimSpace(p.Body) == "" {
 			return errors.New("add requires body")
 		}
-		if utf8.RuneCountInString(p.Body) > MaxEntryBytes {
-			return fmt.Errorf("proposal body exceeds %d runes", MaxEntryBytes)
+		if len(p.Body) > MaxEntryBytes {
+			return fmt.Errorf("proposal body exceeds %d bytes", MaxEntryBytes)
 		}
 	case "replace":
 		if p.ID == "" || strings.TrimSpace(p.Body) == "" {
 			return errors.New("replace requires id and body")
+		}
+		if len(p.Body) > MaxEntryBytes {
+			return fmt.Errorf("proposal body exceeds %d bytes", MaxEntryBytes)
 		}
 	case "drop":
 		if p.ID == "" {

@@ -158,6 +158,31 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	}
 }
 
+func TestRunnerReservedLearnJobDeliversDigestWithoutAgentDispatch(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	cap := &captureDeliverer{}
+	p := &recordingProvider{}
+	runner := &Runner{
+		Agent:     &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
+		Sessions:  session.New(st),
+		Deliverer: cap,
+		Learn: func(context.Context) (string, error) {
+			return "waffle learn digest\npatterns=2 accepted=1", nil
+		},
+	}
+	reply, err := runner.Run(ctx, Job{Name: "learn-daily", Prompt: "/learn", Deliver: "telegram:900"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != cap.text || cap.target != "telegram:900" || !strings.Contains(reply, "learn digest") {
+		t.Fatalf("reply=%q delivered=%q target=%q", reply, cap.text, cap.target)
+	}
+	if len(p.reqs) != 0 {
+		t.Fatalf("reserved learn job reached agent provider: %d calls", len(p.reqs))
+	}
+}
+
 // recordingProvider captures Complete requests so tests can assert system
 // prompt and tool definitions for profile selection (#71). Reflect may call
 // Complete again; tests inspect the first agent-turn request via first().

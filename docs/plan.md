@@ -630,9 +630,12 @@ shipped** (see [Deviations](#deviations)).
    `waffle skills activate <name>`; the skills index lists only active skills
    and refuses to overwrite an active skill without validation.
 
-Cron surface: schedule `waffle learn` (system crontab or a wrapper) and
-deliver the stdout **digest** (pattern counts, proposal statuses, provider
-call count). Example: `0 3 * * * waffle learn >> ~/.waffle/learn.log`.
+Cron surface: use the single reserved prompt `/learn`, for example
+`waffle cron add learn-daily 0 3 * * * /learn --deliver telegram:900`.
+Serve runs the same mine→propose→validate pipeline and delivers its **digest**
+(pattern counts, proposal statuses, provider call count). `/learn` is a closed
+internal callback, not a general CLI-command dispatch surface; all other cron
+prompts continue through the restricted cron agent.
 
 **Action-level policy (#66).** Host config declares ordered rules:
 

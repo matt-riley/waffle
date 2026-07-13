@@ -74,6 +74,17 @@ func TestSpawnSubagentRejectsUnknownAndDisallowedProfile(t *testing.T) {
 	}
 }
 
+func TestProfileTargetingStillEnforcesSubagentDepthLimit(t *testing.T) {
+	toolUnderTest := SubagentTool{
+		Provider: oneShotProvider{reply: "must not run"},
+		Tools:    tool.NewRegistry(), Model: "m", Depth: 3,
+		Profiles: map[string]ChildProfile{"reviewer": {System: "review"}},
+	}
+	if _, err := toolUnderTest.Run(context.Background(), json.RawMessage(`{"task":"t","profile":"reviewer"}`)); err == nil || !strings.Contains(err.Error(), "depth limit") {
+		t.Fatalf("profile-targeted depth error=%v", err)
+	}
+}
+
 func TestSpawnSubagentProfileCannotWidenTools(t *testing.T) {
 	// Parent only has read_file; profile tries to allow bash — bash must not run
 	// even if profile allow includes it (tighten-only intersect with parent toolbox).

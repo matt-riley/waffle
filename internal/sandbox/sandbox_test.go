@@ -584,3 +584,64 @@ func TestDuplicateExecIsAbsorbedAndReclaimable(t *testing.T) {
 		t.Fatalf("reclaim = %#v", got)
 	}
 }
+
+func TestLegacyPopulatedQueueMigratesNullableToolUseID(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, inboundFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE requests (id INTEGER PRIMARY KEY AUTOINCREMENT, tool TEXT NOT NULL, input TEXT NOT NULL, created_at TEXT NOT NULL) STRICT`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO requests(tool,input,created_at) VALUES ('upper','{"s":"legacy"}','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	var count, nullIDs int
+	if err := client.inbound.QueryRow(`SELECT COUNT(*), SUM(tool_use_id IS NULL) FROM requests`).Scan(&count, &nullIDs); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || nullIDs != 1 {
+		t.Fatalf("legacy rows count=%d null tool_use_id=%d", count, nullIDs)
+	}
+	if _, err := client.inbound.Exec(`INSERT INTO requests(tool_use_id,tool,input,created_at) VALUES ('new-id','upper','{}','2026-01-01T00:00:01Z')`); err != nil {
+		t.Fatalf("new identity after additive migration: %v", err)
+	}
+}
+
+func TestNewClientReclaimsCompletedOutputAfterHostRestart(t *testing.T) {
+	dir := t.TempDir()
+	startRunner(t, dir)
+	first, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	content, _, err := first.Exec(ctx, "restart-use", "upper", json.RawMessage(`{"s":"durable"}`))
+	if err != nil || content != "DURABLE" {
+		t.Fatalf("first result=%q err=%v", content, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resumed.Close() }()
+	reclaimed, err := resumed.Reclaim(ctx, []string{"restart-use"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := reclaimed["restart-use"]
+	if !ok || result.Content != "DURABLE" || result.IsError {
+		t.Fatalf("reclaimed=%#v", reclaimed)
+	}
+}

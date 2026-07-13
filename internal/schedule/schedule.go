@@ -233,6 +233,9 @@ type Runner struct {
 
 	// Observability records cron agent runs when configured.
 	Observability *observability.Service
+	// Learn runs the single reserved internal cron action `/learn`. It is a
+	// closed callback, not a general command dispatcher.
+	Learn func(context.Context) (string, error)
 }
 
 // Run executes one job now: fresh session, agent turn, deliver the reply.
@@ -243,6 +246,21 @@ func (r *Runner) Run(ctx context.Context, j Job) (string, error) {
 // RunAttempt executes one numbered attempt. Retries add context to the
 // prompt while the first attempt remains byte-for-byte compatible.
 func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, error) {
+	if j.Prompt == "/learn" {
+		if r.Learn == nil {
+			return "", fmt.Errorf("cron: reserved /learn action is not configured")
+		}
+		digest, err := r.Learn(ctx)
+		if err != nil {
+			return "", fmt.Errorf("cron learn: %w", err)
+		}
+		if j.Deliver != "" && digest != "" && r.Deliverer != nil {
+			if err := r.Deliverer.Deliver(ctx, j.Deliver, digest); err != nil {
+				return digest, fmt.Errorf("deliver learn digest: %w", err)
+			}
+		}
+		return digest, nil
+	}
 	a := r.Agent
 	if j.Profile != "" {
 		if r.AgentsByProfile != nil {

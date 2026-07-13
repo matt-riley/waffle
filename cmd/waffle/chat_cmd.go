@@ -159,7 +159,15 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			fmt.Fprintf(stdout, "(new session %s)\n", c.current.ID)
 			continue
 		case line == "/help":
-			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/repo <owner/repo>    work on a repo in a container workspace\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
+			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/repo <owner/repo>    work on a repo in a container workspace\n/workset [list|replace <id> <text>|drop <id>|clear]  inspect/correct active task state\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
+			continue
+		case cmd == "/workset":
+			out, workErr := c.worksetCommand(ctx, args)
+			if workErr != nil {
+				fmt.Fprintf(stderr, "waffle: %v\n", workErr)
+			} else {
+				fmt.Fprintln(stdout, out)
+			}
 			continue
 		case cmd == "/skill":
 			message, err = c.skillMessage(args)
@@ -182,6 +190,54 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			}
 			fmt.Fprintf(stderr, "\nwaffle: %v\n", err)
 		}
+	}
+}
+
+func (c *chat) worksetCommand(ctx context.Context, args string) (string, error) {
+	if c.st == nil || c.current == nil {
+		return "", fmt.Errorf("no active session working set")
+	}
+	ws := &workset.Store{DB: c.st.DB}
+	fields := strings.Fields(args)
+	if len(fields) == 0 || fields[0] == "list" {
+		entries, err := ws.List(ctx, c.current.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(entries) == 0 {
+			return "working set is empty", nil
+		}
+		return strings.TrimSpace(workset.Render(entries)), nil
+	}
+	switch fields[0] {
+	case "replace":
+		if len(fields) < 3 {
+			return "", fmt.Errorf("usage: /workset replace <id> <text>")
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(args, "replace "+fields[1]))
+		e, err := ws.Replace(ctx, c.current.ID, fields[1], body, workset.SourceUser)
+		if err != nil {
+			return "", err
+		}
+		return "replaced " + e.ID, nil
+	case "drop":
+		if len(fields) != 2 {
+			return "", fmt.Errorf("usage: /workset drop <id>")
+		}
+		if err := ws.Drop(ctx, c.current.ID, fields[1]); err != nil {
+			return "", err
+		}
+		return "dropped " + fields[1], nil
+	case "clear":
+		if len(fields) != 1 {
+			return "", fmt.Errorf("usage: /workset clear")
+		}
+		if err := ws.Clear(ctx, c.current.ID); err != nil {
+			return "", err
+		}
+		return "working set cleared", nil
+	default:
+		return "", fmt.Errorf("usage: /workset [list|replace <id> <text>|drop <id>|clear]")
 	}
 }
 

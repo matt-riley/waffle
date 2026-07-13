@@ -18,6 +18,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
+	"github.com/matt-riley/waffle/internal/workset"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -44,6 +45,52 @@ func TestSplitCommand(t *testing.T) {
 		if cmd != tt.cmd || args != tt.args {
 			t.Errorf("splitCommand(%q) = (%q, %q), want (%q, %q)", tt.line, cmd, args, tt.cmd, tt.args)
 		}
+	}
+}
+
+func TestWorksetCommandInspectsAndCorrectsPersistedState(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "workset cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &workset.Store{DB: st.DB}
+	e, err := ws.Add(ctx, sess.ID, workset.KindConstraint, "old constraint", workset.SourceModel, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &chat{st: st, current: sess}
+	if out, err := c.worksetCommand(ctx, "list"); err != nil || !strings.Contains(out, "old constraint") {
+		t.Fatalf("list=%q err=%v", out, err)
+	}
+	if _, err := c.worksetCommand(ctx, "replace "+e.ID+" corrected by owner"); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := ws.List(ctx, sess.ID)
+	if len(entries) != 1 || entries[0].Body != "corrected by owner" || entries[0].Source != workset.SourceUser {
+		t.Fatalf("replace persistence=%+v", entries)
+	}
+	if _, err := c.worksetCommand(ctx, "drop "+entries[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := c.worksetCommand(ctx, "list"); err != nil || out != "working set is empty" {
+		t.Fatalf("after drop=%q err=%v", out, err)
+	}
+	if _, err := ws.Add(ctx, sess.ID, workset.KindGoal, "clear me", workset.SourceUser, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.worksetCommand(ctx, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ = ws.List(ctx, sess.ID)
+	if len(entries) != 0 {
+		t.Fatalf("clear persistence=%+v", entries)
 	}
 }
 

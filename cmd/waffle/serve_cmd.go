@@ -260,6 +260,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 			Deliverer:       adapterDeliverer(adapters),
 			Log:             log,
 			Observability:   obs,
+			Learn: func(ctx context.Context) (string, error) {
+				return learnDigest(ctx, cfg, st)
+			},
 		},
 		Log:    log,
 		Usage:  usagepkg.New(st),
