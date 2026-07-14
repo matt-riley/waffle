@@ -42,6 +42,74 @@ export function sourceOver(bottom, top) {
   return output;
 }
 
+function bilinearSample(source, x, y, output, outputOffset) {
+  if (x < -0.5 || y < -0.5 || x > source.width - 0.5 || y > source.height - 0.5) return;
+  const clampedX = Math.max(0, Math.min(source.width - 1, x));
+  const clampedY = Math.max(0, Math.min(source.height - 1, y));
+  const x0 = Math.floor(clampedX);
+  const y0 = Math.floor(clampedY);
+  const x1 = Math.min(source.width - 1, x0 + 1);
+  const y1 = Math.min(source.height - 1, y0 + 1);
+  const fx = clampedX - x0;
+  const fy = clampedY - y0;
+  const samples = [
+    [x0, y0, (1 - fx) * (1 - fy)],
+    [x1, y0, fx * (1 - fy)],
+    [x0, y1, (1 - fx) * fy],
+    [x1, y1, fx * fy],
+  ];
+  let alpha = 0;
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  for (const [sampleX, sampleY, weight] of samples) {
+    const offset = (sampleY * source.width + sampleX) * 4;
+    const normalizedAlpha = source.data[offset + 3] / 255;
+    const weightedAlpha = normalizedAlpha * weight;
+    alpha += weightedAlpha;
+    red += source.data[offset] * weightedAlpha;
+    green += source.data[offset + 1] * weightedAlpha;
+    blue += source.data[offset + 2] * weightedAlpha;
+  }
+  output[outputOffset] = alpha === 0 ? 0 : Math.round(red / alpha);
+  output[outputOffset + 1] = alpha === 0 ? 0 : Math.round(green / alpha);
+  output[outputOffset + 2] = alpha === 0 ? 0 : Math.round(blue / alpha);
+  output[outputOffset + 3] = Math.round(alpha * 255);
+}
+
+export function transformRgba(source, transform) {
+  if (
+    transform.x === 0
+    && transform.y === 0
+    && transform.rotationDegrees === 0
+    && transform.scaleX === 1
+    && transform.scaleY === 1
+  ) {
+    const identity = new PNG({ width: source.width, height: source.height });
+    identity.data.set(source.data);
+    return identity;
+  }
+  if (transform.scaleX === 0 || transform.scaleY === 0) throw new Error("transform scale must be non-zero");
+  const output = new PNG({ width: source.width, height: source.height });
+  const pivotX = transform.pivot.x * (source.width - 1);
+  const pivotY = transform.pivot.y * (source.height - 1);
+  const translateX = transform.x * source.width;
+  const translateY = transform.y * source.height;
+  const radians = (transform.rotationDegrees * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  for (let y = 0; y < output.height; y += 1) {
+    for (let x = 0; x < output.width; x += 1) {
+      const translatedX = x - pivotX - translateX;
+      const translatedY = y - pivotY - translateY;
+      const sourceX = (cosine * translatedX + sine * translatedY) / transform.scaleX + pivotX;
+      const sourceY = (-sine * translatedX + cosine * translatedY) / transform.scaleY + pivotY;
+      bilinearSample(source, sourceX, sourceY, output.data, (y * output.width + x) * 4);
+    }
+  }
+  return output;
+}
+
 export async function recomposeLayers(manifestPath) {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const directory = path.dirname(manifestPath);

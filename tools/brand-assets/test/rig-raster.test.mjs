@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { PNG } from "pngjs";
 
-import { recomposeLayers, sourceOver } from "../rig-raster.mjs";
+import { recomposeLayers, sourceOver, transformRgba } from "../rig-raster.mjs";
 import { validateRig } from "../validate-rig.mjs";
 
 async function workspace(t) {
@@ -128,6 +128,47 @@ test("sourceOver keeps transparent and opaque pixels exact", () => {
   const result = sourceOver(bottom, top);
 
   assert.deepEqual([...result.data], [20, 40, 60, 128, 220, 180, 140, 255]);
+});
+
+test("transformRgba preserves identity and rotates around a normalized pivot", () => {
+  const source = rgba(5, 5, new Array(5 * 5 * 4).fill(0));
+  source.data.set([220, 100, 30, 255], (2 * 5 + 3) * 4);
+
+  const identity = transformRgba(source, {
+    pivot: { x: 0.5, y: 0.5 },
+    x: 0,
+    y: 0,
+    rotationDegrees: 0,
+    scaleX: 1,
+    scaleY: 1,
+  });
+  const rotated = transformRgba(source, {
+    pivot: { x: 0.5, y: 0.5 },
+    x: 0,
+    y: 0,
+    rotationDegrees: 90,
+    scaleX: 1,
+    scaleY: 1,
+  });
+
+  assert.deepEqual(identity.data, source.data);
+  assert.equal(rotated.data[(3 * 5 + 2) * 4 + 3], 255);
+  assert.equal(rotated.data[(2 * 5 + 3) * 4 + 3], 0);
+  assert.equal([...rotated.data].filter((_, index) => index % 4 === 3 && rotated.data[index] > 0).length, 1);
+});
+
+test("transformRgba clears pixels whose inverse sample is outside the canvas", () => {
+  const source = rgba(3, 3, new Array(3 * 3 * 4).fill(255));
+  const translated = transformRgba(source, {
+    pivot: { x: 0.5, y: 0.5 },
+    x: 2,
+    y: 0,
+    rotationDegrees: 0,
+    scaleX: 1,
+    scaleY: 1,
+  });
+
+  assert.ok([...translated.data].every((value) => value === 0));
 });
 
 test("recomposes partitioned neutral layers with exact visible RGBA", async (t) => {

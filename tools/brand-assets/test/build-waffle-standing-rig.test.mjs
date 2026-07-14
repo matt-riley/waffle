@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { PNG } from "pngjs";
 
-import { buildStandingRig, partitionSource, pointInPolygon } from "../build-waffle-standing-rig.mjs";
+import { applyUnderlaps, buildStandingRig, partitionSource, pointInPolygon } from "../build-waffle-standing-rig.mjs";
 import { sourceOver } from "../rig-raster.mjs";
 
 function sourceFixture() {
@@ -66,6 +66,38 @@ test("partitioned layers recompose to the exact decoded source", () => {
   let composite = new PNG({ width: source.width, height: source.height });
   for (const id of ["back", "middle", "front"]) composite = sourceOver(composite, layers.get(id));
 
+  assert.deepEqual(composite.data, source.data);
+});
+
+test("underlaps duplicate source pixels so a moving layer can stay tucked behind its cover", () => {
+  const source = sourceFixture();
+  const regions = [
+    {
+      id: "ear",
+      polygons: [[[0, 0], [1, 0], [1, 3], [0, 3]]],
+      underlapPolygons: [[[1, 0], [3, 0], [3, 3], [1, 3]]],
+    },
+    { id: "head", polygons: [[[1, 0], [3, 0], [3, 3], [1, 3]]] },
+  ];
+  const layers = partitionSource(source, regions, "body");
+
+  applyUnderlaps(source, layers, regions);
+
+  const translucentOffset = (source.width + 1) * 4;
+  assert.equal(layers.get("ear").data[translucentOffset + 3], 0);
+
+  const sharedOffset = (source.width + 2) * 4;
+  assert.deepEqual(
+    [...layers.get("ear").data.subarray(sharedOffset, sharedOffset + 4)],
+    [...source.data.subarray(sharedOffset, sharedOffset + 4)],
+  );
+  assert.deepEqual(
+    [...layers.get("head").data.subarray(sharedOffset, sharedOffset + 4)],
+    [...source.data.subarray(sharedOffset, sharedOffset + 4)],
+  );
+
+  let composite = new PNG({ width: source.width, height: source.height });
+  for (const id of ["body", "ear", "head"]) composite = sourceOver(composite, layers.get(id));
   assert.deepEqual(composite.data, source.data);
 });
 

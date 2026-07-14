@@ -35,6 +35,26 @@ export function partitionSource(source, regions, fallbackId) {
   return layers;
 }
 
+export function applyUnderlaps(source, layers, regions) {
+  for (const region of regions) {
+    if (!Array.isArray(region.underlapPolygons) || region.underlapPolygons.length === 0) continue;
+    const layer = layers.get(region.id);
+    if (!layer) throw new Error(`underlap region ${region.id} has no matching layer`);
+    for (let y = 0; y < source.height; y += 1) {
+      for (let x = 0; x < source.width; x += 1) {
+        const offset = (y * source.width + x) * 4;
+        // Only duplicate opaque source pixels. Re-compositing the same
+        // translucent edge pixel twice changes its decoded neutral colour.
+        if (source.data[offset + 3] !== 255) continue;
+        if (region.underlapPolygons.some((polygon) => pointInPolygon(x + 0.5, y + 0.5, polygon))) {
+          layer.data.set(source.data.subarray(offset, offset + 4), offset);
+        }
+      }
+    }
+  }
+  return layers;
+}
+
 async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
 }
@@ -55,6 +75,7 @@ export async function buildStandingRig({ sourceFile, masksFile, outputDirectory 
     throw new Error("masks require regionsFrontToBack and fallback");
   }
   const layers = partitionSource(source, masks.regionsFrontToBack, masks.fallback);
+  applyUnderlaps(source, layers, masks.regionsFrontToBack);
   const layersDirectory = path.join(outputDirectory, "layers");
   await mkdir(layersDirectory, { recursive: true });
   const referenceFile = path.join(outputDirectory, "neutral-reference.png");

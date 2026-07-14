@@ -6,6 +6,7 @@ This tree contains Waffle's reviewed raster artwork and machine-readable deliver
 
 - `canon/` holds character rules, the non-identifying reference review, the approved raster model sheet, its generation record, and standalone expressions.
 - `poses/` holds the approved transparent standing, sitting, and curled composites.
+- `rigs/` holds editor-neutral layered raster rigs, including their source-locked PNG layers, pivots, safe control ranges, and deterministic validation inputs.
 - `animation/idle/` holds the deterministic standing seed, normalized sprite frames, and the animation manifest.
 - `manifest.json` declares every static production asset's role, dimensions, alpha policy, and privacy-safe provenance.
 - `qa/` records owner decisions and technical verification evidence.
@@ -23,6 +24,7 @@ mise run brand-check
 
 - `brand-install` restores the pinned asset-tool dependencies from the lockfile.
 - `brand-check` runs all brand-tool tests, then validates the static and idle manifests when they exist. It is safe during early stages when no raster deliverables exist yet.
+- `brand-rig-check` validates the standing layered rig and its exact neutral reconstruction.
 
 Production helpers are explicit so they never overwrite an approved master:
 
@@ -32,6 +34,7 @@ node tools/brand-assets/resize-raster.mjs input.png output.png WIDTH HEIGHT
 node tools/brand-assets/build-sprite-edit-canvas.mjs seed.png canvas.png
 node tools/brand-assets/normalize-sprite-strip.mjs strip.png frames/ seed.png
 node tools/brand-assets/validate-raster.mjs assets/brand/waffle/manifest.json
+node tools/brand-assets/validate-rig.mjs assets/brand/waffle/rigs/standing-v1/rig.json
 ```
 
 Sanitization decodes and re-encodes RGBA pixels before validation, dropping ancillary metadata. The sprite helpers use deterministic bilinear resizing, one shared scale, a bottom-centre anchor, and a locked first frame.
@@ -45,9 +48,10 @@ Static `manifest.json` files use schema version 1. Every asset requires `id`, `f
 | Character canon, palette, and construction ratios | Approved |
 | Balanced visual direction | Approved |
 | Vector studies | Rejected; preserved privately for review evidence |
-| Raster model-sheet likeness and cross-view consistency | Not started |
-| Neutral master likeness and expression language | Not started |
-| Standing, sitting, and curled documentation poses | Not started |
-| Idle proof and final package | Not started |
+| Raster model-sheet likeness and cross-view consistency | Approved |
+| Neutral master likeness and expression language | Approved |
+| Standing, sitting, curled, and airplane-ear documentation poses | Approved |
+| Standing layered raster rig v1 | Approved source and motion scope; Fusion assembly pending |
+| Idle proof and final package | Prototype reviewed; final animation pending |
 
 Do not advance a creative stage until its preceding gate is explicitly approved. Passing file validation is never evidence that Waffle's identity is acceptable.

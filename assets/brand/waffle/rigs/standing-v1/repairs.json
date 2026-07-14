@@ -1,0 +1,211 @@
+{
+  "repairs": [
+    {
+      "id": "body-repair",
+      "cover": "body",
+      "parent": null,
+      "drawOrder": 1,
+      "pivot": {
+        "x": 0.52,
+        "y": 0.78
+      },
+      "polygons": [],
+      "sampleOffset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "tail-hidden",
+      "cover": "body",
+      "parent": "body",
+      "drawOrder": 5,
+      "pivot": {
+        "x": 0.677,
+        "y": 0.435
+      },
+      "polygons": [
+        [
+          [975, 402],
+          [1066, 400],
+          [1100, 443],
+          [1090, 515],
+          [1015, 548],
+          [978, 505]
+        ]
+      ],
+      "sampleOffset": {
+        "x": 38,
+        "y": -24
+      }
+    },
+    {
+      "id": "neck-repair",
+      "cover": "head",
+      "parent": "body",
+      "drawOrder": 25,
+      "pivot": {
+        "x": 0.391,
+        "y": 0.435
+      },
+      "polygons": [
+        [
+          [421, 348],
+          [762, 348],
+          [757, 432],
+          [696, 478],
+          [523, 494],
+          [438, 443]
+        ]
+      ],
+      "sampleOffset": {
+        "x": 0,
+        "y": 100
+      }
+    },
+    {
+      "id": "left-ear-repair",
+      "cover": "left-ear",
+      "parent": "head",
+      "drawOrder": 35,
+      "pivot": {
+        "x": 0.326,
+        "y": 0.186
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideCover": true,
+      "polygons": [
+        [
+          [524, 122],
+          [578, 126],
+          [596, 255],
+          [548, 263]
+        ]
+      ],
+      "sampleOffset": {
+        "x": 0,
+        "y": 0
+      },
+      "fallbackSample": {
+        "x": 560,
+        "y": 180
+      }
+    },
+    {
+      "id": "right-ear-repair",
+      "cover": "right-ear",
+      "parent": "head",
+      "drawOrder": 45,
+      "pivot": {
+        "x": 0.469,
+        "y": 0.19
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideCover": true,
+      "polygons": [
+        [
+          [606, 126],
+          [663, 122],
+          [655, 260],
+          [600, 255]
+        ]
+      ],
+      "sampleOffset": {
+        "x": 0,
+        "y": 0
+      },
+      "fallbackSample": {
+        "x": 620,
+        "y": 180
+      }
+    }
+  ],
+  "lids": [
+    {
+      "id": "left-eye-lid",
+      "parent": "head",
+      "drawOrder": 60,
+      "pivot": {
+        "x": 0.335,
+        "y": 0.303
+      },
+      "center": {
+        "x": 515,
+        "y": 310
+      },
+      "radius": {
+        "x": 50,
+        "y": 55
+      },
+      "reference": {
+        "center": {
+          "x": 493,
+          "y": 325
+        },
+        "radius": {
+          "x": 58,
+          "y": 55
+        }
+      },
+      "feather": 0.15,
+      "sampleBand": {
+        "top": 202,
+        "bottom": 244
+      },
+      "lash": {
+        "y": 319,
+        "arch": 0.003,
+        "thickness": 3.5,
+        "color": [
+          88,
+          48,
+          22,
+          255
+        ]
+      }
+    },
+    {
+      "id": "right-eye-lid",
+      "parent": "head",
+      "drawOrder": 70,
+      "pivot": {
+        "x": 0.428,
+        "y": 0.309
+      },
+      "center": {
+        "x": 658,
+        "y": 316
+      },
+      "radius": {
+        "x": 50,
+        "y": 55
+      },
+      "reference": {
+        "center": {
+          "x": 657,
+          "y": 325
+        },
+        "radius": {
+          "x": 58,
+          "y": 55
+        }
+      },
+      "feather": 0.15,
+      "sampleBand": {
+        "top": 208,
+        "bottom": 250
+      },
+      "lash": {
+        "y": 325,
+        "arch": 0.003,
+        "thickness": 3.5,
+        "color": [
+          88,
+          48,
+          22,
+          255
+        ]
+      }
+    }
+  ]
+}
