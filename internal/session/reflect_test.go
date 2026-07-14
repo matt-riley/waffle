@@ -218,6 +218,50 @@ func TestIdleReflectSkipsWhenLocked(t *testing.T) {
 	}
 }
 
+func TestListIdleForReflectionUsesCandidateIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rows, err := st.DB.QueryContext(ctx, `
+		EXPLAIN QUERY PLAN
+		SELECT id FROM sessions
+		WHERE summary = ''
+		  AND updated_at < ?
+		  AND EXISTS (
+		    SELECT 1 FROM turns
+		    WHERE session_id = sessions.id
+		    LIMIT 1 OFFSET 1
+		  )
+		ORDER BY updated_at ASC
+		LIMIT ?`, time.Now().UTC().Format(time.RFC3339Nano), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	usedIndex := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "idx_sessions_reflection_candidates") {
+			usedIndex = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !usedIndex {
+		t.Fatal("idle reflection query did not use its candidate index")
+	}
+}
+
 func TestListShowsSummary(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "r.db"))

@@ -100,6 +100,7 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+
 	defer func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -123,6 +124,31 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO sessions (id, created_at, updated_at) VALUES ('s1', 'now', 'now')`); err != nil {
 		t.Fatalf("sessions table missing: %v", err)
+	}
+}
+
+func TestOpenCreatesSessionQueryIndexes(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, name := range []string{
+		"idx_sessions_updated_at",
+		"idx_sessions_reflection_candidates",
+		"idx_channel_groups_session",
+		"idx_workspaces_session",
+	} {
+		var count int
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Errorf("index %q missing", name)
+		}
 	}
 }
 

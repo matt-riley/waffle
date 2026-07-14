@@ -179,9 +179,13 @@ func (s *Store) ListIdleForReflection(ctx context.Context, cutoff time.Time, lim
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id FROM sessions
-		WHERE (summary IS NULL OR summary = '')
+		WHERE summary = ''
 		  AND updated_at < ?
-		  AND id IN (SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= 2)
+		  AND EXISTS (
+		    SELECT 1 FROM turns
+		    WHERE session_id = sessions.id
+		    LIMIT 1 OFFSET 1
+		  )
 		ORDER BY updated_at ASC
 		LIMIT ?`, cutoff.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
