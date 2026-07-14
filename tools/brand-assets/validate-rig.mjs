@@ -80,6 +80,7 @@ function validateGraph(layers) {
 function firstMismatch(left, right) {
   if (left.width !== right.width || left.height !== right.height) return { x: 0, y: 0 };
   for (let offset = 0; offset < left.data.length; offset += 4) {
+    if (left.data[offset + 3] === 0 && right.data[offset + 3] === 0) continue;
     if (!left.data.subarray(offset, offset + 4).equals(right.data.subarray(offset, offset + 4))) {
       const pixel = offset / 4;
       return { x: pixel % left.width, y: Math.floor(pixel / left.width) };

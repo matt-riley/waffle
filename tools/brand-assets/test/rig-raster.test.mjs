@@ -31,6 +31,19 @@ async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
 }
 
+function assertRenderedEqual(actual, expected) {
+  assert.equal(actual.length, expected.length);
+  for (let offset = 0; offset < actual.length; offset += 4) {
+    assert.equal(actual[offset + 3], expected[offset + 3], `alpha differs at pixel ${offset / 4}`);
+    if (expected[offset + 3] === 0) continue;
+    assert.deepEqual(
+      [...actual.subarray(offset, offset + 3)],
+      [...expected.subarray(offset, offset + 3)],
+      `RGB differs at visible pixel ${offset / 4}`,
+    );
+  }
+}
+
 async function rigFixture(t) {
   const directory = await workspace(t);
   const layersDirectory = path.join(directory, "layers");
@@ -43,6 +56,7 @@ async function rigFixture(t) {
   const source = blank();
   const back = blank();
   const front = blank();
+  paint(source, 0, 0, [10, 17, 16, 0]);
   paint(source, 1, 0, gold);
   paint(source, 1, 1, red);
   paint(source, 2, 1, red);
@@ -116,13 +130,13 @@ test("sourceOver keeps transparent and opaque pixels exact", () => {
   assert.deepEqual([...result.data], [20, 40, 60, 128, 220, 180, 140, 255]);
 });
 
-test("recomposes partitioned neutral layers exactly", async (t) => {
+test("recomposes partitioned neutral layers with exact visible RGBA", async (t) => {
   const fixture = await rigFixture(t);
   await fixture.save();
 
   const result = await recomposeLayers(fixture.manifestFile);
 
-  assert.deepEqual(result.data, fixture.source.data);
+  assertRenderedEqual(result.data, fixture.source.data);
 });
 
 test("validates a complete rig and reports zero neutral mismatches", async (t) => {
