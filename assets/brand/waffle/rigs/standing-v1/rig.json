@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "canvas": {
+    "width": 1536,
+    "height": 1024
+  },
+  "source": {
+    "file": "../../poses/standing.png",
+    "sha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b"
+  },
+  "neutralReference": {
+    "file": "neutral-reference.png",
+    "sha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b"
+  },
+  "layers": [
+    {
+      "id": "tail-visible",
+      "file": "layers/tail-visible.png",
+      "role": "visible",
+      "parent": "body",
+      "drawOrder": 10,
+      "visibleAtNeutral": true,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.677,
+        "y": 0.435
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "sha256": "13fbfeef4e6f798f966a64efad7fd5b535a842a61a2cc37cadc7d226b3705fcc"
+    },
+    {
+      "id": "body",
+      "file": "layers/body.png",
+      "role": "visible",
+      "parent": null,
+      "drawOrder": 20,
+      "visibleAtNeutral": true,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.52,
+        "y": 0.78
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "sha256": "ac5d4114832889ec3d9b1094b689281675642290824ace9f7ade820b3d7ad51b"
+    },
+    {
+      "id": "head",
+      "file": "layers/head.png",
+      "role": "visible",
+      "parent": "body",
+      "drawOrder": 30,
+      "visibleAtNeutral": true,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.391,
+        "y": 0.435
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "sha256": "9098b84c21d1562c2e10409fa1d2da77c1878a0001d8191133d782e1b7486d87"
+    },
+    {
+      "id": "left-ear",
+      "file": "layers/left-ear.png",
+      "role": "visible",
+      "parent": "head",
+      "drawOrder": 40,
+      "visibleAtNeutral": true,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.306,
+        "y": 0.225
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "sha256": "bb137689c1b75ea1864c4f0d99bed5a4b2a4bd3ff7b84dc281e123eeef98e4fa"
+    },
+    {
+      "id": "right-ear",
+      "file": "layers/right-ear.png",
+      "role": "visible",
+      "parent": "head",
+      "drawOrder": 50,
+      "visibleAtNeutral": true,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.475,
+        "y": 0.225
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "sha256": "32039446d9fc8794ca354e3e9bef12d786a3ca39b0848d02318e4d91e7f72a7c"
+    }
+  ],
+  "controls": {
+    "breath": {
+      "min": 0,
+      "max": 1
+    },
+    "headTilt": {
+      "min": -3,
+      "max": 3
+    },
+    "headTurn": {
+      "min": -0.015,
+      "max": 0.015
+    },
+    "blink": {
+      "min": 0,
+      "max": 1
+    },
+    "leftEar": {
+      "min": -8,
+      "max": 4
+    },
+    "rightEar": {
+      "min": -4,
+      "max": 8
+    },
+    "tailSway": {
+      "min": -5,
+      "max": 5
+    }
+  }
+}
