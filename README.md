@@ -115,8 +115,8 @@ What's here, by capability:
 Session data is retained forever by default. `waffle session rm <id>` and
 `waffle forget <query>` require confirmation and update the FTS index. Deletion
 does not run a foreground SQLite `VACUUM`, so it does not block the active
-gateway; free pages are reused by later writes. Opt-in
-retention runs only under `waffle serve`:
+gateway; free pages are reused by later writes. Opt-in retention runs only
+under `waffle serve`:
 
 ```toml
 [store]

@@ -157,8 +157,9 @@ func (n *NotesIndex) notesFromFile(path string, archived bool) ([]indexedNote, e
 		}
 		return nil, err
 	}
-	notes := make([]indexedNote, 0, strings.Count(string(body), "\n")+1)
-	for i, line := range strings.Split(string(body), "\n") {
+	content := string(body)
+	notes := make([]indexedNote, 0, strings.Count(content, "\n")+1)
+	for i, line := range strings.Split(content, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
