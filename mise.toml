@@ -30,4 +30,8 @@ run = "pnpm --dir tools/brand-assets install --frozen-lockfile"
 
 [tasks.brand-check]
 description = "Test raster tooling and validate Waffle manifests when present"
-run = "pnpm --dir tools/brand-assets test && node tools/brand-assets/validate-raster.mjs --optional assets/brand/waffle/manifest.json assets/brand/waffle/animation/idle/manifest.json"
+run = "pnpm --dir tools/brand-assets test && node tools/brand-assets/validate-raster.mjs --optional assets/brand/waffle/manifest.json assets/brand/waffle/animation/idle/manifest.json && node tools/brand-assets/validate-rig.mjs --optional assets/brand/waffle/rigs/standing-v1/rig.json"
+
+[tasks.brand-rig-check]
+description = "Validate the Waffle layered standing rig when present"
+run = "node tools/brand-assets/validate-rig.mjs --optional assets/brand/waffle/rigs/standing-v1/rig.json"
