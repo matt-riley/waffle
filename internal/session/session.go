@@ -309,7 +309,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return vacuum(ctx, s.db)
+	return nil
 }
 
 // DeleteTurns removes matching turn rows in one transaction.
@@ -339,7 +339,7 @@ func (s *Store) DeleteTurns(ctx context.Context, ids []int64) (err error) {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return vacuum(ctx, s.db)
+	return nil
 }
 
 // Retain deletes sessions older than cutoff, excluding workspaces that are
@@ -361,24 +361,8 @@ func (s *Store) Retain(ctx context.Context, cutoff time.Time) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if err := vacuum(ctx, s.db); err != nil {
-		return 0, err
-	}
 	n, _ := res.RowsAffected()
 	return n, nil
-}
-
-func vacuum(ctx context.Context, db *sql.DB) error {
-	var mode int
-	if err := db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
-		return err
-	}
-	if mode == 2 {
-		_, err := db.ExecContext(ctx, `PRAGMA incremental_vacuum`)
-		return err
-	}
-	_, err := db.ExecContext(ctx, `VACUUM`)
-	return err
 }
 
 // SearchSummaries finds sessions whose summary or title matches all query
