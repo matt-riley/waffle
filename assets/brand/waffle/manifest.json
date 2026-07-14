@@ -1,5 +1,17 @@
 {
   "schemaVersion": 1,
+  "rigs": [
+    {
+      "id": "waffle-standing-rig-v1",
+      "file": "rigs/standing-v1/rig.json",
+      "role": "source-locked layered raster rig for subtle standing idle animation",
+      "schemaVersion": 1,
+      "canvas": {
+        "width": 1536,
+        "height": 1024
+      }
+    }
+  ],
   "assets": [
     {
       "id": "waffle-model-sheet",

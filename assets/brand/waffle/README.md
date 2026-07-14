@@ -51,7 +51,7 @@ Static `manifest.json` files use schema version 1. Every asset requires `id`, `f
 | Raster model-sheet likeness and cross-view consistency | Approved |
 | Neutral master likeness and expression language | Approved |
 | Standing, sitting, curled, and airplane-ear documentation poses | Approved |
-| Standing layered raster rig v1 | Approved source and motion scope; Fusion assembly pending |
+| Standing layered raster rig v1 | Approved; tool-neutral package and Fusion idle assembly verified |
 | Idle proof and final package | Prototype reviewed; final animation pending |
 
 Do not advance a creative stage until its preceding gate is explicitly approved. Passing file validation is never evidence that Waffle's identity is acceptable.
