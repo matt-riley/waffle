@@ -229,7 +229,6 @@ func TestListIdleForReflectionUsesCandidateIndex(t *testing.T) {
 	rows, err := st.DB.QueryContext(ctx, `
 		EXPLAIN QUERY PLAN
 		SELECT id FROM sessions
-		INDEXED BY idx_sessions_reflection_candidates
 		WHERE summary = ''
 		  AND updated_at < ?
 		  AND EXISTS (
