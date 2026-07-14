@@ -16,6 +16,10 @@ type NotesIndex struct {
 	Now func() time.Time
 }
 
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (n *NotesIndex) now() time.Time {
 	if n != nil && n.Now != nil {
 		return n.Now().UTC()
@@ -39,6 +43,10 @@ func (n *NotesIndex) Upsert(ctx context.Context, agent string, note note, archiv
 	if n == nil || n.DB == nil {
 		return nil
 	}
+	return n.upsert(ctx, n.DB, agent, note, archived)
+}
+
+func (n *NotesIndex) upsert(ctx context.Context, db sqlExecer, agent string, note note, archived bool) error {
 	if agent == "" {
 		agent = DefaultAgent
 	}
@@ -64,7 +72,7 @@ func (n *NotesIndex) Upsert(ctx context.Context, agent string, note note, archiv
 	if body == "" {
 		body = extractBody(note.raw)
 	}
-	_, err := n.DB.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO memory_notes (id, agent, body, raw_line, archived, pinned, note_date, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -108,33 +116,56 @@ func (n *NotesIndex) SyncWorkspace(ctx context.Context, agent string, ws Workspa
 	if agent == "" {
 		agent = DefaultAgent
 	}
-	// Clear existing rows for this agent, then re-insert from files.
-	if _, err := n.DB.ExecContext(ctx, `DELETE FROM memory_notes WHERE agent = ?`, agent); err != nil {
-		return err
-	}
-	if err := n.syncFile(ctx, agent, ws.MemoryPath(), false); err != nil {
-		return err
-	}
-	return n.syncFile(ctx, agent, ws.ArchivePath(), true)
-}
-
-func (n *NotesIndex) syncFile(ctx context.Context, agent, path string, archived bool) error {
-	body, err := os.ReadFile(path)
+	notes, err := n.notesFromFile(ws.MemoryPath(), false)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	for i, line := range strings.Split(string(body), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if err := n.Upsert(ctx, agent, parseNote(line, i), archived); err != nil {
+	archived, err := n.notesFromFile(ws.ArchivePath(), true)
+	if err != nil {
+		return err
+	}
+	notes = append(notes, archived...)
+
+	// Rebuilding one workspace index used to commit each note separately. Keep
+	// the index replacement atomic and hold the single SQLite writer briefly.
+	tx, err := n.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_notes WHERE agent = ?`, agent); err != nil {
+		return err
+	}
+	for _, entry := range notes {
+		if err := n.upsert(ctx, tx, agent, entry.note, entry.archived); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
+}
+
+type indexedNote struct {
+	note     note
+	archived bool
+}
+
+func (n *NotesIndex) notesFromFile(path string, archived bool) ([]indexedNote, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	content := string(body)
+	notes := make([]indexedNote, 0, strings.Count(content, "\n")+1)
+	for i, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		notes = append(notes, indexedNote{note: parseNote(line, i), archived: archived})
+	}
+	return notes, nil
 }
 
 // Search runs FTS over live and archived notes, blending relevance with recency.
