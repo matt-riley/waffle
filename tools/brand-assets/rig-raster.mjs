@@ -77,37 +77,52 @@ function bilinearSample(source, x, y, output, outputOffset) {
   output[outputOffset + 3] = Math.round(alpha * 255);
 }
 
-export function transformRgba(source, transform) {
-  if (
-    transform.x === 0
-    && transform.y === 0
-    && transform.rotationDegrees === 0
-    && transform.scaleX === 1
-    && transform.scaleY === 1
-  ) {
+export function transformRgbaMatrix(source, matrix) {
+  if (!Array.isArray(matrix) || matrix.length !== 6 || !matrix.every(Number.isFinite)) {
+    throw new Error("transform matrix must contain six finite numbers");
+  }
+  if (matrix.every((value, index) => value === [1, 0, 0, 1, 0, 0][index])) {
     const identity = new PNG({ width: source.width, height: source.height });
     identity.data.set(source.data);
     return identity;
   }
-  if (transform.scaleX === 0 || transform.scaleY === 0) throw new Error("transform scale must be non-zero");
+  const [a, b, c, d, e, f] = matrix;
+  const determinant = a * d - b * c;
+  if (determinant === 0) throw new Error("transform matrix must be invertible");
   const output = new PNG({ width: source.width, height: source.height });
-  const pivotX = transform.pivot.x * (source.width - 1);
-  const pivotY = transform.pivot.y * (source.height - 1);
-  const translateX = transform.x * source.width;
-  const translateY = transform.y * source.height;
-  const radians = (transform.rotationDegrees * Math.PI) / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
   for (let y = 0; y < output.height; y += 1) {
     for (let x = 0; x < output.width; x += 1) {
-      const translatedX = x - pivotX - translateX;
-      const translatedY = y - pivotY - translateY;
-      const sourceX = (cosine * translatedX + sine * translatedY) / transform.scaleX + pivotX;
-      const sourceY = (-sine * translatedX + cosine * translatedY) / transform.scaleY + pivotY;
+      const translatedX = x - e;
+      const translatedY = y - f;
+      const sourceX = (d * translatedX - c * translatedY) / determinant;
+      const sourceY = (-b * translatedX + a * translatedY) / determinant;
       bilinearSample(source, sourceX, sourceY, output.data, (y * output.width + x) * 4);
     }
   }
   return output;
+}
+
+export function transformRgba(source, transform) {
+  if (transform.scaleX === 0 || transform.scaleY === 0) throw new Error("transform scale must be non-zero");
+  const pivotX = transform.pivot.x * (source.width - 1);
+  const pivotY = transform.pivot.y * (source.height - 1);
+  const radians = (transform.rotationDegrees * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const a = cosine * transform.scaleX;
+  const b = sine * transform.scaleX;
+  const c = -sine * transform.scaleY;
+  const d = cosine * transform.scaleY;
+  const translateX = transform.x * source.width;
+  const translateY = transform.y * source.height;
+  return transformRgbaMatrix(source, [
+    a,
+    b,
+    c,
+    d,
+    pivotX - a * pivotX - c * pivotY + translateX,
+    pivotY - b * pivotX - d * pivotY + translateY,
+  ]);
 }
 
 export async function recomposeLayers(manifestPath) {
