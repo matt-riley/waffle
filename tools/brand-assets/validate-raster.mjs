@@ -8,6 +8,7 @@ const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const FORBIDDEN_CHUNKS = new Set(["tEXt", "zTXt", "iTXt", "eXIf", "iCCP"]);
 const ALPHA_POLICIES = new Set(["opaque", "transparent-corners", "any"]);
 const REQUIRED_ASSET_FIELDS = ["id", "file", "role", "width", "height", "alphaPolicy", "provenance"];
+const REQUIRED_RIG_FIELDS = ["id", "file", "role", "schemaVersion", "canvas"];
 const MAX_ASSET_BYTES = 10 * 1024 * 1024;
 const MAX_MILESTONE_BYTES = 60 * 1024 * 1024;
 
@@ -126,6 +127,42 @@ export async function validateAssetManifest(manifestPath) {
   const seen = new Set();
   const pending = [];
   const files = new Map();
+
+  if (manifest.rigs !== undefined && !Array.isArray(manifest.rigs)) throw new Error("rigs must be an array");
+  for (const [index, rig] of (manifest.rigs ?? []).entries()) {
+    if (!rig || typeof rig !== "object" || Array.isArray(rig)) throw new Error(`rig ${index + 1} must be an object`);
+    const label = typeof rig.id === "string" && rig.id ? rig.id : String(index + 1);
+    for (const field of REQUIRED_RIG_FIELDS) {
+      if (!(field in rig) || rig[field] === "") throw new Error(`rig ${label} is missing ${field}`);
+    }
+    if (typeof rig.id !== "string" || rig.id.length === 0) throw new Error(`rig ${index + 1} id must be a non-empty string`);
+    if (seen.has(rig.id)) throw new Error(`duplicate manifest id: ${rig.id}`);
+    seen.add(rig.id);
+    if (typeof rig.role !== "string" || rig.role.length === 0) throw new Error(`rig ${label} role must be a non-empty string`);
+    if (!Number.isInteger(rig.schemaVersion) || rig.schemaVersion <= 0) throw new Error(`rig ${label} schemaVersion must be a positive integer`);
+    if (!rig.canvas || !positiveNumber(rig.canvas.width) || !positiveNumber(rig.canvas.height)) {
+      throw new Error(`rig ${label} canvas width and height must be positive numbers`);
+    }
+    let file;
+    try {
+      file = await physicallyContainedPath(directory, rig.file, `rig ${label} file`);
+    } catch (error) {
+      if (error.code === "ENOENT") throw new Error(`rig file does not exist: ${rig.file}`);
+      throw error;
+    }
+    let target;
+    try {
+      target = JSON.parse(await readFile(file, "utf8"));
+    } catch (error) {
+      throw new Error(`rig ${label} is not valid JSON: ${error.message}`);
+    }
+    if (target.schemaVersion !== rig.schemaVersion) {
+      throw new Error(`rig ${label} schemaVersion ${rig.schemaVersion} does not match rig ${target.schemaVersion}`);
+    }
+    if (target.canvas?.width !== rig.canvas.width || target.canvas?.height !== rig.canvas.height) {
+      throw new Error(`rig ${label} canvas ${rig.canvas.width}x${rig.canvas.height} does not match rig ${target.canvas?.width}x${target.canvas?.height}`);
+    }
+  }
 
   for (const [index, asset] of manifest.assets.entries()) {
     if (!asset || typeof asset !== "object" || Array.isArray(asset)) throw new Error(`asset ${index + 1} must be an object`);

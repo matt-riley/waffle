@@ -82,11 +82,15 @@ async function rigFixture(t) {
   const lifted = blank();
   const foreground = blank();
   const hiddenRepair = blank();
+  const leftLid = blank();
+  const rightLid = blank();
   paint(body, 100, 100, [220, 60, 40, 255]);
   paint(planted, 200, 200, [240, 170, 50, 255]);
   paint(lifted, 200, 160, [240, 170, 50, 255]);
   paint(foreground, 100, 100, [25, 80, 180, 255]);
   paint(hiddenRepair, 400, 400, [120, 40, 160, 255]);
+  paint(leftLid, 300, 300, [120, 210, 80, 255]);
+  paint(rightLid, 301, 300, [80, 190, 220, 255]);
   paint(source, 100, 100, [25, 80, 180, 255]);
   paint(source, 200, 200, [240, 170, 50, 255]);
   reference.data.set(source.data);
@@ -101,6 +105,8 @@ async function rigFixture(t) {
     lifted: path.join(variantsDirectory, "lifted.png"),
     foreground: path.join(layersDirectory, "foreground.png"),
     hiddenRepair: path.join(layersDirectory, "hidden-repair.png"),
+    leftLid: path.join(layersDirectory, "left-lid.png"),
+    rightLid: path.join(layersDirectory, "right-lid.png"),
   };
   await Promise.all([
     writePng(files.source, source),
@@ -111,6 +117,8 @@ async function rigFixture(t) {
     writePng(files.lifted, lifted),
     writePng(files.foreground, foreground),
     writePng(files.hiddenRepair, hiddenRepair),
+    writePng(files.leftLid, leftLid),
+    writePng(files.rightLid, rightLid),
   ]);
 
   const manifest = {
@@ -176,6 +184,32 @@ async function rigFixture(t) {
         limits: { x: { min: -0.5, max: 0.5 } },
         sha256: await sha256(files.pawAnchor),
       },
+      {
+        id: "left-lid",
+        file: "layers/left-lid.png",
+        role: "overlay",
+        parent: "body",
+        drawOrder: 40,
+        visibleAtNeutral: false,
+        blendMode: "normal",
+        pivot: { x: 0.2, y: 0.3 },
+        neutral: { x: 0, y: 0, rotationDegrees: 0, scaleX: 1, scaleY: 1 },
+        limits: {},
+        sha256: await sha256(files.leftLid),
+      },
+      {
+        id: "right-lid",
+        file: "layers/right-lid.png",
+        role: "overlay",
+        parent: "body",
+        drawOrder: 41,
+        visibleAtNeutral: false,
+        blendMode: "normal",
+        pivot: { x: 0.2, y: 0.3 },
+        neutral: { x: 0, y: 0, rotationDegrees: 0, scaleX: 1, scaleY: 1 },
+        limits: {},
+        sha256: await sha256(files.rightLid),
+      },
     ],
     variants: {
       "front-paw-left": {
@@ -197,6 +231,16 @@ async function rigFixture(t) {
         min: -0.015,
         max: 0.015,
         bindings: [{ layer: "body", property: "y", factor: 1 }],
+      },
+      blinkLeft: {
+        min: 0,
+        max: 1,
+        bindings: [{ layer: "left-lid", property: "opacity", factor: 1 }],
+      },
+      blinkRight: {
+        min: 0,
+        max: 1,
+        bindings: [{ layer: "right-lid", property: "opacity", factor: 1 }],
       },
     },
   };
@@ -285,6 +329,65 @@ test("evaluateClip returns deterministic controls, variants, and bound local tra
   assert.equal(exact.variants.get("front-paw-left"), "lifted");
   assert.equal(evaluateClip(manifest, clip, 23).variants.get("front-paw-left"), "lifted");
   assert.equal(evaluateClip(manifest, clip, 24).variants.get("front-paw-left"), "planted");
+  assert.equal(exact.layers.get("left-lid").opacity, 0);
+  assert.equal(exact.layers.get("right-lid").opacity, 0);
+});
+
+test("evaluateClip resolves numeric variant thresholds unless explicit variant keys override them", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  manifest.controls.pawState = {
+    min: -1,
+    max: 1,
+    bindings: [{
+      variant: "front-paw-left",
+      thresholds: [
+        { max: -0.5, member: "lifted" },
+        { max: 0.5, member: "planted" },
+        { max: 1, member: "lifted" },
+      ],
+    }],
+  };
+  clip.controls.pawState = [
+    { frame: 0, value: -1, interpolation: "hold" },
+    { frame: 12, value: 0, interpolation: "hold" },
+    { frame: 24, value: 1, interpolation: "hold" },
+    { frame: 47, value: -1, interpolation: "hold" },
+  ];
+
+  assert.equal(evaluateClip(manifest, { ...clip, variants: {} }, 0).variants.get("front-paw-left"), "lifted");
+  assert.equal(evaluateClip(manifest, { ...clip, variants: {} }, 12).variants.get("front-paw-left"), "planted");
+  assert.equal(evaluateClip(manifest, { ...clip, variants: {} }, 24).variants.get("front-paw-left"), "lifted");
+  assert.equal(evaluateClip(manifest, clip, 12).variants.get("front-paw-left"), "lifted", "explicit clip variant wins");
+  assert.doesNotThrow(
+    () => assertLoopClosure(manifest, { ...clip, variants: {} }),
+    "a numeric binding supplies the required frame-zero variant state",
+  );
+});
+
+test("production headTurn and jawOpen controls select their registered painted states", async () => {
+  const manifest = JSON.parse(await readFile(path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2/rig.json",
+  ), "utf8"));
+  const clip = {
+    schemaVersion: 1,
+    id: "variant-control-probe",
+    fps: 24,
+    frameCount: 3,
+    loop: false,
+    requiredClosure: { firstFrame: 0, lastFrame: 2 },
+    variants: {},
+    controls: {
+      headTurn: [{ frame: 0, value: -1 }, { frame: 1, value: 0 }, { frame: 2, value: 1 }],
+      jawOpen: [{ frame: 0, value: 0 }, { frame: 1, value: 1 }, { frame: 2, value: 0 }],
+    },
+  };
+
+  assert.equal(evaluateClip(manifest, clip, 0).variants.get("head-base"), "turn-left");
+  assert.equal(evaluateClip(manifest, clip, 1).variants.get("head-base"), "neutral");
+  assert.equal(evaluateClip(manifest, clip, 2).variants.get("head-base"), "turn-right");
+  assert.equal(evaluateClip(manifest, clip, 0).variants.get("jaw"), "closed");
+  assert.equal(evaluateClip(manifest, clip, 1).variants.get("jaw"), "open");
 });
 
 test("evaluateClip rejects out-of-range values, unknown controls, and missing frames", async (t) => {
@@ -348,6 +451,41 @@ test("renderRigFrame preserves exact neutral source bytes when hidden layers con
   const frame = await renderRigFrame(manifestPath, clipPath, 0);
 
   assert.deepEqual(frame.data, source.data);
+});
+
+test("renderRigFrame activates independent and synchronized blink overlays with scaled alpha", async (t) => {
+  const { clip, clipPath, manifestPath, source } = await rigFixture(t);
+  delete clip.controls.bodyBob;
+  const blinkKeys = (value) => [
+    { frame: 0, value: 0 },
+    { frame: 12, value },
+    { frame: 47, value: 0 },
+  ];
+  clip.controls.blinkLeft = blinkKeys(0.5);
+  await writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`);
+
+  const leftOnly = await renderRigFrame(manifestPath, clipPath, 12);
+  const leftOffset = (300 * 1536 + 300) * 4;
+  const rightOffset = (300 * 1536 + 301) * 4;
+  assert.deepEqual([...leftOnly.data.subarray(leftOffset, leftOffset + 3)], [120, 210, 80]);
+  assert.equal(leftOnly.data[leftOffset + 3], 128);
+  assert.equal(leftOnly.data[rightOffset + 3], 0);
+
+  delete clip.controls.blinkLeft;
+  clip.controls.blinkRight = blinkKeys(1);
+  await writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`);
+  const rightOnly = await renderRigFrame(manifestPath, clipPath, 12);
+  assert.equal(rightOnly.data[leftOffset + 3], 0);
+  assert.deepEqual([...rightOnly.data.subarray(rightOffset, rightOffset + 4)], [80, 190, 220, 255]);
+
+  clip.controls.blinkLeft = blinkKeys(1);
+  await writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`);
+  const synchronized = await renderRigFrame(manifestPath, clipPath, 12);
+  assert.equal(synchronized.data[leftOffset + 3], 255);
+  assert.equal(synchronized.data[rightOffset + 3], 255);
+
+  const neutral = await renderRigFrame(manifestPath, clipPath, 0);
+  assert.deepEqual(neutral.data, source.data);
 });
 
 test("assertLoopClosure accepts exact closure and rejects changed controls or variants", async (t) => {

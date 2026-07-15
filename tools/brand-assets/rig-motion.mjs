@@ -150,6 +150,18 @@ function checkedLayerLimits(layer, transform) {
   }
 }
 
+function variantFromNumericControl(manifest, setId, controls) {
+  for (const [name, control] of Object.entries(manifest.controls)) {
+    const binding = control.bindings.find((candidate) => candidate.variant === setId);
+    if (!binding) continue;
+    const value = controls.get(name);
+    const threshold = binding.thresholds.find((candidate) => value <= candidate.max);
+    if (!threshold) throw new Error(`control ${name} value ${value} has no variant threshold for ${setId}`);
+    return threshold.member;
+  }
+  return undefined;
+}
+
 export function evaluateClip(manifest, clip, frame) {
   validateRigV2Shape(manifest);
   validateMotionClipShape(manifest, clip);
@@ -164,17 +176,10 @@ export function evaluateClip(manifest, clip, frame) {
     controls.set(name, checkedControlValue(control, name, value));
   }
 
-  const variants = new Map();
-  for (const [setId, variantSet] of Object.entries(manifest.variants)) {
-    const keyframes = clip.variants[setId];
-    const memberId = keyframes === undefined
-      ? variantSet.members.find((member) => member.neutral).id
-      : interpolateKeyframes(keyframes, Math.min(frame, keyframes.at(-1).frame));
-    variantForLayer(manifest, variantSet.layer, memberId);
-    variants.set(setId, memberId);
-  }
-
-  const layers = new Map(manifest.layers.map((layer) => [layer.id, { ...layer.neutral }]));
+  const layers = new Map(manifest.layers.map((layer) => [layer.id, {
+    ...layer.neutral,
+    opacity: layer.visibleAtNeutral ? 1 : 0,
+  }]));
   for (const [name, value] of controls) {
     for (const binding of manifest.controls[name].bindings) {
       if (!("layer" in binding)) continue;
@@ -183,6 +188,22 @@ export function evaluateClip(manifest, clip, frame) {
     }
   }
   for (const layer of manifest.layers) checkedLayerLimits(layer, layers.get(layer.id));
+  for (const [layerId, state] of layers) {
+    if (!Number.isFinite(state.opacity) || state.opacity < 0 || state.opacity > 1) {
+      throw new Error(`layer ${layerId} opacity ${state.opacity} is outside 0..1`);
+    }
+  }
+
+  const variants = new Map();
+  for (const [setId, variantSet] of Object.entries(manifest.variants)) {
+    const keyframes = clip.variants[setId];
+    const memberId = keyframes !== undefined
+      ? interpolateKeyframes(keyframes, Math.min(frame, keyframes.at(-1).frame))
+      : variantFromNumericControl(manifest, setId, controls)
+        ?? variantSet.members.find((member) => member.neutral).id;
+    variantForLayer(manifest, variantSet.layer, memberId);
+    variants.set(setId, memberId);
+  }
 
   return { layers, variants, controls };
 }
@@ -200,7 +221,10 @@ export function assertLoopClosure(manifest, clip) {
   validateRigV2Shape(manifest);
   validateMotionClipShape(manifest, clip);
   for (const setId of Object.keys(manifest.variants)) {
-    if (!clip.variants[setId]?.some((keyframe) => keyframe.frame === 0)) {
+    const hasNumericBinding = Object.values(manifest.controls).some((control) => (
+      control.bindings.some((binding) => binding.variant === setId)
+    ));
+    if (!hasNumericBinding && !clip.variants[setId]?.some((keyframe) => keyframe.frame === 0)) {
       throw new Error(`variant ${setId} must declare a state at frame 0`);
     }
   }
@@ -253,7 +277,7 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
   }
 
   const activeLayers = manifest.layers
-    .filter((layer) => layer.visibleAtNeutral && !hiddenLayers.has(layer.id))
+    .filter((layer) => evaluated.layers.get(layer.id).opacity > 0 && !hiddenLayers.has(layer.id))
     .toSorted((left, right) => left.drawOrder - right.drawOrder);
   for (const layer of activeLayers) {
     const file = layer.role === "variant-anchor"
@@ -262,7 +286,14 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
       )).file
       : layer.file;
     const raster = await readRgba(path.resolve(directory, file));
-    output = sourceOver(output, transformRgbaMatrix(raster, world.get(layer.id)));
+    const transformed = transformRgbaMatrix(raster, world.get(layer.id));
+    const opacity = evaluated.layers.get(layer.id).opacity;
+    if (opacity !== 1) {
+      for (let offset = 3; offset < transformed.data.length; offset += 4) {
+        transformed.data[offset] = Math.round(transformed.data[offset] * opacity);
+      }
+    }
+    output = sourceOver(output, transformed);
   }
   return output;
 }

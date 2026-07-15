@@ -1505,11 +1505,20 @@
       "bindings": [
         {
           "variant": "head-base",
-          "states": {
-            "-1": "turn-left",
-            "0": "neutral",
-            "1": "turn-right"
-          }
+          "thresholds": [
+            {
+              "max": -0.5,
+              "member": "turn-left"
+            },
+            {
+              "max": 0.5,
+              "member": "neutral"
+            },
+            {
+              "max": 1,
+              "member": "turn-right"
+            }
+          ]
         }
       ]
     },
@@ -1551,13 +1560,13 @@
       "bindings": [
         {
           "layer": "upper-lid-left",
-          "property": "y",
-          "factor": 0
+          "property": "opacity",
+          "factor": 1
         },
         {
           "layer": "lower-lid-left",
-          "property": "y",
-          "factor": 0
+          "property": "opacity",
+          "factor": 1
         }
       ]
     },
@@ -1567,13 +1576,13 @@
       "bindings": [
         {
           "layer": "upper-lid-right",
-          "property": "y",
-          "factor": 0
+          "property": "opacity",
+          "factor": 1
         },
         {
           "layer": "lower-lid-right",
-          "property": "y",
-          "factor": 0
+          "property": "opacity",
+          "factor": 1
         }
       ]
     },
@@ -1605,10 +1614,16 @@
       "bindings": [
         {
           "variant": "jaw",
-          "states": {
-            "0": "closed",
-            "1": "open"
-          }
+          "thresholds": [
+            {
+              "max": 0.5,
+              "member": "closed"
+            },
+            {
+              "max": 1,
+              "member": "open"
+            }
+          ]
         }
       ]
     },

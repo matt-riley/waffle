@@ -64,6 +64,7 @@ function assertSafeTarget(outputDirectory) {
 }
 
 const SAFE_LAYER_ID = /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/u;
+const AUTHORITATIVE_PACKAGE_FILES = ["repairs.json", "variants.json", "GENERATION.md", "README.md"];
 
 function containedOutputPath(temporaryDirectory, ...parts) {
   const base = path.resolve(temporaryDirectory);
@@ -232,6 +233,21 @@ async function classifyExistingTarget(outputDirectory, masksFile) {
   return "v2";
 }
 
+async function readAuthoritativePackageFiles(outputDirectory, targetKind) {
+  const files = new Map();
+  if (targetKind !== "v2") return files;
+  for (const name of AUTHORITATIVE_PACKAGE_FILES) {
+    const file = path.join(outputDirectory, name);
+    if (!await exists(file)) continue;
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error(`authoritative package file ${name} must be a regular nonsymlink file`);
+    }
+    files.set(name, await readFile(file));
+  }
+  return files;
+}
+
 function orderedDefinitions(definitions, layers) {
   if (definitions.length !== layers.size || definitions.some((definition) => !layers.has(definition.id))) {
     throw new Error("layerDefinitions must describe every partition layer exactly once");
@@ -239,7 +255,16 @@ function orderedDefinitions(definitions, layers) {
   return definitions;
 }
 
-async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan }) {
+function bootstrapControls(controls, definitions) {
+  const baseLayers = new Set(definitions.map((definition) => definition.id));
+  return Object.fromEntries(Object.entries(controls ?? {}).filter(([, control]) => (
+    Array.isArray(control.bindings)
+      && control.bindings.length > 0
+      && control.bindings.every((binding) => "layer" in binding && baseLayers.has(binding.layer))
+  )));
+}
+
+async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan, preservedFiles }) {
   const source = await readRgba(sourceFile);
   if (source.width !== masks.canvas?.width || source.height !== masks.canvas?.height) {
     throw new Error(`mask canvas ${masks.canvas?.width}x${masks.canvas?.height} does not match source ${source.width}x${source.height}`);
@@ -254,6 +279,9 @@ async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan }) {
 
   await mkdir(plan.layersDirectory, { recursive: true });
   await writeFile(plan.masksFile, masksBytes);
+  await Promise.all([...preservedFiles].map(([name, bytes]) => (
+    writeFile(containedOutputPath(path.dirname(plan.manifestFile), name), bytes)
+  )));
 
   await writeRgba(plan.referenceFile, source);
 
@@ -290,7 +318,7 @@ async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan }) {
     },
     layers: manifestLayers,
     variants: masks.variants ?? {},
-    controls: masks.controls,
+    controls: bootstrapControls(masks.controls, definitions),
   };
   await writeFile(plan.manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
   await validateRig(plan.manifestFile);
@@ -346,6 +374,7 @@ export async function buildStandingRigV2({ sourceFile, masksFile, outputDirector
 
   await recoverInterruptedPromotion(outputDirectory, renamePath);
   const targetKind = await classifyExistingTarget(outputDirectory, masksFile);
+  const preservedFiles = await readAuthoritativePackageFiles(outputDirectory, targetKind);
   const masksBytes = await readFile(masksFile);
   const masks = JSON.parse(masksBytes.toString("utf8"));
   const temporaryDirectory = `${outputDirectory}.building-${process.pid}`;
@@ -353,7 +382,7 @@ export async function buildStandingRigV2({ sourceFile, masksFile, outputDirector
   await rm(temporaryDirectory, { recursive: true, force: true });
 
   try {
-    await writeTemporaryPackage({ sourceFile, masksBytes, masks, plan });
+    await writeTemporaryPackage({ sourceFile, masksBytes, masks, plan, preservedFiles });
     await promote({ outputDirectory, temporaryDirectory, targetKind, masksFile, renamePath });
   } catch (error) {
     await rm(temporaryDirectory, { recursive: true, force: true });

@@ -80,15 +80,28 @@ const PRODUCTION_CONTROLS = {
   headTilt: { range: [-5, 5], bindings: [["head-base", "rotationDegrees", 1]] },
   headTurn: {
     range: [-1, 1],
-    variants: [{ variant: "head-base", states: { "-1": "turn-left", 0: "neutral", 1: "turn-right" } }],
+    variants: [{
+      variant: "head-base",
+      thresholds: [
+        { max: -0.5, member: "turn-left" },
+        { max: 0.5, member: "neutral" },
+        { max: 1, member: "turn-right" },
+      ],
+    }],
   },
   gazeX: { range: [-0.012, 0.012], bindings: [["pupil-left", "x", 1], ["pupil-right", "x", 1]] },
   gazeY: { range: [-0.009, 0.009], bindings: [["pupil-left", "y", 1], ["pupil-right", "y", 1]] },
-  blinkLeft: { range: [0, 1], bindings: [["upper-lid-left", "y", 0], ["lower-lid-left", "y", 0]] },
-  blinkRight: { range: [0, 1], bindings: [["upper-lid-right", "y", 0], ["lower-lid-right", "y", 0]] },
+  blinkLeft: { range: [0, 1], bindings: [["upper-lid-left", "opacity", 1], ["lower-lid-left", "opacity", 1]] },
+  blinkRight: { range: [0, 1], bindings: [["upper-lid-right", "opacity", 1], ["lower-lid-right", "opacity", 1]] },
   earLeft: { range: [-6, 6], bindings: [["ear-left", "rotationDegrees", 1]] },
   earRight: { range: [-6, 6], bindings: [["ear-right", "rotationDegrees", 1]] },
-  jawOpen: { range: [0, 1], variants: [{ variant: "jaw", states: { 0: "closed", 1: "open" } }] },
+  jawOpen: {
+    range: [0, 1],
+    variants: [{
+      variant: "jaw",
+      thresholds: [{ max: 0.5, member: "closed" }, { max: 1, member: "open" }],
+    }],
+  },
   tailBase: { range: [-8, 8], bindings: [["tail-base", "rotationDegrees", 1]] },
   tailMid: { range: [-12, 12], bindings: [["tail-mid", "rotationDegrees", 1]] },
   tailTip: { range: [-15, 15], bindings: [["tail-tip", "rotationDegrees", 1]] },
@@ -204,8 +217,8 @@ test("rejects unknown control binding targets and properties", () => {
   assert.throws(() => validateRigV2Shape(unknownLayer), /unknown layer missing/);
 
   const unknownProperty = validManifest();
-  unknownProperty.controls.bodyBob.bindings[0].property = "opacity";
-  assert.throws(() => validateRigV2Shape(unknownProperty), /unsupported property opacity/);
+  unknownProperty.controls.bodyBob.bindings[0].property = "visibility";
+  assert.throws(() => validateRigV2Shape(unknownProperty), /unsupported property visibility/);
 
   const unknownVariant = validManifest();
   unknownVariant.controls.pawState = {
@@ -214,6 +227,63 @@ test("rejects unknown control binding targets and properties", () => {
     bindings: [{ variant: "missing" }],
   };
   assert.throws(() => validateRigV2Shape(unknownVariant), /unknown variant set missing/);
+});
+
+test("validates opacity bindings against the layer neutral opacity and control range", () => {
+  const valid = validManifest();
+  valid.layers.push({
+    ...structuredClone(valid.layers[0]),
+    id: "upper-lid-left",
+    file: "layers/upper-lid-left.png",
+    parent: "front-paw-left",
+    drawOrder: 40,
+    visibleAtNeutral: false,
+    limits: {},
+  });
+  valid.controls.blinkLeft = {
+    min: 0,
+    max: 1,
+    bindings: [{ layer: "upper-lid-left", property: "opacity", factor: 1 }],
+  };
+  assert.doesNotThrow(() => validateRigV2Shape(valid));
+
+  const overflow = structuredClone(valid);
+  overflow.controls.blinkLeft.bindings[0].factor = 1.01;
+  assert.throws(() => validateRigV2Shape(overflow), /opacity must remain inside 0\.\.1/);
+
+  const visibleOverflow = structuredClone(valid);
+  visibleOverflow.controls.blinkLeft.bindings[0].layer = "torso";
+  assert.throws(() => validateRigV2Shape(visibleOverflow), /opacity must remain inside 0\.\.1/);
+});
+
+test("requires deterministic complete numeric variant thresholds", () => {
+  const valid = validManifest();
+  valid.controls.pawState = {
+    min: -1,
+    max: 1,
+    bindings: [{
+      variant: "front-paw-left",
+      thresholds: [
+        { max: -0.5, member: "lifted" },
+        { max: 0.5, member: "planted" },
+        { max: 1, member: "wave" },
+      ],
+    }],
+  };
+  assert.doesNotThrow(() => validateRigV2Shape(valid));
+
+  for (const [label, mutate, message] of [
+    ["null map", (manifest) => { manifest.controls.pawState.bindings[0].thresholds = null; }, /thresholds must be a non-empty array/],
+    ["unknown member", (manifest) => { manifest.controls.pawState.bindings[0].thresholds[0].member = "missing"; }, /unknown member missing/],
+    ["missing neutral", (manifest) => { manifest.controls.pawState.bindings[0].thresholds[1].member = "lifted"; }, /must map the neutral member planted at value 0/],
+    ["out of range", (manifest) => { manifest.controls.pawState.bindings[0].thresholds[0].max = -2; }, /threshold must be inside -1\.\.1/],
+    ["ambiguous", (manifest) => { manifest.controls.pawState.bindings[0].thresholds[1].max = -0.5; }, /thresholds must be strictly increasing/],
+    ["incomplete", (manifest) => { manifest.controls.pawState.bindings[0].thresholds.at(-1).max = 0.9; }, /last threshold must equal control max 1/],
+  ]) {
+    const invalid = structuredClone(valid);
+    mutate(invalid);
+    assert.throws(() => validateRigV2Shape(invalid), message, label);
+  }
 });
 
 test("requires every variant anchor to have exactly one neutral variant", () => {
@@ -328,8 +398,13 @@ test("validates the motion clip shape against controls and variants", () => {
 
 test("production standing rig v2 exposes the complete hierarchy, variants, controls, and joint limits", async () => {
   const manifestPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/rig.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const masksPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/masks.json");
+  const [manifest, masks] = await Promise.all([
+    readFile(manifestPath, "utf8").then(JSON.parse),
+    readFile(masksPath, "utf8").then(JSON.parse),
+  ]);
   assert.doesNotThrow(() => validateRigV2Shape(manifest));
+  assert.deepEqual(masks.controls, manifest.controls, "authoritative masks controls must reproduce the final manifest");
 
   assert.deepEqual(
     Object.fromEntries(manifest.layers.map((layer) => [layer.id, layer.parent])),
@@ -354,7 +429,7 @@ test("production standing rig v2 exposes the complete hierarchy, variants, contr
       .map((binding) => [binding.layer, binding.property, binding.factor]);
     const variantBindings = actual.bindings
       .filter((binding) => "variant" in binding)
-      .map((binding) => ({ variant: binding.variant, states: binding.states }));
+      .map((binding) => ({ variant: binding.variant, thresholds: binding.thresholds }));
     assert.deepEqual(layerBindings, expected.bindings ?? [], `${name} layer bindings drifted`);
     assert.deepEqual(variantBindings, expected.variants ?? [], `${name} variant bindings drifted`);
   }

@@ -103,6 +103,17 @@ function asset(file = "cat.png", overrides = {}) {
   };
 }
 
+function rig(file = "rig.json", overrides = {}) {
+  return {
+    id: "cat-rig",
+    file,
+    role: "articulated raster rig",
+    schemaVersion: 2,
+    canvas: { width: 4, height: 4 },
+    ...overrides,
+  };
+}
+
 test("accepts a schema-v1 raster asset manifest and RGBA PNG", async (t) => {
   const directory = await workspace(t);
   await pngFile(directory, "cat.png");
@@ -112,6 +123,34 @@ test("accepts a schema-v1 raster asset manifest and RGBA PNG", async (t) => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /PASS .*manifest\.json assets=1 bytes=/);
+});
+
+test("validates top-level rig inventory paths, schema versions, and canvases", async (t) => {
+  const directory = await workspace(t);
+  await pngFile(directory, "cat.png");
+  await writeFile(path.join(directory, "rig.json"), JSON.stringify({
+    schemaVersion: 2,
+    canvas: { width: 4, height: 4 },
+  }));
+  let manifest = await manifestFile(directory, [asset()], { rigs: [rig()] });
+
+  let result = run(manifest);
+  assert.equal(result.status, 0, result.stderr);
+
+  manifest = await manifestFile(directory, [asset()], { rigs: [rig("../rig.json")] });
+  result = run(manifest);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rig cat-rig file must stay inside the manifest directory/);
+
+  manifest = await manifestFile(directory, [asset()], { rigs: [rig("rig.json", { schemaVersion: 1 })] });
+  result = run(manifest);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rig cat-rig schemaVersion 1 does not match rig 2/);
+
+  manifest = await manifestFile(directory, [asset()], { rigs: [rig("rig.json", { canvas: { width: 5, height: 4 } })] });
+  result = run(manifest);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rig cat-rig canvas 5x4 does not match rig 4x4/);
 });
 
 test("requires every declared asset file to exist", async (t) => {

@@ -23,7 +23,7 @@ mise run brand-check
 ```
 
 - `brand-install` restores the pinned asset-tool dependencies from the lockfile.
-- `brand-check` runs all brand-tool tests, then validates the static and idle manifests when they exist. It is safe during early stages when no raster deliverables exist yet.
+- `brand-check` runs all brand-tool tests, validates the top-level rig inventory plus static assets, and validates the idle manifest when it exists. Rig inventory paths, schema versions, and canvases must match their referenced manifests.
 - `brand-rig-check` validates standing v1 and v2, including each rig's exact neutral reconstruction.
 
 Production helpers are explicit so they never overwrite an approved master:

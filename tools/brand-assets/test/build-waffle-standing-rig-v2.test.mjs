@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -243,6 +243,65 @@ test("builder preserves an existing validated v2 package until its replacement p
 
   assert.deepEqual(await readFile(path.join(fixture.outputDirectory, "rig.json")), originalManifest);
   assert.deepEqual(await builderTemps(fixture.outputDirectory), []);
+});
+
+test("base rebuild preserves authoritative art configs and package documentation for the art pass", async (t) => {
+  const fixture = await productionFixture(t);
+  await buildStandingRigV2(fixture);
+  const authoritative = {
+    "repairs.json": "{\"schemaVersion\":1,\"kind\":\"repairs\"}\n",
+    "variants.json": "{\"schemaVersion\":1,\"kind\":\"variants\"}\n",
+    "GENERATION.md": "# Durable generation record\n",
+    "README.md": "# Package contract\n",
+  };
+  await Promise.all(Object.entries(authoritative).map(([name, contents]) => (
+    writeFile(path.join(fixture.outputDirectory, name), contents)
+  )));
+
+  await buildStandingRigV2(fixture);
+
+  for (const [name, contents] of Object.entries(authoritative)) {
+    assert.equal(await readFile(path.join(fixture.outputDirectory, name), "utf8"), contents);
+  }
+});
+
+test("injected rebuild failure preserves the complete 48-layer production package and final controls", async (t) => {
+  const root = await workspace(t);
+  const productionWaffle = path.resolve(import.meta.dirname, "../../../assets/brand/waffle");
+  const waffle = path.join(root, "assets", "brand", "waffle");
+  const sourceFile = path.join(waffle, "poses", "standing.png");
+  const outputDirectory = path.join(waffle, "rigs", "standing-v2");
+  await Promise.all([
+    mkdir(path.dirname(sourceFile), { recursive: true }),
+    mkdir(path.dirname(outputDirectory), { recursive: true }),
+  ]);
+  await Promise.all([
+    cp(path.join(productionWaffle, "poses", "standing.png"), sourceFile),
+    cp(path.join(productionWaffle, "rigs", "standing-v2"), outputDirectory, { recursive: true }),
+  ]);
+  const masksFile = path.join(outputDirectory, "masks.json");
+  const original = JSON.parse(await readFile(path.join(outputDirectory, "rig.json"), "utf8"));
+  const paths = recoveryPaths(outputDirectory);
+
+  await assert.rejects(buildStandingRigV2({
+    sourceFile,
+    masksFile,
+    outputDirectory,
+    renamePath: async (from, to) => {
+      if (from === paths.temporary && to === outputDirectory) throw new Error("injected production rebuild failure");
+      return rename(from, to);
+    },
+  }), /injected production rebuild failure/);
+
+  const restored = JSON.parse(await readFile(path.join(outputDirectory, "rig.json"), "utf8"));
+  assert.equal(restored.layers.length, 48);
+  assert.deepEqual(restored.controls, original.controls);
+  for (const name of ["repairs.json", "variants.json", "GENERATION.md", "README.md"]) {
+    assert.deepEqual(
+      await readFile(path.join(outputDirectory, name)),
+      await readFile(path.join(productionWaffle, "rigs", "standing-v2", name)),
+    );
+  }
 });
 
 test("promotion failure restores the validated previous package", async (t) => {

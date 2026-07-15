@@ -119,6 +119,17 @@ function masks() {
         max: 4,
         bindings: [{ layer: "head-base", property: "rotationDegrees", factor: 1 }],
       },
+      headTurn: {
+        min: -1,
+        max: 1,
+        bindings: [{
+          variant: "head-base",
+          thresholds: [
+            { max: -0.5, member: "turn-left" },
+            { max: 1, member: "neutral" },
+          ],
+        }],
+      },
     },
   };
 }
@@ -319,6 +330,7 @@ test("builder extracts registered variants, preserves the neutral anchor exactly
   assert.equal(manifest.layers.find((layer) => layer.id === "neck-repair").visibleAtNeutral, false);
   assert.equal(manifest.layers.find((layer) => layer.id === "head-base").role, "variant-anchor");
   assert.equal(manifest.variants["head-base"].members.filter((member) => member.neutral).length, 1);
+  assert.deepEqual(manifest.controls, masks().controls, "art pass must restore authoritative controls from masks.json");
   assert.deepEqual(await readFile(path.join(inputs.outputDirectory, "repairs.json")), repairsBytes);
   assert.deepEqual(await readFile(path.join(inputs.outputDirectory, "variants.json")), variantsBytes);
   assert.deepEqual(await validateRig(inputs.manifestPath), { layerCount: 3, mismatchPixels: 0 });

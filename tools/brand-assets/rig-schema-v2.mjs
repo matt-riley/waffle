@@ -3,6 +3,7 @@ import path from "node:path";
 const SHA256 = /^[a-f\d]{64}$/u;
 const LAYER_ROLES = new Set(["visible", "repair", "overlay", "variant-anchor"]);
 const TRANSFORM_PROPERTIES = new Set(["x", "y", "rotationDegrees", "scaleX", "scaleY"]);
+const CONTROL_LAYER_PROPERTIES = new Set([...TRANSFORM_PROPERTIES, "opacity"]);
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -138,8 +139,47 @@ function validateVariants(manifest, byId) {
   }
 }
 
+function validateVariantThresholds(manifest, name, control, binding) {
+  const variantSet = manifest.variants[binding.variant];
+  const thresholds = binding.thresholds;
+  if (!Array.isArray(thresholds) || thresholds.length === 0) {
+    throw new Error(`control ${name} variant ${binding.variant} thresholds must be a non-empty array`);
+  }
+  const knownMembers = new Set(variantSet.members.map((member) => member.id));
+  const mappedMembers = new Set();
+  let previous = control.min;
+  for (const [index, threshold] of thresholds.entries()) {
+    if (!object(threshold) || !finite(threshold.max) || typeof threshold.member !== "string") {
+      throw new Error(`control ${name} variant ${binding.variant} threshold ${index + 1} must contain finite max and member`);
+    }
+    if (threshold.max <= control.min || threshold.max > control.max) {
+      throw new Error(`control ${name} variant ${binding.variant} threshold must be inside ${control.min}..${control.max}`);
+    }
+    if (threshold.max <= previous) {
+      throw new Error(`control ${name} variant ${binding.variant} thresholds must be strictly increasing`);
+    }
+    if (!knownMembers.has(threshold.member)) {
+      throw new Error(`control ${name} variant ${binding.variant} threshold references unknown member ${threshold.member}`);
+    }
+    mappedMembers.add(threshold.member);
+    previous = threshold.max;
+  }
+  if (thresholds.at(-1).max !== control.max) {
+    throw new Error(`control ${name} variant ${binding.variant} last threshold must equal control max ${control.max}`);
+  }
+  const neutral = variantSet.members.find((member) => member.neutral).id;
+  const zeroState = thresholds.find((threshold) => 0 <= threshold.max)?.member;
+  if (zeroState !== neutral) {
+    throw new Error(`control ${name} variant ${binding.variant} must map the neutral member ${neutral} at value 0`);
+  }
+  for (const member of knownMembers) {
+    if (!mappedMembers.has(member)) throw new Error(`control ${name} variant ${binding.variant} must map member ${member}`);
+  }
+}
+
 function validateControls(manifest, byId) {
   if (!object(manifest.controls) || Object.keys(manifest.controls).length === 0) throw new Error("controls must be a non-empty object");
+  const variantOwners = new Map();
   for (const [name, control] of Object.entries(manifest.controls)) {
     if (!object(control) || !finite(control.min) || !finite(control.max) || control.min >= control.max) {
       throw new Error(`control ${name} must have finite min < max`);
@@ -148,11 +188,24 @@ function validateControls(manifest, byId) {
     for (const [index, binding] of control.bindings.entries()) {
       if (!object(binding)) throw new Error(`control ${name} binding ${index + 1} must be an object`);
       if ("layer" in binding) {
-        if (!byId.has(binding.layer)) throw new Error(`control ${name} binding references unknown layer ${binding.layer}`);
-        if (!TRANSFORM_PROPERTIES.has(binding.property)) throw new Error(`control ${name} binding has unsupported property ${binding.property}`);
+        const layer = byId.get(binding.layer);
+        if (!layer) throw new Error(`control ${name} binding references unknown layer ${binding.layer}`);
+        if (!CONTROL_LAYER_PROPERTIES.has(binding.property)) throw new Error(`control ${name} binding has unsupported property ${binding.property}`);
         if (!finite(binding.factor)) throw new Error(`control ${name} binding factor must be finite`);
+        if (binding.property === "opacity") {
+          const neutralOpacity = layer.visibleAtNeutral ? 1 : 0;
+          const endpoints = [control.min, control.max].map((value) => neutralOpacity + value * binding.factor);
+          if (Math.min(...endpoints) < 0 || Math.max(...endpoints) > 1) {
+            throw new Error(`control ${name} binding opacity must remain inside 0..1`);
+          }
+        }
       } else if ("variant" in binding) {
         if (!Object.hasOwn(manifest.variants, binding.variant)) throw new Error(`control ${name} binding references unknown variant set ${binding.variant}`);
+        if (variantOwners.has(binding.variant)) {
+          throw new Error(`variant set ${binding.variant} has ambiguous numeric controls ${variantOwners.get(binding.variant)} and ${name}`);
+        }
+        validateVariantThresholds(manifest, name, control, binding);
+        variantOwners.set(binding.variant, name);
       } else {
         throw new Error(`control ${name} binding must reference a layer or variant set`);
       }

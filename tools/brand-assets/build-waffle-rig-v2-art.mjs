@@ -509,6 +509,8 @@ async function writeArtPackage({
     .concat(additions)
     .toSorted((left, right) => left.drawOrder - right.drawOrder);
   manifest.variants = variantManifest;
+  const masks = JSON.parse(await readFile(path.join(temporaryDirectory, "masks.json"), "utf8"));
+  manifest.controls = masks.controls;
   await writeFile(temporaryManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return validateRig(temporaryManifestPath);
 }
