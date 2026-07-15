@@ -244,7 +244,10 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
   const directory = path.dirname(manifestPath);
   let output = new PNG({ width: manifest.canvas.width, height: manifest.canvas.height });
 
-  for (const layer of manifest.layers.toSorted((left, right) => left.drawOrder - right.drawOrder)) {
+  const activeLayers = manifest.layers
+    .filter((layer) => layer.visibleAtNeutral)
+    .toSorted((left, right) => left.drawOrder - right.drawOrder);
+  for (const layer of activeLayers) {
     const file = layer.role === "variant-anchor"
       ? variantForLayer(manifest, layer.id, evaluated.variants.get(
         Object.entries(manifest.variants).find(([, set]) => set.layer === layer.id)[0],

@@ -81,10 +81,12 @@ async function rigFixture(t) {
   const planted = blank();
   const lifted = blank();
   const foreground = blank();
+  const hiddenRepair = blank();
   paint(body, 100, 100, [220, 60, 40, 255]);
   paint(planted, 200, 200, [240, 170, 50, 255]);
   paint(lifted, 200, 160, [240, 170, 50, 255]);
   paint(foreground, 100, 100, [25, 80, 180, 255]);
+  paint(hiddenRepair, 400, 400, [120, 40, 160, 255]);
   paint(source, 100, 100, [25, 80, 180, 255]);
   paint(source, 200, 200, [240, 170, 50, 255]);
   reference.data.set(source.data);
@@ -98,6 +100,7 @@ async function rigFixture(t) {
     planted: path.join(variantsDirectory, "planted.png"),
     lifted: path.join(variantsDirectory, "lifted.png"),
     foreground: path.join(layersDirectory, "foreground.png"),
+    hiddenRepair: path.join(layersDirectory, "hidden-repair.png"),
   };
   await Promise.all([
     writePng(files.source, source),
@@ -107,6 +110,7 @@ async function rigFixture(t) {
     writePng(files.planted, planted),
     writePng(files.lifted, lifted),
     writePng(files.foreground, foreground),
+    writePng(files.hiddenRepair, hiddenRepair),
   ]);
 
   const manifest = {
@@ -116,6 +120,19 @@ async function rigFixture(t) {
     source: { file: "source.png", sha256: await sha256(files.source) },
     neutralReference: { file: "neutral-reference.png", sha256: await sha256(files.reference) },
     layers: [
+      {
+        id: "hidden-repair",
+        file: "layers/hidden-repair.png",
+        role: "repair",
+        parent: "waffle-root",
+        drawOrder: 5,
+        visibleAtNeutral: false,
+        blendMode: "normal",
+        pivot: { x: 0.5, y: 0.5 },
+        neutral: { x: 0, y: 0, rotationDegrees: 0, scaleX: 1, scaleY: 1 },
+        limits: {},
+        sha256: await sha256(files.hiddenRepair),
+      },
       {
         id: "foreground",
         file: "layers/foreground.png",
@@ -184,7 +201,7 @@ async function rigFixture(t) {
     writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
     writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`),
   ]);
-  return { clip, clipPath, manifest, manifestPath };
+  return { clip, clipPath, manifest, manifestPath, source };
 }
 
 function point(matrix, x, y) {
@@ -280,12 +297,39 @@ test("evaluateClip rejects out-of-range values, unknown controls, and missing fr
   assert.throws(() => evaluateClip(manifest, walkClip(), 48), /frame must be an integer inside the clip/);
 });
 
+test("evaluateClip rejects individually valid controls whose bindings exceed a layer limit together", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  manifest.controls.bodySettle = {
+    min: -0.015,
+    max: 0.015,
+    bindings: [{ layer: "body", property: "y", factor: 1 }],
+  };
+  clip.controls.bodyBob[0].value = -0.01;
+  clip.controls.bodySettle = [
+    { frame: 0, value: -0.01 },
+    { frame: 47, value: -0.01 },
+  ];
+
+  assert.throws(
+    () => evaluateClip(manifest, clip, 0),
+    /layer body y value -0.02 is outside -0.015..0.015/,
+  );
+});
+
 test("renderRigFrame composes active variant rasters in draw order", async (t) => {
   const { clipPath, manifestPath } = await rigFixture(t);
   const frame = await renderRigFrame(manifestPath, clipPath, 0);
 
   assert.deepEqual([...frame.data.subarray((100 * 1536 + 100) * 4, (100 * 1536 + 100) * 4 + 4)], [25, 80, 180, 255]);
   assert.deepEqual([...frame.data.subarray((200 * 1536 + 200) * 4, (200 * 1536 + 200) * 4 + 4)], [240, 170, 50, 255]);
+});
+
+test("renderRigFrame preserves exact neutral source bytes when hidden layers contain pixels", async (t) => {
+  const { clipPath, manifestPath, source } = await rigFixture(t);
+
+  const frame = await renderRigFrame(manifestPath, clipPath, 0);
+
+  assert.deepEqual(frame.data, source.data);
 });
 
 test("assertLoopClosure accepts exact closure and rejects changed controls or variants", async (t) => {
