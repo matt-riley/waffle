@@ -4,6 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
+    "render:rig-motion": "node render-waffle-rig-motion.mjs",
     "test": "node --test",
     "validate": "node validate-raster.mjs --optional ../../assets/brand/waffle/manifest.json ../../assets/brand/waffle/animation/idle/manifest.json",
     "validate:svg": "node validate-svg.mjs"
