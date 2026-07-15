@@ -1,11 +1,110 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   validateMotionClipShape,
   validateRigV2Shape,
   variantForLayer,
 } from "../rig-schema-v2.mjs";
+
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+
+const PRODUCTION_HIERARCHY = {
+  "rear-hip-repair-left": "waffle-root",
+  "rear-hock-repair-left": "rear-thigh-left",
+  "rear-paw-root-repair-left": "rear-hock-left",
+  "rear-paw-left": "rear-hock-left",
+  "rear-hock-left": "rear-thigh-left",
+  "rear-thigh-left": "waffle-root",
+  "rear-hip-repair-right": "waffle-root",
+  "rear-hock-repair-right": "rear-thigh-right",
+  "rear-paw-root-repair-right": "rear-hock-right",
+  "rear-paw-right": "rear-hock-right",
+  "rear-hock-right": "rear-thigh-right",
+  "rear-thigh-right": "waffle-root",
+  "tail-base-mid-repair": "tail-base",
+  "tail-mid-tip-repair": "tail-mid",
+  "tail-tip": "tail-mid",
+  "tail-mid": "tail-base",
+  "tail-base": "waffle-root",
+  "body-repair": "waffle-root",
+  torso: "waffle-root",
+  "front-shoulder-repair-left": "waffle-root",
+  "front-elbow-repair-left": "front-upper-left",
+  "front-wrist-repair-left": "front-lower-left",
+  "front-upper-left": "waffle-root",
+  "front-lower-left": "front-upper-left",
+  "front-paw-left": "front-lower-left",
+  "front-shoulder-repair-right": "waffle-root",
+  "front-elbow-repair-right": "front-upper-right",
+  "front-wrist-repair-right": "front-lower-right",
+  "front-upper-right": "waffle-root",
+  "front-lower-right": "front-upper-right",
+  "front-paw-right": "front-lower-right",
+  "ear-left": "head-base",
+  "ear-right": "head-base",
+  "neck-repair": "torso",
+  "head-base": "waffle-root",
+  muzzle: "head-base",
+  "jaw-closed": "head-base",
+  "iris-left": "head-base",
+  "iris-right": "head-base",
+  "pupil-left": "iris-left",
+  "pupil-right": "iris-right",
+  "highlight-left": "pupil-left",
+  "highlight-right": "pupil-right",
+  "upper-lid-left": "head-base",
+  "lower-lid-left": "head-base",
+  "upper-lid-right": "head-base",
+  "lower-lid-right": "head-base",
+  whiskers: "head-base",
+};
+
+const PRODUCTION_VARIANTS = {
+  "front-paw-left": { layer: "front-paw-left", members: ["planted", "lifted", "wave"], neutral: "planted" },
+  "front-paw-right": { layer: "front-paw-right", members: ["planted", "lifted"], neutral: "planted" },
+  "rear-paw-left": { layer: "rear-paw-left", members: ["planted", "lifted"], neutral: "planted" },
+  "rear-paw-right": { layer: "rear-paw-right", members: ["planted", "lifted"], neutral: "planted" },
+  "head-base": { layer: "head-base", members: ["neutral", "turn-left", "turn-right"], neutral: "neutral" },
+  jaw: { layer: "jaw-closed", members: ["closed", "open"], neutral: "closed" },
+};
+
+const PRODUCTION_CONTROLS = {
+  breath: { range: [0, 1], bindings: [["torso", "scaleX", 0.004], ["torso", "scaleY", 0.008]] },
+  bodyBob: { range: [-0.015, 0.015], bindings: [["torso", "y", 1]] },
+  bodyLean: { range: [-3, 3], bindings: [["torso", "rotationDegrees", 1]] },
+  weightShift: { range: [-1, 1], bindings: [["torso", "x", 0.008]] },
+  headTilt: { range: [-5, 5], bindings: [["head-base", "rotationDegrees", 1]] },
+  headTurn: {
+    range: [-1, 1],
+    variants: [{ variant: "head-base", states: { "-1": "turn-left", 0: "neutral", 1: "turn-right" } }],
+  },
+  gazeX: { range: [-0.012, 0.012], bindings: [["pupil-left", "x", 1], ["pupil-right", "x", 1]] },
+  gazeY: { range: [-0.009, 0.009], bindings: [["pupil-left", "y", 1], ["pupil-right", "y", 1]] },
+  blinkLeft: { range: [0, 1], bindings: [["upper-lid-left", "y", 0], ["lower-lid-left", "y", 0]] },
+  blinkRight: { range: [0, 1], bindings: [["upper-lid-right", "y", 0], ["lower-lid-right", "y", 0]] },
+  earLeft: { range: [-6, 6], bindings: [["ear-left", "rotationDegrees", 1]] },
+  earRight: { range: [-6, 6], bindings: [["ear-right", "rotationDegrees", 1]] },
+  jawOpen: { range: [0, 1], variants: [{ variant: "jaw", states: { 0: "closed", 1: "open" } }] },
+  tailBase: { range: [-8, 8], bindings: [["tail-base", "rotationDegrees", 1]] },
+  tailMid: { range: [-12, 12], bindings: [["tail-mid", "rotationDegrees", 1]] },
+  tailTip: { range: [-15, 15], bindings: [["tail-tip", "rotationDegrees", 1]] },
+  rearThighLeft: { range: [-10, 10], bindings: [["rear-thigh-left", "rotationDegrees", 1]] },
+  rearHockLeft: { range: [-12, 12], bindings: [["rear-hock-left", "rotationDegrees", 1]] },
+  rearPawLeft: { range: [-6, 6], bindings: [["rear-paw-left", "rotationDegrees", 1]] },
+  rearThighRight: { range: [-10, 10], bindings: [["rear-thigh-right", "rotationDegrees", 1]] },
+  rearHockRight: { range: [-12, 12], bindings: [["rear-hock-right", "rotationDegrees", 1]] },
+  rearPawRight: { range: [-6, 6], bindings: [["rear-paw-right", "rotationDegrees", 1]] },
+  frontUpperLeft: { range: [-12, 12], bindings: [["front-upper-left", "rotationDegrees", 1]] },
+  frontLowerLeft: { range: [-14, 14], bindings: [["front-lower-left", "rotationDegrees", 1]] },
+  frontPawLeft: { range: [-8, 8], bindings: [["front-paw-left", "rotationDegrees", 1]] },
+  frontUpperRight: { range: [-12, 12], bindings: [["front-upper-right", "rotationDegrees", 1]] },
+  frontLowerRight: { range: [-14, 14], bindings: [["front-lower-right", "rotationDegrees", 1]] },
+  frontPawRight: { range: [-8, 8], bindings: [["front-paw-right", "rotationDegrees", 1]] },
+};
 
 function validManifest() {
   return {
@@ -225,4 +324,58 @@ test("validates the motion clip shape against controls and variants", () => {
 
   clip.controls.bodyBob[1].value = -0.02;
   assert.throws(() => validateMotionClipShape(manifest, clip), /control bodyBob value -0.02 is outside -0.015..0.015/);
+});
+
+test("production standing rig v2 exposes the complete hierarchy, variants, controls, and joint limits", async () => {
+  const manifestPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/rig.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  assert.doesNotThrow(() => validateRigV2Shape(manifest));
+
+  assert.deepEqual(
+    Object.fromEntries(manifest.layers.map((layer) => [layer.id, layer.parent])),
+    PRODUCTION_HIERARCHY,
+    "the production layer IDs and parent hierarchy are a locked contract",
+  );
+
+  assert.deepEqual(Object.keys(manifest.variants).toSorted(), Object.keys(PRODUCTION_VARIANTS).toSorted());
+  for (const [setId, expected] of Object.entries(PRODUCTION_VARIANTS)) {
+    const actual = manifest.variants[setId];
+    assert.equal(actual.layer, expected.layer, `${setId} must remain registered to its anchor layer`);
+    assert.deepEqual(actual.members.map((member) => member.id), expected.members, `${setId} members drifted`);
+    assert.equal(actual.members.find((member) => member.neutral)?.id, expected.neutral, `${setId} neutral member drifted`);
+  }
+
+  assert.deepEqual(Object.keys(manifest.controls).toSorted(), Object.keys(PRODUCTION_CONTROLS).toSorted());
+  for (const [name, expected] of Object.entries(PRODUCTION_CONTROLS)) {
+    const actual = manifest.controls[name];
+    assert.deepEqual([actual.min, actual.max], expected.range, `${name} range drifted`);
+    const layerBindings = actual.bindings
+      .filter((binding) => "layer" in binding)
+      .map((binding) => [binding.layer, binding.property, binding.factor]);
+    const variantBindings = actual.bindings
+      .filter((binding) => "variant" in binding)
+      .map((binding) => ({ variant: binding.variant, states: binding.states }));
+    assert.deepEqual(layerBindings, expected.bindings ?? [], `${name} layer bindings drifted`);
+    assert.deepEqual(variantBindings, expected.variants ?? [], `${name} variant bindings drifted`);
+  }
+
+  const jointLimits = {
+    "front-upper-left": [-12, 12],
+    "front-lower-left": [-14, 14],
+    "front-paw-left": [-8, 8],
+    "front-upper-right": [-12, 12],
+    "front-lower-right": [-14, 14],
+    "front-paw-right": [-8, 8],
+    "rear-thigh-left": [-10, 10],
+    "rear-hock-left": [-12, 12],
+    "rear-paw-left": [-6, 6],
+    "rear-thigh-right": [-10, 10],
+    "rear-hock-right": [-12, 12],
+    "rear-paw-right": [-6, 6],
+  };
+  const byId = new Map(manifest.layers.map((layer) => [layer.id, layer]));
+  for (const [layerId, range] of Object.entries(jointLimits)) {
+    const actual = byId.get(layerId)?.limits?.rotationDegrees;
+    assert.deepEqual([actual?.min, actual?.max], range, `${layerId} anatomical limit drifted`);
+  }
 });

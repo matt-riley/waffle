@@ -10,6 +10,16 @@
         "width": 1536,
         "height": 1024
       }
+    },
+    {
+      "id": "waffle-standing-rig-v2",
+      "file": "rigs/standing-v2/rig.json",
+      "role": "source-locked articulated three-quarter raster rig for walk, wave, and head-face-tail motion",
+      "schemaVersion": 2,
+      "canvas": {
+        "width": 1536,
+        "height": 1024
+      }
     }
   ],
   "assets": [

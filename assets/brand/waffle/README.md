@@ -6,7 +6,7 @@ This tree contains Waffle's reviewed raster artwork and machine-readable deliver
 
 - `canon/` holds character rules, the non-identifying reference review, the approved raster model sheet, its generation record, and standalone expressions.
 - `poses/` holds the approved transparent standing, sitting, and curled composites.
-- `rigs/` holds editor-neutral layered raster rigs, including their source-locked PNG layers, pivots, safe control ranges, and deterministic validation inputs.
+- `rigs/standing-v1/` holds the lightweight standing idle rig. `rigs/standing-v2/` holds the source-locked articulated three-quarter rig, registered artwork variants, exact controls, build inputs, and its package contract.
 - `animation/idle/` holds the deterministic standing seed, normalized sprite frames, and the animation manifest.
 - `manifest.json` declares every static production asset's role, dimensions, alpha policy, and privacy-safe provenance.
 - `qa/` records owner decisions and technical verification evidence.
@@ -24,7 +24,7 @@ mise run brand-check
 
 - `brand-install` restores the pinned asset-tool dependencies from the lockfile.
 - `brand-check` runs all brand-tool tests, then validates the static and idle manifests when they exist. It is safe during early stages when no raster deliverables exist yet.
-- `brand-rig-check` validates the standing layered rig and its exact neutral reconstruction.
+- `brand-rig-check` validates standing v1 and v2, including each rig's exact neutral reconstruction.
 
 Production helpers are explicit so they never overwrite an approved master:
 
@@ -34,7 +34,9 @@ node tools/brand-assets/resize-raster.mjs input.png output.png WIDTH HEIGHT
 node tools/brand-assets/build-sprite-edit-canvas.mjs seed.png canvas.png
 node tools/brand-assets/normalize-sprite-strip.mjs strip.png frames/ seed.png
 node tools/brand-assets/validate-raster.mjs assets/brand/waffle/manifest.json
-node tools/brand-assets/validate-rig.mjs assets/brand/waffle/rigs/standing-v1/rig.json
+node tools/brand-assets/validate-rig.mjs \
+  assets/brand/waffle/rigs/standing-v1/rig.json \
+  assets/brand/waffle/rigs/standing-v2/rig.json
 ```
 
 Sanitization decodes and re-encodes RGBA pixels before validation, dropping ancillary metadata. The sprite helpers use deterministic bilinear resizing, one shared scale, a bottom-centre anchor, and a locked first frame.
@@ -52,6 +54,8 @@ Static `manifest.json` files use schema version 1. Every asset requires `id`, `f
 | Neutral master likeness and expression language | Approved |
 | Standing, sitting, curled, and airplane-ear documentation poses | Approved |
 | Standing layered raster rig v1 | Approved; tool-neutral package and Fusion idle assembly verified |
+| Standing articulated raster rig v2 still artwork | Approved; source-locked neutral, repairs, and registered paw, head, lid, and jaw artwork verified |
+| Standing rig v2 motion and Fusion proofs | In progress; motion clips and downstream assembly remain gated |
 | Idle proof and final package | Prototype reviewed; final animation pending |
 
 Do not advance a creative stage until its preceding gate is explicitly approved. Passing file validation is never evidence that Waffle's identity is acceptable.
