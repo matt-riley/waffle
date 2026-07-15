@@ -80,6 +80,15 @@ test("rejects duplicate layer IDs and draw orders", () => {
   assert.throws(() => validateRigV2Shape(duplicateOrder), /duplicate drawOrder: 20/);
 });
 
+test("rejects a raster layer that collides with the synthetic root ID", () => {
+  const manifest = validManifest();
+  manifest.layers[0].id = "waffle-root";
+  manifest.layers[1].parent = "waffle-root";
+  manifest.controls.bodyBob.bindings[0].layer = "waffle-root";
+
+  assert.throws(() => validateRigV2Shape(manifest), /layer id waffle-root collides with synthetic root/);
+});
+
 test("rejects missing parents and cycles below the synthetic root", () => {
   const missingParent = validManifest();
   missingParent.layers[1].parent = "missing";

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -29,6 +30,16 @@ async function writePng(file, png) {
 
 async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
+}
+
+async function directoryBytes(directory) {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(file);
+    else if (entry.isFile()) total += (await stat(file)).size;
+  }
+  return total;
 }
 
 function assertRenderedEqual(actual, expected) {
@@ -124,7 +135,7 @@ async function rigFixture(t) {
 async function rigV2Fixture(t) {
   const root = await workspace(t);
   const directory = path.join(root, "brand", "waffle", "rigs", "standing-v2");
-  const posesDirectory = path.join(root, "brand", "poses");
+  const posesDirectory = path.join(root, "brand", "waffle", "poses");
   await Promise.all([
     mkdir(path.join(directory, "layers"), { recursive: true }),
     mkdir(path.join(directory, "variants", "front-paw-left"), { recursive: true }),
@@ -165,7 +176,7 @@ async function rigV2Fixture(t) {
     schemaVersion: 2,
     canvas: { width: 1536, height: 1024 },
     root: { id: "waffle-root", pivot: { x: 0.52, y: 0.76 } },
-    source: { file: "../../../poses/standing.png", sha256: await sha256(files.source) },
+    source: { file: "../../poses/standing.png", sha256: await sha256(files.source) },
     neutralReference: { file: "neutral-reference.png", sha256: await sha256(files.reference) },
     layers: [
       {
@@ -304,6 +315,37 @@ test("validates a complete v2 rig using only the neutral variant", async (t) => 
   assert.deepEqual(result, { layerCount: 2, mismatchPixels: 0 });
 });
 
+test("optional mode fails when an existing manifest references a missing file", async (t) => {
+  const fixture = await rigFixture(t);
+  await fixture.save();
+  await rm(path.join(fixture.directory, fixture.manifest.source.file));
+
+  const result = spawnSync(
+    process.execPath,
+    [path.resolve(import.meta.dirname, "../validate-rig.mjs"), "--optional", fixture.manifestFile],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /SKIP/);
+  assert.match(result.stderr, /ENOENT/);
+});
+
+test("rejects an alternate brand PNG as the v2 source authority", async (t) => {
+  const fixture = await rigV2Fixture(t);
+  const alternateSource = path.resolve(fixture.directory, "../../../poses/standing.png");
+  await mkdir(path.dirname(alternateSource), { recursive: true });
+  await writeFile(alternateSource, await readFile(fixture.files.source));
+  fixture.manifest.source.file = "../../../poses/standing.png";
+  fixture.manifest.source.sha256 = await sha256(alternateSource);
+  await fixture.save();
+
+  await assert.rejects(
+    () => validateRig(fixture.manifestFile),
+    /source must be assets\/brand\/waffle\/poses\/standing\.png/,
+  );
+});
+
 test("rejects v2 hash drift and files at the 10 MB boundary", async (t) => {
   const fixture = await rigV2Fixture(t);
   fixture.manifest.variants["front-paw-left"].members[0].sha256 = "0".repeat(64);
@@ -329,9 +371,13 @@ test("rejects v2 layer and variant paths that use symlinks", async (t) => {
 test("rejects a v2 package at the 60 MB boundary", async (t) => {
   const fixture = await rigV2Fixture(t);
   const undeclaredPackageFile = path.join(fixture.directory, "oversize-package.bin");
-  await writeFile(undeclaredPackageFile, "");
-  await truncate(undeclaredPackageFile, 60 * 1024 * 1024);
   await fixture.save();
+  const existingBytes = await directoryBytes(fixture.directory);
+  assert.ok(existingBytes < 60 * 1024 * 1024);
+  await writeFile(undeclaredPackageFile, "");
+  await truncate(undeclaredPackageFile, 60 * 1024 * 1024 - existingBytes);
+
+  assert.equal(await directoryBytes(fixture.directory), 60 * 1024 * 1024, "fixture must hit the exact 60 MB boundary");
 
   await assert.rejects(() => validateRig(fixture.manifestFile), /rig package must be below 62914560 bytes/);
 });

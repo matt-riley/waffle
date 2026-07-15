@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -58,17 +58,12 @@ async function sourcePath(directory, relative) {
 }
 
 async function v2SourcePath(directory, relative) {
-  const assetRoot = path.resolve(directory, "../../..");
-  if (typeof relative !== "string" || relative.length === 0 || path.isAbsolute(relative) || /^[a-z][a-z\d+.-]*:/iu.test(relative)) {
-    throw new Error("source file must be a local relative path");
-  }
+  if (relative !== "../../poses/standing.png") throw new Error("source must be assets/brand/waffle/poses/standing.png");
+  const assetRoot = path.resolve(directory, "../..");
   const resolved = path.resolve(directory, relative);
-  if (resolved !== assetRoot && !resolved.startsWith(`${assetRoot}${path.sep}`)) {
-    throw new Error("source file must stay inside the Waffle brand directory");
-  }
   const [physicalBase, physicalFile] = await Promise.all([realpath(assetRoot), realpath(resolved)]);
   if (physicalFile !== physicalBase && !physicalFile.startsWith(`${physicalBase}${path.sep}`)) {
-    throw new Error("source file must resolve inside the Waffle brand directory");
+    throw new Error("source file must resolve inside the Waffle asset directory");
   }
   if ((await lstat(resolved)).isSymbolicLink()) throw new Error("source file must not be a symlink");
   return physicalFile;
@@ -275,16 +270,17 @@ async function main(args) {
   const paths = optional ? args.slice(1) : args;
   if (paths.length === 0) throw new Error("usage: validate-rig.mjs [--optional] <rig.json...>");
   for (const manifestPath of paths) {
-    try {
-      const result = await validateRig(manifestPath);
-      console.log(`PASS ${manifestPath} layers=${result.layerCount} mismatchPixels=${result.mismatchPixels}`);
-    } catch (error) {
-      if (optional && error.code === "ENOENT") {
+    if (optional) {
+      try {
+        await access(manifestPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
         console.log(`SKIP ${manifestPath} (not present)`);
         continue;
       }
-      throw error;
     }
+    const result = await validateRig(manifestPath);
+    console.log(`PASS ${manifestPath} layers=${result.layerCount} mismatchPixels=${result.mismatchPixels}`);
   }
 }
 

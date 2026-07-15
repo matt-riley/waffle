@@ -155,6 +155,7 @@ export function validateRigV2Shape(manifest) {
   const ids = new Set();
   const orders = new Set();
   for (const [index, layer] of manifest.layers.entries()) validateLayer(layer, index, ids, orders);
+  if (ids.has(manifest.root.id)) throw new Error(`layer id ${manifest.root.id} collides with synthetic root`);
   validateLayerGraph(manifest.root.id, manifest.layers);
   const byId = new Map(manifest.layers.map((layer) => [layer.id, layer]));
   validateVariants(manifest, byId);
