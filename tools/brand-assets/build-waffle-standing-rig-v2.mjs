@@ -63,6 +63,149 @@ function assertSafeTarget(outputDirectory) {
   }
 }
 
+const SAFE_LAYER_ID = /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/u;
+
+function containedOutputPath(temporaryDirectory, ...parts) {
+  const base = path.resolve(temporaryDirectory);
+  const derived = path.resolve(base, ...parts);
+  if (!derived.startsWith(`${base}${path.sep}`)) {
+    throw new Error(`derived output path must stay inside temporary package: ${parts.join("/")}`);
+  }
+  return derived;
+}
+
+function outputPlan(masks, temporaryDirectory) {
+  const definitions = Object.entries(masks.layerDefinitions ?? {})
+    .map(([id, definition]) => ({ id, ...definition }))
+    .toSorted((left, right) => left.drawOrder - right.drawOrder);
+  const layerFiles = new Map();
+  for (const definition of definitions) {
+    if (!SAFE_LAYER_ID.test(definition.id)) throw new Error(`unsafe layer id: ${definition.id}`);
+    layerFiles.set(definition.id, containedOutputPath(temporaryDirectory, "layers", `${definition.id}.png`));
+  }
+  return {
+    definitions,
+    layerFiles,
+    layersDirectory: containedOutputPath(temporaryDirectory, "layers"),
+    manifestFile: containedOutputPath(temporaryDirectory, "rig.json"),
+    masksFile: containedOutputPath(temporaryDirectory, "masks.json"),
+    referenceFile: containedOutputPath(temporaryDirectory, "neutral-reference.png"),
+  };
+}
+
+function promotionPaths(outputDirectory) {
+  return {
+    marker: `${outputDirectory}.promotion.json`,
+    markerTemporary: `${outputDirectory}.promotion.json.building-${process.pid}`,
+    previous: `${outputDirectory}.previous-${process.pid}`,
+  };
+}
+
+async function validateV2Directory(directory) {
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("promotion recovery package must be a nonsymlink directory");
+  const manifestFile = path.join(directory, "rig.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  if (manifest.schemaVersion !== 2) throw new Error("promotion recovery package must be schema v2");
+  await validateRig(manifestFile);
+}
+
+async function recoveryPreviousEntries(outputDirectory) {
+  const parent = path.dirname(outputDirectory);
+  const prefix = `${path.basename(outputDirectory)}.previous-`;
+  return (await readdir(parent, { withFileTypes: true }))
+    .filter((entry) => entry.name.startsWith(prefix))
+    .map((entry) => entry.name)
+    .toSorted();
+}
+
+async function recoverPrevious({ marker, outputDirectory, previousDirectory, renamePath }) {
+  const targetExists = await exists(outputDirectory);
+  const previousExists = await exists(previousDirectory);
+  if (!targetExists) {
+    if (!previousExists) throw new Error("promotion recovery state has no recoverable package");
+    await validateV2Directory(previousDirectory);
+    await renamePath(previousDirectory, outputDirectory);
+    await validateV2Directory(outputDirectory);
+    if (marker) await rm(marker, { force: true });
+    return;
+  }
+
+  try {
+    await validateV2Directory(outputDirectory);
+  } catch (error) {
+    throw new Error(`ambiguous promotion recovery state: target is invalid: ${error.message}`);
+  }
+  if (previousExists) {
+    try {
+      await validateV2Directory(previousDirectory);
+    } catch (error) {
+      throw new Error(`ambiguous promotion recovery state: previous package is invalid: ${error.message}`);
+    }
+    await rm(previousDirectory, { recursive: true });
+  }
+  if (marker) await rm(marker, { force: true });
+}
+
+async function recoverInterruptedPromotion(outputDirectory, renamePath) {
+  const paths = promotionPaths(outputDirectory);
+  const entries = await recoveryPreviousEntries(outputDirectory);
+  const markerExists = await exists(paths.marker);
+  if (!markerExists) {
+    if (entries.length === 0) return;
+    if (entries.length !== 1 || entries[0] !== path.basename(paths.previous)) {
+      throw new Error("ambiguous promotion recovery state");
+    }
+    await recoverPrevious({
+      marker: null,
+      outputDirectory,
+      previousDirectory: paths.previous,
+      renamePath,
+    });
+    return;
+  }
+
+  const markerInfo = await lstat(paths.marker);
+  if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) throw new Error("ambiguous promotion recovery state");
+  let marker;
+  try {
+    marker = JSON.parse(await readFile(paths.marker, "utf8"));
+  } catch {
+    throw new Error("ambiguous promotion recovery state");
+  }
+  const outputName = path.basename(outputDirectory);
+  const previousPattern = new RegExp(`^${outputName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\.previous-\\d+$`, "u");
+  if (marker.schemaVersion !== 1
+    || marker.outputDirectory !== outputName
+    || typeof marker.previousDirectory !== "string"
+    || !previousPattern.test(marker.previousDirectory)) {
+    throw new Error("ambiguous promotion recovery state");
+  }
+  if (entries.length > 1 || (entries.length === 1 && entries[0] !== marker.previousDirectory)) {
+    throw new Error("ambiguous promotion recovery state");
+  }
+  const previousDirectory = path.join(path.dirname(outputDirectory), marker.previousDirectory);
+  await recoverPrevious({
+    marker: paths.marker,
+    outputDirectory,
+    previousDirectory,
+    renamePath,
+  });
+}
+
+async function writePromotionMarker(outputDirectory, previousDirectory, renamePath) {
+  const paths = promotionPaths(outputDirectory);
+  const marker = {
+    schemaVersion: 1,
+    outputDirectory: path.basename(outputDirectory),
+    previousDirectory: path.basename(previousDirectory),
+  };
+  await rm(paths.markerTemporary, { force: true });
+  await writeFile(paths.markerTemporary, `${JSON.stringify(marker, null, 2)}\n`, { flag: "wx" });
+  await renamePath(paths.markerTemporary, paths.marker);
+  return paths.marker;
+}
+
 async function classifyExistingTarget(outputDirectory, masksFile) {
   if (!await exists(outputDirectory)) return "absent";
   if (!(await lstat(outputDirectory)).isDirectory()) {
@@ -89,17 +232,14 @@ async function classifyExistingTarget(outputDirectory, masksFile) {
   return "v2";
 }
 
-function orderedDefinitions(masks, layers) {
-  const definitions = Object.entries(masks.layerDefinitions ?? {})
-    .map(([id, definition]) => ({ id, ...definition }))
-    .toSorted((left, right) => left.drawOrder - right.drawOrder);
+function orderedDefinitions(definitions, layers) {
   if (definitions.length !== layers.size || definitions.some((definition) => !layers.has(definition.id))) {
     throw new Error("layerDefinitions must describe every partition layer exactly once");
   }
   return definitions;
 }
 
-async function writeTemporaryPackage({ sourceFile, masksBytes, masks, temporaryDirectory }) {
+async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan }) {
   const source = await readRgba(sourceFile);
   if (source.width !== masks.canvas?.width || source.height !== masks.canvas?.height) {
     throw new Error(`mask canvas ${masks.canvas?.width}x${masks.canvas?.height} does not match source ${source.width}x${source.height}`);
@@ -109,19 +249,17 @@ async function writeTemporaryPackage({ sourceFile, masksBytes, masks, temporaryD
   }
 
   const layers = partitionSource(source, masks.regionsFrontToBack, masks.fallback);
-  const definitions = orderedDefinitions(masks, layers);
+  const definitions = orderedDefinitions(plan.definitions, layers);
   applyCoveredUnderlaps(source, layers, masks.regionsFrontToBack, definitions);
 
-  const layersDirectory = path.join(temporaryDirectory, "layers");
-  await mkdir(layersDirectory, { recursive: true });
-  await writeFile(path.join(temporaryDirectory, "masks.json"), masksBytes);
+  await mkdir(plan.layersDirectory, { recursive: true });
+  await writeFile(plan.masksFile, masksBytes);
 
-  const referenceFile = path.join(temporaryDirectory, "neutral-reference.png");
-  await writeRgba(referenceFile, source);
+  await writeRgba(plan.referenceFile, source);
 
   const manifestLayers = [];
   for (const definition of definitions) {
-    const file = path.join(layersDirectory, `${definition.id}.png`);
+    const file = plan.layerFiles.get(definition.id);
     await writeRgba(file, layers.get(definition.id));
     manifestLayers.push({
       id: definition.id,
@@ -148,50 +286,75 @@ async function writeTemporaryPackage({ sourceFile, masksBytes, masks, temporaryD
     },
     neutralReference: {
       file: "neutral-reference.png",
-      sha256: await sha256(referenceFile),
+      sha256: await sha256(plan.referenceFile),
     },
     layers: manifestLayers,
     variants: masks.variants ?? {},
     controls: masks.controls,
   };
-  const manifestFile = path.join(temporaryDirectory, "rig.json");
-  await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-  await validateRig(manifestFile);
+  await writeFile(plan.manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+  await validateRig(plan.manifestFile);
 }
 
-async function promote({ outputDirectory, temporaryDirectory, targetKind }) {
+async function validateRestoredTarget(outputDirectory, targetKind, masksFile) {
+  if (targetKind === "v2") {
+    await validateV2Directory(outputDirectory);
+    return;
+  }
+  if (targetKind === "bootstrap"
+    && await classifyExistingTarget(outputDirectory, masksFile) === "bootstrap") return;
+  throw new Error("restored package no longer matches its recognized target kind");
+}
+
+async function promote({ outputDirectory, temporaryDirectory, targetKind, masksFile, renamePath }) {
   if (targetKind === "absent") {
-    await rename(temporaryDirectory, outputDirectory);
+    await renamePath(temporaryDirectory, outputDirectory);
     return;
   }
 
-  const previousDirectory = `${outputDirectory}.previous-${process.pid}`;
-  await rm(previousDirectory, { recursive: true, force: true });
-  await rename(outputDirectory, previousDirectory);
+  const paths = promotionPaths(outputDirectory);
+  const marker = await writePromotionMarker(outputDirectory, paths.previous, renamePath);
   try {
-    await rename(temporaryDirectory, outputDirectory);
+    await renamePath(outputDirectory, paths.previous);
   } catch (error) {
-    await rename(previousDirectory, outputDirectory);
+    await validateRestoredTarget(outputDirectory, targetKind, masksFile);
+    await rm(marker, { force: true });
     throw error;
   }
-  await rm(previousDirectory, { recursive: true, force: true });
+  try {
+    await renamePath(temporaryDirectory, outputDirectory);
+  } catch (promotionError) {
+    try {
+      await renamePath(paths.previous, outputDirectory);
+      await validateRestoredTarget(outputDirectory, targetKind, masksFile);
+      await rm(marker, { force: true });
+    } catch (restorationError) {
+      throw new Error(restorationError.message, { cause: promotionError });
+    }
+    throw promotionError;
+  }
+  await validateV2Directory(outputDirectory);
+  await rm(paths.previous, { recursive: true });
+  await rm(marker, { force: true });
 }
 
-export async function buildStandingRigV2({ sourceFile, masksFile, outputDirectory }) {
+export async function buildStandingRigV2({ sourceFile, masksFile, outputDirectory, renamePath = rename }) {
   sourceFile = path.resolve(sourceFile);
   masksFile = path.resolve(masksFile);
   outputDirectory = path.resolve(outputDirectory);
   assertSafeTarget(outputDirectory);
 
+  await recoverInterruptedPromotion(outputDirectory, renamePath);
   const targetKind = await classifyExistingTarget(outputDirectory, masksFile);
   const masksBytes = await readFile(masksFile);
   const masks = JSON.parse(masksBytes.toString("utf8"));
   const temporaryDirectory = `${outputDirectory}.building-${process.pid}`;
+  const plan = outputPlan(masks, temporaryDirectory);
   await rm(temporaryDirectory, { recursive: true, force: true });
 
   try {
-    await writeTemporaryPackage({ sourceFile, masksBytes, masks, temporaryDirectory });
-    await promote({ outputDirectory, temporaryDirectory, targetKind });
+    await writeTemporaryPackage({ sourceFile, masksBytes, masks, plan });
+    await promote({ outputDirectory, temporaryDirectory, targetKind, masksFile, renamePath });
   } catch (error) {
     await rm(temporaryDirectory, { recursive: true, force: true });
     throw error;

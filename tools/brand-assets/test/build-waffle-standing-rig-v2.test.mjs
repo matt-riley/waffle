@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -98,6 +98,14 @@ async function builderTemps(outputDirectory) {
   return (await readdir(parent)).filter((entry) => entry.startsWith(prefix));
 }
 
+function recoveryPaths(outputDirectory) {
+  return {
+    marker: `${outputDirectory}.promotion.json`,
+    previous: `${outputDirectory}.previous-${process.pid}`,
+    temporary: `${outputDirectory}.building-${process.pid}`,
+  };
+}
+
 test("partition assigns overlapping polygons to the first front-to-back owner without changing source bytes", () => {
   const source = smallSource();
   const regions = [
@@ -190,6 +198,25 @@ test("builder validates exact layer-definition coverage and removes failed tempo
   await assert.rejects(readFile(path.join(fixture.outputDirectory, "rig.json")), { code: "ENOENT" });
 });
 
+test("builder rejects unsafe layer IDs before any derived path can escape the temporary package", async (t) => {
+  const fixture = await productionFixture(t);
+  const masks = validMasks();
+  masks.regionsFrontToBack[0].id = "../../escape";
+  masks.layerDefinitions["../../escape"] = masks.layerDefinitions["head-base"];
+  delete masks.layerDefinitions["head-base"];
+  masks.controls.headTilt.bindings[0].layer = "../../escape";
+  await writeFile(fixture.masksFile, JSON.stringify(masks));
+  const escapedFile = path.join(path.dirname(fixture.outputDirectory), "escape.png");
+
+  const error = await buildStandingRigV2(fixture).then(
+    () => null,
+    (caught) => caught,
+  );
+  await assert.rejects(readFile(escapedFile), { code: "ENOENT" });
+  assert.match(error?.message ?? "", /unsafe layer id: \.\.\/\.\.\/escape/);
+  assert.deepEqual(await builderTemps(fixture.outputDirectory), []);
+});
+
 test("builder validates the temporary package, copies masks, and atomically promotes it", async (t) => {
   const fixture = await productionFixture(t);
   const inputMasks = await readFile(fixture.masksFile);
@@ -218,6 +245,81 @@ test("builder preserves an existing validated v2 package until its replacement p
   assert.deepEqual(await builderTemps(fixture.outputDirectory), []);
 });
 
+test("promotion failure restores the validated previous package", async (t) => {
+  const fixture = await productionFixture(t);
+  await buildStandingRigV2(fixture);
+  const originalManifest = await readFile(path.join(fixture.outputDirectory, "rig.json"));
+  const paths = recoveryPaths(fixture.outputDirectory);
+  let promotionFailed = false;
+
+  await assert.rejects(buildStandingRigV2({
+    ...fixture,
+    renamePath: async (from, to) => {
+      if (!promotionFailed && from === paths.temporary && to === fixture.outputDirectory) {
+        promotionFailed = true;
+        throw new Error("injected promotion failure");
+      }
+      return rename(from, to);
+    },
+  }), /injected promotion failure/);
+
+  assert.deepEqual(await readFile(path.join(fixture.outputDirectory, "rig.json")), originalManifest);
+  await assert.rejects(readFile(paths.marker), { code: "ENOENT" });
+  await assert.rejects(readFile(path.join(paths.previous, "rig.json")), { code: "ENOENT" });
+});
+
+test("startup recovers a validated previous package after promotion and restoration both fail", async (t) => {
+  const fixture = await productionFixture(t);
+  await buildStandingRigV2(fixture);
+  const originalManifest = await readFile(path.join(fixture.outputDirectory, "rig.json"));
+  const paths = recoveryPaths(fixture.outputDirectory);
+
+  await assert.rejects(buildStandingRigV2({
+    ...fixture,
+    renamePath: async (from, to) => {
+      if (from === paths.temporary && to === fixture.outputDirectory) throw new Error("injected promotion failure");
+      if (from === paths.previous && to === fixture.outputDirectory) throw new Error("injected restoration failure");
+      return rename(from, to);
+    },
+  }), /injected restoration failure/);
+
+  await assert.rejects(readFile(path.join(fixture.outputDirectory, "rig.json")), { code: "ENOENT" });
+  assert.deepEqual(await readFile(path.join(paths.previous, "rig.json")), originalManifest);
+  assert.equal(JSON.parse(await readFile(paths.marker, "utf8")).previousDirectory, path.basename(paths.previous));
+
+  const invalidMasks = validMasks();
+  invalidMasks.layerDefinitions["head-base"].parent = "missing";
+  await writeFile(fixture.masksFile, JSON.stringify(invalidMasks));
+  await assert.rejects(buildStandingRigV2(fixture), /unknown parent missing/);
+
+  assert.deepEqual(await readFile(path.join(fixture.outputDirectory, "rig.json")), originalManifest);
+  await assert.rejects(readFile(paths.marker), { code: "ENOENT" });
+  await assert.rejects(readFile(path.join(paths.previous, "rig.json")), { code: "ENOENT" });
+});
+
+test("startup refuses ambiguous promotion recovery artifacts", async (t) => {
+  const fixture = await productionFixture(t);
+  await buildStandingRigV2(fixture);
+  const paths = recoveryPaths(fixture.outputDirectory);
+  const extraPrevious = `${fixture.outputDirectory}.previous-999999`;
+  await Promise.all([
+    mkdir(paths.previous),
+    mkdir(extraPrevious),
+    writeFile(paths.marker, `${JSON.stringify({
+      schemaVersion: 1,
+      outputDirectory: path.basename(fixture.outputDirectory),
+      previousDirectory: path.basename(paths.previous),
+    })}\n`),
+  ]);
+
+  await assert.rejects(buildStandingRigV2(fixture), /ambiguous promotion recovery state/);
+
+  assert.equal(JSON.parse(await readFile(paths.marker, "utf8")).previousDirectory, path.basename(paths.previous));
+  assert.deepEqual((await readdir(path.dirname(fixture.outputDirectory)))
+    .filter((entry) => entry.startsWith(`${path.basename(fixture.outputDirectory)}.previous-`))
+    .toSorted(), [path.basename(paths.previous), path.basename(extraPrevious)].toSorted());
+});
+
 test("builder promotes over its masks-only production bootstrap directory", async (t) => {
   const fixture = await productionFixture(t);
   await mkdir(fixture.outputDirectory);
@@ -228,6 +330,29 @@ test("builder promotes over its masks-only production bootstrap directory", asyn
 
   assert.equal(manifestPath, path.join(fixture.outputDirectory, "rig.json"));
   assert.deepEqual(await builderTemps(fixture.outputDirectory), []);
+});
+
+test("promotion failure restores the recognized masks-only production bootstrap", async (t) => {
+  const fixture = await productionFixture(t);
+  await mkdir(fixture.outputDirectory);
+  const masksFile = path.join(fixture.outputDirectory, "masks.json");
+  const masksBytes = await readFile(fixture.masksFile);
+  await writeFile(masksFile, masksBytes);
+  const paths = recoveryPaths(fixture.outputDirectory);
+
+  await assert.rejects(buildStandingRigV2({
+    ...fixture,
+    masksFile,
+    renamePath: async (from, to) => {
+      if (from === paths.temporary && to === fixture.outputDirectory) throw new Error("injected bootstrap promotion failure");
+      return rename(from, to);
+    },
+  }), /injected bootstrap promotion failure/);
+
+  assert.deepEqual(await readFile(masksFile), masksBytes);
+  assert.deepEqual(await readdir(fixture.outputDirectory), ["masks.json"]);
+  await assert.rejects(readFile(paths.marker), { code: "ENOENT" });
+  await assert.rejects(readFile(path.join(paths.previous, "masks.json")), { code: "ENOENT" });
 });
 
 test("builder refuses to replace an unrelated existing directory", async (t) => {
@@ -250,15 +375,20 @@ test("builder refuses every target path containing a standing-v1 component", asy
 });
 
 test("production masks declare the exact screen-relative visible hierarchy", async () => {
-  const masks = JSON.parse(await readFile(path.resolve(
+  const productionDirectory = path.resolve(
     import.meta.dirname,
-    "../../../assets/brand/waffle/rigs/standing-v2/masks.json",
-  ), "utf8"));
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const [masks, rig] = await Promise.all([
+    readFile(path.join(productionDirectory, "masks.json"), "utf8").then(JSON.parse),
+    readFile(path.join(productionDirectory, "rig.json"), "utf8").then(JSON.parse),
+  ]);
   const parents = Object.fromEntries(
     Object.entries(masks.layerDefinitions).map(([id, definition]) => [id, definition.parent]),
   );
+  const generatedParents = Object.fromEntries(rig.layers.map((layer) => [layer.id, layer.parent]));
 
-  assert.deepEqual(parents, {
+  const expectedParents = {
     "rear-paw-left": "rear-hock-left",
     "rear-hock-left": "rear-thigh-left",
     "rear-thigh-left": "waffle-root",
@@ -287,6 +417,9 @@ test("production masks declare the exact screen-relative visible hierarchy", asy
     "highlight-left": "pupil-left",
     "highlight-right": "pupil-right",
     whiskers: "head-base",
-  });
+  };
+  assert.deepEqual(parents, expectedParents);
+  assert.deepEqual(generatedParents, expectedParents);
   assert.equal(masks.root.id, "waffle-root");
+  assert.equal(rig.root.id, "waffle-root");
 });

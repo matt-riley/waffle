@@ -126,7 +126,7 @@
           "max": 6
         }
       },
-      "sha256": "5d86f5d0bd69a049de78d046267bb6459b061583c75c50b26023cc92574c575c"
+      "sha256": "1ad541c87e272e6c7c0da958cd72e4f08772925f10fa93cb7172061d8a771482"
     },
     {
       "id": "rear-hock-right",
@@ -153,7 +153,7 @@
           "max": 12
         }
       },
-      "sha256": "26a921fbb1095beb5c616fbe03a1683e040d7eda94c60ad803c80cd5fb19f59c"
+      "sha256": "f0d6eeb5ff81591b7bcdb0dbeab3bdc006484293e698cfe704c3c39e175cf805"
     },
     {
       "id": "rear-thigh-right",
@@ -180,7 +180,7 @@
           "max": 10
         }
       },
-      "sha256": "cd135ee070837e7885160011be3cee5618c9b7bb4997ad61e8a4c210268ba13e"
+      "sha256": "778a2cfcb9e6aac8d2b7ca59a311d36964ce1a381fd8616f193a954e63fdcc5b"
     },
     {
       "id": "tail-tip",
@@ -207,7 +207,7 @@
           "max": 15
         }
       },
-      "sha256": "28f1d146f40e0e027073448297a905e219b80c94686ecbc91dac28daa5ebf9f6"
+      "sha256": "ea06bdf4416f9c93014d0085cce7edf815e13c9d2ff94ec09f900e6566deef3e"
     },
     {
       "id": "tail-mid",
@@ -234,7 +234,7 @@
           "max": 12
         }
       },
-      "sha256": "4fb39666a38f3dd2ea640fc5072effe3d563847db9d7617eb6f973edf4165e36"
+      "sha256": "9e4174c0b3f73af1d68b2f9f5c5fbf21e5080a526eb135026a9ed9214c0ecdca"
     },
     {
       "id": "tail-base",
@@ -261,7 +261,7 @@
           "max": 8
         }
       },
-      "sha256": "041ea3b52c4a294f1a2e883f68650440411e6ac6d29dd21cfa4b98f7fb71721e"
+      "sha256": "bb956b299acc6b73277b8e4af395efacbc771aa0be8d6e3bf869bb799c82db4c"
     },
     {
       "id": "torso",
@@ -304,7 +304,7 @@
           "max": 1.01
         }
       },
-      "sha256": "85dbaddc50246f3a96131796d3975bea730cf7a6ae645a9c73e4cd1556e2401b"
+      "sha256": "e0528d58e36698258c2c22a80f6233c9f2da1b576f14719bcd85d0e691489f20"
     },
     {
       "id": "front-upper-left",
@@ -331,7 +331,7 @@
           "max": 12
         }
       },
-      "sha256": "8d190eb41b8defde7a45dfca442672260b062e9c6490cf888185cff1e00aa863"
+      "sha256": "d019840720383c95ec0041a429069b162779bcdcd0aa9c13654d04e7e91c2190"
     },
     {
       "id": "front-lower-left",
@@ -358,7 +358,7 @@
           "max": 14
         }
       },
-      "sha256": "cd3bbe3019fa24b3760bebaca6ee59824d0da47eb3b5d63e1000fb3cb3d44bd9"
+      "sha256": "13de8af79601a04b8898a562aede799b4976b4dd3454d69637acdd3c6a5af49d"
     },
     {
       "id": "front-paw-left",
@@ -385,7 +385,7 @@
           "max": 8
         }
       },
-      "sha256": "24c3784b1a960783161df32e2d9f59a9fb8d7b33ea6b81ba4db53708f76d173b"
+      "sha256": "d6b3ce8ac6b7168be1ccc3c65e28544728d182ed7d3ef679212a91421f907014"
     },
     {
       "id": "front-upper-right",
@@ -412,7 +412,7 @@
           "max": 12
         }
       },
-      "sha256": "90acab92e113a85423df360a42af1eeb92c3f6de32faac25c113f1179f67b159"
+      "sha256": "ce48a36f6bba0aa99a3e1d33a98ac0d4f56e9ca7f4d482403cccd536b49b3128"
     },
     {
       "id": "front-lower-right",
@@ -439,7 +439,7 @@
           "max": 14
         }
       },
-      "sha256": "0e3957d12508fbeda332bbebd90435bfc26592c193bf468520bbfce904671ff3"
+      "sha256": "7dbe5ca1a28cb58840d33aeaf933be1f06b8da03e5612eff15bea8998320c778"
     },
     {
       "id": "front-paw-right",
@@ -466,7 +466,7 @@
           "max": 8
         }
       },
-      "sha256": "521300edf7ac851f99227c974f8d283b1945e1c20e1544d2e61f960a3e8650a2"
+      "sha256": "2329ac5333ac6dfc31390e111aad8420950bc955d656a758ad6754a0f9e15057"
     },
     {
       "id": "ear-left",
@@ -493,7 +493,7 @@
           "max": 6
         }
       },
-      "sha256": "97239a9f81a2ffaaa91a30242a048029f983d4f8ba2b5078684a9378e41e01bf"
+      "sha256": "bfa02dbee3257f137eafb03675bcb1c41fe52a5d65ddd7d2a2b6250a10f47f64"
     },
     {
       "id": "ear-right",
@@ -520,7 +520,7 @@
           "max": 6
         }
       },
-      "sha256": "1377fc92d034c91fec5af9a51504d36a37da8d2fc4c013552fe92c1d11afcda5"
+      "sha256": "9b9c4006ccd99df7f8cfcd70c2b47464fc5130677d74d22222c911a7057e723d"
     },
     {
       "id": "head-base",
@@ -555,7 +555,7 @@
           "max": 5
         }
       },
-      "sha256": "d18b254771a329d09dab080c995da3eab470c55902f6681244f279f18aa185b0"
+      "sha256": "857c853c40904a90edbc929be98bad8fd975985a9ecfda73d92b8f0119b59e20"
     },
     {
       "id": "muzzle",
