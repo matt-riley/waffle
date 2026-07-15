@@ -315,6 +315,22 @@ test("validates a complete v2 rig using only the neutral variant", async (t) => 
   assert.deepEqual(result, { layerCount: 2, mismatchPixels: 0 });
 });
 
+test("v2 neutral validation ignores RGB drift only when both pixels are fully transparent", async (t) => {
+  const fixture = await rigV2Fixture(t);
+  for (const file of [fixture.files.source, fixture.files.reference]) {
+    const png = PNG.sync.read(await readFile(file));
+    png.data.set([10, 17, 16, 0], 0);
+    await writePng(file, png);
+  }
+  fixture.manifest.source.sha256 = await sha256(fixture.files.source);
+  fixture.manifest.neutralReference.sha256 = await sha256(fixture.files.reference);
+  await fixture.save();
+
+  const result = await validateRig(fixture.manifestFile);
+
+  assert.deepEqual(result, { layerCount: 2, mismatchPixels: 0 });
+});
+
 test("optional mode fails when an existing manifest references a missing file", async (t) => {
   const fixture = await rigFixture(t);
   await fixture.save();
