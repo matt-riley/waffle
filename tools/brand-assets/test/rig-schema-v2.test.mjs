@@ -229,6 +229,63 @@ test("rejects unknown control binding targets and properties", () => {
   assert.throws(() => validateRigV2Shape(unknownVariant), /unknown variant set missing/);
 });
 
+test("requires control bindings to declare exactly one discriminated binding kind", async () => {
+  const manifestPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/rig.json");
+  const production = JSON.parse(await readFile(manifestPath, "utf8"));
+  Object.assign(production.controls.headTurn.bindings[0], {
+    layer: "head-base",
+    property: "rotationDegrees",
+    factor: 1,
+  });
+  assert.throws(
+    () => validateRigV2Shape(production),
+    /control headTurn binding 1 must declare exactly one of layer or variant/,
+    "a production headTurn-shaped hybrid must not be accepted as a layer binding",
+  );
+
+  const neither = validManifest();
+  neither.controls.bodyBob.bindings[0] = { property: "y", factor: 1 };
+  assert.throws(
+    () => validateRigV2Shape(neither),
+    /control bodyBob binding 1 must declare exactly one of layer or variant/,
+  );
+});
+
+test("rejects binding-kind fields and unknown keys on the other control binding shape", () => {
+  for (const [label, mutate, message] of [
+    ["layer thresholds", (binding) => { binding.thresholds = []; }, /layer binding has unsupported field thresholds/],
+    ["layer states", (binding) => { binding.states = {}; }, /layer binding has unsupported field states/],
+    ["layer unknown", (binding) => { binding.note = "drift"; }, /layer binding has unsupported field note/],
+  ]) {
+    const manifest = validManifest();
+    mutate(manifest.controls.bodyBob.bindings[0]);
+    assert.throws(() => validateRigV2Shape(manifest), message, label);
+  }
+
+  for (const [label, mutate, message] of [
+    ["variant property", (binding) => { binding.property = "x"; }, /variant binding has unsupported field property/],
+    ["variant factor", (binding) => { binding.factor = 1; }, /variant binding has unsupported field factor/],
+    ["variant states", (binding) => { binding.states = {}; }, /variant binding has unsupported field states/],
+    ["variant unknown", (binding) => { binding.note = "drift"; }, /variant binding has unsupported field note/],
+  ]) {
+    const manifest = validManifest();
+    manifest.controls.pawState = {
+      min: -1,
+      max: 1,
+      bindings: [{
+        variant: "front-paw-left",
+        thresholds: [
+          { max: -0.5, member: "lifted" },
+          { max: 0.5, member: "planted" },
+          { max: 1, member: "wave" },
+        ],
+      }],
+    };
+    mutate(manifest.controls.pawState.bindings[0]);
+    assert.throws(() => validateRigV2Shape(manifest), message, label);
+  }
+});
+
 test("validates opacity bindings against the layer neutral opacity and control range", () => {
   const valid = validManifest();
   valid.layers.push({

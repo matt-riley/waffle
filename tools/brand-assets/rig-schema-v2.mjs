@@ -4,6 +4,8 @@ const SHA256 = /^[a-f\d]{64}$/u;
 const LAYER_ROLES = new Set(["visible", "repair", "overlay", "variant-anchor"]);
 const TRANSFORM_PROPERTIES = new Set(["x", "y", "rotationDegrees", "scaleX", "scaleY"]);
 const CONTROL_LAYER_PROPERTIES = new Set([...TRANSFORM_PROPERTIES, "opacity"]);
+const LAYER_BINDING_FIELDS = new Set(["layer", "property", "factor"]);
+const VARIANT_BINDING_FIELDS = new Set(["variant", "thresholds"]);
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -187,7 +189,14 @@ function validateControls(manifest, byId) {
     if (!Array.isArray(control.bindings) || control.bindings.length === 0) throw new Error(`control ${name} bindings must be a non-empty array`);
     for (const [index, binding] of control.bindings.entries()) {
       if (!object(binding)) throw new Error(`control ${name} binding ${index + 1} must be an object`);
-      if ("layer" in binding) {
+      const hasLayer = Object.hasOwn(binding, "layer");
+      const hasVariant = Object.hasOwn(binding, "variant");
+      if (hasLayer === hasVariant) {
+        throw new Error(`control ${name} binding ${index + 1} must declare exactly one of layer or variant`);
+      }
+      if (hasLayer) {
+        const unsupported = Object.keys(binding).find((field) => !LAYER_BINDING_FIELDS.has(field));
+        if (unsupported) throw new Error(`control ${name} layer binding has unsupported field ${unsupported}`);
         const layer = byId.get(binding.layer);
         if (!layer) throw new Error(`control ${name} binding references unknown layer ${binding.layer}`);
         if (!CONTROL_LAYER_PROPERTIES.has(binding.property)) throw new Error(`control ${name} binding has unsupported property ${binding.property}`);
@@ -199,15 +208,15 @@ function validateControls(manifest, byId) {
             throw new Error(`control ${name} binding opacity must remain inside 0..1`);
           }
         }
-      } else if ("variant" in binding) {
+      } else {
+        const unsupported = Object.keys(binding).find((field) => !VARIANT_BINDING_FIELDS.has(field));
+        if (unsupported) throw new Error(`control ${name} variant binding has unsupported field ${unsupported}`);
         if (!Object.hasOwn(manifest.variants, binding.variant)) throw new Error(`control ${name} binding references unknown variant set ${binding.variant}`);
         if (variantOwners.has(binding.variant)) {
           throw new Error(`variant set ${binding.variant} has ambiguous numeric controls ${variantOwners.get(binding.variant)} and ${name}`);
         }
         validateVariantThresholds(manifest, name, control, binding);
         variantOwners.set(binding.variant, name);
-      } else {
-        throw new Error(`control ${name} binding must reference a layer or variant set`);
       }
     }
   }

@@ -152,7 +152,9 @@ function checkedLayerLimits(layer, transform) {
 
 function variantFromNumericControl(manifest, setId, controls) {
   for (const [name, control] of Object.entries(manifest.controls)) {
-    const binding = control.bindings.find((candidate) => candidate.variant === setId);
+    const binding = control.bindings.find((candidate) => (
+      Object.hasOwn(candidate, "variant") && candidate.variant === setId
+    ));
     if (!binding) continue;
     const value = controls.get(name);
     const threshold = binding.thresholds.find((candidate) => value <= candidate.max);
@@ -182,7 +184,7 @@ export function evaluateClip(manifest, clip, frame) {
   }]));
   for (const [name, value] of controls) {
     for (const binding of manifest.controls[name].bindings) {
-      if (!("layer" in binding)) continue;
+      if (!Object.hasOwn(binding, "layer")) continue;
       const transform = layers.get(binding.layer);
       transform[binding.property] += value * binding.factor;
     }
@@ -222,7 +224,7 @@ export function assertLoopClosure(manifest, clip) {
   validateMotionClipShape(manifest, clip);
   for (const setId of Object.keys(manifest.variants)) {
     const hasNumericBinding = Object.values(manifest.controls).some((control) => (
-      control.bindings.some((binding) => binding.variant === setId)
+      control.bindings.some((binding) => Object.hasOwn(binding, "variant") && binding.variant === setId)
     ));
     if (!hasNumericBinding && !clip.variants[setId]?.some((keyframe) => keyframe.frame === 0)) {
       throw new Error(`variant ${setId} must declare a state at frame 0`);

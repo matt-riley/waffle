@@ -364,6 +364,54 @@ test("evaluateClip resolves numeric variant thresholds unless explicit variant k
   );
 });
 
+test("evaluateClip rejects a hybrid binding before transform and variant evaluation", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  manifest.controls.pawState = {
+    min: -1,
+    max: 1,
+    bindings: [{
+      layer: "body",
+      property: "x",
+      factor: 0.01,
+      variant: "front-paw-left",
+      thresholds: [
+        { max: -0.5, member: "lifted" },
+        { max: 0.5, member: "planted" },
+        { max: 1, member: "lifted" },
+      ],
+    }],
+  };
+  clip.controls.pawState = [{ frame: 0, value: 0 }, { frame: 47, value: 0 }];
+
+  assert.throws(
+    () => evaluateClip(manifest, clip, 0),
+    /control pawState binding 1 must declare exactly one of layer or variant/,
+  );
+});
+
+test("evaluateClip discriminates bindings by their own kind field", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  const binding = Object.assign(Object.create({
+    layer: "body",
+    property: "x",
+    factor: 0.01,
+  }), {
+    variant: "front-paw-left",
+    thresholds: [
+      { max: -0.5, member: "lifted" },
+      { max: 0.5, member: "planted" },
+      { max: 1, member: "lifted" },
+    ],
+  });
+  manifest.controls.pawState = { min: -1, max: 1, bindings: [binding] };
+  clip.controls.pawState = [{ frame: 0, value: 1 }, { frame: 47, value: 1 }];
+  clip.variants = {};
+
+  const evaluated = evaluateClip(manifest, clip, 0);
+  assert.equal(evaluated.variants.get("front-paw-left"), "lifted");
+  assert.equal(evaluated.layers.get("body").x, 0, "inherited layer fields must not be evaluated as a layer binding");
+});
+
 test("production headTurn and jawOpen controls select their registered painted states", async () => {
   const manifest = JSON.parse(await readFile(path.resolve(
     import.meta.dirname,
@@ -505,4 +553,24 @@ test("assertLoopClosure requires every variant to declare its frame-zero state",
   const { clip, manifest } = await rigFixture(t);
   clip.variants["front-paw-left"][0].frame = 1;
   assert.throws(() => assertLoopClosure(manifest, clip), /variant front-paw-left must declare a state at frame 0/);
+});
+
+test("standing v2 documentation states the loop source and rebuild prerequisites precisely", async () => {
+  const readme = await readFile(path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2/README.md",
+  ), "utf8");
+  assert.match(
+    readme,
+    /Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip\.variants` key, while a numeric-bound set may derive it from its control/,
+  );
+  assert.match(readme, /Explicit `clip\.variants` keys override a numeric-derived state/);
+
+  const prerequisite = readme.indexOf("Before running either rebuild command");
+  const firstCommand = readme.indexOf("node tools/brand-assets/build-waffle-standing-rig-v2.mjs");
+  assert.ok(prerequisite >= 0 && prerequisite < firstCommand, "concept-plate prerequisite must precede both rebuild commands");
+  assert.match(
+    readme.slice(prerequisite, firstCommand),
+    /ignored concept\/edit plates referenced by both `repairs\.json` and `variants\.json` must already be retained locally/,
+  );
 });

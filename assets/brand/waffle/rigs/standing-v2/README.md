@@ -27,15 +27,17 @@ Paw, head-turn, and jaw extremes use these registered paintings, not aggressive 
 
 ## Controls and clips
 
-Normalized translation controls use canvas fractions; rotation controls use degrees; `breath`, `weightShift`, turn/state, blink, and jaw controls are unitless. The exact ranges and bindings in `rig.json` are authoritative and must not be widened. Shoulder/upper-leg, elbow/lower-leg, wrist/paw, hip/thigh, hock, and rear-paw rotations additionally obey their per-layer limits. `headTurn` and `jawOpen` bind numeric values to registered variant members through ordered, upper-inclusive thresholds: the first member covers the control minimum through its `max`, and each later member covers values above the preceding threshold through its own `max`. Thresholds are strictly increasing and the last equals the control maximum. Explicit `clip.variants` keyframes take precedence over a control-derived variant when both target the same set.
+Normalized translation controls use canvas fractions; rotation controls use degrees; `breath`, `weightShift`, turn/state, blink, and jaw controls are unitless. The exact ranges and bindings in `rig.json` are authoritative and must not be widened. Shoulder/upper-leg, elbow/lower-leg, wrist/paw, hip/thigh, hock, and rear-paw rotations additionally obey their per-layer limits. `headTurn` and `jawOpen` bind numeric values to registered variant members through ordered, upper-inclusive thresholds: the first member covers the control minimum through its `max`, and each later member covers values above the preceding threshold through its own `max`. Thresholds are strictly increasing and the last equals the control maximum. Explicit `clip.variants` keys override a numeric-derived state when both target the same set.
 
 `blinkLeft` and `blinkRight` independently drive the opacity of their source-matched upper and lower lid overlays from 0 to 1. Opacity activation never translates or rotates the painted lids, so their full-canvas registration stays exact. Equal left/right values produce a synchronized blink.
 
-Motion clips use schema version 1 and declare `id`, `fps`, `frameCount`, `loop`, `requiredClosure`, variant keyframes, and numeric control keyframes. Numeric keys interpolate linearly unless held; variant keys always hold. A looping clip must explicitly declare every variant at frame 0 and evaluate to exactly equal controls, variants, and world matrices at its closure frames.
+Motion clips use schema version 1 and declare `id`, `fps`, `frameCount`, `loop`, `requiredClosure`, variant keyframes, and numeric control keyframes. Numeric keys interpolate linearly unless held; variant keys always hold. Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip.variants` key, while a numeric-bound set may derive it from its control. A looping clip must evaluate to exactly equal controls, variants, and world matrices at its closure frames.
 
 The v2 motion acceptance clips are 24 fps: 48 frames for walk-in-place, 72 frames for the paw wave, and 48 frames for the head/face/tail proof. This three-quarter rig does not support a side-profile travelling walk; that requires a separate source-locked rig.
 
 ## Build and validation
+
+Before running either rebuild command, the ignored concept/edit plates referenced by both `repairs.json` and `variants.json` must already be retained locally. They are not production deliverables, but the full base-then-art rebuild sequence depends on them; if they are missing, do not start either rebuild command and use the committed generated rasters plus validation commands instead.
 
 Run commands from the repository root:
 
@@ -54,7 +56,7 @@ mise run brand-check
 
 The base builder stages a source-only sibling package while preserving the authoritative `repairs.json`, `variants.json`, `GENERATION.md`, and package `README.md` needed by the art pass. Controls that target art-pass layers or variant sets are deliberately deferred in the temporary source-only manifest, then restored from authoritative `masks.json` after the art builder registers those targets. Both builders promote only validated packages and never write standing v1.
 
-From-scratch art regeneration also requires the ignored edit plates referenced by `repairs.json` and `variants.json`. Those concept plates remain local by design and are not a production deliverable; without them, use the committed generated rasters and validation commands rather than invoking the art builder. Validation requires contained nonsymlink paths, current SHA-256 hashes, sanitized RGBA PNGs, exact dimensions, package size limits, an acyclic hierarchy, valid variants and controls, and zero visible neutral mismatches against both the approved source and `neutral-reference.png`.
+Validation requires contained nonsymlink paths, current SHA-256 hashes, sanitized RGBA PNGs, exact dimensions, package size limits, an acyclic hierarchy, valid variants and controls, and zero visible neutral mismatches against both the approved source and `neutral-reference.png`.
 
 Artwork must pass still review at full resolution, 320 px, and 160 px on warm-white and charcoal backgrounds before motion authoring. Motion review then checks feline gait and balance, planted baselines, anatomy and joint seams, marking continuity, expression, eye bounds, blink coverage, jaw and whiskers, tail continuity, and exact loop closure before Fusion assembly.
 
