@@ -195,8 +195,12 @@ function validateControls(manifest, byId) {
         throw new Error(`control ${name} binding ${index + 1} must declare exactly one of layer or variant`);
       }
       if (hasLayer) {
-        const unsupported = Object.keys(binding).find((field) => !LAYER_BINDING_FIELDS.has(field));
-        if (unsupported) throw new Error(`control ${name} layer binding has unsupported field ${unsupported}`);
+        const ownFields = Reflect.ownKeys(binding);
+        const unsupported = ownFields.find((field) => typeof field !== "string" || !LAYER_BINDING_FIELDS.has(field));
+        if (unsupported !== undefined) throw new Error(`control ${name} layer binding has unsupported field ${String(unsupported)}`);
+        if (ownFields.length !== LAYER_BINDING_FIELDS.size) {
+          throw new Error(`control ${name} layer binding must contain exactly own fields layer, property, factor`);
+        }
         const layer = byId.get(binding.layer);
         if (!layer) throw new Error(`control ${name} binding references unknown layer ${binding.layer}`);
         if (!CONTROL_LAYER_PROPERTIES.has(binding.property)) throw new Error(`control ${name} binding has unsupported property ${binding.property}`);
@@ -209,9 +213,13 @@ function validateControls(manifest, byId) {
           }
         }
       } else {
-        const unsupported = Object.keys(binding).find((field) => !VARIANT_BINDING_FIELDS.has(field));
-        if (unsupported) throw new Error(`control ${name} variant binding has unsupported field ${unsupported}`);
         if (!Object.hasOwn(manifest.variants, binding.variant)) throw new Error(`control ${name} binding references unknown variant set ${binding.variant}`);
+        const ownFields = Reflect.ownKeys(binding);
+        const unsupported = ownFields.find((field) => typeof field !== "string" || !VARIANT_BINDING_FIELDS.has(field));
+        if (unsupported !== undefined) throw new Error(`control ${name} variant binding has unsupported field ${String(unsupported)}`);
+        if (ownFields.length !== VARIANT_BINDING_FIELDS.size) {
+          throw new Error(`control ${name} variant binding must contain exactly own fields variant, thresholds`);
+        }
         if (variantOwners.has(binding.variant)) {
           throw new Error(`variant set ${binding.variant} has ambiguous numeric controls ${variantOwners.get(binding.variant)} and ${name}`);
         }

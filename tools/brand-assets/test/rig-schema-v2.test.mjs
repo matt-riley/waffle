@@ -251,6 +251,48 @@ test("requires control bindings to declare exactly one discriminated binding kin
   );
 });
 
+test("requires every binding field to be an own property while accepting JSON and null-prototype objects", () => {
+  const inheritedLayerFields = validManifest();
+  inheritedLayerFields.controls.bodyBob.bindings[0] = Object.assign(Object.create({
+    property: "y",
+    factor: 1,
+  }), { layer: "torso" });
+  assert.throws(
+    () => validateRigV2Shape(inheritedLayerFields),
+    /control bodyBob layer binding must contain exactly own fields layer, property, factor/,
+  );
+
+  const thresholds = [
+    { max: -0.5, member: "lifted" },
+    { max: 0.5, member: "planted" },
+    { max: 1, member: "wave" },
+  ];
+  const inheritedVariantFields = validManifest();
+  inheritedVariantFields.controls.pawState = {
+    min: -1,
+    max: 1,
+    bindings: [Object.assign(Object.create({ thresholds }), { variant: "front-paw-left" })],
+  };
+  assert.throws(
+    () => validateRigV2Shape(inheritedVariantFields),
+    /control pawState variant binding must contain exactly own fields variant, thresholds/,
+  );
+
+  const normalJson = validManifest();
+  assert.doesNotThrow(() => validateRigV2Shape(normalJson));
+
+  const nullPrototype = validManifest();
+  nullPrototype.controls.bodyBob.bindings[0] = Object.assign(Object.create(null), {
+    factor: 1,
+    layer: "torso",
+    property: "y",
+  });
+  assert.doesNotThrow(
+    () => validateRigV2Shape(nullPrototype),
+    "own-key equality must be order-insensitive and support null-prototype objects",
+  );
+});
+
 test("rejects binding-kind fields and unknown keys on the other control binding shape", () => {
   for (const [label, mutate, message] of [
     ["layer thresholds", (binding) => { binding.thresholds = []; }, /layer binding has unsupported field thresholds/],
