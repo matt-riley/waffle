@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -24,8 +25,10 @@ import { renderMotionReview } from "../render-waffle-rig-motion.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT = path.resolve(import.meta.dirname, "../render-waffle-rig-motion.mjs");
+const REPO_ROOT = path.resolve(import.meta.dirname, "../../..");
 const WARM_WHITE = [250, 247, 240, 255];
 const CHARCOAL = [35, 32, 30, 255];
+let reviewSequence = 0;
 
 function rgba(width, height) {
   return new PNG({ width, height });
@@ -121,7 +124,7 @@ async function workspace(t) {
     writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
     writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`),
   ]);
-  return { clipPath, manifestPath, root };
+  return { clipPath, layerFile, manifestPath, root };
 }
 
 function pixel(png, x, y) {
@@ -137,9 +140,74 @@ async function entries(directory) {
   return (await readdir(directory)).toSorted();
 }
 
+function repoReviewPath(t, name) {
+  reviewSequence += 1;
+  const output = path.join(
+    REPO_ROOT,
+    ".superpowers",
+    "tests",
+    `task-6-${process.pid}-${reviewSequence}-${name}`,
+  );
+  t.after(async () => {
+    await Promise.all([
+      rm(output, { recursive: true, force: true }),
+      rm(`${output}.building-${process.pid}`, { recursive: true, force: true }),
+      rm(`${output}.previous-${process.pid}`, { recursive: true, force: true }),
+      rm(`${output}.promotion.json`, { force: true }),
+      rm(`${output}.promotion.json.building-${process.pid}`, { force: true }),
+    ]);
+  });
+  return output;
+}
+
+test("repository anchoring is invariant across repo root, asset subdirectory, and unrelated cwd", async (t) => {
+  const fixture = await workspace(t);
+  const fromRoot = repoReviewPath(t, "root");
+  const fromAssets = repoReviewPath(t, "assets-subdir");
+  const fromOutside = repoReviewPath(t, "outside");
+  const common = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+  };
+
+  await renderMotionReview({
+    ...common,
+    outputDirectory: path.relative(REPO_ROOT, fromRoot),
+    cwd: REPO_ROOT,
+  });
+  await renderMotionReview({
+    ...common,
+    outputDirectory: path.relative(path.join(REPO_ROOT, "assets"), fromAssets),
+    cwd: path.join(REPO_ROOT, "assets"),
+  });
+  await renderMotionReview({
+    ...common,
+    outputDirectory: fromOutside,
+    cwd: fixture.root,
+  });
+  for (const output of [fromRoot, fromAssets, fromOutside]) {
+    assert.deepEqual(await entries(output), ["frame-0000.png", "review.json"]);
+  }
+
+  const invalidClip = JSON.parse(await readFile(fixture.clipPath, "utf8"));
+  invalidClip.frameCount = 0;
+  await writeFile(fixture.clipPath, JSON.stringify(invalidClip));
+  const forbidden = path.join(REPO_ROOT, "assets", ".superpowers", `task-6-${process.pid}`);
+  t.after(() => rm(forbidden, { recursive: true, force: true }));
+  await assert.rejects(renderMotionReview({
+    ...common,
+    outputDirectory: `.superpowers/task-6-${process.pid}`,
+    cwd: path.join(REPO_ROOT, "assets"),
+  }), /refusing to write inside assets/);
+  await assert.rejects(lstat(forbidden), { code: "ENOENT" });
+});
+
 test("CLI renders every selected frame and row-major 320/160 contact sheets deterministically", async (t) => {
   const fixture = await workspace(t);
-  const output = path.join(fixture.root, ".superpowers", "reviews", "tiny-warm");
+  const output = repoReviewPath(t, "tiny-warm");
 
   await execFileAsync(process.execPath, [
     SCRIPT,
@@ -199,7 +267,7 @@ test("CLI renders every selected frame and row-major 320/160 contact sheets dete
 
 test("renderer requires explicit supported backgrounds and preserves selected frame order", async (t) => {
   const fixture = await workspace(t);
-  const base = path.join(fixture.root, ".superpowers", "reviews");
+  const base = repoReviewPath(t, "backgrounds");
   for (const [background, expected] of [
     ["charcoal", CHARCOAL],
     ["checkerboard", [238, 235, 228, 255]],
@@ -233,7 +301,7 @@ test("renderer requires explicit supported backgrounds and preserves selected fr
 
 test("renderer validates the rig and clip before creating temporary output", async (t) => {
   const fixture = await workspace(t);
-  const output = path.join(fixture.root, ".superpowers", "reviews", "invalid");
+  const output = repoReviewPath(t, "invalid");
   const clip = JSON.parse(await readFile(fixture.clipPath, "utf8"));
   clip.frameCount = 0;
   await writeFile(fixture.clipPath, JSON.stringify(clip));
@@ -249,12 +317,12 @@ test("renderer validates the rig and clip before creating temporary output", asy
   }), /frameCount must be a positive integer/);
 
   await assert.rejects(lstat(output), { code: "ENOENT" });
-  await assert.rejects(lstat(path.dirname(output)), { code: "ENOENT" });
+  await assert.rejects(lstat(`${output}.building-${process.pid}`), { code: "ENOENT" });
 });
 
 test("renderer preflights every non-loop clip frame before creating output", async (t) => {
   const fixture = await workspace(t);
-  const output = path.join(fixture.root, ".superpowers", "reviews", "uncovered-frame");
+  const output = repoReviewPath(t, "uncovered-frame");
   const clip = JSON.parse(await readFile(fixture.clipPath, "utf8"));
   clip.controls.fade.pop();
   await writeFile(fixture.clipPath, JSON.stringify(clip));
@@ -269,7 +337,59 @@ test("renderer preflights every non-loop clip frame before creating output", asy
     cwd: fixture.root,
   }), /frame 2 is outside keyframe range 0\.\.1/);
 
-  await assert.rejects(lstat(path.dirname(output)), { code: "ENOENT" });
+  await assert.rejects(lstat(output), { code: "ENOENT" });
+  await assert.rejects(lstat(`${output}.building-${process.pid}`), { code: "ENOENT" });
+});
+
+test("renderer uses one validated manifest, clip, and raster snapshot after live inputs mutate", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "immutable-snapshot");
+  const [manifestBytes, clipBytes, layerBytes] = await Promise.all([
+    readFile(fixture.manifestPath),
+    readFile(fixture.clipPath),
+    readFile(fixture.layerFile),
+  ]);
+  let snapshotHookCalls = 0;
+
+  await renderMotionReview({
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  }, {
+    afterSnapshot: async () => {
+      snapshotHookCalls += 1;
+      const changedLayer = rgba(1536, 1024);
+      paintRectangle(changedLayer, 744, 480, 48, 64, [20, 60, 220, 255]);
+      const changedClip = JSON.parse(clipBytes.toString("utf8"));
+      changedClip.controls.fade[0].value = -1;
+      const changedManifest = JSON.parse(manifestBytes.toString("utf8"));
+      changedManifest.root.pivot.x = 0.49;
+      await Promise.all([
+        writePng(fixture.layerFile, changedLayer),
+        writeFile(fixture.clipPath, `${JSON.stringify(changedClip, null, 2)}\n`),
+        writeFile(fixture.manifestPath, `${JSON.stringify(changedManifest, null, 2)}\n`),
+      ]);
+    },
+  });
+
+  assert.equal(snapshotHookCalls, 1);
+  const frame = await decoded(path.join(output, "frame-0000.png"));
+  assert.deepEqual(pixel(frame, 768, 512), [232, 137, 48, 255]);
+  const review = JSON.parse(await readFile(path.join(output, "review.json"), "utf8"));
+  assert.equal(review.inputs.manifest.sha256, createHash("sha256").update(manifestBytes).digest("hex"));
+  assert.equal(review.inputs.clip.sha256, createHash("sha256").update(clipBytes).digest("hex"));
+  assert.equal(review.inputs.manifest.scope, "external");
+  assert.equal(review.inputs.clip.scope, "external");
+  assert.equal(review.inputs.manifest.path.includes(fixture.root), false);
+  assert.equal(review.inputs.clip.path.includes(fixture.root), false);
+  const layer = review.inputs.rasters.find((entry) => entry.declaredPath === "layers/cat.png");
+  assert.equal(layer.sha256, createHash("sha256").update(layerBytes).digest("hex"));
+  assert.equal(layer.scope, "external");
+  assert.equal(layer.path.includes(fixture.root), false);
 });
 
 test("renderer refuses assets, traversal, and symlinked output before writing", async (t) => {
@@ -284,15 +404,15 @@ test("renderer refuses assets, traversal, and symlinked output before writing", 
   };
   await assert.rejects(renderMotionReview({
     ...common,
-    outputDirectory: path.join(fixture.root, "assets", "brand", "waffle", "review"),
+    outputDirectory: path.join(REPO_ROOT, "assets", "brand", "waffle", "review"),
   }), /refusing to write inside assets/);
   await assert.rejects(renderMotionReview({
     ...common,
     outputDirectory: path.join(fixture.root, ".superpowers", "reviews", "..", "..", "assets"),
-  }), /refusing to write inside assets|output must stay inside \.superpowers/);
+  }), /refusing to write inside assets|output must be lexically inside repository \.superpowers/);
 
   const outside = path.join(fixture.root, "outside");
-  const link = path.join(fixture.root, ".superpowers", "linked");
+  const link = repoReviewPath(t, "linked");
   await Promise.all([mkdir(outside), mkdir(path.dirname(link), { recursive: true })]);
   await symlink(outside, link);
   await assert.rejects(renderMotionReview({
@@ -300,11 +420,24 @@ test("renderer refuses assets, traversal, and symlinked output before writing", 
     outputDirectory: path.join(link, "escape"),
   }), /output path must not use symlinks|output must stay inside \.superpowers/);
   assert.deepEqual(await readdir(outside), []);
+
+  const allowedTarget = repoReviewPath(t, "allowed-symlink-target");
+  const outsideLink = path.join(fixture.root, "link-into-repo-reviews");
+  await mkdir(allowedTarget);
+  await symlink(allowedTarget, outsideLink);
+  const invalidClip = JSON.parse(await readFile(fixture.clipPath, "utf8"));
+  invalidClip.frameCount = 0;
+  await writeFile(fixture.clipPath, JSON.stringify(invalidClip));
+  await assert.rejects(renderMotionReview({
+    ...common,
+    outputDirectory: path.join(outsideLink, "must-not-write"),
+  }), /output must be lexically inside repository \.superpowers/);
+  assert.deepEqual(await readdir(allowedTarget), []);
 });
 
 test("injected promotion failure restores the previous complete review output", async (t) => {
   const fixture = await workspace(t);
-  const output = path.join(fixture.root, ".superpowers", "reviews", "recoverable");
+  const output = repoReviewPath(t, "recoverable");
   const common = {
     manifestPath: fixture.manifestPath,
     clipPath: fixture.clipPath,
@@ -338,9 +471,239 @@ test("injected promotion failure restores the previous complete review output", 
   await assert.rejects(lstat(`${output}.promotion.json`), { code: "ENOENT" });
 });
 
+test("post-rename validation failure immediately restores the previous complete review", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "post-rename-validation");
+  const common = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview({ ...common, background: "warm-white" });
+  const [originalReview, originalFrame] = await Promise.all([
+    readFile(path.join(output, "review.json")),
+    readFile(path.join(output, "frame-0000.png")),
+  ]);
+  let hookCalls = 0;
+
+  await assert.rejects(renderMotionReview({ ...common, background: "charcoal" }, {
+    afterPromote: async (promotedDirectory) => {
+      hookCalls += 1;
+      await writeFile(path.join(promotedDirectory, "frame-0000.png"), "corrupt promoted frame");
+    },
+  }), /review output hash mismatch|file is not a PNG/);
+
+  assert.equal(hookCalls, 1);
+  assert.deepEqual(await readFile(path.join(output, "review.json")), originalReview);
+  assert.deepEqual(await readFile(path.join(output, "frame-0000.png")), originalFrame);
+  const siblings = await readdir(path.dirname(output));
+  assert.equal(siblings.some((name) => name.startsWith(`${path.basename(output)}.previous-`)), false);
+  await assert.rejects(lstat(`${output}.promotion.json`), { code: "ENOENT" });
+});
+
+test("startup restores a valid previous review over a corrupt promoted destination", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "recover-corrupt-destination");
+  const previous = `${output}.previous-424242`;
+  t.after(() => rm(previous, { recursive: true, force: true }));
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  const [originalReview, originalFrame] = await Promise.all([
+    readFile(path.join(output, "review.json")),
+    readFile(path.join(output, "frame-0000.png")),
+  ]);
+  await rename(output, previous);
+  await mkdir(output);
+  await writeFile(path.join(output, "review.json"), "{\"corrupt\":true}\n");
+  await writeFile(`${output}.promotion.json`, `${JSON.stringify({
+    schemaVersion: 1,
+    outputDirectory: path.basename(output),
+    previousDirectory: path.basename(previous),
+  }, null, 2)}\n`);
+
+  await renderMotionReview(options);
+
+  assert.deepEqual(await readFile(path.join(output, "review.json")), originalReview);
+  assert.deepEqual(await readFile(path.join(output, "frame-0000.png")), originalFrame);
+  await assert.rejects(lstat(previous), { code: "ENOENT" });
+  await assert.rejects(lstat(`${output}.promotion.json`), { code: "ENOENT" });
+});
+
+test("recovery refuses a malformed marker without deleting target or evidence", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "malformed-marker");
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  const originalReview = await readFile(path.join(output, "review.json"));
+  await writeFile(`${output}.promotion.json`, "not-json\n");
+
+  await assert.rejects(renderMotionReview(options), /ambiguous review promotion recovery state/);
+
+  assert.deepEqual(await readFile(path.join(output, "review.json")), originalReview);
+  assert.equal(await readFile(`${output}.promotion.json`, "utf8"), "not-json\n");
+});
+
+test("recovery rejects a marker whose previous directory lacks a numeric promotion suffix", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "malformed-previous-name");
+  const malformedPrevious = `${output}.previous-not-a-pid`;
+  t.after(() => rm(malformedPrevious, { recursive: true, force: true }));
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  await cp(output, malformedPrevious, { recursive: true });
+  await writeFile(`${output}.promotion.json`, `${JSON.stringify({
+    schemaVersion: 1,
+    outputDirectory: path.basename(output),
+    previousDirectory: path.basename(malformedPrevious),
+  })}\n`);
+
+  await assert.rejects(renderMotionReview(options), /ambiguous review promotion recovery state/);
+
+  assert.deepEqual(await entries(output), ["frame-0000.png", "review.json"]);
+  assert.deepEqual(await entries(malformedPrevious), ["frame-0000.png", "review.json"]);
+  assert.equal((await lstat(`${output}.promotion.json`)).isFile(), true);
+});
+
+test("recovery refuses multiple stale previous directories and preserves every artifact", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "multiple-previous");
+  const previousOne = `${output}.previous-111111`;
+  const previousTwo = `${output}.previous-222222`;
+  t.after(() => Promise.all([
+    rm(previousOne, { recursive: true, force: true }),
+    rm(previousTwo, { recursive: true, force: true }),
+  ]));
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  await Promise.all([
+    cp(output, previousOne, { recursive: true }),
+    cp(output, previousTwo, { recursive: true }),
+  ]);
+
+  await assert.rejects(renderMotionReview(options), /ambiguous review promotion recovery state/);
+
+  for (const directory of [output, previousOne, previousTwo]) {
+    assert.deepEqual(await entries(directory), ["frame-0000.png", "review.json"]);
+  }
+});
+
+test("recovery restores the sole valid previous review when a marker has no destination", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "marker-missing-destination");
+  const previous = `${output}.previous-333333`;
+  t.after(() => rm(previous, { recursive: true, force: true }));
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  const originalFrame = await readFile(path.join(output, "frame-0000.png"));
+  await rename(output, previous);
+  await writeFile(`${output}.promotion.json`, `${JSON.stringify({
+    schemaVersion: 1,
+    outputDirectory: path.basename(output),
+    previousDirectory: path.basename(previous),
+  })}\n`);
+
+  await renderMotionReview(options);
+
+  assert.deepEqual(await readFile(path.join(output, "frame-0000.png")), originalFrame);
+  await assert.rejects(lstat(previous), { code: "ENOENT" });
+  await assert.rejects(lstat(`${output}.promotion.json`), { code: "ENOENT" });
+});
+
+test("recovery cleans an abandoned build only beside a complete destination", async (t) => {
+  const fixture = await workspace(t);
+  const output = repoReviewPath(t, "clean-abandoned-build");
+  const building = `${output}.building-444444`;
+  t.after(() => rm(building, { recursive: true, force: true }));
+  const options = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview(options);
+  await cp(output, building, { recursive: true });
+
+  await renderMotionReview(options);
+
+  await assert.rejects(lstat(building), { code: "ENOENT" });
+  assert.deepEqual(await entries(output), ["frame-0000.png", "review.json"]);
+});
+
+test("recovery preserves an abandoned build when no destination proves which state won", async (t) => {
+  const fixture = await workspace(t);
+  const seedOutput = repoReviewPath(t, "abandoned-seed");
+  const output = repoReviewPath(t, "ambiguous-abandoned-build");
+  const building = `${output}.building-555555`;
+  t.after(() => rm(building, { recursive: true, force: true }));
+  const common = {
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    frames: "0",
+    background: "warm-white",
+    contactSheet: false,
+    cwd: fixture.root,
+  };
+  await renderMotionReview({ ...common, outputDirectory: seedOutput });
+  await rename(seedOutput, building);
+
+  await assert.rejects(renderMotionReview({
+    ...common,
+    outputDirectory: output,
+  }), /ambiguous review promotion recovery state/);
+
+  assert.deepEqual(await entries(building), ["frame-0000.png", "review.json"]);
+  await assert.rejects(lstat(output), { code: "ENOENT" });
+});
+
 test("renderer refuses to replace an existing review whose declared inventory is incomplete", async (t) => {
   const fixture = await workspace(t);
-  const output = path.join(fixture.root, ".superpowers", "reviews", "incomplete");
+  const output = repoReviewPath(t, "incomplete");
   const common = {
     manifestPath: fixture.manifestPath,
     clipPath: fixture.clipPath,

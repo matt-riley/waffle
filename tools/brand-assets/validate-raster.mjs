@@ -91,13 +91,20 @@ export async function validatePng(file, options = {}) {
     throw new Error(`asset exceeds ${(options.maxBytes ?? MAX_ASSET_BYTES)}-byte budget: ${file}`);
   }
   const buffer = await readFile(file);
+  return validatePngBuffer(buffer, options);
+}
+
+export function validatePngBuffer(buffer, options = {}) {
+  if (buffer.length > (options.maxBytes ?? MAX_ASSET_BYTES)) {
+    throw new Error(`asset exceeds ${(options.maxBytes ?? MAX_ASSET_BYTES)}-byte budget`);
+  }
   const header = inspectPngBuffer(buffer);
   const decoded = PNG.sync.read(buffer);
   if (options.width !== undefined && (header.width !== options.width || header.height !== options.height)) {
     throw new Error(`declared dimensions ${options.width}x${options.height} do not match PNG ${header.width}x${header.height}`);
   }
   validateAlpha(decoded, options.alphaPolicy ?? "any");
-  return { ...header, bytes: fileStat.size, pixels: decoded.data };
+  return { ...header, bytes: buffer.length, pixels: decoded.data };
 }
 
 async function readManifest(manifestPath) {

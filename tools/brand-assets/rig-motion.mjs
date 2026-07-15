@@ -260,14 +260,9 @@ export function assertLoopClosure(manifest, clip) {
   }
 }
 
-export async function renderRigFrame(manifestPath, clipPath, frame) {
-  const [manifest, clip] = await Promise.all([
-    readFile(manifestPath, "utf8").then(JSON.parse),
-    readFile(clipPath, "utf8").then(JSON.parse),
-  ]);
+async function renderFrameFromInputs(manifest, clip, frame, rasterForFile) {
   const evaluated = evaluateClip(manifest, clip, frame);
   const world = worldTransforms(manifest, evaluated.layers);
-  const directory = path.dirname(manifestPath);
   let output = new PNG({ width: manifest.canvas.width, height: manifest.canvas.height });
 
   const hiddenLayers = new Set();
@@ -287,7 +282,7 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
         Object.entries(manifest.variants).find(([, set]) => set.layer === layer.id)[0],
       )).file
       : layer.file;
-    const raster = await readRgba(path.resolve(directory, file));
+    const raster = await rasterForFile(file);
     const transformed = transformRgbaMatrix(raster, world.get(layer.id));
     const opacity = evaluated.layers.get(layer.id).opacity;
     if (opacity !== 1) {
@@ -298,4 +293,22 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
     output = sourceOver(output, transformed);
   }
   return output;
+}
+
+export async function renderRigFrameSnapshot(snapshot, frame) {
+  if (!snapshot || !(snapshot.rasters instanceof Map)) throw new Error("motion snapshot rasters must be a Map");
+  return renderFrameFromInputs(snapshot.manifest, snapshot.clip, frame, async (file) => {
+    const raster = snapshot.rasters.get(file);
+    if (!raster) throw new Error(`motion snapshot is missing raster ${file}`);
+    return raster;
+  });
+}
+
+export async function renderRigFrame(manifestPath, clipPath, frame) {
+  const [manifest, clip] = await Promise.all([
+    readFile(manifestPath, "utf8").then(JSON.parse),
+    readFile(clipPath, "utf8").then(JSON.parse),
+  ]);
+  const directory = path.dirname(manifestPath);
+  return renderFrameFromInputs(manifest, clip, frame, (file) => readRgba(path.resolve(directory, file)));
 }
