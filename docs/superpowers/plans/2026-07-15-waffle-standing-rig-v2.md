@@ -146,7 +146,7 @@ Change both mise commands to validate v1 and v2:
 run = "pnpm --dir tools/brand-assets test && node tools/brand-assets/validate-raster.mjs --optional assets/brand/waffle/manifest.json assets/brand/waffle/animation/idle/manifest.json && node tools/brand-assets/validate-rig.mjs --optional assets/brand/waffle/rigs/standing-v1/rig.json assets/brand/waffle/rigs/standing-v2/rig.json"
 ```
 
-The v2 path remains optional until Task 5 promotes the package.
+The v2 path remains optional until Task 3 promotes the first valid package.
 
 - [ ] **Step 6: Run GREEN and commit**
 
