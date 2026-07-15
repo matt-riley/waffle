@@ -127,12 +127,46 @@ function dominanceAlpha(rgb, key) {
   return clampByte(255 * (1 - Math.min(1, dominance / denominator)));
 }
 
-function sanitizeChromaPixel(data, offset, chromaKey) {
+function keyLikeRgb(rgb, chromaKey) {
+  return channelDistance(rgb, chromaKey.rgb) <= 32
+    || keyDominance(rgb, chromaKey.rgb) >= KEY_DOMINANCE_THRESHOLD;
+}
+
+function localEdgeRgb(source, x, y, chromaKey) {
+  const maximumRadius = 12;
+  for (let radius = 1; radius <= maximumRadius; radius += 1) {
+    const samples = [];
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+        const sampleX = x + dx;
+        const sampleY = y + dy;
+        if (sampleX < 0 || sampleY < 0 || sampleX >= source.width || sampleY >= source.height) continue;
+        const sampleOffset = (sampleY * source.width + sampleX) * 4;
+        if (source.data[sampleOffset + 3] < 128) continue;
+        const rgb = [...source.data.subarray(sampleOffset, sampleOffset + 3)];
+        if (!keyLikeRgb(rgb, chromaKey)) samples.push(rgb);
+      }
+    }
+    if (samples.length > 0) {
+      return [0, 1, 2].map((channel) => clampByte(
+        samples.reduce((sum, sample) => sum + sample[channel], 0) / samples.length,
+      ));
+    }
+  }
+  return undefined;
+}
+
+function neutralRgb(rgb) {
+  const luminance = clampByte(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]);
+  return [luminance, luminance, luminance];
+}
+
+function sanitizeChromaPixel(source, sourceOffset, data, offset, chromaKey) {
   const rgb = [data[offset], data[offset + 1], data[offset + 2]];
   const sourceAlpha = data[offset + 3];
   const distance = channelDistance(rgb, chromaKey.rgb);
-  const keyLike = distance <= 32 || keyDominance(rgb, chromaKey.rgb) >= KEY_DOMINANCE_THRESHOLD;
-  if (!keyLike) return;
+  if (!keyLikeRgb(rgb, chromaKey)) return;
 
   const ratio = (distance - chromaKey.transparentThreshold)
     / (chromaKey.opaqueThreshold - chromaKey.transparentThreshold);
@@ -147,11 +181,10 @@ function sanitizeChromaPixel(data, offset, chromaKey) {
   const unmixed = rgb.map((value, index) => clampByte(
     (value - (1 - matte) * chromaKey.rgb[index]) / matte,
   ));
-  const spill = spillChannels(chromaKey.rgb);
-  const other = [0, 1, 2].filter((index) => !spill.includes(index));
-  const cap = Math.max(0, Math.max(...other.map((index) => unmixed[index])) - 1);
-  for (const index of spill) unmixed[index] = Math.min(unmixed[index], cap);
-  data.set([...unmixed, outputAlpha], offset);
+  const sourceX = (sourceOffset / 4) % source.width;
+  const sourceY = Math.floor(sourceOffset / 4 / source.width);
+  const decontaminated = localEdgeRgb(source, sourceX, sourceY, chromaKey) ?? neutralRgb(unmixed);
+  data.set([...decontaminated, outputAlpha], offset);
 }
 
 function pointToSegmentDistance(x, y, start, end) {
@@ -228,7 +261,7 @@ export function extractBounded(source, specification) {
       if (sourceOffset < 0 || source.data[sourceOffset + 3] === 0) continue;
       const targetOffset = (y * source.width + x) * 4;
       output.data.set(source.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
-      if (chromaKey) sanitizeChromaPixel(output.data, targetOffset, chromaKey);
+      if (chromaKey) sanitizeChromaPixel(source, sourceOffset, output.data, targetOffset, chromaKey);
       const feather = edgeFeatherAlpha(centreX, centreY, specification.polygons, specification.edgeFeatherPixels);
       output.data[targetOffset + 3] = clampByte(output.data[targetOffset + 3] * feather);
       if (output.data[targetOffset + 3] <= ALPHA_NOISE_FLOOR) output.data.fill(0, targetOffset, targetOffset + 4);

@@ -1242,13 +1242,13 @@
           "id": "lifted",
           "file": "variants/front-paw-left/lifted.png",
           "neutral": false,
-          "sha256": "cc8a78f6dc24be24028c1e4c73578e9c34759a051531be0317e9450e4ac9e435"
+          "sha256": "1ba3593c13411de56c5bd55374070b94f836b8311e406b1ce6abf7c1ded6578c"
         },
         {
           "id": "wave",
           "file": "variants/front-paw-left/wave.png",
           "neutral": false,
-          "sha256": "9aedb3867a7470ba6b0b3f72fc4a6ca90e9ee676d24d69b3cb811d8eff200f1d"
+          "sha256": "dba0973936a0dda3d172561004f41f644e4f4b63dacbb398b7eb5d3f43a0a830"
         }
       ]
     },
@@ -1265,7 +1265,7 @@
           "id": "lifted",
           "file": "variants/front-paw-right/lifted.png",
           "neutral": false,
-          "sha256": "d0a87e05105f84d0b56d6631f3fad3d0eca7f3ce3f36dbe17193897f29b53b3b"
+          "sha256": "476c4fd5168c22a97a8d09ef7e5a210d443df3790bfcc90298dec17e53fd27ca"
         }
       ]
     },
@@ -1282,7 +1282,7 @@
           "id": "lifted",
           "file": "variants/rear-paw-left/lifted.png",
           "neutral": false,
-          "sha256": "bd0a5c64bb5f02a540ba8f7b97b05f67977c067c403eb596c141a5176c207492"
+          "sha256": "bc68bfaee03fd90c6325aab2a930f1eb1e58c82cb3fa2d69dd1e730c8411dff0"
         }
       ]
     },
@@ -1299,7 +1299,7 @@
           "id": "lifted",
           "file": "variants/rear-paw-right/lifted.png",
           "neutral": false,
-          "sha256": "a7656869150d3c614175019fce96e3434ead6de0af9239733ff02afeb6e7277d"
+          "sha256": "5df6c0bd1f6732606fa6ca2b29b3701cba7f1fac9727b362bed5494acc1cb999"
         }
       ]
     },
@@ -1316,7 +1316,7 @@
           "id": "turn-left",
           "file": "variants/head-base/turn-left.png",
           "neutral": false,
-          "sha256": "c41f7e6ccd949c124f5fabace85f3d620fecf693f726079a75a7c946676f91d7",
+          "sha256": "134be924de814fbe133378c986f52d6709f16ab1b3d41c3db6812f9f9a52abc6",
           "layerOverrides": {
             "ear-left": {
               "visible": false
@@ -1369,7 +1369,7 @@
           "id": "turn-right",
           "file": "variants/head-base/turn-right.png",
           "neutral": false,
-          "sha256": "f524003f16bfdc471753b1ba58ad2cc1de32f4f076c5f5446fc97baefe459104",
+          "sha256": "7b7ce4a261990f80163af4a08882f77ec21f486f99bf110368963ab197336454",
           "layerOverrides": {
             "ear-left": {
               "visible": false

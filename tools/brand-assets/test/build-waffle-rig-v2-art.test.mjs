@@ -43,6 +43,25 @@ function residualMagentaPixels(image, exempt) {
   return count;
 }
 
+function complementaryGreenPixels(image, exempt) {
+  let count = 0;
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const red = image.data[offset];
+    const green = image.data[offset + 1];
+    const blue = image.data[offset + 2];
+    const alpha = image.data[offset + 3];
+    const sourceOwned = exempt && image.data.subarray(offset, offset + 4).equals(exempt.data.subarray(offset, offset + 4));
+    if (!sourceOwned
+      && alpha > 0
+      && alpha < 255
+      && green >= 160
+      && blue <= 25
+      && green - red >= 25
+      && green - blue >= 80) count += 1;
+  }
+  return count;
+}
+
 function artRecoveryPaths(outputDirectory) {
   return {
     marker: `${outputDirectory}.art-promotion.json`,
@@ -260,6 +279,7 @@ test("extractBounded unmixed antialiased key edges and zeros transparent RGB", (
   const edge = [...extracted.data.subarray((1 * 5 + 2) * 4, (1 * 5 + 2) * 4 + 4)];
   assert.ok(edge[3] > 0 && edge[3] < 255, `expected partial edge alpha, got ${edge}`);
   assert.ok(edge[0] - edge[1] < 16 || edge[2] - edge[1] < 16, `residual magenta edge ${edge}`);
+  assert.equal(complementaryGreenPixels(extracted), 0, `complementary green edge ${edge}`);
   assert.deepEqual([...extracted.data.subarray(0, 4)], [0, 0, 0, 0]);
   assert.equal(residualMagentaPixels(extracted), 0);
 });
@@ -459,6 +479,7 @@ test("production art package has the complete registered inventory and no residu
     for (const member of actual.members.filter((entry) => !entry.neutral)) {
       const image = await readRgba(path.join(productionDirectory, member.file));
       assert.equal(residualMagentaPixels(image, anchorImage), 0, `residual chroma in ${specification.id}/${member.id}`);
+      assert.equal(complementaryGreenPixels(image, anchorImage), 0, `complementary chroma in ${specification.id}/${member.id}`);
     }
   }
 });
