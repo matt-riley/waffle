@@ -1198,7 +1198,7 @@
         "scaleY": 1
       },
       "limits": {},
-      "sha256": "60bb41a674e14e74e35b312d24f9e1cd4fed6e341d3053d3edc090356602f16c"
+      "sha256": "ca11808b2bc0a90c1cc6c1a5843878bc41130ca46e1839d6423f960de3ab67dc"
     },
     {
       "id": "whiskers",
@@ -1242,13 +1242,13 @@
           "id": "lifted",
           "file": "variants/front-paw-left/lifted.png",
           "neutral": false,
-          "sha256": "373ac638b4fedfe0d4e3c082754f238d57b06ff86dff3d87ca12b32779fbe494"
+          "sha256": "cc8a78f6dc24be24028c1e4c73578e9c34759a051531be0317e9450e4ac9e435"
         },
         {
           "id": "wave",
           "file": "variants/front-paw-left/wave.png",
           "neutral": false,
-          "sha256": "b825dd28b7f0d9e16d2efa1ed2897c035fee5dfe38f4b6ff6f860561a1c81a8b"
+          "sha256": "9aedb3867a7470ba6b0b3f72fc4a6ca90e9ee676d24d69b3cb811d8eff200f1d"
         }
       ]
     },
@@ -1265,7 +1265,7 @@
           "id": "lifted",
           "file": "variants/front-paw-right/lifted.png",
           "neutral": false,
-          "sha256": "aba966f0dc04d09abed887b69230472964be1b20043d60569074c90c2a0c0c77"
+          "sha256": "d0a87e05105f84d0b56d6631f3fad3d0eca7f3ce3f36dbe17193897f29b53b3b"
         }
       ]
     },
@@ -1282,7 +1282,7 @@
           "id": "lifted",
           "file": "variants/rear-paw-left/lifted.png",
           "neutral": false,
-          "sha256": "db397dbfd68a6b27edada375b0a8d7d3e03c0b154651b6e8aa027e1ea190ec67"
+          "sha256": "bd0a5c64bb5f02a540ba8f7b97b05f67977c067c403eb596c141a5176c207492"
         }
       ]
     },
@@ -1299,7 +1299,7 @@
           "id": "lifted",
           "file": "variants/rear-paw-right/lifted.png",
           "neutral": false,
-          "sha256": "9eab62f9caa212378af0c4e1560e353fa1bbe74957dba43289fcfe27b1e599f2"
+          "sha256": "a7656869150d3c614175019fce96e3434ead6de0af9239733ff02afeb6e7277d"
         }
       ]
     },
@@ -1316,13 +1316,107 @@
           "id": "turn-left",
           "file": "variants/head-base/turn-left.png",
           "neutral": false,
-          "sha256": "ce4a36de8cbfeb5cb0769831df728772fbbd8295680ca3d228fd652d198ff993"
+          "sha256": "c41f7e6ccd949c124f5fabace85f3d620fecf693f726079a75a7c946676f91d7",
+          "layerOverrides": {
+            "ear-left": {
+              "visible": false
+            },
+            "ear-right": {
+              "visible": false
+            },
+            "muzzle": {
+              "visible": false
+            },
+            "jaw-closed": {
+              "visible": false
+            },
+            "iris-left": {
+              "visible": false
+            },
+            "iris-right": {
+              "visible": false
+            },
+            "pupil-left": {
+              "visible": false
+            },
+            "pupil-right": {
+              "visible": false
+            },
+            "highlight-left": {
+              "visible": false
+            },
+            "highlight-right": {
+              "visible": false
+            },
+            "upper-lid-left": {
+              "visible": false
+            },
+            "lower-lid-left": {
+              "visible": false
+            },
+            "upper-lid-right": {
+              "visible": false
+            },
+            "lower-lid-right": {
+              "visible": false
+            },
+            "whiskers": {
+              "visible": false
+            }
+          }
         },
         {
           "id": "turn-right",
           "file": "variants/head-base/turn-right.png",
           "neutral": false,
-          "sha256": "7dbdf68d9cf1eac69f64c8334258429c66153e3b269a5e97e3684370ed54ddce"
+          "sha256": "f524003f16bfdc471753b1ba58ad2cc1de32f4f076c5f5446fc97baefe459104",
+          "layerOverrides": {
+            "ear-left": {
+              "visible": false
+            },
+            "ear-right": {
+              "visible": false
+            },
+            "muzzle": {
+              "visible": false
+            },
+            "jaw-closed": {
+              "visible": false
+            },
+            "iris-left": {
+              "visible": false
+            },
+            "iris-right": {
+              "visible": false
+            },
+            "pupil-left": {
+              "visible": false
+            },
+            "pupil-right": {
+              "visible": false
+            },
+            "highlight-left": {
+              "visible": false
+            },
+            "highlight-right": {
+              "visible": false
+            },
+            "upper-lid-left": {
+              "visible": false
+            },
+            "lower-lid-left": {
+              "visible": false
+            },
+            "upper-lid-right": {
+              "visible": false
+            },
+            "lower-lid-right": {
+              "visible": false
+            },
+            "whiskers": {
+              "visible": false
+            }
+          }
         }
       ]
     },
@@ -1339,7 +1433,7 @@
           "id": "open",
           "file": "variants/jaw/open.png",
           "neutral": false,
-          "sha256": "36cea2c9c41bd6977deb31a51b00318e2a54148cbb0b9a03c00febe6efd7764c"
+          "sha256": "a0fc600fc54bfe8cfab222f2d89380ac2a4eee7fc4b3afede17001fbad2032c6"
         }
       ]
     }

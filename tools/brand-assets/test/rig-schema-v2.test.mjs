@@ -127,6 +127,43 @@ test("requires every variant anchor to have exactly one neutral variant", () => 
   assert.throws(() => validateRigV2Shape(twoNeutral), /must have exactly one neutral member/);
 });
 
+test("validates member visibility overrides for descendants of a variant anchor", () => {
+  const valid = validManifest();
+  valid.layers.push({
+    ...structuredClone(valid.layers[0]),
+    id: "paw-detail",
+    file: "layers/paw-detail.png",
+    parent: "front-paw-left",
+    drawOrder: 40,
+  });
+  valid.variants["front-paw-left"].members[1].layerOverrides = {
+    "paw-detail": { visible: false },
+  };
+  assert.doesNotThrow(() => validateRigV2Shape(valid));
+
+  const neutralOverride = structuredClone(valid);
+  neutralOverride.variants["front-paw-left"].members[0].layerOverrides = {
+    "paw-detail": { visible: false },
+  };
+  assert.throws(() => validateRigV2Shape(neutralOverride), /neutral member cannot declare layer overrides/);
+
+  const unknown = structuredClone(valid);
+  unknown.variants["front-paw-left"].members[1].layerOverrides = {
+    missing: { visible: false },
+  };
+  assert.throws(() => validateRigV2Shape(unknown), /override references unknown layer missing/);
+
+  const outsideSubtree = structuredClone(valid);
+  outsideSubtree.variants["front-paw-left"].members[1].layerOverrides = {
+    torso: { visible: false },
+  };
+  assert.throws(() => validateRigV2Shape(outsideSubtree), /override layer torso must descend from front-paw-left/);
+
+  const visible = structuredClone(valid);
+  visible.variants["front-paw-left"].members[1].layerOverrides["paw-detail"].visible = true;
+  assert.throws(() => validateRigV2Shape(visible), /visible must be false/);
+});
+
 test("rejects invalid per-layer limits", () => {
   const reversed = validManifest();
   reversed.layers[0].limits.y = { min: 0.01, max: 0.01 };

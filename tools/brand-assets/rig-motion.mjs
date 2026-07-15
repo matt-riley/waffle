@@ -244,8 +244,16 @@ export async function renderRigFrame(manifestPath, clipPath, frame) {
   const directory = path.dirname(manifestPath);
   let output = new PNG({ width: manifest.canvas.width, height: manifest.canvas.height });
 
+  const hiddenLayers = new Set();
+  for (const [setId, memberId] of evaluated.variants) {
+    const member = manifest.variants[setId].members.find((candidate) => candidate.id === memberId);
+    for (const [layerId, override] of Object.entries(member.layerOverrides ?? {})) {
+      if (override.visible === false) hiddenLayers.add(layerId);
+    }
+  }
+
   const activeLayers = manifest.layers
-    .filter((layer) => layer.visibleAtNeutral)
+    .filter((layer) => layer.visibleAtNeutral && !hiddenLayers.has(layer.id))
     .toSorted((left, right) => left.drawOrder - right.drawOrder);
   for (const layer of activeLayers) {
     const file = layer.role === "variant-anchor"

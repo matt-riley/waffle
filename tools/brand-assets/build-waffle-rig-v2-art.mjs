@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -19,6 +20,8 @@ import { validateRig } from "./validate-rig.mjs";
 
 const SAFE_ID = /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/u;
 const SHA256 = /^[a-f\d]{64}$/u;
+const ALPHA_NOISE_FLOOR = 8;
+const KEY_DOMINANCE_THRESHOLD = 16;
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -84,6 +87,100 @@ function validateCrop(crop, canvas, polygons) {
   }
 }
 
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function smoothstep(value) {
+  const clamped = Math.max(0, Math.min(1, value));
+  return clamped * clamped * (3 - 2 * clamped);
+}
+
+function spillChannels(key) {
+  const maximum = Math.max(...key);
+  if (maximum < 128) return [];
+  return key.flatMap((value, index) => value >= maximum - 16 && value >= 128 ? [index] : []);
+}
+
+function channelDistance(rgb, key) {
+  return Math.max(...rgb.map((value, index) => Math.abs(value - key[index])));
+}
+
+function keyDominance(rgb, key) {
+  const spill = spillChannels(key);
+  if (spill.length === 0) return 0;
+  const other = [0, 1, 2].filter((index) => !spill.includes(index));
+  const keyStrength = spill.length > 1
+    ? Math.min(...spill.map((index) => rgb[index]))
+    : rgb[spill[0]];
+  const otherStrength = Math.max(0, ...other.map((index) => rgb[index]));
+  return keyStrength - otherStrength;
+}
+
+function dominanceAlpha(rgb, key) {
+  const dominance = keyDominance(rgb, key);
+  if (dominance <= 0) return 255;
+  const spill = spillChannels(key);
+  const other = [0, 1, 2].filter((index) => !spill.includes(index));
+  const otherStrength = Math.max(0, ...other.map((index) => rgb[index]));
+  const denominator = Math.max(1, Math.max(...key) - otherStrength);
+  return clampByte(255 * (1 - Math.min(1, dominance / denominator)));
+}
+
+function sanitizeChromaPixel(data, offset, chromaKey) {
+  const rgb = [data[offset], data[offset + 1], data[offset + 2]];
+  const sourceAlpha = data[offset + 3];
+  const distance = channelDistance(rgb, chromaKey.rgb);
+  const keyLike = distance <= 32 || keyDominance(rgb, chromaKey.rgb) >= KEY_DOMINANCE_THRESHOLD;
+  if (!keyLike) return;
+
+  const ratio = (distance - chromaKey.transparentThreshold)
+    / (chromaKey.opaqueThreshold - chromaKey.transparentThreshold);
+  const matteAlpha = Math.min(clampByte(255 * smoothstep(ratio)), dominanceAlpha(rgb, chromaKey.rgb));
+  const outputAlpha = clampByte(sourceAlpha * matteAlpha / 255);
+  if (outputAlpha <= ALPHA_NOISE_FLOOR || matteAlpha === 0) {
+    data.fill(0, offset, offset + 4);
+    return;
+  }
+
+  const matte = matteAlpha / 255;
+  const unmixed = rgb.map((value, index) => clampByte(
+    (value - (1 - matte) * chromaKey.rgb[index]) / matte,
+  ));
+  const spill = spillChannels(chromaKey.rgb);
+  const other = [0, 1, 2].filter((index) => !spill.includes(index));
+  const cap = Math.max(0, Math.max(...other.map((index) => unmixed[index])) - 1);
+  for (const index of spill) unmixed[index] = Math.min(unmixed[index], cap);
+  data.set([...unmixed, outputAlpha], offset);
+}
+
+function pointToSegmentDistance(x, y, start, end) {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(x - start[0], y - start[1]);
+  const progress = Math.max(0, Math.min(1, ((x - start[0]) * dx + (y - start[1]) * dy) / lengthSquared));
+  return Math.hypot(x - (start[0] + progress * dx), y - (start[1] + progress * dy));
+}
+
+function edgeFeatherAlpha(x, y, polygons, pixels) {
+  if (pixels === undefined || pixels === 0) return 1;
+  if (!Number.isFinite(pixels) || pixels < 0) throw new Error("edgeFeatherPixels must be a non-negative number");
+  const containing = polygons.filter((polygon) => pointInPolygon(x, y, polygon));
+  let distance = Infinity;
+  for (const polygon of containing) {
+    for (let index = 0; index < polygon.length; index += 1) {
+      distance = Math.min(distance, pointToSegmentDistance(
+        x,
+        y,
+        polygon[index],
+        polygon[(index + 1) % polygon.length],
+      ));
+    }
+  }
+  return smoothstep((distance - 0.5) / pixels);
+}
+
 export function extractBounded(source, specification) {
   const canvas = { width: source.width, height: source.height };
   validateCrop(specification.crop, canvas, specification.polygons);
@@ -117,7 +214,9 @@ export function extractBounded(source, specification) {
   const bottom = top + specification.crop.height;
   for (let y = top; y < bottom; y += 1) {
     for (let x = left; x < right; x += 1) {
-      if (!specification.polygons.some((polygon) => pointInPolygon(x + 0.5, y + 0.5, polygon))) continue;
+      const centreX = x + 0.5;
+      const centreY = y + 0.5;
+      if (!specification.polygons.some((polygon) => pointInPolygon(centreX, centreY, polygon))) continue;
       const sampleX = x + sampleOffset.x;
       const sampleY = y + sampleOffset.y;
       let sourceOffset = sampleX >= 0 && sampleY >= 0 && sampleX < source.width && sampleY < source.height
@@ -129,21 +228,10 @@ export function extractBounded(source, specification) {
       if (sourceOffset < 0 || source.data[sourceOffset + 3] === 0) continue;
       const targetOffset = (y * source.width + x) * 4;
       output.data.set(source.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
-      if (chromaKey) {
-        const red = output.data[targetOffset] - chromaKey.rgb[0];
-        const green = output.data[targetOffset + 1] - chromaKey.rgb[1];
-        const blue = output.data[targetOffset + 2] - chromaKey.rgb[2];
-        const distance = Math.sqrt(red * red + green * green + blue * blue);
-        if (distance <= chromaKey.transparentThreshold) {
-          output.data.fill(0, targetOffset, targetOffset + 4);
-        } else if (distance < chromaKey.opaqueThreshold) {
-          output.data[targetOffset + 3] = Math.round(
-            output.data[targetOffset + 3]
-            * (distance - chromaKey.transparentThreshold)
-            / (chromaKey.opaqueThreshold - chromaKey.transparentThreshold),
-          );
-        }
-      }
+      if (chromaKey) sanitizeChromaPixel(output.data, targetOffset, chromaKey);
+      const feather = edgeFeatherAlpha(centreX, centreY, specification.polygons, specification.edgeFeatherPixels);
+      output.data[targetOffset + 3] = clampByte(output.data[targetOffset + 3] * feather);
+      if (output.data[targetOffset + 3] <= ALPHA_NOISE_FLOOR) output.data.fill(0, targetOffset, targetOffset + 4);
     }
   }
   return output;
@@ -309,6 +397,7 @@ async function writeArtPackage({
       sampleOffset: repair.input.sampleOffset,
       fallbackSample: repair.input.fallbackSample,
       chromaKey: repair.input.chromaKey,
+      edgeFeatherPixels: repair.input.edgeFeatherPixels,
     });
     if (!repair.allowOutsideNeutralCover) image = maskToOpaqueCover(image, cover);
     const relative = `layers/${repair.id}.png`;
@@ -359,6 +448,7 @@ async function writeArtPackage({
         crop: member.input.crop,
         polygons: member.polygons,
         chromaKey: member.input.chromaKey,
+        edgeFeatherPixels: member.input.edgeFeatherPixels,
       });
       if (member.input.constrainToAnchorAlpha) image = maskToOwnedAlpha(image, anchorImage);
       if (member.input.preserveAnchorOutsidePolygons) image = compositePatchOntoAnchor(image, anchorImage);
@@ -374,6 +464,7 @@ async function writeArtPackage({
         file: relative,
         neutral: member.neutral,
         sha256: await sha256(file),
+        ...(member.layerOverrides === undefined ? {} : { layerOverrides: member.layerOverrides }),
       });
     }
     anchorLayer.role = "variant-anchor";
@@ -389,24 +480,116 @@ async function writeArtPackage({
   return validateRig(temporaryManifestPath);
 }
 
+async function exists(file) {
+  try {
+    await lstat(file);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function artPromotionPaths(outputDirectory) {
+  return {
+    marker: `${outputDirectory}.art-promotion.json`,
+    markerTemporary: `${outputDirectory}.art-promotion.json.building-${process.pid}`,
+    previous: `${outputDirectory}.art-previous-${process.pid}`,
+  };
+}
+
+async function artPreviousEntries(outputDirectory) {
+  const prefix = `${path.basename(outputDirectory)}.art-previous-`;
+  return (await readdir(path.dirname(outputDirectory))).filter((entry) => entry.startsWith(prefix));
+}
+
+async function validateArtDirectory(directory) {
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("art recovery package must be a nonsymlink directory");
+  await validateRig(path.join(directory, "rig.json"));
+}
+
+async function recoverInterruptedArtPromotion(outputDirectory, renamePath) {
+  const paths = artPromotionPaths(outputDirectory);
+  const previousEntries = await artPreviousEntries(outputDirectory);
+  if (!await exists(paths.marker)) {
+    if (previousEntries.length > 0) throw new Error("ambiguous art promotion recovery state");
+    return;
+  }
+  const markerInfo = await lstat(paths.marker);
+  if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) throw new Error("ambiguous art promotion recovery state");
+  const marker = JSON.parse(await readFile(paths.marker, "utf8"));
+  const outputName = path.basename(outputDirectory).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const previousPattern = new RegExp(`^${outputName}\\.art-previous-\\d+$`, "u");
+  if (marker.schemaVersion !== 1
+    || marker.outputDirectory !== path.basename(outputDirectory)
+    || typeof marker.previousDirectory !== "string"
+    || !previousPattern.test(marker.previousDirectory)
+    || previousEntries.length > 1
+    || (previousEntries.length === 1 && previousEntries[0] !== marker.previousDirectory)) {
+    throw new Error("ambiguous art promotion recovery state");
+  }
+  const previousDirectory = path.join(path.dirname(outputDirectory), marker.previousDirectory);
+  const outputExists = await exists(outputDirectory);
+  const previousExists = await exists(previousDirectory);
+  if (!outputExists) {
+    if (!previousExists) throw new Error("art promotion recovery state has no recoverable package");
+    await validateArtDirectory(previousDirectory);
+    await renamePath(previousDirectory, outputDirectory);
+    await rm(paths.marker, { force: true });
+    return;
+  }
+  await validateArtDirectory(outputDirectory);
+  if (previousExists) {
+    await validateArtDirectory(previousDirectory);
+    await rm(previousDirectory, { recursive: true });
+  }
+  await rm(paths.marker, { force: true });
+}
+
+async function writeArtPromotionMarker(outputDirectory, previousDirectory, renamePath) {
+  const paths = artPromotionPaths(outputDirectory);
+  await writeFile(paths.markerTemporary, `${JSON.stringify({
+    schemaVersion: 1,
+    outputDirectory: path.basename(outputDirectory),
+    previousDirectory: path.basename(previousDirectory),
+  })}\n`);
+  await renamePath(paths.markerTemporary, paths.marker);
+  return paths.marker;
+}
+
 async function promote(outputDirectory, temporaryDirectory, renamePath) {
-  const previousDirectory = `${outputDirectory}.art-previous-${process.pid}`;
-  await rm(previousDirectory, { recursive: true, force: true });
-  await renamePath(outputDirectory, previousDirectory);
+  const paths = artPromotionPaths(outputDirectory);
+  const marker = await writeArtPromotionMarker(outputDirectory, paths.previous, renamePath);
+  try {
+    await renamePath(outputDirectory, paths.previous);
+  } catch (error) {
+    await validateArtDirectory(outputDirectory);
+    await rm(marker, { force: true });
+    throw error;
+  }
   try {
     await renamePath(temporaryDirectory, outputDirectory);
-  } catch (error) {
-    await renamePath(previousDirectory, outputDirectory);
-    throw error;
+  } catch (promotionError) {
+    try {
+      await renamePath(paths.previous, outputDirectory);
+      await validateArtDirectory(outputDirectory);
+      await rm(marker, { force: true });
+    } catch (restorationError) {
+      throw new Error(restorationError.message, { cause: promotionError });
+    }
+    throw promotionError;
   }
   try {
     await validateRig(path.join(outputDirectory, "rig.json"));
   } catch (error) {
     await rm(outputDirectory, { recursive: true, force: true });
-    await renamePath(previousDirectory, outputDirectory);
+    await renamePath(paths.previous, outputDirectory);
+    await rm(marker, { force: true });
     throw error;
   }
-  await rm(previousDirectory, { recursive: true, force: true });
+  await rm(paths.previous, { recursive: true, force: true });
+  await rm(marker, { force: true });
 }
 
 export async function buildRigV2Art({
@@ -421,6 +604,7 @@ export async function buildRigV2Art({
   const outputDirectory = path.dirname(manifestPath);
   if (path.basename(manifestPath) !== "rig.json") throw new Error("manifest path must end in rig.json");
   if (path.resolve(outputDirectory).split(path.sep).includes("standing-v1")) throw new Error("refusing to write into standing-v1");
+  await recoverInterruptedArtPromotion(outputDirectory, renamePath);
   const info = await lstat(outputDirectory);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("rig package must be a nonsymlink directory");
   const [repairsBytes, variantsBytes] = await Promise.all([readFile(repairsFile), readFile(variantsFile)]);

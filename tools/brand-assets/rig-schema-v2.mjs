@@ -108,6 +108,26 @@ function validateVariants(manifest, byId) {
       if (typeof member.neutral !== "boolean") throw new Error(`variant ${setId}/${member.id} neutral must be boolean`);
       if (member.neutral) neutralCount += 1;
       declaredFile(member, `variant ${setId}/${member.id}`);
+      if (member.layerOverrides !== undefined) {
+        if (member.neutral) throw new Error(`variant ${setId}/${member.id} neutral member cannot declare layer overrides`);
+        if (!object(member.layerOverrides) || Object.keys(member.layerOverrides).length === 0) {
+          throw new Error(`variant ${setId}/${member.id} layerOverrides must be a non-empty object`);
+        }
+        for (const [layerId, override] of Object.entries(member.layerOverrides)) {
+          const overrideLayer = byId.get(layerId);
+          if (!overrideLayer) throw new Error(`variant ${setId}/${member.id} override references unknown layer ${layerId}`);
+          let current = overrideLayer;
+          while (current.parent !== manifest.root.id && current.parent !== layer.id) current = byId.get(current.parent);
+          if (current.parent !== layer.id) {
+            throw new Error(`variant ${setId}/${member.id} override layer ${layerId} must descend from ${layer.id}`);
+          }
+          if (!object(override)
+            || Object.keys(override).length !== 1
+            || override.visible !== false) {
+            throw new Error(`variant ${setId}/${member.id} override ${layerId} visible must be false`);
+          }
+        }
+      }
     }
     if (neutralCount !== 1) throw new Error(`variant set ${setId} must have exactly one neutral member`);
   }

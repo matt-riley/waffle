@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -28,6 +28,27 @@ function png() {
 
 function paint(target, x, y, rgba) {
   target.data.set(rgba, (y * target.width + x) * 4);
+}
+
+function residualMagentaPixels(image, exempt) {
+  let count = 0;
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const red = image.data[offset];
+    const green = image.data[offset + 1];
+    const blue = image.data[offset + 2];
+    const alpha = image.data[offset + 3];
+    const sourceOwned = exempt && image.data.subarray(offset, offset + 4).equals(exempt.data.subarray(offset, offset + 4));
+    if (!sourceOwned && alpha > 0 && red - green >= 16 && blue - green >= 16) count += 1;
+  }
+  return count;
+}
+
+function artRecoveryPaths(outputDirectory) {
+  return {
+    marker: `${outputDirectory}.art-promotion.json`,
+    previous: `${outputDirectory}.art-previous-${process.pid}`,
+    temporary: `${outputDirectory}.art-building-${process.pid}`,
+  };
 }
 
 async function workspace(t) {
@@ -224,6 +245,40 @@ test("extractBounded removes a declared flat chroma key without affecting bounde
   assert.deepEqual([...extracted.data.subarray((1 * 4 + 2) * 4, (1 * 4 + 2) * 4 + 4)], [220, 140, 55, 255]);
 });
 
+test("extractBounded unmixed antialiased key edges and zeros transparent RGB", () => {
+  const source = new PNG({ width: 5, height: 3 });
+  for (let offset = 0; offset < source.data.length; offset += 4) source.data.set([255, 0, 255, 255], offset);
+  paint(source, 2, 1, [236, 48, 224, 255]);
+  paint(source, 3, 1, [220, 140, 55, 255]);
+
+  const extracted = extractBounded(source, {
+    crop: { x: 0, y: 0, width: 5, height: 3 },
+    polygons: [[[0, 0], [5, 0], [5, 3], [0, 3]]],
+    chromaKey: { rgb: [255, 0, 255], transparentThreshold: 12, opaqueThreshold: 220 },
+  });
+
+  const edge = [...extracted.data.subarray((1 * 5 + 2) * 4, (1 * 5 + 2) * 4 + 4)];
+  assert.ok(edge[3] > 0 && edge[3] < 255, `expected partial edge alpha, got ${edge}`);
+  assert.ok(edge[0] - edge[1] < 16 || edge[2] - edge[1] < 16, `residual magenta edge ${edge}`);
+  assert.deepEqual([...extracted.data.subarray(0, 4)], [0, 0, 0, 0]);
+  assert.equal(residualMagentaPixels(extracted), 0);
+});
+
+test("extractBounded feathers a bounded edit before it is blended into its anchor", () => {
+  const source = new PNG({ width: 7, height: 7 });
+  for (let offset = 0; offset < source.data.length; offset += 4) source.data.set([180, 90, 30, 255], offset);
+
+  const extracted = extractBounded(source, {
+    crop: { x: 1, y: 1, width: 5, height: 5 },
+    polygons: [[[1, 1], [6, 1], [6, 6], [1, 6]]],
+    edgeFeatherPixels: 2,
+  });
+
+  assert.equal(extracted.data[(1 * 7 + 1) * 4 + 3], 0);
+  assert.ok(extracted.data[(2 * 7 + 2) * 4 + 3] > 0);
+  assert.equal(extracted.data[(3 * 7 + 3) * 4 + 3], 255);
+});
+
 test("builder extracts registered variants, preserves the neutral anchor exactly, and keeps repairs out of neutral", async (t) => {
   const inputs = await fixture(t);
   const originalAnchor = await readRgba(path.join(inputs.outputDirectory, "layers", "head-base.png"));
@@ -298,4 +353,112 @@ test("builder writes deterministic hashes and outputs when repeated from an appr
   const second = await packageSnapshot(inputs.outputDirectory);
 
   assert.deepEqual(second, first);
+});
+
+test("startup restores the approved package after promotion and immediate restoration both fail", async (t) => {
+  const inputs = await fixture(t);
+  const originalManifest = await readFile(inputs.manifestPath);
+  const paths = artRecoveryPaths(inputs.outputDirectory);
+  const invalidVariantsFile = path.join(path.dirname(inputs.outputDirectory), "invalid-variants.json");
+  inputs.variants.source.sha256 = "0".repeat(64);
+  await writeFile(invalidVariantsFile, `${JSON.stringify(inputs.variants, null, 2)}\n`);
+
+  await assert.rejects(buildRigV2Art({
+    ...inputs,
+    renamePath: async (from, to) => {
+      if (from === paths.temporary && to === inputs.outputDirectory) throw new Error("injected art promotion failure");
+      if (from === paths.previous && to === inputs.outputDirectory) throw new Error("injected art restoration failure");
+      return rename(from, to);
+    },
+  }), /injected art restoration failure/);
+
+  await assert.rejects(readFile(inputs.manifestPath), { code: "ENOENT" });
+  assert.deepEqual(await readFile(path.join(paths.previous, "rig.json")), originalManifest);
+  assert.equal(JSON.parse(await readFile(paths.marker, "utf8")).previousDirectory, path.basename(paths.previous));
+
+  await assert.rejects(buildRigV2Art({ ...inputs, variantsFile: invalidVariantsFile }), /source sha256 mismatch/);
+
+  assert.deepEqual(await readFile(inputs.manifestPath), originalManifest);
+  await assert.rejects(readFile(paths.marker), { code: "ENOENT" });
+  await assert.rejects(readFile(path.join(paths.previous, "rig.json")), { code: "ENOENT" });
+});
+
+test("production art package has the complete registered inventory and no residual key pixels", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const [manifest, repairs, variants] = await Promise.all([
+    readFile(path.join(productionDirectory, "rig.json"), "utf8").then(JSON.parse),
+    readFile(path.join(productionDirectory, "repairs.json"), "utf8").then(JSON.parse),
+    readFile(path.join(productionDirectory, "variants.json"), "utf8").then(JSON.parse),
+  ]);
+  const expectedRepairs = [
+    "body-repair", "neck-repair",
+    "front-shoulder-repair-left", "front-shoulder-repair-right",
+    "rear-hip-repair-left", "rear-hip-repair-right",
+    "front-elbow-repair-left", "front-elbow-repair-right",
+    "rear-hock-repair-left", "rear-hock-repair-right",
+    "front-wrist-repair-left", "front-wrist-repair-right",
+    "rear-paw-root-repair-left", "rear-paw-root-repair-right",
+    "tail-base-mid-repair", "tail-mid-tip-repair",
+  ].toSorted();
+  const expectedOverlays = ["upper-lid-left", "lower-lid-left", "upper-lid-right", "lower-lid-right"].toSorted();
+  const expectedMembers = {
+    "front-paw-left": ["planted", "lifted", "wave"],
+    "front-paw-right": ["planted", "lifted"],
+    "rear-paw-left": ["planted", "lifted"],
+    "rear-paw-right": ["planted", "lifted"],
+    "head-base": ["neutral", "turn-left", "turn-right"],
+    jaw: ["closed", "open"],
+  };
+  const replacedHeadChildren = [
+    "ear-left", "ear-right", "muzzle", "jaw-closed",
+    "iris-left", "iris-right", "pupil-left", "pupil-right",
+    "highlight-left", "highlight-right", "whiskers",
+    "upper-lid-left", "lower-lid-left", "upper-lid-right", "lower-lid-right",
+  ].toSorted();
+
+  assert.deepEqual(repairs.repairs.map((entry) => entry.id).toSorted(), expectedRepairs);
+  assert.deepEqual(repairs.overlays.map((entry) => entry.id).toSorted(), expectedOverlays);
+  assert.deepEqual(variants.sets.map((entry) => entry.id).toSorted(), Object.keys(expectedMembers).toSorted());
+
+  const layerById = new Map(manifest.layers.map((layer) => [layer.id, layer]));
+  for (const specification of [...repairs.repairs, ...repairs.overlays]) {
+    const layer = layerById.get(specification.id);
+    assert.ok(layer, `missing production layer ${specification.id}`);
+    assert.equal(layer.parent, specification.parent);
+    assert.equal(layer.drawOrder, specification.drawOrder);
+    assert.deepEqual(layer.pivot, specification.pivot);
+    assert.equal(layer.role, specification.role ?? "repair");
+    assert.equal(layer.visibleAtNeutral, false);
+  }
+
+  for (const specification of variants.sets) {
+    const actual = manifest.variants[specification.id];
+    const anchor = layerById.get(specification.anchorLayer);
+    assert.ok(actual && anchor, `missing production variant set ${specification.id}`);
+    assert.deepEqual(specification.registrationPivot, anchor.pivot);
+    assert.deepEqual(actual.members.map((member) => member.id), expectedMembers[specification.id]);
+    assert.equal(actual.members.filter((member) => member.neutral).length, 1);
+    assert.equal(actual.members.find((member) => member.neutral).id, specification.neutralMember);
+    if (specification.id === "head-base") {
+      assert.equal(actual.members.find((member) => member.neutral).layerOverrides, undefined);
+      for (const member of actual.members.filter((entry) => !entry.neutral)) {
+        assert.deepEqual(Object.keys(member.layerOverrides).toSorted(), replacedHeadChildren);
+        assert.ok(Object.values(member.layerOverrides).every((override) => override.visible === false));
+      }
+    }
+    const neutral = actual.members.find((member) => member.neutral);
+    const anchorImage = await readRgba(path.join(productionDirectory, anchor.file));
+    assert.deepEqual(
+      (await readRgba(path.join(productionDirectory, neutral.file))).data,
+      anchorImage.data,
+      `neutral anchor drift for ${specification.id}`,
+    );
+    for (const member of actual.members.filter((entry) => !entry.neutral)) {
+      const image = await readRgba(path.join(productionDirectory, member.file));
+      assert.equal(residualMagentaPixels(image, anchorImage), 0, `residual chroma in ${specification.id}/${member.id}`);
+    }
+  }
 });

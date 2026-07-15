@@ -137,7 +137,7 @@ async function rigFixture(t) {
         id: "foreground",
         file: "layers/foreground.png",
         role: "overlay",
-        parent: "waffle-root",
+        parent: "front-paw-left",
         drawOrder: 30,
         visibleAtNeutral: true,
         blendMode: "normal",
@@ -182,7 +182,13 @@ async function rigFixture(t) {
         layer: "front-paw-left",
         members: [
           { id: "planted", file: "variants/front-paw-left/planted.png", neutral: true, sha256: await sha256(files.planted) },
-          { id: "lifted", file: "variants/front-paw-left/lifted.png", neutral: false, sha256: await sha256(files.lifted) },
+          {
+            id: "lifted",
+            file: "variants/front-paw-left/lifted.png",
+            neutral: false,
+            sha256: await sha256(files.lifted),
+            layerOverrides: { foreground: { visible: false } },
+          },
         ],
       },
     },
@@ -322,6 +328,18 @@ test("renderRigFrame composes active variant rasters in draw order", async (t) =
 
   assert.deepEqual([...frame.data.subarray((100 * 1536 + 100) * 4, (100 * 1536 + 100) * 4 + 4)], [25, 80, 180, 255]);
   assert.deepEqual([...frame.data.subarray((200 * 1536 + 200) * 4, (200 * 1536 + 200) * 4 + 4)], [240, 170, 50, 255]);
+});
+
+test("renderRigFrame applies selected variant member visibility overrides", async (t) => {
+  const { clipPath, manifestPath } = await rigFixture(t);
+  const frame = await renderRigFrame(manifestPath, clipPath, 12);
+
+  const bodyPixel = [...frame.data.subarray((92 * 1536 + 100) * 4, (92 * 1536 + 100) * 4 + 4)];
+  const pawPixel = [...frame.data.subarray((152 * 1536 + 200) * 4, (152 * 1536 + 200) * 4 + 4)];
+  assert.deepEqual(bodyPixel.slice(0, 3), [220, 60, 40]);
+  assert.ok(bodyPixel[3] > 0);
+  assert.deepEqual(pawPixel.slice(0, 3), [240, 170, 50]);
+  assert.ok(pawPixel[3] > 0);
 });
 
 test("renderRigFrame preserves exact neutral source bytes when hidden layers contain pixels", async (t) => {

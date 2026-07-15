@@ -515,90 +515,83 @@
         {
           "id": "turn-left",
           "neutral": false,
+          "layerOverrides": {
+            "ear-left": { "visible": false },
+            "ear-right": { "visible": false },
+            "muzzle": { "visible": false },
+            "jaw-closed": { "visible": false },
+            "iris-left": { "visible": false },
+            "iris-right": { "visible": false },
+            "pupil-left": { "visible": false },
+            "pupil-right": { "visible": false },
+            "highlight-left": { "visible": false },
+            "highlight-right": { "visible": false },
+            "upper-lid-left": { "visible": false },
+            "lower-lid-left": { "visible": false },
+            "upper-lid-right": { "visible": false },
+            "lower-lid-right": { "visible": false },
+            "whiskers": { "visible": false }
+          },
           "polygons": [
             [
               [
-                420,
-                145
+                410,
+                40
               ],
               [
-                760,
-                145
+                800,
+                40
               ],
               [
-                735,
-                205
+                820,
+                300
               ],
               [
-                690,
-                215
+                870,
+                335
               ],
               [
-                635,
-                210
-              ],
-              [
-                540,
-                210
-              ],
-              [
-                485,
-                215
-              ],
-              [
-                440,
-                205
-              ]
-            ],
-            [
-              [
-                405,
-                250
-              ],
-              [
-                440,
-                245
-              ],
-              [
-                440,
-                380
-              ],
-              [
-                420,
+                870,
                 400
               ],
               [
-                400,
-                350
-              ]
-            ],
-            [
-              [
-                745,
-                245
+                720,
+                415
               ],
               [
-                785,
-                250
+                680,
+                550
               ],
               [
-                795,
-                350
+                500,
+                550
               ],
               [
-                765,
-                400
+                450,
+                500
               ],
               [
-                745,
-                380
+                470,
+                415
+              ],
+              [
+                350,
+                410
+              ],
+              [
+                350,
+                335
+              ],
+              [
+                410,
+                300
               ]
             ]
           ],
           "input": {
             "kind": "edit-plate",
-            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/head-base-turn-left-plate-v1-key.png",
-            "sha256": "7e8fd7ed2b98d9ff28ae4bb6e991f331f01d809892b26bc0026777277072b140",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/head-base-turn-left-plate-v2-key.png",
+            "sha256": "7543bf0311b4ea91e8e66c78783431fb232cb4a9609f219da230183b865489f1",
             "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
             "canvas": {
               "width": 1536,
@@ -606,10 +599,10 @@
             },
             "expectedVariantId": "head-base/turn-left",
             "crop": {
-              "x": 390,
-              "y": 110,
-              "width": 410,
-              "height": 370
+              "x": 350,
+              "y": 40,
+              "width": 520,
+              "height": 520
             },
             "chromaKey": {
               "rgb": [
@@ -620,97 +613,89 @@
               "transparentThreshold": 120,
               "opaqueThreshold": 235
             },
-            "constrainToAnchorAlpha": true,
-            "preserveAnchorOutsidePolygons": true
+            "edgeFeatherPixels": 16
           }
         },
         {
           "id": "turn-right",
           "neutral": false,
+          "layerOverrides": {
+            "ear-left": { "visible": false },
+            "ear-right": { "visible": false },
+            "muzzle": { "visible": false },
+            "jaw-closed": { "visible": false },
+            "iris-left": { "visible": false },
+            "iris-right": { "visible": false },
+            "pupil-left": { "visible": false },
+            "pupil-right": { "visible": false },
+            "highlight-left": { "visible": false },
+            "highlight-right": { "visible": false },
+            "upper-lid-left": { "visible": false },
+            "lower-lid-left": { "visible": false },
+            "upper-lid-right": { "visible": false },
+            "lower-lid-right": { "visible": false },
+            "whiskers": { "visible": false }
+          },
           "polygons": [
             [
               [
-                420,
-                145
+                410,
+                40
               ],
               [
-                760,
-                145
+                800,
+                40
               ],
               [
-                735,
-                205
+                820,
+                300
               ],
               [
-                690,
-                215
+                870,
+                335
               ],
               [
-                635,
-                210
-              ],
-              [
-                540,
-                210
-              ],
-              [
-                485,
-                215
-              ],
-              [
-                440,
-                205
-              ]
-            ],
-            [
-              [
-                405,
-                250
-              ],
-              [
-                440,
-                245
-              ],
-              [
-                440,
-                380
-              ],
-              [
-                420,
+                870,
                 400
               ],
               [
-                400,
-                350
-              ]
-            ],
-            [
-              [
-                745,
-                245
+                720,
+                415
               ],
               [
-                785,
-                250
+                680,
+                550
               ],
               [
-                795,
-                350
+                500,
+                550
               ],
               [
-                765,
-                400
+                450,
+                500
               ],
               [
-                745,
-                380
+                470,
+                415
+              ],
+              [
+                350,
+                410
+              ],
+              [
+                350,
+                335
+              ],
+              [
+                410,
+                300
               ]
             ]
           ],
           "input": {
             "kind": "edit-plate",
-            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/head-base-turn-right-plate-v1-key.png",
-            "sha256": "4e0cf7fa3a860e0ca7c11e521263484bc9ef430a4309f193706b9292d465e644",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/head-base-turn-right-plate-v2-key.png",
+            "sha256": "6aed5fbe5353d684f383e57590fc9c22230814ddc27d220f8ec168d1e9bf46ad",
             "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
             "canvas": {
               "width": 1536,
@@ -718,10 +703,10 @@
             },
             "expectedVariantId": "head-base/turn-right",
             "crop": {
-              "x": 390,
-              "y": 110,
-              "width": 410,
-              "height": 370
+              "x": 350,
+              "y": 40,
+              "width": 520,
+              "height": 520
             },
             "chromaKey": {
               "rgb": [
@@ -732,8 +717,7 @@
               "transparentThreshold": 120,
               "opaqueThreshold": 235
             },
-            "constrainToAnchorAlpha": true,
-            "preserveAnchorOutsidePolygons": true
+            "edgeFeatherPixels": 16
           }
         }
       ]
