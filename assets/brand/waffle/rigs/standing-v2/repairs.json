@@ -1,0 +1,1619 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "file": "../../poses/standing.png",
+    "sha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b"
+  },
+  "canvas": {
+    "width": 1536,
+    "height": 1024
+  },
+  "repairs": [
+    {
+      "id": "body-repair",
+      "cover": "torso",
+      "parent": "waffle-root",
+      "drawOrder": 90,
+      "pivot": {
+        "x": 0.49,
+        "y": 0.64
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            720,
+            610
+          ],
+          [
+            840,
+            610
+          ],
+          [
+            840,
+            700
+          ],
+          [
+            720,
+            700
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "body-repair",
+        "crop": {
+          "x": 720,
+          "y": 610,
+          "width": 120,
+          "height": 90
+        },
+        "polygons": [
+          [
+            [
+              720,
+              610
+            ],
+            [
+              840,
+              610
+            ],
+            [
+              840,
+              700
+            ],
+            [
+              720,
+              700
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": -12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "neck-repair",
+      "cover": "head-base",
+      "parent": "torso",
+      "drawOrder": 199,
+      "pivot": {
+        "x": 0.384,
+        "y": 0.435
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            475,
+            385
+          ],
+          [
+            695,
+            385
+          ],
+          [
+            695,
+            470
+          ],
+          [
+            475,
+            470
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "neck-repair",
+        "crop": {
+          "x": 475,
+          "y": 385,
+          "width": 220,
+          "height": 85
+        },
+        "polygons": [
+          [
+            [
+              475,
+              385
+            ],
+            [
+              695,
+              385
+            ],
+            [
+              695,
+              470
+            ],
+            [
+              475,
+              470
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "front-shoulder-repair-left",
+      "cover": "front-upper-left",
+      "parent": "waffle-root",
+      "drawOrder": 101,
+      "pivot": {
+        "x": 0.357,
+        "y": 0.557
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            465,
+            520
+          ],
+          [
+            615,
+            520
+          ],
+          [
+            615,
+            630
+          ],
+          [
+            465,
+            630
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-shoulder-repair-left",
+        "crop": {
+          "x": 465,
+          "y": 520,
+          "width": 150,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              465,
+              520
+            ],
+            [
+              615,
+              520
+            ],
+            [
+              615,
+              630
+            ],
+            [
+              465,
+              630
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "front-shoulder-repair-right",
+      "cover": "front-upper-right",
+      "parent": "waffle-root",
+      "drawOrder": 113,
+      "pivot": {
+        "x": 0.45,
+        "y": 0.571
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            605,
+            530
+          ],
+          [
+            760,
+            530
+          ],
+          [
+            760,
+            640
+          ],
+          [
+            605,
+            640
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-shoulder-repair-right",
+        "crop": {
+          "x": 605,
+          "y": 530,
+          "width": 155,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              605,
+              530
+            ],
+            [
+              760,
+              530
+            ],
+            [
+              760,
+              640
+            ],
+            [
+              605,
+              640
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": -12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "rear-hip-repair-left",
+      "cover": "rear-thigh-left",
+      "parent": "waffle-root",
+      "drawOrder": 1,
+      "pivot": {
+        "x": 0.536,
+        "y": 0.635
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            745,
+            585
+          ],
+          [
+            900,
+            585
+          ],
+          [
+            900,
+            695
+          ],
+          [
+            745,
+            695
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-hip-repair-left",
+        "crop": {
+          "x": 745,
+          "y": 585,
+          "width": 155,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              745,
+              585
+            ],
+            [
+              900,
+              585
+            ],
+            [
+              900,
+              695
+            ],
+            [
+              745,
+              695
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "rear-hip-repair-right",
+      "cover": "rear-thigh-right",
+      "parent": "waffle-root",
+      "drawOrder": 14,
+      "pivot": {
+        "x": 0.638,
+        "y": 0.645
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            900,
+            570
+          ],
+          [
+            1065,
+            570
+          ],
+          [
+            1065,
+            690
+          ],
+          [
+            900,
+            690
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-hip-repair-right",
+        "crop": {
+          "x": 900,
+          "y": 570,
+          "width": 165,
+          "height": 120
+        },
+        "polygons": [
+          [
+            [
+              900,
+              570
+            ],
+            [
+              1065,
+              570
+            ],
+            [
+              1065,
+              690
+            ],
+            [
+              900,
+              690
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": -12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "front-elbow-repair-left",
+      "cover": "front-lower-left",
+      "parent": "front-upper-left",
+      "drawOrder": 105,
+      "pivot": {
+        "x": 0.352,
+        "y": 0.674
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            475,
+            655
+          ],
+          [
+            615,
+            655
+          ],
+          [
+            615,
+            750
+          ],
+          [
+            475,
+            750
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-elbow-repair-left",
+        "crop": {
+          "x": 475,
+          "y": 655,
+          "width": 140,
+          "height": 95
+        },
+        "polygons": [
+          [
+            [
+              475,
+              655
+            ],
+            [
+              615,
+              655
+            ],
+            [
+              615,
+              750
+            ],
+            [
+              475,
+              750
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "front-elbow-repair-right",
+      "cover": "front-lower-right",
+      "parent": "front-upper-right",
+      "drawOrder": 115,
+      "pivot": {
+        "x": 0.448,
+        "y": 0.684
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            620,
+            665
+          ],
+          [
+            765,
+            665
+          ],
+          [
+            765,
+            760
+          ],
+          [
+            620,
+            760
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-elbow-repair-right",
+        "crop": {
+          "x": 620,
+          "y": 665,
+          "width": 145,
+          "height": 95
+        },
+        "polygons": [
+          [
+            [
+              620,
+              665
+            ],
+            [
+              765,
+              665
+            ],
+            [
+              765,
+              760
+            ],
+            [
+              620,
+              760
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "rear-hock-repair-left",
+      "cover": "rear-hock-left",
+      "parent": "rear-thigh-left",
+      "drawOrder": 3,
+      "pivot": {
+        "x": 0.57,
+        "y": 0.742
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            795,
+            690
+          ],
+          [
+            920,
+            690
+          ],
+          [
+            920,
+            790
+          ],
+          [
+            795,
+            790
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-hock-repair-left",
+        "crop": {
+          "x": 795,
+          "y": 690,
+          "width": 125,
+          "height": 100
+        },
+        "polygons": [
+          [
+            [
+              795,
+              690
+            ],
+            [
+              920,
+              690
+            ],
+            [
+              920,
+              790
+            ],
+            [
+              795,
+              790
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "rear-hock-repair-right",
+      "cover": "rear-hock-right",
+      "parent": "rear-thigh-right",
+      "drawOrder": 16,
+      "pivot": {
+        "x": 0.664,
+        "y": 0.757
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            960,
+            685
+          ],
+          [
+            1085,
+            685
+          ],
+          [
+            1085,
+            795
+          ],
+          [
+            960,
+            795
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-hock-repair-right",
+        "crop": {
+          "x": 960,
+          "y": 685,
+          "width": 125,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              960,
+              685
+            ],
+            [
+              1085,
+              685
+            ],
+            [
+              1085,
+              795
+            ],
+            [
+              960,
+              795
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "front-wrist-repair-left",
+      "cover": "front-paw-left",
+      "parent": "front-lower-left",
+      "drawOrder": 107,
+      "pivot": {
+        "x": 0.348,
+        "y": 0.833
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            465,
+            810
+          ],
+          [
+            615,
+            810
+          ],
+          [
+            615,
+            910
+          ],
+          [
+            465,
+            910
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-wrist-repair-left",
+        "crop": {
+          "x": 465,
+          "y": 810,
+          "width": 150,
+          "height": 100
+        },
+        "polygons": [
+          [
+            [
+              465,
+              810
+            ],
+            [
+              615,
+              810
+            ],
+            [
+              615,
+              910
+            ],
+            [
+              465,
+              910
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "front-wrist-repair-right",
+      "cover": "front-paw-right",
+      "parent": "front-lower-right",
+      "drawOrder": 117,
+      "pivot": {
+        "x": 0.445,
+        "y": 0.846
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            605,
+            820
+          ],
+          [
+            760,
+            820
+          ],
+          [
+            760,
+            920
+          ],
+          [
+            605,
+            920
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "front-wrist-repair-right",
+        "crop": {
+          "x": 605,
+          "y": 820,
+          "width": 155,
+          "height": 100
+        },
+        "polygons": [
+          [
+            [
+              605,
+              820
+            ],
+            [
+              760,
+              820
+            ],
+            [
+              760,
+              920
+            ],
+            [
+              605,
+              920
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "rear-paw-root-repair-left",
+      "cover": "rear-paw-left",
+      "parent": "rear-hock-left",
+      "drawOrder": 5,
+      "pivot": {
+        "x": 0.548,
+        "y": 0.85
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            760,
+            800
+          ],
+          [
+            910,
+            800
+          ],
+          [
+            910,
+            905
+          ],
+          [
+            760,
+            905
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-paw-root-repair-left",
+        "crop": {
+          "x": 760,
+          "y": 800,
+          "width": 150,
+          "height": 105
+        },
+        "polygons": [
+          [
+            [
+              760,
+              800
+            ],
+            [
+              910,
+              800
+            ],
+            [
+              910,
+              905
+            ],
+            [
+              760,
+              905
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "rear-paw-root-repair-right",
+      "cover": "rear-paw-right",
+      "parent": "rear-hock-right",
+      "drawOrder": 18,
+      "pivot": {
+        "x": 0.655,
+        "y": 0.855
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            935,
+            810
+          ],
+          [
+            1085,
+            810
+          ],
+          [
+            1085,
+            915
+          ],
+          [
+            935,
+            915
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "rear-paw-root-repair-right",
+        "crop": {
+          "x": 935,
+          "y": 810,
+          "width": 150,
+          "height": 105
+        },
+        "polygons": [
+          [
+            [
+              935,
+              810
+            ],
+            [
+              1085,
+              810
+            ],
+            [
+              1085,
+              915
+            ],
+            [
+              935,
+              915
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": -12
+        }
+      }
+    },
+    {
+      "id": "tail-base-mid-repair",
+      "cover": "tail-mid",
+      "parent": "tail-base",
+      "drawOrder": 27,
+      "pivot": {
+        "x": 0.69,
+        "y": 0.381
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            1005,
+            380
+          ],
+          [
+            1130,
+            380
+          ],
+          [
+            1130,
+            490
+          ],
+          [
+            1005,
+            490
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "tail-base-mid-repair",
+        "crop": {
+          "x": 1005,
+          "y": 380,
+          "width": 125,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              1005,
+              380
+            ],
+            [
+              1130,
+              380
+            ],
+            [
+              1130,
+              490
+            ],
+            [
+              1005,
+              490
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": -12,
+          "y": 0
+        }
+      }
+    },
+    {
+      "id": "tail-mid-tip-repair",
+      "cover": "tail-tip",
+      "parent": "tail-mid",
+      "drawOrder": 28,
+      "pivot": {
+        "x": 0.703,
+        "y": 0.225
+      },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            1015,
+            195
+          ],
+          [
+            1150,
+            195
+          ],
+          [
+            1150,
+            305
+          ],
+          [
+            1015,
+            305
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "tail-mid-tip-repair",
+        "crop": {
+          "x": 1015,
+          "y": 195,
+          "width": 135,
+          "height": 110
+        },
+        "polygons": [
+          [
+            [
+              1015,
+              195
+            ],
+            [
+              1150,
+              195
+            ],
+            [
+              1150,
+              305
+            ],
+            [
+              1015,
+              305
+            ]
+          ]
+        ],
+        "sampleOffset": {
+          "x": 0,
+          "y": 12
+        }
+      }
+    }
+  ],
+  "overlays": [
+    {
+      "id": "upper-lid-left",
+      "cover": "iris-left",
+      "parent": "head-base",
+      "drawOrder": 252,
+      "pivot": {
+        "x": 0.335,
+        "y": 0.3
+      },
+      "role": "overlay",
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            465,
+            265
+          ],
+          [
+            490,
+            252
+          ],
+          [
+            530,
+            254
+          ],
+          [
+            558,
+            277
+          ],
+          [
+            550,
+            320
+          ],
+          [
+            520,
+            305
+          ],
+          [
+            488,
+            303
+          ],
+          [
+            465,
+            322
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "edit-plate",
+        "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-left-plate-v1-key.png",
+        "sha256": "ee4ae8f44ed61a5cc1ae36d70eea5f4378ab7e7bfaa7ce955a5797566bdd41ed",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "upper-lid-left",
+        "crop": {
+          "x": 455,
+          "y": 245,
+          "width": 115,
+          "height": 95
+        },
+        "polygons": [
+          [
+            [
+              465,
+              265
+            ],
+            [
+              490,
+              252
+            ],
+            [
+              530,
+              254
+            ],
+            [
+              558,
+              277
+            ],
+            [
+              550,
+              320
+            ],
+            [
+              520,
+              305
+            ],
+            [
+              488,
+              303
+            ],
+            [
+              465,
+              322
+            ]
+          ]
+        ],
+        "chromaKey": {
+          "rgb": [
+            255,
+            0,
+            255
+          ],
+          "transparentThreshold": 20,
+          "opaqueThreshold": 220
+        }
+      }
+    },
+    {
+      "id": "lower-lid-left",
+      "cover": "iris-left",
+      "parent": "head-base",
+      "drawOrder": 253,
+      "pivot": {
+        "x": 0.335,
+        "y": 0.325
+      },
+      "role": "overlay",
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            470,
+            310
+          ],
+          [
+            490,
+            330
+          ],
+          [
+            525,
+            338
+          ],
+          [
+            553,
+            312
+          ],
+          [
+            545,
+            350
+          ],
+          [
+            520,
+            360
+          ],
+          [
+            490,
+            355
+          ],
+          [
+            470,
+            340
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "edit-plate",
+        "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-left-plate-v1-key.png",
+        "sha256": "ee4ae8f44ed61a5cc1ae36d70eea5f4378ab7e7bfaa7ce955a5797566bdd41ed",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "lower-lid-left",
+        "crop": {
+          "x": 465,
+          "y": 305,
+          "width": 95,
+          "height": 65
+        },
+        "polygons": [
+          [
+            [
+              470,
+              310
+            ],
+            [
+              490,
+              330
+            ],
+            [
+              525,
+              338
+            ],
+            [
+              553,
+              312
+            ],
+            [
+              545,
+              350
+            ],
+            [
+              520,
+              360
+            ],
+            [
+              490,
+              355
+            ],
+            [
+              470,
+              340
+            ]
+          ]
+        ],
+        "chromaKey": {
+          "rgb": [
+            255,
+            0,
+            255
+          ],
+          "transparentThreshold": 20,
+          "opaqueThreshold": 220
+        },
+        "sampleOffset": {
+          "x": 0,
+          "y": -45
+        }
+      }
+    },
+    {
+      "id": "upper-lid-right",
+      "cover": "iris-right",
+      "parent": "head-base",
+      "drawOrder": 254,
+      "pivot": {
+        "x": 0.428,
+        "y": 0.298
+      },
+      "role": "overlay",
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            610,
+            260
+          ],
+          [
+            635,
+            247
+          ],
+          [
+            675,
+            250
+          ],
+          [
+            703,
+            273
+          ],
+          [
+            695,
+            315
+          ],
+          [
+            665,
+            300
+          ],
+          [
+            633,
+            300
+          ],
+          [
+            610,
+            317
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "edit-plate",
+        "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-right-plate-v1-key.png",
+        "sha256": "18df8d51fbd80327adaf28aa934bc173215cd4815e569b224683311b9089ba02",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "upper-lid-right",
+        "crop": {
+          "x": 600,
+          "y": 240,
+          "width": 115,
+          "height": 95
+        },
+        "polygons": [
+          [
+            [
+              610,
+              260
+            ],
+            [
+              635,
+              247
+            ],
+            [
+              675,
+              250
+            ],
+            [
+              703,
+              273
+            ],
+            [
+              695,
+              315
+            ],
+            [
+              665,
+              300
+            ],
+            [
+              633,
+              300
+            ],
+            [
+              610,
+              317
+            ]
+          ]
+        ],
+        "chromaKey": {
+          "rgb": [
+            255,
+            0,
+            255
+          ],
+          "transparentThreshold": 20,
+          "opaqueThreshold": 220
+        }
+      }
+    },
+    {
+      "id": "lower-lid-right",
+      "cover": "iris-right",
+      "parent": "head-base",
+      "drawOrder": 255,
+      "pivot": {
+        "x": 0.428,
+        "y": 0.323
+      },
+      "role": "overlay",
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [
+        [
+          [
+            615,
+            305
+          ],
+          [
+            635,
+            325
+          ],
+          [
+            670,
+            333
+          ],
+          [
+            698,
+            307
+          ],
+          [
+            690,
+            345
+          ],
+          [
+            665,
+            355
+          ],
+          [
+            635,
+            350
+          ],
+          [
+            615,
+            335
+          ]
+        ]
+      ],
+      "input": {
+        "kind": "edit-plate",
+        "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-right-plate-v1-key.png",
+        "sha256": "18df8d51fbd80327adaf28aa934bc173215cd4815e569b224683311b9089ba02",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": {
+          "width": 1536,
+          "height": 1024
+        },
+        "expectedId": "lower-lid-right",
+        "crop": {
+          "x": 610,
+          "y": 300,
+          "width": 95,
+          "height": 65
+        },
+        "polygons": [
+          [
+            [
+              615,
+              305
+            ],
+            [
+              635,
+              325
+            ],
+            [
+              670,
+              333
+            ],
+            [
+              698,
+              307
+            ],
+            [
+              690,
+              345
+            ],
+            [
+              665,
+              355
+            ],
+            [
+              635,
+              350
+            ],
+            [
+              615,
+              335
+            ]
+          ]
+        ],
+        "chromaKey": {
+          "rgb": [
+            255,
+            0,
+            255
+          ],
+          "transparentThreshold": 20,
+          "opaqueThreshold": 220
+        },
+        "sampleOffset": {
+          "x": 0,
+          "y": -45
+        }
+      }
+    }
+  ]
+}

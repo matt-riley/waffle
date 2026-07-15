@@ -386,7 +386,9 @@ test("production masks declare the exact screen-relative visible hierarchy", asy
   const parents = Object.fromEntries(
     Object.entries(masks.layerDefinitions).map(([id, definition]) => [id, definition.parent]),
   );
-  const generatedParents = Object.fromEntries(rig.layers.map((layer) => [layer.id, layer.parent]));
+  const generatedParents = Object.fromEntries(
+    rig.layers.filter((layer) => layer.visibleAtNeutral).map((layer) => [layer.id, layer.parent]),
+  );
 
   const expectedParents = {
     "rear-paw-left": "rear-hock-left",

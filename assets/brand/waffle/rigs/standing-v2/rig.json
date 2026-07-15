@@ -21,9 +21,75 @@
   },
   "layers": [
     {
+      "id": "rear-hip-repair-left",
+      "file": "layers/rear-hip-repair-left.png",
+      "role": "repair",
+      "parent": "waffle-root",
+      "drawOrder": 1,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.536,
+        "y": 0.635
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "12cd3dd3e73229075b4c0c8eaa52f0ec4f88dafd5de139c45b4a7aff3fa1806d"
+    },
+    {
+      "id": "rear-hock-repair-left",
+      "file": "layers/rear-hock-repair-left.png",
+      "role": "repair",
+      "parent": "rear-thigh-left",
+      "drawOrder": 3,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.57,
+        "y": 0.742
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "0f50cb2a11cc5610e945d9270c69bc6c86c776b05e7f8b841463e22cdc727a6c"
+    },
+    {
+      "id": "rear-paw-root-repair-left",
+      "file": "layers/rear-paw-root-repair-left.png",
+      "role": "repair",
+      "parent": "rear-hock-left",
+      "drawOrder": 5,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.548,
+        "y": 0.85
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "4084d94824f7ea060473093d1a8fab514f3ba082f2ee941bf22701310074b0ef"
+    },
+    {
       "id": "rear-paw-left",
       "file": "layers/rear-paw-left.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "rear-hock-left",
       "drawOrder": 10,
       "visibleAtNeutral": true,
@@ -102,9 +168,75 @@
       "sha256": "759dc3639152b334deaded43c9b509d56f120abe570e5b780eaacdf4d13c3a55"
     },
     {
+      "id": "rear-hip-repair-right",
+      "file": "layers/rear-hip-repair-right.png",
+      "role": "repair",
+      "parent": "waffle-root",
+      "drawOrder": 14,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.638,
+        "y": 0.645
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "6479dcc3b1eea87b8f22b5e4f7ca8fd324bda99e99aca2e05abd1ca72e06d0ef"
+    },
+    {
+      "id": "rear-hock-repair-right",
+      "file": "layers/rear-hock-repair-right.png",
+      "role": "repair",
+      "parent": "rear-thigh-right",
+      "drawOrder": 16,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.664,
+        "y": 0.757
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "abcdff5148a95cda0838fd013a8d2c14e4c7690752ce11c108379191ebd55525"
+    },
+    {
+      "id": "rear-paw-root-repair-right",
+      "file": "layers/rear-paw-root-repair-right.png",
+      "role": "repair",
+      "parent": "rear-hock-right",
+      "drawOrder": 18,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.655,
+        "y": 0.855
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "de84d80773cfc4584f08905d1806dd7892c5fc3b1435297694fabce4a5095b96"
+    },
+    {
       "id": "rear-paw-right",
       "file": "layers/rear-paw-right.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "rear-hock-right",
       "drawOrder": 20,
       "visibleAtNeutral": true,
@@ -181,6 +313,50 @@
         }
       },
       "sha256": "778a2cfcb9e6aac8d2b7ca59a311d36964ce1a381fd8616f193a954e63fdcc5b"
+    },
+    {
+      "id": "tail-base-mid-repair",
+      "file": "layers/tail-base-mid-repair.png",
+      "role": "repair",
+      "parent": "tail-base",
+      "drawOrder": 27,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.69,
+        "y": 0.381
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "bce8814c248be71cf3a0b7f658b097fd6126d20f30eb0ee8ec10af86a9600b6f"
+    },
+    {
+      "id": "tail-mid-tip-repair",
+      "file": "layers/tail-mid-tip-repair.png",
+      "role": "repair",
+      "parent": "tail-mid",
+      "drawOrder": 28,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.703,
+        "y": 0.225
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "26233a4591f03804db5f9f1342a0448465db81f017e3269b67b6ce64530e92ad"
     },
     {
       "id": "tail-tip",
@@ -264,6 +440,28 @@
       "sha256": "bb956b299acc6b73277b8e4af395efacbc771aa0be8d6e3bf869bb799c82db4c"
     },
     {
+      "id": "body-repair",
+      "file": "layers/body-repair.png",
+      "role": "repair",
+      "parent": "waffle-root",
+      "drawOrder": 90,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.49,
+        "y": 0.64
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "e8a06286fdedaf7f7a71d60a7ffc84ad29eac6c6336e2404f1baf336c53ca136"
+    },
+    {
       "id": "torso",
       "file": "layers/torso.png",
       "role": "visible",
@@ -305,6 +503,72 @@
         }
       },
       "sha256": "e0528d58e36698258c2c22a80f6233c9f2da1b576f14719bcd85d0e691489f20"
+    },
+    {
+      "id": "front-shoulder-repair-left",
+      "file": "layers/front-shoulder-repair-left.png",
+      "role": "repair",
+      "parent": "waffle-root",
+      "drawOrder": 101,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.357,
+        "y": 0.557
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "01516b0faa3e8c1d91dc1fe65ae2704c505c8fecdd054c3ac24da5e9a413236c"
+    },
+    {
+      "id": "front-elbow-repair-left",
+      "file": "layers/front-elbow-repair-left.png",
+      "role": "repair",
+      "parent": "front-upper-left",
+      "drawOrder": 105,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.352,
+        "y": 0.674
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "db1801df659a58b281c07e2e8b96619a19012ff52878683fe1907c98f1f0431d"
+    },
+    {
+      "id": "front-wrist-repair-left",
+      "file": "layers/front-wrist-repair-left.png",
+      "role": "repair",
+      "parent": "front-lower-left",
+      "drawOrder": 107,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.348,
+        "y": 0.833
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "2cd3cef9455a8c2daacaf5c98946dff779c2b2b2bd9b60143dc9e29c2b49aa11"
     },
     {
       "id": "front-upper-left",
@@ -363,7 +627,7 @@
     {
       "id": "front-paw-left",
       "file": "layers/front-paw-left.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "front-lower-left",
       "drawOrder": 112,
       "visibleAtNeutral": true,
@@ -386,6 +650,72 @@
         }
       },
       "sha256": "d6b3ce8ac6b7168be1ccc3c65e28544728d182ed7d3ef679212a91421f907014"
+    },
+    {
+      "id": "front-shoulder-repair-right",
+      "file": "layers/front-shoulder-repair-right.png",
+      "role": "repair",
+      "parent": "waffle-root",
+      "drawOrder": 113,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.45,
+        "y": 0.571
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "f9599a201b787ee6d8b7bf82bc0dc892d9c9bfd07d9e5007be303aea7aff5206"
+    },
+    {
+      "id": "front-elbow-repair-right",
+      "file": "layers/front-elbow-repair-right.png",
+      "role": "repair",
+      "parent": "front-upper-right",
+      "drawOrder": 115,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.448,
+        "y": 0.684
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "1ef30e5bd0b1e27a643431cdfcadec5a9f4981ec6dce0e8599da57bc9554b546"
+    },
+    {
+      "id": "front-wrist-repair-right",
+      "file": "layers/front-wrist-repair-right.png",
+      "role": "repair",
+      "parent": "front-lower-right",
+      "drawOrder": 117,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.445,
+        "y": 0.846
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "fe0f724a6e976a547cf7e38cd35198e6d90f3f81d5c16e51b4f3392c57b49407"
     },
     {
       "id": "front-upper-right",
@@ -444,7 +774,7 @@
     {
       "id": "front-paw-right",
       "file": "layers/front-paw-right.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "front-lower-right",
       "drawOrder": 122,
       "visibleAtNeutral": true,
@@ -523,9 +853,31 @@
       "sha256": "9b9c4006ccd99df7f8cfcd70c2b47464fc5130677d74d22222c911a7057e723d"
     },
     {
+      "id": "neck-repair",
+      "file": "layers/neck-repair.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 199,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.384,
+        "y": 0.435
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "3ab00468e8b793635e67a820261d12e2ce90fc2290d218d5360302a71e119958"
+    },
+    {
       "id": "head-base",
       "file": "layers/head-base.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "waffle-root",
       "drawOrder": 200,
       "visibleAtNeutral": true,
@@ -582,7 +934,7 @@
     {
       "id": "jaw-closed",
       "file": "layers/jaw-closed.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "head-base",
       "drawOrder": 220,
       "visibleAtNeutral": true,
@@ -761,6 +1113,94 @@
       "sha256": "94a109280c9c339a92ff0f0ba8e50752bb42de7f1a6be072fcdefeb2cc70ca2b"
     },
     {
+      "id": "upper-lid-left",
+      "file": "layers/upper-lid-left.png",
+      "role": "overlay",
+      "parent": "head-base",
+      "drawOrder": 252,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.335,
+        "y": 0.3
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "1b12354fe7c74e3e7c47ef8eed427e1dd307162f34120eef8e6d448055e38524"
+    },
+    {
+      "id": "lower-lid-left",
+      "file": "layers/lower-lid-left.png",
+      "role": "overlay",
+      "parent": "head-base",
+      "drawOrder": 253,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.335,
+        "y": 0.325
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "78ef65ab107c8e09295187237789043f897af03bb28945bd16789ba04813dda6"
+    },
+    {
+      "id": "upper-lid-right",
+      "file": "layers/upper-lid-right.png",
+      "role": "overlay",
+      "parent": "head-base",
+      "drawOrder": 254,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.428,
+        "y": 0.298
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "80f12dd4dea528edab8f8f9b5322ef25f31f0bb12c753139da788b595a4d92ec"
+    },
+    {
+      "id": "lower-lid-right",
+      "file": "layers/lower-lid-right.png",
+      "role": "overlay",
+      "parent": "head-base",
+      "drawOrder": 255,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.428,
+        "y": 0.323
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "60bb41a674e14e74e35b312d24f9e1cd4fed6e341d3053d3edc090356602f16c"
+    },
+    {
       "id": "whiskers",
       "file": "layers/whiskers.png",
       "role": "visible",
@@ -788,7 +1228,122 @@
       "sha256": "0a9fed2cee96ef64663b5ad31e14b70daccf48beb6cc3f3d743b82f44a259535"
     }
   ],
-  "variants": {},
+  "variants": {
+    "front-paw-left": {
+      "layer": "front-paw-left",
+      "members": [
+        {
+          "id": "planted",
+          "file": "variants/front-paw-left/planted.png",
+          "neutral": true,
+          "sha256": "d6b3ce8ac6b7168be1ccc3c65e28544728d182ed7d3ef679212a91421f907014"
+        },
+        {
+          "id": "lifted",
+          "file": "variants/front-paw-left/lifted.png",
+          "neutral": false,
+          "sha256": "373ac638b4fedfe0d4e3c082754f238d57b06ff86dff3d87ca12b32779fbe494"
+        },
+        {
+          "id": "wave",
+          "file": "variants/front-paw-left/wave.png",
+          "neutral": false,
+          "sha256": "b825dd28b7f0d9e16d2efa1ed2897c035fee5dfe38f4b6ff6f860561a1c81a8b"
+        }
+      ]
+    },
+    "front-paw-right": {
+      "layer": "front-paw-right",
+      "members": [
+        {
+          "id": "planted",
+          "file": "variants/front-paw-right/planted.png",
+          "neutral": true,
+          "sha256": "2329ac5333ac6dfc31390e111aad8420950bc955d656a758ad6754a0f9e15057"
+        },
+        {
+          "id": "lifted",
+          "file": "variants/front-paw-right/lifted.png",
+          "neutral": false,
+          "sha256": "aba966f0dc04d09abed887b69230472964be1b20043d60569074c90c2a0c0c77"
+        }
+      ]
+    },
+    "rear-paw-left": {
+      "layer": "rear-paw-left",
+      "members": [
+        {
+          "id": "planted",
+          "file": "variants/rear-paw-left/planted.png",
+          "neutral": true,
+          "sha256": "440e9a00aa2e3ff182d47c499c1e9e71bcb67d0f521b809a85264956fee8912e"
+        },
+        {
+          "id": "lifted",
+          "file": "variants/rear-paw-left/lifted.png",
+          "neutral": false,
+          "sha256": "db397dbfd68a6b27edada375b0a8d7d3e03c0b154651b6e8aa027e1ea190ec67"
+        }
+      ]
+    },
+    "rear-paw-right": {
+      "layer": "rear-paw-right",
+      "members": [
+        {
+          "id": "planted",
+          "file": "variants/rear-paw-right/planted.png",
+          "neutral": true,
+          "sha256": "1ad541c87e272e6c7c0da958cd72e4f08772925f10fa93cb7172061d8a771482"
+        },
+        {
+          "id": "lifted",
+          "file": "variants/rear-paw-right/lifted.png",
+          "neutral": false,
+          "sha256": "9eab62f9caa212378af0c4e1560e353fa1bbe74957dba43289fcfe27b1e599f2"
+        }
+      ]
+    },
+    "head-base": {
+      "layer": "head-base",
+      "members": [
+        {
+          "id": "neutral",
+          "file": "variants/head-base/neutral.png",
+          "neutral": true,
+          "sha256": "857c853c40904a90edbc929be98bad8fd975985a9ecfda73d92b8f0119b59e20"
+        },
+        {
+          "id": "turn-left",
+          "file": "variants/head-base/turn-left.png",
+          "neutral": false,
+          "sha256": "ce4a36de8cbfeb5cb0769831df728772fbbd8295680ca3d228fd652d198ff993"
+        },
+        {
+          "id": "turn-right",
+          "file": "variants/head-base/turn-right.png",
+          "neutral": false,
+          "sha256": "7dbdf68d9cf1eac69f64c8334258429c66153e3b269a5e97e3684370ed54ddce"
+        }
+      ]
+    },
+    "jaw": {
+      "layer": "jaw-closed",
+      "members": [
+        {
+          "id": "closed",
+          "file": "variants/jaw/closed.png",
+          "neutral": true,
+          "sha256": "58a96b0fb0b22dcf23b77a9e427b68a2206e634934d9e6b6eef3380e4557ec44"
+        },
+        {
+          "id": "open",
+          "file": "variants/jaw/open.png",
+          "neutral": false,
+          "sha256": "36cea2c9c41bd6977deb31a51b00318e2a54148cbb0b9a03c00febe6efd7764c"
+        }
+      ]
+    }
+  },
   "controls": {
     "breath": {
       "min": 0,
