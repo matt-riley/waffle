@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { recomposeLayers } from "./rig-raster.mjs";
+import { PNG } from "pngjs";
+
+import { readRgba, recomposeLayers, sourceOver } from "./rig-raster.mjs";
+import { validateRigV2Shape, variantForLayer } from "./rig-schema-v2.mjs";
 import { validatePng } from "./validate-raster.mjs";
 
 const SHA256 = /^[a-f\d]{64}$/u;
+const MAX_V2_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_V2_PACKAGE_BYTES = 60 * 1024 * 1024;
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -52,6 +57,37 @@ async function sourcePath(directory, relative) {
   return physicalFile;
 }
 
+async function v2SourcePath(directory, relative) {
+  const assetRoot = path.resolve(directory, "../../..");
+  if (typeof relative !== "string" || relative.length === 0 || path.isAbsolute(relative) || /^[a-z][a-z\d+.-]*:/iu.test(relative)) {
+    throw new Error("source file must be a local relative path");
+  }
+  const resolved = path.resolve(directory, relative);
+  if (resolved !== assetRoot && !resolved.startsWith(`${assetRoot}${path.sep}`)) {
+    throw new Error("source file must stay inside the Waffle brand directory");
+  }
+  const [physicalBase, physicalFile] = await Promise.all([realpath(assetRoot), realpath(resolved)]);
+  if (physicalFile !== physicalBase && !physicalFile.startsWith(`${physicalBase}${path.sep}`)) {
+    throw new Error("source file must resolve inside the Waffle brand directory");
+  }
+  if ((await lstat(resolved)).isSymbolicLink()) throw new Error("source file must not be a symlink");
+  return physicalFile;
+}
+
+async function nonsymlinkContainedPath(base, relative, label) {
+  const file = lexicalPath(base, relative, label);
+  let current = path.resolve(base);
+  for (const part of path.relative(base, file).split(path.sep)) {
+    current = path.join(current, part);
+    if ((await lstat(current)).isSymbolicLink()) throw new Error(`${label} must not use symlinks`);
+  }
+  const [physicalBase, physicalFile] = await Promise.all([realpath(base), realpath(file)]);
+  if (physicalFile !== physicalBase && !physicalFile.startsWith(`${physicalBase}${path.sep}`)) {
+    throw new Error(`${label} must resolve inside the rig directory`);
+  }
+  return physicalFile;
+}
+
 async function hash(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
 }
@@ -89,8 +125,96 @@ function firstMismatch(left, right) {
   return null;
 }
 
+function firstExactMismatch(left, right) {
+  if (left.width !== right.width || left.height !== right.height) return { x: 0, y: 0, actual: [], expected: [] };
+  for (let offset = 0; offset < left.data.length; offset += 4) {
+    if (!left.data.subarray(offset, offset + 4).equals(right.data.subarray(offset, offset + 4))) {
+      const pixel = offset / 4;
+      return {
+        x: pixel % left.width,
+        y: Math.floor(pixel / left.width),
+        actual: [...left.data.subarray(offset, offset + 4)],
+        expected: [...right.data.subarray(offset, offset + 4)],
+      };
+    }
+  }
+  return null;
+}
+
+async function packageBytes(directory) {
+  let total = 0;
+  async function visit(current) {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const file = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`rig package must not contain symlinks: ${path.relative(directory, file)}`);
+      if (entry.isDirectory()) await visit(file);
+      else if (entry.isFile()) total += (await lstat(file)).size;
+    }
+  }
+  await visit(directory);
+  return total;
+}
+
+async function validateRigV2(manifestPath, manifest) {
+  validateRigV2Shape(manifest);
+  const directory = path.dirname(manifestPath);
+  const source = await v2SourcePath(directory, manifest.source.file);
+  const reference = await nonsymlinkContainedPath(directory, manifest.neutralReference.file, "neutralReference file");
+  await verifyHash(source, manifest.source.sha256, "source");
+  await verifyHash(reference, manifest.neutralReference.sha256, "neutralReference");
+  const pngOptions = {
+    width: manifest.canvas.width,
+    height: manifest.canvas.height,
+    alphaPolicy: "transparent-corners",
+    maxBytes: MAX_V2_FILE_BYTES - 1,
+  };
+  const sourcePng = await validatePng(source, pngOptions);
+  const referencePng = await validatePng(reference, pngOptions);
+
+  const layerFiles = new Map();
+  for (const layer of manifest.layers) {
+    const file = await nonsymlinkContainedPath(directory, layer.file, `layer ${layer.id} file`);
+    await verifyHash(file, layer.sha256, `layer ${layer.id}`);
+    await validatePng(file, pngOptions);
+    layerFiles.set(layer.id, file);
+  }
+  const variantFiles = new Map();
+  for (const [setId, variantSet] of Object.entries(manifest.variants)) {
+    for (const member of variantSet.members) {
+      const file = await nonsymlinkContainedPath(directory, member.file, `variant ${setId}/${member.id} file`);
+      await verifyHash(file, member.sha256, `variant ${setId}/${member.id}`);
+      await validatePng(file, pngOptions);
+      variantFiles.set(`${setId}/${member.id}`, file);
+    }
+  }
+  const bytes = await packageBytes(directory);
+  if (bytes >= MAX_V2_PACKAGE_BYTES) throw new Error(`rig package must be below ${MAX_V2_PACKAGE_BYTES} bytes`);
+
+  let composite = new PNG({ width: manifest.canvas.width, height: manifest.canvas.height });
+  const context = [];
+  for (const layer of manifest.layers.filter((candidate) => candidate.visibleAtNeutral).toSorted((left, right) => left.drawOrder - right.drawOrder)) {
+    if (layer.role === "variant-anchor") {
+      const member = variantForLayer(manifest, layer.id);
+      const setId = Object.entries(manifest.variants).find(([, variantSet]) => variantSet.layer === layer.id)[0];
+      composite = sourceOver(composite, await readRgba(variantFiles.get(`${setId}/${member.id}`)));
+      context.push(`variant ${setId}/${member.id}`);
+    } else {
+      composite = sourceOver(composite, await readRgba(layerFiles.get(layer.id)));
+      context.push(`layer ${layer.id}`);
+    }
+  }
+  for (const [label, comparison] of [["source", sourcePng], ["neutralReference", referencePng]]) {
+    const mismatch = firstExactMismatch(composite, { width: manifest.canvas.width, height: manifest.canvas.height, data: comparison.pixels });
+    if (mismatch) {
+      throw new Error(`neutral recomposition differs from ${label} at x=${mismatch.x} y=${mismatch.y} context=${context.join(",")} expected=[${mismatch.expected.join(",")}] actual=[${mismatch.actual.join(",")}]`);
+    }
+  }
+  return { layerCount: manifest.layers.length, mismatchPixels: 0 };
+}
+
 export async function validateRig(manifestPath) {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  if (manifest.schemaVersion === 2) return validateRigV2(manifestPath, manifest);
   if (manifest.schemaVersion !== 1) throw new Error("schemaVersion must be 1");
   if (!object(manifest.canvas) || !Number.isInteger(manifest.canvas.width) || !Number.isInteger(manifest.canvas.height) || manifest.canvas.width <= 0 || manifest.canvas.height <= 0) {
     throw new Error("canvas width and height must be positive integers");
