@@ -104,6 +104,8 @@ What's here, by capability:
   backups.
 - **Deployment** — systemd and launchd service examples, headless identity
   setup, and the loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
+- **Releases** — Release Please handles version PRs, `v` tags, and GitHub
+  releases independently from the binary deployment flow described below.
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
   target) that fire under `waffle serve` and deliver to a channel;
   `[[intake.github]]` watchers poll labeled issues and dispatch restricted
@@ -244,6 +246,20 @@ Start here:
   [nanoclaw](https://github.com/nanocoai/nanoclaw),
   [openclaw](https://github.com/openclaw/openclaw), and
   [workweave/router](https://github.com/workweave/router)
+
+## Release automation
+
+Waffle keeps its two main `main`-branch automations independent:
+
+- Release Please runs on every push to `main` (and on manual
+  `workflow_dispatch`) to open or update the version bump PR, then creates
+  `v`-prefixed tags and GitHub releases when that PR is merged.
+- The binary deployment flow runs on successful `main` pushes and uses the
+  git-derived version available at that exact commit, whether or not Release
+  Please creates a release during the same push.
+
+That separation keeps semantic versioning and GitHub release publication
+decoupled from the Linux artifact build/deployment path.
 
 ### Usage limits
 
