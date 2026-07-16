@@ -14,6 +14,20 @@ repo_root=${1:-$(
 source_sha=$(git -C "$repo_root" -c core.fsmonitor=false rev-parse HEAD)
 builder_rel=scripts/build-linux-artifact.sh
 
+file_mode() {
+  local target=$1
+  if stat -c '%a' "$target" >/dev/null 2>&1; then
+    stat -c '%a' "$target"
+    return
+  fi
+  if stat -f '%Lp' "$target" >/dev/null 2>&1; then
+    stat -f '%Lp' "$target"
+    return
+  fi
+  printf 'error: could not determine mode for %s\n' "$target" >&2
+  exit 1
+}
+
 tmp_a=$(mktemp -d /private/tmp/waffle-repro-a.XXXXXX)
 tmp_b=$(mktemp -d /private/tmp/waffle-repro-b.XXXXXX)
 cache_a=$(mktemp -d /private/tmp/waffle-gocache-a.XXXXXX)
@@ -82,15 +96,15 @@ jq -e '
 ' --arg sha "$source_sha" "$tmp_b/out/build-metadata.json" >/dev/null
 
 for artifact_dir in "$tmp_a/out" "$tmp_b/out"; do
-  [[ $(stat -f '%Lp' "$artifact_dir/waffle") == 755 ]] || {
+  [[ $(file_mode "$artifact_dir/waffle") == 755 ]] || {
     printf 'unexpected waffle mode in %s\n' "$artifact_dir" >&2
     exit 1
   }
-  [[ $(stat -f '%Lp' "$artifact_dir/waffle.sha256") == 644 ]] || {
+  [[ $(file_mode "$artifact_dir/waffle.sha256") == 644 ]] || {
     printf 'unexpected waffle.sha256 mode in %s\n' "$artifact_dir" >&2
     exit 1
   }
-  [[ $(stat -f '%Lp' "$artifact_dir/build-metadata.json") == 644 ]] || {
+  [[ $(file_mode "$artifact_dir/build-metadata.json") == 644 ]] || {
     printf 'unexpected build-metadata.json mode in %s\n' "$artifact_dir" >&2
     exit 1
   }
