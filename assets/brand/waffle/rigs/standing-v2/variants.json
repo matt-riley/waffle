@@ -10,6 +10,297 @@
   },
   "sets": [
     {
+      "id": "front-chain-left",
+      "anchorLayer": "front-upper-left",
+      "registrationPivot": { "x": 0.357, "y": 0.557 },
+      "neutralMember": "neutral",
+      "members": [
+        {
+          "id": "neutral", "neutral": true,
+          "polygons": [[[450, 510], [635, 510], [635, 715], [450, 715]]],
+          "input": {
+            "kind": "anchor-layer", "layer": "front-upper-left",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-left/neutral",
+            "crop": { "x": 450, "y": 510, "width": 185, "height": 205 }
+          }
+        },
+        {
+          "id": "low-lift", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": { "visible": false },
+            "front-paw-left": { "visible": false },
+            "front-elbow-repair-left": { "visible": false },
+            "front-wrist-repair-left": { "visible": false }
+          },
+          "polygons": [[[465, 585], [610, 585], [635, 650], [585, 735], [580, 935], [440, 935], [420, 845], [465, 675]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/walk-repairs/intermediates-front/front-chain-left-low-lift-v4-key.png",
+            "sha256": "3ed16c9f09d894c02b0415340a0a9fa10c1e817ff02697fa8be4e3f220c75269",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-left/low-lift",
+            "crop": { "x": 410, "y": 515, "width": 235, "height": 430 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "proximalFeather": { "startY": 585, "endY": 597, "fullCatBoundaryPreservePixels": 6 },
+            "removeAlphaIslandsBelowPixels": 32,
+            "edgeFeatherPixels": 0
+          }
+        },
+        {
+          "id": "landing", "neutral": false,
+          "layerOverrides": {
+            "front-lower-left": { "visible": false },
+            "front-paw-left": { "visible": false },
+            "front-elbow-repair-left": { "visible": false },
+            "front-wrist-repair-left": { "visible": false }
+          },
+          "polygons": [
+            [[485, 592], [630, 592], [655, 657], [605, 742], [600, 942], [460, 942], [440, 852], [485, 682]],
+            [[475, 640], [621, 640], [621, 945], [475, 945]]
+          ],
+          "input": {
+            "kind": "hybrid-landing",
+            "baseMember": "low-lift",
+            "baseOffsetPixels": { "x": 20, "y": 7 },
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-left/landing",
+            "crop": { "x": 410, "y": 515, "width": 260, "height": 430 },
+            "transitionStartY": 640,
+            "seamY": 681,
+            "neutralDistalPolygons": [[[475, 640], [621, 640], [621, 945], [475, 945]]],
+            "edgeFeatherPixels": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "front-chain-right",
+      "anchorLayer": "front-upper-right",
+      "registrationPivot": { "x": 0.45, "y": 0.571 },
+      "neutralMember": "neutral",
+      "members": [
+        {
+          "id": "neutral", "neutral": true,
+          "polygons": [[[600, 520], [775, 520], [775, 715], [600, 715]]],
+          "input": {
+            "kind": "anchor-layer", "layer": "front-upper-right",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-right/neutral",
+            "crop": { "x": 600, "y": 520, "width": 175, "height": 195 }
+          }
+        },
+        {
+          "id": "low-lift", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-right": { "visible": false },
+            "front-paw-right": { "visible": false },
+            "front-elbow-repair-right": { "visible": false },
+            "front-wrist-repair-right": { "visible": false }
+          },
+          "polygons": [[[625, 590], [760, 590], [790, 650], [750, 735], [755, 935], [615, 935], [630, 850], [620, 700]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/walk-repairs/intermediates-front/front-chain-right-low-lift-v2-key.png",
+            "sha256": "12fb49e4481bb6b2aa07f42a0cfa7ed48eee4c100c835f29092f270f1ca5488b",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-right/low-lift",
+            "crop": { "x": 570, "y": 515, "width": 230, "height": 430 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "proximalFeather": { "startY": 590, "endY": 602, "fullCatBoundaryPreservePixels": 6 },
+            "edgeFeatherPixels": 0
+          }
+        },
+        {
+          "id": "landing", "neutral": false,
+          "layerOverrides": {
+            "front-lower-right": { "visible": false },
+            "front-paw-right": { "visible": false },
+            "front-elbow-repair-right": { "visible": false },
+            "front-wrist-repair-right": { "visible": false }
+          },
+          "polygons": [
+            [[634, 609], [769, 609], [799, 669], [759, 754], [764, 954], [624, 954], [639, 869], [629, 719]],
+            [[615, 640], [776, 640], [776, 955], [615, 955]]
+          ],
+          "input": {
+            "kind": "hybrid-landing",
+            "baseMember": "low-lift",
+            "baseOffsetPixels": { "x": 9, "y": 19 },
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-right/landing",
+            "crop": { "x": 570, "y": 515, "width": 240, "height": 440 },
+            "transitionStartY": 640,
+            "seamY": 681,
+            "neutralDistalPolygons": [[[615, 640], [776, 640], [776, 955], [615, 955]]],
+            "edgeFeatherPixels": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "rear-chain-left",
+      "anchorLayer": "rear-thigh-left",
+      "registrationPivot": { "x": 0.536, "y": 0.635 },
+      "neutralMember": "neutral",
+      "members": [
+        {
+          "id": "neutral", "neutral": true,
+          "polygons": [[[730, 560], [925, 560], [925, 785], [730, 785]]],
+          "input": {
+            "kind": "anchor-layer", "layer": "rear-thigh-left",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-left/neutral",
+            "crop": { "x": 730, "y": 560, "width": 195, "height": 225 }
+          }
+        },
+        {
+          "id": "low-lift", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "rear-hock-left": { "visible": false },
+            "rear-paw-left": { "visible": false },
+            "rear-hock-repair-left": { "visible": false },
+            "rear-paw-root-repair-left": { "visible": false }
+          },
+          "polygons": [[[883, 690], [883, 715], [887, 730], [895, 745], [898, 760], [896, 775], [900, 900], [770, 900], [750, 825], [775, 755]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/walk-repairs/intermediates-rear/rear-chain-left-low-lift-v4-key.png",
+            "sha256": "236e685fc74ff09b9a3ac3eff8014efe5254fbc7ce10e2ca863e5e50627732ee",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-left/low-lift",
+            "crop": { "x": 710, "y": 690, "width": 245, "height": 220 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "proximalFeather": { "startY": 690, "endY": 770, "fullCatBoundaryPreservePixels": 0 },
+            "innerEdgeDespill": {
+              "bounds": { "x": 788, "y": 727, "width": 80, "height": 164 },
+              "edgeDepthPixels": 4,
+              "sampleSearchPixels": 16,
+              "alphaThreshold": 8,
+              "redOverGreenMinimum": 70,
+              "blueBelowGreenMaximum": 25,
+              "minimumSampleAlpha": 240
+            },
+            "edgeFeatherPixels": 8
+          }
+        },
+        {
+          "id": "landing", "neutral": false,
+          "layerOverrides": {
+            "rear-hock-left": { "visible": false },
+            "rear-paw-left": { "visible": false },
+            "rear-hock-repair-left": { "visible": false },
+            "rear-paw-root-repair-left": { "visible": false }
+          },
+          "polygons": [
+            [[874, 703], [874, 728], [878, 743], [886, 758], [889, 773], [887, 788], [891, 913], [761, 913], [741, 838], [766, 768]],
+            [[760, 740], [876, 740], [886, 765], [900, 790], [900, 920], [760, 920]]
+          ],
+          "input": {
+            "kind": "hybrid-landing",
+            "baseMember": "low-lift",
+            "baseOffsetPixels": { "x": -9, "y": 13 },
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-left/landing",
+            "crop": { "x": 710, "y": 690, "width": 245, "height": 230 },
+            "transitionStartY": 700,
+            "seamY": 790,
+            "neutralDistalPolygons": [[[760, 740], [876, 740], [886, 765], [900, 790], [900, 920], [760, 920]]],
+            "innerEdgeDespill": {
+              "bounds": { "x": 788, "y": 727, "width": 80, "height": 164 },
+              "edgeDepthPixels": 4,
+              "sampleSearchPixels": 16,
+              "alphaThreshold": 8,
+              "redOverGreenMinimum": 70,
+              "blueBelowGreenMaximum": 25,
+              "minimumSampleAlpha": 240
+            },
+            "edgeFeatherPixels": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "rear-chain-right",
+      "anchorLayer": "rear-thigh-right",
+      "registrationPivot": { "x": 0.638, "y": 0.645 },
+      "neutralMember": "neutral",
+      "members": [
+        {
+          "id": "neutral", "neutral": true,
+          "polygons": [[[895, 550], [1100, 550], [1100, 790], [895, 790]]],
+          "input": {
+            "kind": "anchor-layer", "layer": "rear-thigh-right",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-right/neutral",
+            "crop": { "x": 895, "y": 550, "width": 205, "height": 240 }
+          }
+        },
+        {
+          "id": "low-lift", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "rear-hock-right": { "visible": false },
+            "rear-paw-right": { "visible": false },
+            "rear-hock-repair-right": { "visible": false },
+            "rear-paw-root-repair-right": { "visible": false }
+          },
+          "polygons": [[[947, 690], [1110, 690], [1090, 745], [1100, 910], [960, 910], [930, 840], [990, 790], [1007, 760], [993, 730], [969, 710], [956, 700]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/walk-repairs/intermediates-rear/rear-chain-right-low-lift-v4-key.png",
+            "sha256": "15680f28838927ce5a5e8ca11ba0acb2e1e07ccef8fddb46f169b6e93c467c1c",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-right/low-lift",
+            "crop": { "x": 900, "y": 690, "width": 230, "height": 230 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "proximalFeather": { "startY": 690, "endY": 770, "fullCatBoundaryPreservePixels": 0 },
+            "edgeFeatherPixels": 8
+          }
+        },
+        {
+          "id": "landing", "neutral": false,
+          "layerOverrides": {
+            "rear-hock-right": { "visible": false },
+            "rear-paw-right": { "visible": false },
+            "rear-hock-repair-right": { "visible": false },
+            "rear-paw-root-repair-right": { "visible": false }
+          },
+          "polygons": [
+            [[945, 709], [1108, 709], [1088, 764], [1098, 929], [958, 929], [928, 859], [988, 809], [1005, 779], [991, 749], [967, 729], [954, 719]],
+            [[910, 690], [1052, 690], [1071, 730], [1067, 790], [1091, 790], [1091, 930], [940, 930], [940, 790], [991, 790], [953, 730]]
+          ],
+          "input": {
+            "kind": "hybrid-landing",
+            "baseMember": "low-lift",
+            "baseOffsetPixels": { "x": -2, "y": 19 },
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "rear-chain-right/landing",
+            "crop": { "x": 900, "y": 690, "width": 230, "height": 240 },
+            "transitionStartY": 640,
+            "seamY": 790,
+            "neutralDistalPolygons": [[[910, 690], [1052, 690], [1071, 730], [1067, 790], [1091, 790], [1091, 930], [940, 930], [940, 790], [991, 790], [953, 730]]],
+            "edgeFeatherPixels": 0
+          }
+        }
+      ]
+    },
+    {
       "id": "front-paw-left",
       "anchorLayer": "front-paw-left",
       "registrationPivot": {

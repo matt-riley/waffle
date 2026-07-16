@@ -356,11 +356,11 @@ function resizeNearest(source, width) {
   return output;
 }
 
-async function contactSheet(frameFiles, cellWidth) {
+async function contactSheet(frameFiles, cellWidth, background) {
   const columns = Math.min(CONTACT_COLUMNS, frameFiles.length);
   const rows = Math.ceil(frameFiles.length / columns);
   const cellHeight = Math.round(cellWidth * 1024 / 1536);
-  const output = new PNG({ width: cellWidth * columns, height: cellHeight * rows });
+  const output = backgroundRgba(cellWidth * columns, cellHeight * rows, background);
   for (const [index, file] of frameFiles.entries()) {
     const frame = PNG.sync.read(await readFile(file));
     const cell = resizeNearest(frame, cellWidth);
@@ -697,7 +697,7 @@ async function writeTemporaryReview({
   if (includeContactSheet) {
     for (const width of CONTACT_WIDTHS) {
       const file = path.join(temporaryDirectory, `contact-sheet-${width}.png`);
-      files.push(await writePng(file, await contactSheet(frameFiles, width)));
+      files.push(await writePng(file, await contactSheet(frameFiles, width, background)));
     }
   }
   files.sort((left, right) => left.file.localeCompare(right.file, "en"));

@@ -7,7 +7,14 @@ import { test } from "node:test";
 
 import { PNG } from "pngjs";
 
-import { buildRigV2Art, extractBounded } from "../build-waffle-rig-v2-art.mjs";
+import * as rigV2Art from "../build-waffle-rig-v2-art.mjs";
+
+import {
+  buildHybridLandingPlate,
+  buildRigV2Art,
+  extractBounded,
+  maskToFullCatInterior,
+} from "../build-waffle-rig-v2-art.mjs";
 import { buildStandingRigV2 } from "../build-waffle-standing-rig-v2.mjs";
 import { readRgba } from "../rig-raster.mjs";
 import { validateRig } from "../validate-rig.mjs";
@@ -37,7 +44,9 @@ function residualMagentaPixels(image, exempt) {
     const green = image.data[offset + 1];
     const blue = image.data[offset + 2];
     const alpha = image.data[offset + 3];
-    const sourceOwned = exempt && image.data.subarray(offset, offset + 4).equals(exempt.data.subarray(offset, offset + 4));
+    const sourceOwned = exempt
+      && alpha <= exempt.data[offset + 3]
+      && image.data.subarray(offset, offset + 3).equals(exempt.data.subarray(offset, offset + 3));
     if (!sourceOwned && alpha > 0 && red - green >= 16 && blue - green >= 16) count += 1;
   }
   return count;
@@ -50,7 +59,9 @@ function complementaryGreenPixels(image, exempt) {
     const green = image.data[offset + 1];
     const blue = image.data[offset + 2];
     const alpha = image.data[offset + 3];
-    const sourceOwned = exempt && image.data.subarray(offset, offset + 4).equals(exempt.data.subarray(offset, offset + 4));
+    const sourceOwned = exempt
+      && alpha <= exempt.data[offset + 3]
+      && image.data.subarray(offset, offset + 3).equals(exempt.data.subarray(offset, offset + 3));
     if (!sourceOwned
       && alpha > 0
       && alpha < 255
@@ -60,6 +71,84 @@ function complementaryGreenPixels(image, exempt) {
       && green - blue >= 80) count += 1;
   }
   return count;
+}
+
+function innerEdgeHueCandidates(image, {
+  endX = image.width - 1,
+  endY = image.height - 1,
+  startX = 0,
+  startY = 0,
+} = {}) {
+  const candidates = [];
+  for (let y = startY; y <= endY; y += 1) {
+    let innerEdgeX = -1;
+    for (let x = startX; x <= endX; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] > 8) {
+        innerEdgeX = x;
+        break;
+      }
+    }
+    if (innerEdgeX < 0) continue;
+    for (let x = innerEdgeX; x <= Math.min(innerEdgeX + 3, endX); x += 1) {
+      const offset = (y * image.width + x) * 4;
+      const red = image.data[offset];
+      const green = image.data[offset + 1];
+      const blue = image.data[offset + 2];
+      const alpha = image.data[offset + 3];
+      if (alpha > 8 && red - green >= 70 && blue + 25 >= green) candidates.push({ x, y });
+    }
+  }
+  return candidates;
+}
+
+function alphaIslandSizes(image, threshold = 8) {
+  const visited = new Uint8Array(image.width * image.height);
+  const sizes = [];
+  const neighbours = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], [1, 0],
+    [-1, 1], [0, 1], [1, 1],
+  ];
+  for (let start = 0; start < visited.length; start += 1) {
+    if (visited[start] || image.data[start * 4 + 3] <= threshold) continue;
+    let size = 0;
+    const pending = [start];
+    visited[start] = 1;
+    while (pending.length > 0) {
+      const pixel = pending.pop();
+      size += 1;
+      const x = pixel % image.width;
+      const y = Math.floor(pixel / image.width);
+      for (const [dx, dy] of neighbours) {
+        const nextX = x + dx;
+        const nextY = y + dy;
+        if (nextX < 0 || nextY < 0 || nextX >= image.width || nextY >= image.height) continue;
+        const next = nextY * image.width + nextX;
+        if (visited[next] || image.data[next * 4 + 3] <= threshold) continue;
+        visited[next] = 1;
+        pending.push(next);
+      }
+    }
+    sizes.push(size);
+  }
+  return sizes.toSorted((left, right) => right - left);
+}
+
+function alphaBounds(image, threshold = 8) {
+  let minX = image.width;
+  let minY = image.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] <= threshold) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  return { minX, minY, maxX, maxY, centerX: (minX + maxX) / 2 };
 }
 
 function artRecoveryPaths(outputDirectory) {
@@ -310,6 +399,118 @@ test("extractBounded feathers a bounded edit before it is blended into its ancho
   assert.equal(extracted.data[(3 * 7 + 3) * 4 + 3], 255);
 });
 
+test("maskToFullCatInterior can preserve a tightly declared source-boundary relief", () => {
+  const fullCat = new PNG({ width: 7, height: 7 });
+  for (let y = 2; y <= 4; y += 1) {
+    for (let x = 2; x <= 4; x += 1) paint(fullCat, x, y, [180, 90, 30, 255]);
+  }
+  const support = PNG.sync.read(PNG.sync.write(fullCat));
+
+  maskToFullCatInterior(support, fullCat, 2, [[[1, 2], [3, 2], [3, 5], [1, 5]]]);
+
+  assert.deepEqual([...support.data.subarray((3 * 7 + 2) * 4, (3 * 7 + 2) * 4 + 4)], [180, 90, 30, 255]);
+  assert.deepEqual([...support.data.subarray((3 * 7 + 4) * 4, (3 * 7 + 4) * 4 + 4)], [0, 0, 0, 0]);
+});
+
+test("maskToFullCatInterior feathers the interior edge of a source-boundary relief", () => {
+  const fullCat = new PNG({ width: 9, height: 9 });
+  for (let y = 2; y <= 6; y += 1) {
+    for (let x = 2; x <= 6; x += 1) paint(fullCat, x, y, [180, 90, 30, 255]);
+  }
+  const support = PNG.sync.read(PNG.sync.write(fullCat));
+
+  maskToFullCatInterior(support, fullCat, 2, [[[1, 1], [5, 1], [5, 8], [1, 8]]], 1);
+
+  const featheredAlpha = support.data[(4 * 9 + 2) * 4 + 3];
+  assert.ok(featheredAlpha > 0 && featheredAlpha < 255, `expected feathered relief alpha, got ${featheredAlpha}`);
+  assert.equal(support.data[(4 * 9 + 3) * 4 + 3], 255);
+  assert.equal(support.data[(4 * 9 + 6) * 4 + 3], 0);
+});
+
+test("hybrid landing plate preserves its lifted start, blends premultiplied color and transparency, and locks the neutral distal exactly", () => {
+  const lowLift = new PNG({ width: 8, height: 8 });
+  const neutral = new PNG({ width: 8, height: 8 });
+  for (let y = 0; y <= 4; y += 1) {
+    for (let x = 1; x <= 3; x += 1) paint(lowLift, x, y, [180, 90, 30, 255]);
+  }
+  for (let y = 3; y < 8; y += 1) {
+    for (let x = 3; x <= 5; x += 1) paint(neutral, x, y, [220, 140, 55, 255]);
+  }
+  paint(neutral, 7, 7, [255, 0, 255, 255]);
+
+  const landing = buildHybridLandingPlate(lowLift, neutral, {
+    baseOffsetPixels: { x: 1, y: 0 },
+    seamY: 5,
+    transitionStartY: 3,
+    neutralDistalPolygons: [[[3, 3], [6, 3], [6, 8], [3, 8]]],
+  });
+
+  assert.deepEqual([...landing.data.subarray((2 * 8 + 1) * 4, (2 * 8 + 1) * 4 + 4)], [0, 0, 0, 0]);
+  assert.deepEqual([...landing.data.subarray((2 * 8 + 3) * 4, (2 * 8 + 3) * 4 + 4)], [180, 90, 30, 255]);
+  assert.deepEqual([...landing.data.subarray((3 * 8 + 4) * 4, (3 * 8 + 4) * 4 + 4)], [180, 90, 30, 255]);
+  assert.deepEqual([...landing.data.subarray((3 * 8 + 5) * 4, (3 * 8 + 5) * 4 + 4)], [0, 0, 0, 0]);
+  assert.deepEqual([...landing.data.subarray((4 * 8 + 2) * 4, (4 * 8 + 2) * 4 + 4)], [180, 90, 30, 128]);
+  assert.deepEqual([...landing.data.subarray((4 * 8 + 4) * 4, (4 * 8 + 4) * 4 + 4)], [200, 115, 43, 255]);
+  assert.deepEqual([...landing.data.subarray((4 * 8 + 5) * 4, (4 * 8 + 5) * 4 + 4)], [220, 140, 55, 128]);
+  for (let y = 5; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const offset = (y * 8 + x) * 4;
+      const expected = x >= 3 && x <= 5 ? neutral.data.subarray(offset, offset + 4) : new Uint8Array(4);
+      assert.deepEqual([...landing.data.subarray(offset, offset + 4)], [...expected], `neutral distal mismatch at ${x},${y}`);
+    }
+  }
+  assert.deepEqual(alphaIslandSizes(landing), [25]);
+});
+
+test("inner-edge despill copies a bounded tabby hue while preserving alpha and every undeclared pixel", () => {
+  const image = new PNG({ width: 12, height: 5 });
+  for (let x = 2; x <= 9; x += 1) paint(image, x, 2, [220, 140, 55, 255]);
+  paint(image, 2, 2, [210, 80, 70, 20]);
+  for (let x = 3; x <= 5; x += 1) paint(image, x, 2, [210, 80, 70, 255]);
+  paint(image, 7, 2, [205, 75, 65, 255]);
+  paint(image, 2, 1, [210, 80, 70, 255]);
+  for (let x = 2; x <= 9; x += 1) paint(image, x, 3, [205, 75, 65, 128]);
+  const before = PNG.sync.read(PNG.sync.write(image));
+
+  const corrected = rigV2Art.despillInnerEdge(image, {
+    bounds: { x: 2, y: 2, width: 8, height: 2 },
+    edgeDepthPixels: 4,
+    sampleSearchPixels: 8,
+    alphaThreshold: 8,
+    redOverGreenMinimum: 70,
+    blueBelowGreenMaximum: 25,
+    minimumSampleAlpha: 240,
+  });
+
+  for (let offset = 3; offset < corrected.data.length; offset += 4) {
+    assert.equal(corrected.data[offset], before.data[offset], `alpha drift at pixel ${Math.floor(offset / 4)}`);
+  }
+  for (let x = 2; x <= 5; x += 1) {
+    const offset = (2 * image.width + x) * 4;
+    assert.deepEqual([...corrected.data.subarray(offset, offset + 3)], [220, 140, 55]);
+  }
+  for (let x = 2; x <= 5; x += 1) {
+    const offset = (3 * image.width + x) * 4;
+    assert.deepEqual(
+      [...corrected.data.subarray(offset, offset + 3)],
+      [220, 140, 55],
+      "a fully contaminated edge row must use the nearest neighbouring-row tabby sample",
+    );
+  }
+  for (let pixel = 0; pixel < image.width * image.height; pixel += 1) {
+    const x = pixel % image.width;
+    const y = Math.floor(pixel / image.width);
+    if ((y === 2 || y === 3) && x >= 2 && x <= 5) continue;
+    const offset = pixel * 4;
+    assert.deepEqual(
+      [...corrected.data.subarray(offset, offset + 4)],
+      [...before.data.subarray(offset, offset + 4)],
+      `undeclared pixel drift at ${x},${y}`,
+    );
+  }
+  assert.deepEqual(image.data, before.data, "despill must not mutate its input raster");
+});
+
 test("builder extracts registered variants, preserves the neutral anchor exactly, and keeps repairs out of neutral", async (t) => {
   const inputs = await fixture(t);
   const originalAnchor = await readRgba(path.join(inputs.outputDirectory, "layers", "head-base.png"));
@@ -420,10 +621,11 @@ test("production art package has the complete registered inventory and no residu
     import.meta.dirname,
     "../../../assets/brand/waffle/rigs/standing-v2",
   );
-  const [manifest, repairs, variants] = await Promise.all([
+  const [manifest, repairs, variants, sourceImage] = await Promise.all([
     readFile(path.join(productionDirectory, "rig.json"), "utf8").then(JSON.parse),
     readFile(path.join(productionDirectory, "repairs.json"), "utf8").then(JSON.parse),
     readFile(path.join(productionDirectory, "variants.json"), "utf8").then(JSON.parse),
+    readRgba(path.resolve(productionDirectory, "../../poses/standing.png")),
   ]);
   const expectedRepairs = [
     "body-repair", "neck-repair",
@@ -434,9 +636,16 @@ test("production art package has the complete registered inventory and no residu
     "front-wrist-repair-left", "front-wrist-repair-right",
     "rear-paw-root-repair-left", "rear-paw-root-repair-right",
     "tail-base-mid-repair", "tail-mid-tip-repair",
+    "walk-socket-front-left", "walk-socket-front-right",
+    "walk-socket-rear-left", "walk-socket-rear-right",
+    "walk-cover-front-left", "walk-cover-front-right",
   ].toSorted();
   const expectedOverlays = ["upper-lid-left", "lower-lid-left", "upper-lid-right", "lower-lid-right"].toSorted();
   const expectedMembers = {
+    "front-chain-left": ["neutral", "low-lift", "landing"],
+    "front-chain-right": ["neutral", "low-lift", "landing"],
+    "rear-chain-left": ["neutral", "low-lift", "landing"],
+    "rear-chain-right": ["neutral", "low-lift", "landing"],
     "front-paw-left": ["planted", "lifted", "wave"],
     "front-paw-right": ["planted", "lifted"],
     "rear-paw-left": ["planted", "lifted"],
@@ -450,6 +659,12 @@ test("production art package has the complete registered inventory and no residu
     "highlight-left", "highlight-right", "whiskers",
     "upper-lid-left", "lower-lid-left", "upper-lid-right", "lower-lid-right",
   ].toSorted();
+  const replacedChainChildren = {
+    "front-chain-left": ["front-lower-left", "front-paw-left", "front-elbow-repair-left", "front-wrist-repair-left"],
+    "front-chain-right": ["front-lower-right", "front-paw-right", "front-elbow-repair-right", "front-wrist-repair-right"],
+    "rear-chain-left": ["rear-hock-left", "rear-paw-left", "rear-hock-repair-left", "rear-paw-root-repair-left"],
+    "rear-chain-right": ["rear-hock-right", "rear-paw-right", "rear-hock-repair-right", "rear-paw-root-repair-right"],
+  };
 
   assert.deepEqual(repairs.repairs.map((entry) => entry.id).toSorted(), expectedRepairs);
   assert.deepEqual(repairs.overlays.map((entry) => entry.id).toSorted(), expectedOverlays);
@@ -481,6 +696,31 @@ test("production art package has the complete registered inventory and no residu
         assert.ok(Object.values(member.layerOverrides).every((override) => override.visible === false));
       }
     }
+    if (Object.hasOwn(replacedChainChildren, specification.id)) {
+      const neutralMember = actual.members.find((member) => member.neutral);
+      assert.equal(neutralMember.layerOverrides, undefined, `${specification.id} neutral must remain override-free`);
+      assert.equal(neutralMember.parentOverride, undefined, `${specification.id} neutral must retain its authored hierarchy`);
+      for (const member of actual.members.filter((candidate) => !candidate.neutral)) {
+        assert.equal(
+          member.parentOverride,
+          member.id === "landing" ? undefined : "torso",
+          `${specification.id}/${member.id} parent space`,
+        );
+        assert.deepEqual(Object.keys(member.layerOverrides).toSorted(), replacedChainChildren[specification.id].toSorted());
+        assert.ok(Object.values(member.layerOverrides).every((override) => override.visible === false));
+        const image = await readRgba(path.join(productionDirectory, member.file));
+        const sourceExempt = member.id === "landing" ? sourceImage : undefined;
+        assert.equal(residualMagentaPixels(image, sourceExempt), 0, `${specification.id}/${member.id} residual chroma`);
+        assert.equal(complementaryGreenPixels(image, sourceExempt), 0, `${specification.id}/${member.id} complementary chroma`);
+        const islands = alphaIslandSizes(image);
+        assert.equal(islands.filter((size) => size >= 64).length, 1, `${specification.id}/${member.id} must have one coherent limb and no duplicate art island`);
+        assert.ok(islands[0] >= 8_000 && islands[0] <= 70_000, `${specification.id}/${member.id} must stay tightly limb-bounded`);
+        assert.ok((islands[1] ?? 0) < 64, `${specification.id}/${member.id} may only retain tiny isolated fur-edge wisps`);
+        const bounds = alphaBounds(image);
+        const screenDivider = specification.id.startsWith("front-") ? 620 : 920;
+        assert.equal(bounds.centerX < screenDivider, specification.id.endsWith("-left"), `${specification.id}/${member.id} screen-side ownership`);
+      }
+    }
     const neutral = actual.members.find((member) => member.neutral);
     const anchorImage = await readRgba(path.join(productionDirectory, anchor.file));
     assert.deepEqual(
@@ -490,8 +730,33 @@ test("production art package has the complete registered inventory and no residu
     );
     for (const member of actual.members.filter((entry) => !entry.neutral)) {
       const image = await readRgba(path.join(productionDirectory, member.file));
-      assert.equal(residualMagentaPixels(image, anchorImage), 0, `residual chroma in ${specification.id}/${member.id}`);
-      assert.equal(complementaryGreenPixels(image, anchorImage), 0, `complementary chroma in ${specification.id}/${member.id}`);
+      const exempt = member.id === "landing" ? sourceImage : anchorImage;
+      assert.equal(residualMagentaPixels(image, exempt), 0, `residual chroma in ${specification.id}/${member.id}`);
+      assert.equal(complementaryGreenPixels(image, exempt), 0, `complementary chroma in ${specification.id}/${member.id}`);
     }
+  }
+});
+
+test("rear-left low-lift and landing inner edges contain no more pink key spill than the neutral control", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const manifest = JSON.parse(await readFile(path.join(productionDirectory, "rig.json"), "utf8"));
+  const members = new Map(manifest.variants["rear-chain-left"].members.map((member) => [member.id, member]));
+  const images = new Map(await Promise.all([...members].map(async ([id, member]) => [
+    id,
+    await readRgba(path.join(productionDirectory, member.file)),
+  ])));
+  const bounds = { startX: 760, endX: 920, startY: 760, endY: 905 };
+  const neutralCandidates = innerEdgeHueCandidates(images.get("neutral"), bounds);
+  assert.equal(neutralCandidates.length, 0, "neutral rear-left control must have no pink inner-edge spill");
+  for (const id of ["low-lift", "landing"]) {
+    const candidates = innerEdgeHueCandidates(images.get(id), bounds);
+    assert.equal(
+      candidates.length,
+      neutralCandidates.length,
+      `${id} has ${candidates.length} pink inner-edge pixels; first at ${candidates[0]?.x},${candidates[0]?.y}`,
+    );
   }
 });

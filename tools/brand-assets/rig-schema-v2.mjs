@@ -6,6 +6,13 @@ const TRANSFORM_PROPERTIES = new Set(["x", "y", "rotationDegrees", "scaleX", "sc
 const CONTROL_LAYER_PROPERTIES = new Set([...TRANSFORM_PROPERTIES, "opacity"]);
 const LAYER_BINDING_FIELDS = new Set(["layer", "property", "factor"]);
 const VARIANT_BINDING_FIELDS = new Set(["variant", "thresholds"]);
+const VARIANT_TRANSFORM_RANGES = {
+  x: { min: -0.025, max: 0.025 },
+  y: { min: -0.025, max: 0.025 },
+  rotationDegrees: { min: -6, max: 6 },
+  scaleX: { min: 0.9, max: 1.1 },
+  scaleY: { min: 0.9, max: 1.1 },
+};
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -111,6 +118,18 @@ function validateVariants(manifest, byId) {
       if (typeof member.neutral !== "boolean") throw new Error(`variant ${setId}/${member.id} neutral must be boolean`);
       if (member.neutral) neutralCount += 1;
       declaredFile(member, `variant ${setId}/${member.id}`);
+      if (member.parentOverride !== undefined) {
+        if (member.neutral) throw new Error(`variant ${setId}/${member.id} neutral member cannot declare a parentOverride`);
+        if (typeof member.parentOverride !== "string"
+          || (member.parentOverride !== manifest.root.id && !byId.has(member.parentOverride))) {
+          throw new Error(`variant ${setId}/${member.id} parentOverride references unknown parent ${member.parentOverride}`);
+        }
+        let current = member.parentOverride === manifest.root.id ? undefined : byId.get(member.parentOverride);
+        while (current) {
+          if (current.id === layer.id) throw new Error(`variant ${setId}/${member.id} parentOverride would create a cycle`);
+          current = current.parent === manifest.root.id ? undefined : byId.get(current.parent);
+        }
+      }
       if (member.layerOverrides !== undefined) {
         if (member.neutral) throw new Error(`variant ${setId}/${member.id} neutral member cannot declare layer overrides`);
         if (!object(member.layerOverrides) || Object.keys(member.layerOverrides).length === 0) {
@@ -299,6 +318,71 @@ export function validateMotionClipShape(manifest, clip) {
       if (!variantSet.members.some((member) => member.id === keyframe.value)) throw new Error(`variant ${setId} has unknown member ${keyframe.value}`);
       if (keyframe.interpolation !== undefined && keyframe.interpolation !== "hold") throw new Error(`variant ${setId} interpolation must be hold`);
     });
+  }
+  if (clip.variantTransforms !== undefined) {
+    if (!object(clip.variantTransforms)) throw new Error("motion clip variantTransforms must be an object");
+    for (const [setId, specification] of Object.entries(clip.variantTransforms)) {
+      const variantSet = manifest.variants?.[setId];
+      if (!variantSet) throw new Error(`variantTransforms references unknown variant set ${setId}`);
+      if (!object(specification) || !object(specification.tracks) || Object.keys(specification.tracks).length === 0) {
+        throw new Error(`variant transform ${setId} must declare non-empty tracks`);
+      }
+      const member = variantSet.members.find((candidate) => candidate.id === specification.member);
+      if (!member) throw new Error(`variant transform ${setId} has unknown member ${specification.member}`);
+      if (member.neutral) throw new Error(`variant transform ${setId} member must be non-neutral`);
+      if (!clip.variants[setId]?.some((keyframe) => keyframe.value === member.id)) {
+        throw new Error(`variant transform ${setId} member ${member.id} must be selected by clip variants`);
+      }
+      for (const [property, keyframes] of Object.entries(specification.tracks)) {
+        const range = VARIANT_TRANSFORM_RANGES[property];
+        if (!range) throw new Error(`variant transform ${setId} has unsupported track ${property}`);
+        validateKeyframes(keyframes, clip.frameCount, `variant transform ${setId}/${property}`, (keyframe) => {
+          if (!finite(keyframe.value)) throw new Error(`variant transform ${setId} ${property} values must be finite`);
+          if (keyframe.value < range.min || keyframe.value > range.max) {
+            throw new Error(`variant transform ${setId} ${property} value ${keyframe.value} is outside ${range.min}..${range.max}`);
+          }
+          if (keyframe.interpolation !== undefined && !["linear", "hold"].includes(keyframe.interpolation)) {
+            throw new Error(`variant transform ${setId} ${property} interpolation must be linear or hold`);
+          }
+        });
+        if (keyframes[0].frame !== 0) throw new Error(`variant transform ${setId}/${property} must declare frame 0`);
+        if (keyframes.at(-1).frame !== clip.frameCount - 1) {
+          throw new Error(`variant transform ${setId}/${property} must declare the final frame`);
+        }
+      }
+    }
+  }
+  if (clip.layerOpacity !== undefined) {
+    if (!object(clip.layerOpacity)) throw new Error("motion clip layerOpacity must be an object");
+    const byId = new Map(manifest.layers.map((layer) => [layer.id, layer]));
+    const publiclyBoundOpacityLayers = new Set(Object.values(manifest.controls ?? {}).flatMap((control) =>
+      (control.bindings ?? [])
+        .filter((binding) => binding.property === "opacity")
+        .map((binding) => binding.layer)));
+    for (const [layerId, keyframes] of Object.entries(clip.layerOpacity)) {
+      const layer = byId.get(layerId);
+      if (!layer) throw new Error(`layerOpacity references unknown layer ${layerId}`);
+      if (layer.visibleAtNeutral) throw new Error(`layerOpacity target ${layerId} must be hidden at neutral`);
+      if (!["repair", "overlay"].includes(layer.role)) {
+        throw new Error(`layerOpacity target ${layerId} must have repair or overlay role`);
+      }
+      if (publiclyBoundOpacityLayers.has(layerId)) {
+        throw new Error(`layerOpacity target ${layerId} must not also be bound by a public opacity control`);
+      }
+      validateKeyframes(keyframes, clip.frameCount, `layer opacity ${layerId}`, (keyframe) => {
+        if (!finite(keyframe.value)) throw new Error(`layer opacity ${layerId} values must be finite`);
+        if (keyframe.value < 0 || keyframe.value > 1) {
+          throw new Error(`layer opacity ${layerId} value ${keyframe.value} is outside 0..1`);
+        }
+        if (keyframe.interpolation !== undefined && !["linear", "hold"].includes(keyframe.interpolation)) {
+          throw new Error(`layer opacity ${layerId} interpolation must be linear or hold`);
+        }
+      });
+      if (keyframes[0].frame !== 0) throw new Error(`layer opacity ${layerId} must declare frame 0`);
+      if (keyframes.at(-1).frame !== clip.frameCount - 1) {
+        throw new Error(`layer opacity ${layerId} must declare the final frame`);
+      }
+    }
   }
   for (const [name, keyframes] of Object.entries(clip.controls)) {
     const control = manifest.controls?.[name];

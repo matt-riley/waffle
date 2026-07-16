@@ -43,6 +43,28 @@
       "sha256": "12cd3dd3e73229075b4c0c8eaa52f0ec4f88dafd5de139c45b4a7aff3fa1806d"
     },
     {
+      "id": "walk-socket-rear-left",
+      "file": "layers/walk-socket-rear-left.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 2,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.536,
+        "y": 0.635
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "94a9c4480c25882c39a4a7fda531ce2712622d4135217081ac209ff0b2c864ed"
+    },
+    {
       "id": "rear-hock-repair-left",
       "file": "layers/rear-hock-repair-left.png",
       "role": "repair",
@@ -143,7 +165,7 @@
     {
       "id": "rear-thigh-left",
       "file": "layers/rear-thigh-left.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "waffle-root",
       "drawOrder": 12,
       "visibleAtNeutral": true,
@@ -188,6 +210,28 @@
       },
       "limits": {},
       "sha256": "6479dcc3b1eea87b8f22b5e4f7ca8fd324bda99e99aca2e05abd1ca72e06d0ef"
+    },
+    {
+      "id": "walk-socket-rear-right",
+      "file": "layers/walk-socket-rear-right.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 15,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.638,
+        "y": 0.645
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "c7b403c21f3c619ab5f1110605e4a51c8fe3656385ff7187fd84f0862cdb6ad2"
     },
     {
       "id": "rear-hock-repair-right",
@@ -290,7 +334,7 @@
     {
       "id": "rear-thigh-right",
       "file": "layers/rear-thigh-right.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "waffle-root",
       "drawOrder": 22,
       "visibleAtNeutral": true,
@@ -440,6 +484,50 @@
       "sha256": "bb956b299acc6b73277b8e4af395efacbc771aa0be8d6e3bf869bb799c82db4c"
     },
     {
+      "id": "walk-socket-front-left",
+      "file": "layers/walk-socket-front-left.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 88,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.357,
+        "y": 0.557
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "3d6777aef0a0950a4a1cfeaaeb5f661eac4f583cbac0c5c85e071c105a130b5a"
+    },
+    {
+      "id": "walk-socket-front-right",
+      "file": "layers/walk-socket-front-right.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 89,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.45,
+        "y": 0.571
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "3d6777aef0a0950a4a1cfeaaeb5f661eac4f583cbac0c5c85e071c105a130b5a"
+    },
+    {
       "id": "body-repair",
       "file": "layers/body-repair.png",
       "role": "repair",
@@ -573,7 +661,7 @@
     {
       "id": "front-upper-left",
       "file": "layers/front-upper-left.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "waffle-root",
       "drawOrder": 110,
       "visibleAtNeutral": true,
@@ -718,9 +806,31 @@
       "sha256": "fe0f724a6e976a547cf7e38cd35198e6d90f3f81d5c16e51b4f3392c57b49407"
     },
     {
+      "id": "walk-cover-front-left",
+      "file": "layers/walk-cover-front-left.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 118,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.45,
+        "y": 0.56
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "3bd015793b332cb5d92d92a58fb0c99b03d00beb056d04dd324cc204eeea3f2e"
+    },
+    {
       "id": "front-upper-right",
       "file": "layers/front-upper-right.png",
-      "role": "visible",
+      "role": "variant-anchor",
       "parent": "waffle-root",
       "drawOrder": 120,
       "visibleAtNeutral": true,
@@ -797,6 +907,28 @@
         }
       },
       "sha256": "2329ac5333ac6dfc31390e111aad8420950bc955d656a758ad6754a0f9e15057"
+    },
+    {
+      "id": "walk-cover-front-right",
+      "file": "layers/walk-cover-front-right.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 123,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.39,
+        "y": 0.56
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "f8c796ee3ba68b1418d89da2d543844de29500819e481ec117f7cbd96c30aa3b"
     },
     {
       "id": "ear-left",
@@ -1229,6 +1361,214 @@
     }
   ],
   "variants": {
+    "front-chain-left": {
+      "layer": "front-upper-left",
+      "members": [
+        {
+          "id": "neutral",
+          "file": "variants/front-chain-left/neutral.png",
+          "neutral": true,
+          "sha256": "d019840720383c95ec0041a429069b162779bcdcd0aa9c13654d04e7e91c2190"
+        },
+        {
+          "id": "low-lift",
+          "file": "variants/front-chain-left/low-lift.png",
+          "neutral": false,
+          "sha256": "2d55a4fa8340438d666ff594be6fccb33ee81cb57a6ce380d1196080cc269b41",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": {
+              "visible": false
+            },
+            "front-paw-left": {
+              "visible": false
+            },
+            "front-elbow-repair-left": {
+              "visible": false
+            },
+            "front-wrist-repair-left": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "landing",
+          "file": "variants/front-chain-left/landing.png",
+          "neutral": false,
+          "sha256": "ac2c39c7d25afef4dcd06ef0401fcf7367ad69fa229b93a8d0b856a8a00cacfc",
+          "layerOverrides": {
+            "front-lower-left": {
+              "visible": false
+            },
+            "front-paw-left": {
+              "visible": false
+            },
+            "front-elbow-repair-left": {
+              "visible": false
+            },
+            "front-wrist-repair-left": {
+              "visible": false
+            }
+          }
+        }
+      ]
+    },
+    "front-chain-right": {
+      "layer": "front-upper-right",
+      "members": [
+        {
+          "id": "neutral",
+          "file": "variants/front-chain-right/neutral.png",
+          "neutral": true,
+          "sha256": "ce48a36f6bba0aa99a3e1d33a98ac0d4f56e9ca7f4d482403cccd536b49b3128"
+        },
+        {
+          "id": "low-lift",
+          "file": "variants/front-chain-right/low-lift.png",
+          "neutral": false,
+          "sha256": "4b507974292e90de5aa147306fabdea15468587b1244f051eaddf651715967ac",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-right": {
+              "visible": false
+            },
+            "front-paw-right": {
+              "visible": false
+            },
+            "front-elbow-repair-right": {
+              "visible": false
+            },
+            "front-wrist-repair-right": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "landing",
+          "file": "variants/front-chain-right/landing.png",
+          "neutral": false,
+          "sha256": "b57aadf3045510c6b1884ace85bdba7d9e39b11c7190094345b6c052f50088b5",
+          "layerOverrides": {
+            "front-lower-right": {
+              "visible": false
+            },
+            "front-paw-right": {
+              "visible": false
+            },
+            "front-elbow-repair-right": {
+              "visible": false
+            },
+            "front-wrist-repair-right": {
+              "visible": false
+            }
+          }
+        }
+      ]
+    },
+    "rear-chain-left": {
+      "layer": "rear-thigh-left",
+      "members": [
+        {
+          "id": "neutral",
+          "file": "variants/rear-chain-left/neutral.png",
+          "neutral": true,
+          "sha256": "759dc3639152b334deaded43c9b509d56f120abe570e5b780eaacdf4d13c3a55"
+        },
+        {
+          "id": "low-lift",
+          "file": "variants/rear-chain-left/low-lift.png",
+          "neutral": false,
+          "sha256": "fa8facca0665d385971458bbcb0ffbb28a18bd1398ebec4827081c8342c6abcb",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "rear-hock-left": {
+              "visible": false
+            },
+            "rear-paw-left": {
+              "visible": false
+            },
+            "rear-hock-repair-left": {
+              "visible": false
+            },
+            "rear-paw-root-repair-left": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "landing",
+          "file": "variants/rear-chain-left/landing.png",
+          "neutral": false,
+          "sha256": "2851674892b53cf2bdddafde43239309045ae341f1e2418997f0aaa6359d85ed",
+          "layerOverrides": {
+            "rear-hock-left": {
+              "visible": false
+            },
+            "rear-paw-left": {
+              "visible": false
+            },
+            "rear-hock-repair-left": {
+              "visible": false
+            },
+            "rear-paw-root-repair-left": {
+              "visible": false
+            }
+          }
+        }
+      ]
+    },
+    "rear-chain-right": {
+      "layer": "rear-thigh-right",
+      "members": [
+        {
+          "id": "neutral",
+          "file": "variants/rear-chain-right/neutral.png",
+          "neutral": true,
+          "sha256": "778a2cfcb9e6aac8d2b7ca59a311d36964ce1a381fd8616f193a954e63fdcc5b"
+        },
+        {
+          "id": "low-lift",
+          "file": "variants/rear-chain-right/low-lift.png",
+          "neutral": false,
+          "sha256": "dff23780cef3206aef697145b46c9a7b1473abdf9ba5037579fa03a1a1868a58",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "rear-hock-right": {
+              "visible": false
+            },
+            "rear-paw-right": {
+              "visible": false
+            },
+            "rear-hock-repair-right": {
+              "visible": false
+            },
+            "rear-paw-root-repair-right": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "landing",
+          "file": "variants/rear-chain-right/landing.png",
+          "neutral": false,
+          "sha256": "13d598111752a07a13a2baf55a48895cfef179d7471db7abd94fef6687c148ae",
+          "layerOverrides": {
+            "rear-hock-right": {
+              "visible": false
+            },
+            "rear-paw-right": {
+              "visible": false
+            },
+            "rear-hock-repair-right": {
+              "visible": false
+            },
+            "rear-paw-root-repair-right": {
+              "visible": false
+            }
+          }
+        }
+      ]
+    },
     "front-paw-left": {
       "layer": "front-paw-left",
       "members": [

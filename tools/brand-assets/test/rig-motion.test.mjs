@@ -251,7 +251,7 @@ async function rigFixture(t) {
     writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
     writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`),
   ]);
-  return { clip, clipPath, manifest, manifestPath, source };
+  return { clip, clipPath, files, manifest, manifestPath, source };
 }
 
 function point(matrix, x, y) {
@@ -454,6 +454,90 @@ test("evaluateClip rejects out-of-range values, unknown controls, and missing fr
   assert.throws(() => evaluateClip(manifest, walkClip(), 48), /frame must be an integer inside the clip/);
 });
 
+test("evaluateClip interpolates member-local variant transform tracks", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  clip.variantTransforms = {
+    "front-paw-left": {
+      member: "lifted",
+      tracks: {
+        y: [{ frame: 0, value: 0 }, { frame: 12, value: -0.01 }, { frame: 47, value: 0 }],
+        scaleY: [{ frame: 0, value: 1 }, { frame: 12, value: 0.95 }, { frame: 47, value: 1 }],
+      },
+    },
+  };
+  assert.deepEqual(evaluateClip(manifest, clip, 6).variantTransforms.get("front-paw-left"), {
+    member: "lifted",
+    transform: { x: 0, y: -0.005, rotationDegrees: 0, scaleX: 1, scaleY: 0.975 },
+  });
+});
+
+test("evaluateClip applies private hidden-layer opacity without adding a public rig control", async (t) => {
+  const { clip, manifest } = await rigFixture(t);
+  clip.layerOpacity = {
+    "hidden-repair": [
+      { frame: 0, value: 0 },
+      { frame: 12, value: 1 },
+      { frame: 47, value: 0 },
+    ],
+  };
+  assert.equal(evaluateClip(manifest, clip, 6).layers.get("hidden-repair").opacity, 0.5);
+  assert.equal(evaluateClip(manifest, clip, 12).layerOpacity.get("hidden-repair"), 1);
+  assert.equal(manifest.controls["hidden-repair"], undefined);
+});
+
+test("renderRigFrame includes a hidden repair only while its clip opacity is active", async (t) => {
+  const { clip, clipPath, manifest, manifestPath } = await rigFixture(t);
+  clip.layerOpacity = {
+    "hidden-repair": [
+      { frame: 0, value: 0 },
+      { frame: 12, value: 1 },
+      { frame: 47, value: 0 },
+    ],
+  };
+  await Promise.all([
+    writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
+    writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`),
+  ]);
+
+  const neutral = await renderRigFrame(manifestPath, clipPath, 0);
+  assert.equal(neutral.data[(400 * 1536 + 400) * 4 + 3], 0);
+  const active = await renderRigFrame(manifestPath, clipPath, 12);
+  assert.deepEqual(
+    [...active.data.subarray((400 * 1536 + 400) * 4, (400 * 1536 + 400) * 4 + 4)],
+    [120, 40, 160, 255],
+  );
+});
+
+test("renderRigFrame applies parentOverride and an opaque member-local transform without moving neutral stance", async (t) => {
+  const { clip, clipPath, manifest, manifestPath } = await rigFixture(t);
+  manifest.layers.find((layer) => layer.id === "front-paw-left").parent = "waffle-root";
+  manifest.variants["front-paw-left"].members.find((member) => member.id === "lifted").parentOverride = "body";
+  clip.variants["front-paw-left"] = [
+    { frame: 0, value: "planted", interpolation: "hold" },
+    { frame: 1, value: "lifted", interpolation: "hold" },
+    { frame: 47, value: "planted", interpolation: "hold" },
+  ];
+  clip.variantTransforms = {
+    "front-paw-left": {
+      member: "lifted",
+      tracks: {
+        y: [{ frame: 0, value: 0 }, { frame: 12, value: -0.01 }, { frame: 47, value: 0 }],
+      },
+    },
+  };
+  await Promise.all([
+    writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
+    writeFile(clipPath, `${JSON.stringify(clip, null, 2)}\n`),
+  ]);
+
+  const neutral = await renderRigFrame(manifestPath, clipPath, 0);
+  assert.equal(neutral.data[(200 * 1536 + 200) * 4 + 3], 255, "root-pinned planted paw stays on its baseline");
+
+  const lifted = await renderRigFrame(manifestPath, clipPath, 12);
+  assert.ok(lifted.data[(142 * 1536 + 200) * 4 + 3] > 0, "lifted member follows bodyBob and its member-local transform");
+  assert.equal(lifted.data[(160 * 1536 + 200) * 4 + 3], 0, "lifted member is not left at the root-pinned location");
+});
+
 test("evaluateClip rejects individually valid controls whose bindings exceed a layer limit together", async (t) => {
   const { clip, manifest } = await rigFixture(t);
   manifest.controls.bodySettle = {
@@ -547,6 +631,13 @@ test("assertLoopClosure accepts exact closure and rejects changed controls or va
   const changedVariant = structuredClone(clip);
   changedVariant.variants["front-paw-left"].push({ frame: 47, value: "lifted", interpolation: "hold" });
   assert.throws(() => assertLoopClosure(manifest, changedVariant), /variant front-paw-left does not close exactly/);
+
+  const changedLayerOpacity = structuredClone(clip);
+  changedLayerOpacity.layerOpacity = {
+    "hidden-repair": [{ frame: 0, value: 0 }, { frame: 47, value: 1 }],
+  };
+  assert.throws(() => assertLoopClosure(manifest, changedLayerOpacity), /layer opacity hidden-repair does not close exactly/);
+
 });
 
 test("assertLoopClosure requires every variant to declare its frame-zero state", async (t) => {
@@ -565,7 +656,8 @@ test("standing v2 documentation states the loop source and rebuild prerequisites
     /Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip\.variants` key, while a numeric-bound set may derive it from its control/,
   );
   assert.match(readme, /Explicit `clip\.variants` keys override a numeric-derived state/);
-
+  assert.match(readme, /Optional `variantTransforms` provide conservative member-local motion for an opaque selected non-neutral member/);
+  assert.match(readme, /A non-neutral member may declare `parentOverride` to follow a different registered parent while active/);
   const prerequisite = readme.indexOf("Before running either rebuild command");
   const firstCommand = readme.indexOf("node tools/brand-assets/build-waffle-standing-rig-v2.mjs");
   assert.ok(prerequisite >= 0 && prerequisite < firstCommand, "concept-plate prerequisite must precede both rebuild commands");

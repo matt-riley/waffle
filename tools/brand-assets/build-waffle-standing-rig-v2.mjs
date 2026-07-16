@@ -65,6 +65,7 @@ function assertSafeTarget(outputDirectory) {
 
 const SAFE_LAYER_ID = /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/u;
 const AUTHORITATIVE_PACKAGE_FILES = ["repairs.json", "variants.json", "GENERATION.md", "README.md"];
+const AUTHORITATIVE_PACKAGE_DIRECTORIES = ["motions"];
 
 function containedOutputPath(temporaryDirectory, ...parts) {
   const base = path.resolve(temporaryDirectory);
@@ -245,6 +246,32 @@ async function readAuthoritativePackageFiles(outputDirectory, targetKind) {
     }
     files.set(name, await readFile(file));
   }
+  const collectDirectory = async (directory, relativeDirectory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const relative = path.join(relativeDirectory, entry.name);
+      const file = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`authoritative package path ${relative} must not be a symlink`);
+      }
+      if (entry.isDirectory()) {
+        await collectDirectory(file, relative);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(`authoritative package path ${relative} must be a regular file or directory`);
+      }
+      files.set(relative, await readFile(file));
+    }
+  };
+  for (const name of AUTHORITATIVE_PACKAGE_DIRECTORIES) {
+    const directory = path.join(outputDirectory, name);
+    if (!await exists(directory)) continue;
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`authoritative package directory ${name} must be a nonsymlink directory`);
+    }
+    await collectDirectory(directory, name);
+  }
   return files;
 }
 
@@ -279,9 +306,11 @@ async function writeTemporaryPackage({ sourceFile, masksBytes, masks, plan, pres
 
   await mkdir(plan.layersDirectory, { recursive: true });
   await writeFile(plan.masksFile, masksBytes);
-  await Promise.all([...preservedFiles].map(([name, bytes]) => (
-    writeFile(containedOutputPath(path.dirname(plan.manifestFile), name), bytes)
-  )));
+  await Promise.all([...preservedFiles].map(async ([name, bytes]) => {
+    const file = containedOutputPath(path.dirname(plan.manifestFile), name);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, bytes);
+  }));
 
   await writeRgba(plan.referenceFile, source);
 

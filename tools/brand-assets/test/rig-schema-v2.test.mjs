@@ -19,12 +19,14 @@ const PRODUCTION_HIERARCHY = {
   "rear-paw-left": "rear-hock-left",
   "rear-hock-left": "rear-thigh-left",
   "rear-thigh-left": "waffle-root",
+  "walk-socket-rear-left": "torso",
   "rear-hip-repair-right": "waffle-root",
   "rear-hock-repair-right": "rear-thigh-right",
   "rear-paw-root-repair-right": "rear-hock-right",
   "rear-paw-right": "rear-hock-right",
   "rear-hock-right": "rear-thigh-right",
   "rear-thigh-right": "waffle-root",
+  "walk-socket-rear-right": "torso",
   "tail-base-mid-repair": "tail-base",
   "tail-mid-tip-repair": "tail-mid",
   "tail-tip": "tail-mid",
@@ -38,12 +40,16 @@ const PRODUCTION_HIERARCHY = {
   "front-upper-left": "waffle-root",
   "front-lower-left": "front-upper-left",
   "front-paw-left": "front-lower-left",
+  "walk-socket-front-left": "torso",
+  "walk-cover-front-left": "torso",
   "front-shoulder-repair-right": "waffle-root",
   "front-elbow-repair-right": "front-upper-right",
   "front-wrist-repair-right": "front-lower-right",
   "front-upper-right": "waffle-root",
   "front-lower-right": "front-upper-right",
   "front-paw-right": "front-lower-right",
+  "walk-socket-front-right": "torso",
+  "walk-cover-front-right": "torso",
   "ear-left": "head-base",
   "ear-right": "head-base",
   "neck-repair": "torso",
@@ -64,6 +70,10 @@ const PRODUCTION_HIERARCHY = {
 };
 
 const PRODUCTION_VARIANTS = {
+  "front-chain-left": { layer: "front-upper-left", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
+  "front-chain-right": { layer: "front-upper-right", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
+  "rear-chain-left": { layer: "rear-thigh-left", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
+  "rear-chain-right": { layer: "rear-thigh-right", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
   "front-paw-left": { layer: "front-paw-left", members: ["planted", "lifted", "wave"], neutral: "planted" },
   "front-paw-right": { layer: "front-paw-right", members: ["planted", "lifted"], neutral: "planted" },
   "rear-paw-left": { layer: "rear-paw-left", members: ["planted", "lifted"], neutral: "planted" },
@@ -180,6 +190,24 @@ function validManifest() {
 
 test("accepts the standing rig v2 manifest contract", () => {
   assert.doesNotThrow(() => validateRigV2Shape(validManifest()));
+});
+
+test("validates non-neutral variant parent overrides without changing neutral hierarchy", () => {
+  const valid = validManifest();
+  valid.variants["front-paw-left"].members[1].parentOverride = "waffle-root";
+  assert.doesNotThrow(() => validateRigV2Shape(valid));
+
+  const neutral = validManifest();
+  neutral.variants["front-paw-left"].members[0].parentOverride = "waffle-root";
+  assert.throws(() => validateRigV2Shape(neutral), /neutral member cannot declare a parentOverride/);
+
+  const unknown = validManifest();
+  unknown.variants["front-paw-left"].members[1].parentOverride = "missing";
+  assert.throws(() => validateRigV2Shape(unknown), /parentOverride references unknown parent missing/);
+
+  const cycle = validManifest();
+  cycle.variants["front-paw-left"].members[1].parentOverride = "front-paw-left";
+  assert.throws(() => validateRigV2Shape(cycle), /parentOverride would create a cycle/);
 });
 
 test("rejects duplicate layer IDs and draw orders", () => {
@@ -495,22 +523,125 @@ test("validates the motion clip shape against controls and variants", () => {
   assert.throws(() => validateMotionClipShape(manifest, clip), /control bodyBob value -0.02 is outside -0.015..0.015/);
 });
 
-test("production standing rig v2 exposes the complete hierarchy, variants, controls, and joint limits", async () => {
+test("validates conservative member-local variant transform tracks", () => {
+  const manifest = validManifest();
+  const clip = {
+    schemaVersion: 1,
+    id: "variant-transform-probe",
+    fps: 24,
+    frameCount: 3,
+    loop: true,
+    requiredClosure: { firstFrame: 0, lastFrame: 2 },
+    variants: {
+      "front-paw-left": [
+        { frame: 0, value: "planted", interpolation: "hold" },
+        { frame: 1, value: "lifted", interpolation: "hold" },
+        { frame: 2, value: "planted", interpolation: "hold" },
+      ],
+    },
+    controls: {},
+    variantTransforms: {
+      "front-paw-left": {
+        member: "lifted",
+        tracks: {
+          y: [{ frame: 0, value: 0 }, { frame: 1, value: -0.01 }, { frame: 2, value: 0 }],
+          scaleY: [{ frame: 0, value: 1 }, { frame: 1, value: 0.95 }, { frame: 2, value: 1 }],
+        },
+      },
+    },
+  };
+  assert.doesNotThrow(() => validateMotionClipShape(manifest, clip));
+
+  const neutral = structuredClone(clip);
+  neutral.variantTransforms["front-paw-left"].member = "planted";
+  assert.throws(() => validateMotionClipShape(manifest, neutral), /variant transform front-paw-left member must be non-neutral/);
+
+  const excessive = structuredClone(clip);
+  excessive.variantTransforms["front-paw-left"].tracks.y[1].value = -0.026;
+  assert.throws(() => validateMotionClipShape(manifest, excessive), /variant transform front-paw-left y value -0.026 is outside -0.025..0.025/);
+
+  const unsupported = structuredClone(clip);
+  unsupported.variantTransforms["front-paw-left"].tracks.skewX = unsupported.variantTransforms["front-paw-left"].tracks.y;
+  assert.throws(() => validateMotionClipShape(manifest, unsupported), /variant transform front-paw-left has unsupported track skewX/);
+});
+
+test("validates private clip opacity tracks for hidden repairs and overlays", () => {
+  const manifest = validManifest();
+  manifest.layers.push({
+    ...structuredClone(manifest.layers[0]),
+    id: "walk-socket-left",
+    file: "layers/walk-socket-left.png",
+    role: "repair",
+    parent: "torso",
+    drawOrder: 40,
+    visibleAtNeutral: false,
+    limits: {},
+  });
+  const clip = {
+    schemaVersion: 1,
+    id: "socket-opacity-probe",
+    fps: 24,
+    frameCount: 3,
+    loop: true,
+    requiredClosure: { firstFrame: 0, lastFrame: 2 },
+    variants: {},
+    controls: {},
+    layerOpacity: {
+      "walk-socket-left": [
+        { frame: 0, value: 0 },
+        { frame: 1, value: 1 },
+        { frame: 2, value: 0 },
+      ],
+    },
+  };
+  assert.doesNotThrow(() => validateMotionClipShape(manifest, clip));
+
+  const unknown = structuredClone(clip);
+  unknown.layerOpacity.unknown = unknown.layerOpacity["walk-socket-left"];
+  assert.throws(() => validateMotionClipShape(manifest, unknown), /layerOpacity references unknown layer unknown/);
+
+  const visible = structuredClone(clip);
+  visible.layerOpacity.torso = visible.layerOpacity["walk-socket-left"];
+  assert.throws(() => validateMotionClipShape(manifest, visible), /layerOpacity target torso must be hidden at neutral/);
+
+  const outOfRange = structuredClone(clip);
+  outOfRange.layerOpacity["walk-socket-left"][1].value = 1.01;
+  assert.throws(() => validateMotionClipShape(manifest, outOfRange), /layer opacity walk-socket-left value 1.01 is outside 0..1/);
+
+  const missingClosure = structuredClone(clip);
+  missingClosure.layerOpacity["walk-socket-left"].pop();
+  assert.throws(() => validateMotionClipShape(manifest, missingClosure), /layer opacity walk-socket-left must declare the final frame/);
+
+  const publiclyBound = structuredClone(manifest);
+  publiclyBound.controls.socketFade = {
+    min: 0,
+    max: 1,
+    bindings: [{ layer: "walk-socket-left", property: "opacity", factor: 1 }],
+  };
+  assert.throws(
+    () => validateMotionClipShape(publiclyBound, clip),
+    /layerOpacity target walk-socket-left must not also be bound by a public opacity control/,
+  );
+});
+
+async function readProductionRig() {
   const manifestPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/rig.json");
-  const masksPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/masks.json");
-  const [manifest, masks] = await Promise.all([
-    readFile(manifestPath, "utf8").then(JSON.parse),
-    readFile(masksPath, "utf8").then(JSON.parse),
-  ]);
+  return readFile(manifestPath, "utf8").then(JSON.parse);
+}
+
+test("production standing rig v2 validates and exposes the exact layer hierarchy", async () => {
+  const manifest = await readProductionRig();
   assert.doesNotThrow(() => validateRigV2Shape(manifest));
-  assert.deepEqual(masks.controls, manifest.controls, "authoritative masks controls must reproduce the final manifest");
 
   assert.deepEqual(
     Object.fromEntries(manifest.layers.map((layer) => [layer.id, layer.parent])),
     PRODUCTION_HIERARCHY,
     "the production layer IDs and parent hierarchy are a locked contract",
   );
+});
 
+test("production standing rig v2 exposes the exact variant inventory", async () => {
+  const manifest = await readProductionRig();
   assert.deepEqual(Object.keys(manifest.variants).toSorted(), Object.keys(PRODUCTION_VARIANTS).toSorted());
   for (const [setId, expected] of Object.entries(PRODUCTION_VARIANTS)) {
     const actual = manifest.variants[setId];
@@ -518,7 +649,15 @@ test("production standing rig v2 exposes the complete hierarchy, variants, contr
     assert.deepEqual(actual.members.map((member) => member.id), expected.members, `${setId} members drifted`);
     assert.equal(actual.members.find((member) => member.neutral)?.id, expected.neutral, `${setId} neutral member drifted`);
   }
+});
 
+test("production standing rig v2 preserves the public controls and joint limits", async () => {
+  const masksPath = path.join(REPOSITORY_ROOT, "assets/brand/waffle/rigs/standing-v2/masks.json");
+  const [manifest, masks] = await Promise.all([
+    readProductionRig(),
+    readFile(masksPath, "utf8").then(JSON.parse),
+  ]);
+  assert.deepEqual(masks.controls, manifest.controls, "authoritative masks controls must reproduce the final manifest");
   assert.deepEqual(Object.keys(manifest.controls).toSorted(), Object.keys(PRODUCTION_CONTROLS).toSorted());
   for (const [name, expected] of Object.entries(PRODUCTION_CONTROLS)) {
     const actual = manifest.controls[name];

@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "walk-in-place",
+  "fps": 24,
+  "frameCount": 48,
+  "loop": true,
+  "requiredClosure": { "firstFrame": 0, "lastFrame": 47 },
+  "variants": {
+    "front-chain-left": [{ "frame": 0, "value": "neutral", "interpolation": "hold" }, { "frame": 1, "value": "landing", "interpolation": "hold" }, { "frame": 2, "value": "low-lift", "interpolation": "hold" }, { "frame": 23, "value": "landing", "interpolation": "hold" }, { "frame": 24, "value": "neutral", "interpolation": "hold" }, { "frame": 47, "value": "neutral", "interpolation": "hold" }],
+    "rear-chain-right": [{ "frame": 0, "value": "neutral", "interpolation": "hold" }, { "frame": 1, "value": "landing", "interpolation": "hold" }, { "frame": 2, "value": "low-lift", "interpolation": "hold" }, { "frame": 23, "value": "landing", "interpolation": "hold" }, { "frame": 24, "value": "neutral", "interpolation": "hold" }, { "frame": 47, "value": "neutral", "interpolation": "hold" }],
+    "front-chain-right": [{ "frame": 0, "value": "neutral", "interpolation": "hold" }, { "frame": 25, "value": "landing", "interpolation": "hold" }, { "frame": 26, "value": "low-lift", "interpolation": "hold" }, { "frame": 46, "value": "landing", "interpolation": "hold" }, { "frame": 47, "value": "neutral", "interpolation": "hold" }],
+    "rear-chain-left": [{ "frame": 0, "value": "neutral", "interpolation": "hold" }, { "frame": 25, "value": "landing", "interpolation": "hold" }, { "frame": 26, "value": "low-lift", "interpolation": "hold" }, { "frame": 46, "value": "landing", "interpolation": "hold" }, { "frame": 47, "value": "neutral", "interpolation": "hold" }],
+    "front-paw-left": [{ "frame": 0, "value": "planted", "interpolation": "hold" }, { "frame": 47, "value": "planted", "interpolation": "hold" }],
+    "front-paw-right": [{ "frame": 0, "value": "planted", "interpolation": "hold" }, { "frame": 47, "value": "planted", "interpolation": "hold" }],
+    "rear-paw-left": [{ "frame": 0, "value": "planted", "interpolation": "hold" }, { "frame": 47, "value": "planted", "interpolation": "hold" }],
+    "rear-paw-right": [{ "frame": 0, "value": "planted", "interpolation": "hold" }, { "frame": 47, "value": "planted", "interpolation": "hold" }],
+    "head-base": [{ "frame": 0, "value": "neutral", "interpolation": "hold" }, { "frame": 47, "value": "neutral", "interpolation": "hold" }],
+    "jaw": [{ "frame": 0, "value": "closed", "interpolation": "hold" }, { "frame": 47, "value": "closed", "interpolation": "hold" }]
+  },
+  "variantTransforms": {
+    "front-chain-left": { "member": "low-lift", "tracks": {
+      "x": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": 0.013020833333333334 }, { "frame": 12, "value": 0 }, { "frame": 23, "value": 0.013020833333333334 }, { "frame": 47, "value": 0 }],
+      "y": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": 0.0068359375 }, { "frame": 12, "value": -0.0107421875 }, { "frame": 23, "value": 0.0068359375 }, { "frame": 47, "value": 0 }],
+      "rotationDegrees": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 23, "value": 0 }, { "frame": 47, "value": 0 }]
+    } },
+    "rear-chain-right": { "member": "low-lift", "tracks": {
+      "x": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": -0.0013020833333333333 }, { "frame": 12, "value": 0 }, { "frame": 23, "value": -0.0013020833333333333 }, { "frame": 47, "value": 0 }],
+      "y": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": 0.0185546875 }, { "frame": 12, "value": 0 }, { "frame": 23, "value": 0.0185546875 }, { "frame": 47, "value": 0 }],
+      "rotationDegrees": [{ "frame": 0, "value": 0 }, { "frame": 1, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 23, "value": 0 }, { "frame": 47, "value": 0 }]
+    } },
+    "front-chain-right": { "member": "low-lift", "tracks": {
+      "x": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": 0.005859375 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": 0.005859375 }, { "frame": 47, "value": 0 }],
+      "y": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": 0.0185546875 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": 0.0185546875 }, { "frame": 47, "value": 0 }],
+      "rotationDegrees": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": 0 }, { "frame": 47, "value": 0 }]
+    } },
+    "rear-chain-left": { "member": "low-lift", "tracks": {
+      "x": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": -0.005859375 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": -0.005859375 }, { "frame": 47, "value": 0 }],
+      "y": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": 0.0126953125 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": 0.0126953125 }, { "frame": 47, "value": 0 }],
+      "rotationDegrees": [{ "frame": 0, "value": 0 }, { "frame": 25, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 46, "value": 0 }, { "frame": 47, "value": 0 }]
+    } }
+  },
+  "layerOpacity": {
+    "walk-socket-front-left": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 1, "value": 1, "interpolation": "hold" }, { "frame": 24, "value": 0, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }],
+    "walk-cover-front-left": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 1, "value": 1, "interpolation": "hold" }, { "frame": 24, "value": 0, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }],
+    "walk-socket-rear-right": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 1, "value": 1, "interpolation": "hold" }, { "frame": 24, "value": 0, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }],
+    "walk-socket-front-right": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 25, "value": 1, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }],
+    "walk-cover-front-right": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 25, "value": 1, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }],
+    "walk-socket-rear-left": [{ "frame": 0, "value": 0, "interpolation": "hold" }, { "frame": 25, "value": 1, "interpolation": "hold" }, { "frame": 47, "value": 0, "interpolation": "hold" }]
+  },
+  "controls": {
+    "breath": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "bodyBob": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "bodyLean": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "weightShift": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "headTilt": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "headTurn": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "gazeX": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "gazeY": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "blinkLeft": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "blinkRight": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "earLeft": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "earRight": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "jawOpen": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "tailBase": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "tailMid": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "tailTip": [{ "frame": 0, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearThighLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearHockLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearPawLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearThighRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearHockRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "rearPawRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontUpperLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontLowerLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontPawLeft": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontUpperRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontLowerRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }],
+    "frontPawRight": [{ "frame": 0, "value": 0 }, { "frame": 12, "value": 0 }, { "frame": 24, "value": 0 }, { "frame": 36, "value": 0 }, { "frame": 47, "value": 0 }]
+  }
+}

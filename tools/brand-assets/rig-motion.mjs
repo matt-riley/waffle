@@ -189,6 +189,12 @@ export function evaluateClip(manifest, clip, frame) {
       transform[binding.property] += value * binding.factor;
     }
   }
+  const layerOpacity = new Map();
+  for (const [layerId, keyframes] of Object.entries(clip.layerOpacity ?? {})) {
+    const opacity = interpolateKeyframes(keyframes, frame);
+    layers.get(layerId).opacity = opacity;
+    layerOpacity.set(layerId, opacity);
+  }
   for (const layer of manifest.layers) checkedLayerLimits(layer, layers.get(layer.id));
   for (const [layerId, state] of layers) {
     if (!Number.isFinite(state.opacity) || state.opacity < 0 || state.opacity > 1) {
@@ -207,7 +213,16 @@ export function evaluateClip(manifest, clip, frame) {
     variants.set(setId, memberId);
   }
 
-  return { layers, variants, controls };
+  const variantTransforms = new Map();
+  for (const [setId, specification] of Object.entries(clip.variantTransforms ?? {})) {
+    const transform = { x: 0, y: 0, rotationDegrees: 0, scaleX: 1, scaleY: 1 };
+    for (const [property, keyframes] of Object.entries(specification.tracks)) {
+      transform[property] = interpolateKeyframes(keyframes, frame);
+    }
+    variantTransforms.set(setId, { member: specification.member, transform });
+  }
+
+  return { layers, variants, controls, variantTransforms, layerOpacity };
 }
 
 function exactMapEntry(map, key) {
@@ -230,7 +245,6 @@ export function assertLoopClosure(manifest, clip) {
       throw new Error(`variant ${setId} must declare a state at frame 0`);
     }
   }
-
   for (let frame = 0; frame < clip.frameCount; frame += 1) {
     const evaluated = evaluateClip(manifest, clip, frame);
     for (const [name, control] of Object.entries(manifest.controls)) {
@@ -250,7 +264,21 @@ export function assertLoopClosure(manifest, clip) {
       throw new Error(`variant ${setId} does not close exactly`);
     }
   }
-
+  for (const setId of Object.keys(clip.variantTransforms ?? {})) {
+    const firstTransform = exactMapEntry(first.variantTransforms, setId);
+    const lastTransform = exactMapEntry(last.variantTransforms, setId);
+    if (firstTransform.member !== lastTransform.member
+      || Object.keys(firstTransform.transform).some((property) => (
+        firstTransform.transform[property] !== lastTransform.transform[property]
+      ))) {
+      throw new Error(`variant transform ${setId} does not close exactly`);
+    }
+  }
+  for (const layerId of Object.keys(clip.layerOpacity ?? {})) {
+    if (exactMapEntry(first.layerOpacity, layerId) !== exactMapEntry(last.layerOpacity, layerId)) {
+      throw new Error(`layer opacity ${layerId} does not close exactly`);
+    }
+  }
   const firstWorld = worldTransforms(manifest, first.layers);
   const lastWorld = worldTransforms(manifest, last.layers);
   for (const layer of manifest.layers) {
@@ -260,13 +288,19 @@ export function assertLoopClosure(manifest, clip) {
   }
 }
 
-async function renderFrameFromInputs(manifest, clip, frame, rasterForFile) {
-  const evaluated = evaluateClip(manifest, clip, frame);
+function scaleAlpha(raster, opacity) {
+  if (opacity === 1) return;
+  for (let offset = 3; offset < raster.data.length; offset += 4) {
+    raster.data[offset] = Math.round(raster.data[offset] * opacity);
+  }
+}
+
+async function renderDiscreteFrame(manifest, evaluated, selections, rasterForFile) {
   const world = worldTransforms(manifest, evaluated.layers);
   let output = new PNG({ width: manifest.canvas.width, height: manifest.canvas.height });
 
   const hiddenLayers = new Set();
-  for (const [setId, memberId] of evaluated.variants) {
+  for (const [setId, memberId] of selections) {
     const member = manifest.variants[setId].members.find((candidate) => candidate.id === memberId);
     for (const [layerId, override] of Object.entries(member.layerOverrides ?? {})) {
       if (override.visible === false) hiddenLayers.add(layerId);
@@ -277,22 +311,36 @@ async function renderFrameFromInputs(manifest, clip, frame, rasterForFile) {
     .filter((layer) => evaluated.layers.get(layer.id).opacity > 0 && !hiddenLayers.has(layer.id))
     .toSorted((left, right) => left.drawOrder - right.drawOrder);
   for (const layer of activeLayers) {
-    const file = layer.role === "variant-anchor"
-      ? variantForLayer(manifest, layer.id, evaluated.variants.get(
-        Object.entries(manifest.variants).find(([, set]) => set.layer === layer.id)[0],
-      )).file
-      : layer.file;
+    const variantEntry = layer.role === "variant-anchor"
+      ? Object.entries(manifest.variants).find(([, set]) => set.layer === layer.id)
+      : undefined;
+    const selectedMember = variantEntry
+      ? variantForLayer(manifest, layer.id, selections.get(variantEntry[0]))
+      : undefined;
+    const file = selectedMember?.file ?? layer.file;
     const raster = await rasterForFile(file);
-    const transformed = transformRgbaMatrix(raster, world.get(layer.id));
-    const opacity = evaluated.layers.get(layer.id).opacity;
-    if (opacity !== 1) {
-      for (let offset = 3; offset < transformed.data.length; offset += 4) {
-        transformed.data[offset] = Math.round(transformed.data[offset] * opacity);
-      }
+    let memberWorld = world.get(layer.id);
+    if (selectedMember?.parentOverride !== undefined) {
+      const parentWorld = selectedMember.parentOverride === manifest.root.id
+        ? IDENTITY
+        : world.get(selectedMember.parentOverride);
+      memberWorld = multiply(parentWorld, localMatrix(manifest, layer, evaluated.layers.get(layer.id)));
     }
+    const setTransform = variantEntry ? evaluated.variantTransforms.get(variantEntry[0]) : undefined;
+    if (setTransform && setTransform.member === selectedMember?.id) {
+      memberWorld = multiply(memberWorld, localMatrix(manifest, layer, setTransform.transform));
+    }
+    const transformed = transformRgbaMatrix(raster, memberWorld);
+    const opacity = evaluated.layers.get(layer.id).opacity;
+    scaleAlpha(transformed, opacity);
     output = sourceOver(output, transformed);
   }
   return output;
+}
+
+async function renderFrameFromInputs(manifest, clip, frame, rasterForFile) {
+  const evaluated = evaluateClip(manifest, clip, frame);
+  return renderDiscreteFrame(manifest, evaluated, evaluated.variants, rasterForFile);
 }
 
 export async function renderRigFrameSnapshot(snapshot, frame) {

@@ -257,15 +257,20 @@ test("base rebuild preserves authoritative art configs and package documentation
   await Promise.all(Object.entries(authoritative).map(([name, contents]) => (
     writeFile(path.join(fixture.outputDirectory, name), contents)
   )));
+  const motionFile = path.join(fixture.outputDirectory, "motions", "walk-in-place.json");
+  const authoredMotion = "{\"schemaVersion\":1,\"id\":\"walk-in-place\"}\n";
+  await mkdir(path.dirname(motionFile), { recursive: true });
+  await writeFile(motionFile, authoredMotion);
 
   await buildStandingRigV2(fixture);
 
   for (const [name, contents] of Object.entries(authoritative)) {
     assert.equal(await readFile(path.join(fixture.outputDirectory, name), "utf8"), contents);
   }
+  assert.equal(await readFile(motionFile, "utf8"), authoredMotion);
 });
 
-test("injected rebuild failure preserves the complete 48-layer production package and final controls", async (t) => {
+test("injected rebuild failure preserves the complete 54-layer production package and final controls", async (t) => {
   const root = await workspace(t);
   const productionWaffle = path.resolve(import.meta.dirname, "../../../assets/brand/waffle");
   const waffle = path.join(root, "assets", "brand", "waffle");
@@ -294,7 +299,7 @@ test("injected rebuild failure preserves the complete 48-layer production packag
   }), /injected production rebuild failure/);
 
   const restored = JSON.parse(await readFile(path.join(outputDirectory, "rig.json"), "utf8"));
-  assert.equal(restored.layers.length, 48);
+  assert.equal(restored.layers.length, 54);
   assert.deepEqual(restored.controls, original.controls);
   for (const name of ["repairs.json", "variants.json", "GENERATION.md", "README.md"]) {
     assert.deepEqual(

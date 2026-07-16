@@ -16,6 +16,10 @@ Variant sets are mutually exclusive and registered to their anchor layer. Each s
 
 | Set | Members | Neutral |
 | --- | --- | --- |
+| `front-chain-left` | `neutral`, `landing`, `low-lift` | `neutral` |
+| `front-chain-right` | `neutral`, `landing`, `low-lift` | `neutral` |
+| `rear-chain-left` | `neutral`, `landing`, `low-lift` | `neutral` |
+| `rear-chain-right` | `neutral`, `landing`, `low-lift` | `neutral` |
 | `front-paw-left` | `planted`, `lifted`, `wave` | `planted` |
 | `front-paw-right` | `planted`, `lifted` | `planted` |
 | `rear-paw-left` | `planted`, `lifted` | `planted` |
@@ -23,7 +27,7 @@ Variant sets are mutually exclusive and registered to their anchor layer. Each s
 | `head-base` | `neutral`, `turn-left`, `turn-right` | `neutral` |
 | `jaw` | `closed`, `open` | `closed` |
 
-Paw, head-turn, and jaw extremes use these registered paintings, not aggressive raster rotation. Swap a paw only at a registered interchange pose while motion conceals the change. Turned head paintings replace the declared descendant face layers as a coherent state.
+The four chain sets are the walk-in-place swing states. Each opaque `low-lift` painting replaces the complete declared leg subtree and follows the source-locked torso through its private parent override. Each discrete `landing` painting bakes the registered interchange offset into the approved low-lift upper, applies a baked premultiplied blend through the overlap band, and restores exact neutral distal pixels below the concealed seam; it has no parent override or member transform. A matching hidden, feathered `walk-socket-*` underlay fills the vacated root from the approved standing master. The two front joints also use compact feathered `walk-cover-*` layers; the rear members instead blend directly into shaped underlays so no source rectangle can switch above the legs. Paw, head-turn, and jaw extremes use registered paintings, not aggressive raster rotation. Transition a painting only at a registered interchange pose while motion conceals the change. Turned head paintings replace the declared descendant face layers as a coherent state.
 
 ## Controls and clips
 
@@ -31,7 +35,11 @@ Normalized translation controls use canvas fractions; rotation controls use degr
 
 `blinkLeft` and `blinkRight` independently drive the opacity of their source-matched upper and lower lid overlays from 0 to 1. Opacity activation never translates or rotates the painted lids, so their full-canvas registration stays exact. Equal left/right values produce a synchronized blink.
 
-Motion clips use schema version 1 and declare `id`, `fps`, `frameCount`, `loop`, `requiredClosure`, variant keyframes, and numeric control keyframes. Numeric keys interpolate linearly unless held; variant keys always hold. Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip.variants` key, while a numeric-bound set may derive it from its control. A looping clip must evaluate to exactly equal controls, variants, and world matrices at its closure frames.
+Motion clips use schema version 1 and declare `id`, `fps`, `frameCount`, `loop`, `requiredClosure`, variant keyframes, and numeric control keyframes. Numeric keys interpolate linearly unless held; variant keys always hold. Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip.variants` key, while a numeric-bound set may derive it from its control. A looping clip must evaluate to exactly equal controls, variants, private layer opacity, member transforms, and world matrices at its closure frames.
+
+Optional `variantTransforms` provide conservative member-local motion for an opaque selected non-neutral member. Each transform targets one known non-neutral member selected by `variants` and may animate normalized `x`/`y`, rotation, and scale tracks within the schema's bounded ranges from frame 0 through the final frame. A non-neutral member may declare `parentOverride` to follow a different registered parent while active. The selected member remains fully opaque and suppresses its declared descendants without alpha overlap. Rendering composes the selected parent's world transform, the anchor layer's local transform, and then the member-local transform around the same registered pivot. Loop endpoints must close exactly.
+
+Optional `layerOpacity` tracks are clip-private visibility channels for registered layers that are hidden at neutral and have role `repair` or `overlay`. They do not add or widen a public rig control, and a target may not also have a public opacity binding. Values are finite from 0 through 1, interpolate linearly unless held, must declare frame 0 and the final frame, and must close exactly for a loop. The walk clip switches each fixed `walk-socket-*` and front `walk-cover-*` layer between Boolean 0 and 1 with its matching discrete `landing` or `low-lift` member.
 
 The v2 motion acceptance clips are 24 fps: 48 frames for walk-in-place, 72 frames for the paw wave, and 48 frames for the head/face/tail proof. This three-quarter rig does not support a side-profile travelling walk; that requires a separate source-locked rig.
 
@@ -54,7 +62,7 @@ mise run brand-rig-check
 mise run brand-check
 ```
 
-The base builder stages a source-only sibling package while preserving the authoritative `repairs.json`, `variants.json`, `GENERATION.md`, and package `README.md` needed by the art pass. Controls that target art-pass layers or variant sets are deliberately deferred in the temporary source-only manifest, then restored from authoritative `masks.json` after the art builder registers those targets. Both builders promote only validated packages and never write standing v1.
+The base builder stages a source-only sibling package while preserving the authoritative `repairs.json`, `variants.json`, `GENERATION.md`, package `README.md`, and authored files beneath `motions/`. Controls that target art-pass layers or variant sets are deliberately deferred in the temporary source-only manifest, then restored from authoritative `masks.json` after the art builder registers those targets. Both builders promote only validated packages and never write standing v1.
 
 Validation requires contained nonsymlink paths, current SHA-256 hashes, sanitized RGBA PNGs, exact dimensions, package size limits, an acyclic hierarchy, valid variants and controls, and zero visible neutral mismatches against both the approved source and `neutral-reference.png`.
 
@@ -62,4 +70,4 @@ Artwork must pass still review at full resolution, 320 px, and 160 px on warm-wh
 
 ## Fusion handoff
 
-Fusion mirrors `rig.json` with Loaders, Transforms, and Merges; it is downstream, never authoritative. Convert every top-left manifest pivot with `fusionY = 1 - manifestY`. Read back each MCP node, path, pivot, connection, control, variant visibility, and keyframe write before saving a verified subtree. Do not render or export through the Resolve MCP. The owner handles delivery exports.
+Fusion mirrors `rig.json` with Loaders, Transforms, and Merges; it is downstream, never authoritative. Convert every top-left manifest pivot with `fusionY = 1 - manifestY`. Implement each clip-private `layerOpacity` track on the corresponding hidden repair or overlay Merge's Blend channel, keeping that channel separate from the published controller group; for the walk, the four `walk-socket-*` Loaders remain torso-parented and their Blends follow the exact Boolean 0/1 clip keys. Read back each MCP node, path, pivot, connection, control, variant visibility, private opacity key, and connection write before saving a verified subtree. Do not render or export through the Resolve MCP. The owner handles delivery exports.

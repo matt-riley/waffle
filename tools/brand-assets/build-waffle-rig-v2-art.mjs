@@ -200,8 +200,9 @@ function edgeFeatherAlpha(x, y, polygons, pixels) {
   if (pixels === undefined || pixels === 0) return 1;
   if (!Number.isFinite(pixels) || pixels < 0) throw new Error("edgeFeatherPixels must be a non-negative number");
   const containing = polygons.filter((polygon) => pointInPolygon(x, y, polygon));
-  let distance = Infinity;
+  let alpha = 0;
   for (const polygon of containing) {
+    let distance = Infinity;
     for (let index = 0; index < polygon.length; index += 1) {
       distance = Math.min(distance, pointToSegmentDistance(
         x,
@@ -210,8 +211,9 @@ function edgeFeatherAlpha(x, y, polygons, pixels) {
         polygon[(index + 1) % polygon.length],
       ));
     }
+    alpha = Math.max(alpha, smoothstep((distance - 0.5) / pixels));
   }
-  return smoothstep((distance - 0.5) / pixels);
+  return alpha;
 }
 
 export function extractBounded(source, specification) {
@@ -270,6 +272,180 @@ export function extractBounded(source, specification) {
   return output;
 }
 
+function removeAlphaIslandsBelowPixels(image, minimumPixels) {
+  if (!Number.isInteger(minimumPixels) || minimumPixels <= 0) {
+    throw new Error("removeAlphaIslandsBelowPixels must be a positive integer");
+  }
+  const { width, height } = image;
+  const visited = new Uint8Array(width * height);
+  for (let start = 0; start < visited.length; start += 1) {
+    if (visited[start] || image.data[start * 4 + 3] === 0) continue;
+    const component = [];
+    const queue = [start];
+    visited[start] = 1;
+    while (queue.length > 0) {
+      const index = queue.pop();
+      component.push(index);
+      const x = index % width;
+      const y = Math.floor(index / width);
+      for (const neighbor of [
+        x > 0 ? index - 1 : -1,
+        x + 1 < width ? index + 1 : -1,
+        y > 0 ? index - width : -1,
+        y + 1 < height ? index + width : -1,
+      ]) {
+        if (neighbor < 0 || visited[neighbor] || image.data[neighbor * 4 + 3] === 0) continue;
+        visited[neighbor] = 1;
+        queue.push(neighbor);
+      }
+    }
+    if (component.length >= minimumPixels) continue;
+    for (const index of component) image.data.fill(0, index * 4, index * 4 + 4);
+  }
+  return image;
+}
+
+function distanceToTransparent(image, x, y, limit) {
+  let nearest = Infinity;
+  const radius = Math.ceil(limit);
+  for (let sampleY = y - radius; sampleY <= y + radius; sampleY += 1) {
+    for (let sampleX = x - radius; sampleX <= x + radius; sampleX += 1) {
+      const distance = Math.hypot(sampleX - x, sampleY - y);
+      if (distance >= nearest || distance > limit) continue;
+      if (sampleX < 0 || sampleY < 0 || sampleX >= image.width || sampleY >= image.height
+        || image.data[(sampleY * image.width + sampleX) * 4 + 3] === 0) {
+        nearest = distance;
+      }
+    }
+  }
+  return nearest;
+}
+
+function featherInternalProximalCut(image, fullCat, specification) {
+  if (!object(specification)
+    || !Number.isInteger(specification.startY)
+    || !Number.isInteger(specification.endY)
+    || !Number.isFinite(specification.fullCatBoundaryPreservePixels)
+    || specification.startY < 0
+    || specification.endY <= specification.startY
+    || specification.endY >= image.height
+    || specification.fullCatBoundaryPreservePixels < 0) {
+    throw new Error("proximalFeather must declare an increasing in-canvas y range and non-negative external-boundary preservation distance");
+  }
+  for (let y = specification.startY; y <= specification.endY; y += 1) {
+    const alphaScale = smoothstep((y - specification.startY) / (specification.endY - specification.startY));
+    for (let x = 0; x < image.width; x += 1) {
+      const offset = (y * image.width + x) * 4;
+      if (image.data[offset + 3] === 0
+        || (specification.fullCatBoundaryPreservePixels > 0
+          && distanceToTransparent(fullCat, x, y, specification.fullCatBoundaryPreservePixels)
+            < specification.fullCatBoundaryPreservePixels)) continue;
+      image.data[offset + 3] = clampByte(image.data[offset + 3] * alphaScale);
+      if (image.data[offset + 3] <= ALPHA_NOISE_FLOOR) image.data.fill(0, offset, offset + 4);
+    }
+  }
+  return image;
+}
+
+export function maskToFullCatInterior(
+  image,
+  fullCat,
+  minimumDistancePixels,
+  boundaryReliefPolygons = [],
+  boundaryReliefFeatherPixels = 0,
+) {
+  if (!Number.isFinite(minimumDistancePixels) || minimumDistancePixels <= 0) {
+    throw new Error("internalOnlyDistancePixels must be a positive number");
+  }
+  if (!Array.isArray(boundaryReliefPolygons)) {
+    throw new Error("boundaryReliefPolygons must be an array of in-canvas polygons");
+  }
+  if (!Number.isFinite(boundaryReliefFeatherPixels) || boundaryReliefFeatherPixels < 0) {
+    throw new Error("boundaryReliefFeatherPixels must be a non-negative number");
+  }
+  if (boundaryReliefPolygons.length > 0) {
+    validateCrop(
+      { x: 0, y: 0, width: image.width, height: image.height },
+      { width: image.width, height: image.height },
+      boundaryReliefPolygons,
+    );
+  }
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const offset = (y * image.width + x) * 4;
+      if (image.data[offset + 3] === 0) continue;
+      if (distanceToTransparent(fullCat, x, y, minimumDistancePixels) < minimumDistancePixels) {
+        const insideBoundaryRelief = boundaryReliefPolygons.some((polygon) => pointInPolygon(x, y, polygon));
+        if (!insideBoundaryRelief) {
+          image.data.fill(0, offset, offset + 4);
+        } else if (boundaryReliefFeatherPixels > 0) {
+          image.data[offset + 3] = clampByte(
+            image.data[offset + 3]
+              * edgeFeatherAlpha(x, y, boundaryReliefPolygons, boundaryReliefFeatherPixels),
+          );
+          if (image.data[offset + 3] <= ALPHA_NOISE_FLOOR) image.data.fill(0, offset, offset + 4);
+        }
+      }
+    }
+  }
+  return image;
+}
+
+function assertProximalUnderlayOutput(image, specification, id) {
+  const bounds = specification.outputBounds;
+  if (!object(bounds)
+    || !Number.isInteger(bounds.minNonzeroPixels)
+    || bounds.minNonzeroPixels <= 0
+    || !Number.isInteger(bounds.maxHeight)
+    || bounds.maxHeight <= 0
+    || !Number.isInteger(bounds.maxY)
+    || !object(bounds.within)
+    || !["x", "y", "width", "height"].every((key) => Number.isInteger(bounds.within[key]))
+    || bounds.within.width <= 0
+    || bounds.within.height <= 0
+    || (bounds.forbidden !== undefined && (!Array.isArray(bounds.forbidden)
+      || !bounds.forbidden.every((region) => object(region)
+        && ["x", "y", "width", "height"].every((key) => Number.isInteger(region[key]))
+        && region.width > 0
+        && region.height > 0)))) {
+    throw new Error(`repair ${id} proximal underlay outputBounds must declare positive coverage, height, max-y, containment, and optional forbidden rectangles`);
+  }
+  let nonzeroPixels = 0;
+  let minX = image.width;
+  let minY = image.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] === 0) continue;
+      nonzeroPixels += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      if ((bounds.forbidden ?? []).some((region) => x >= region.x
+        && x < region.x + region.width
+        && y >= region.y
+        && y < region.y + region.height)) {
+        throw new Error(`repair ${id} proximal underlay contains forbidden distal alpha at ${x},${y}`);
+      }
+    }
+  }
+  if (nonzeroPixels < bounds.minNonzeroPixels) {
+    throw new Error(`repair ${id} proximal underlay has ${nonzeroPixels} nonzero pixels; expected at least ${bounds.minNonzeroPixels}`);
+  }
+  const height = maxY - minY + 1;
+  const within = bounds.within;
+  if (height > bounds.maxHeight
+    || maxY > bounds.maxY
+    || minX < within.x
+    || minY < within.y
+    || maxX >= within.x + within.width
+    || maxY >= within.y + within.height) {
+    throw new Error(`repair ${id} proximal underlay alpha bounds ${minX},${minY}..${maxX},${maxY} exceed the authored joint envelope`);
+  }
+}
+
 function exactPixels(left, right) {
   return left.width === right.width && left.height === right.height && left.data.equals(right.data);
 }
@@ -311,6 +487,160 @@ function compositePatchOntoAnchor(patch, anchor) {
   return output;
 }
 
+function innerEdgeHueCandidate(data, offset, specification) {
+  const red = data[offset];
+  const green = data[offset + 1];
+  const blue = data[offset + 2];
+  const alpha = data[offset + 3];
+  return alpha > specification.alphaThreshold
+    && red - green >= specification.redOverGreenMinimum
+    && blue + specification.blueBelowGreenMaximum >= green;
+}
+
+export function despillInnerEdge(image, specification) {
+  if (!image || !object(specification) || !object(specification.bounds)) {
+    throw new Error("inner-edge despill requires an image and bounds");
+  }
+  const { bounds } = specification;
+  for (const [name, value] of Object.entries(bounds)) {
+    if (!Number.isInteger(value) || value < (name === "width" || name === "height" ? 1 : 0)) {
+      throw new Error(`inner-edge despill bounds ${name} must be a valid integer`);
+    }
+  }
+  if (bounds.x + bounds.width > image.width || bounds.y + bounds.height > image.height) {
+    throw new Error("inner-edge despill bounds must stay inside the canvas");
+  }
+  for (const name of [
+    "edgeDepthPixels",
+    "sampleSearchPixels",
+    "alphaThreshold",
+    "redOverGreenMinimum",
+    "blueBelowGreenMaximum",
+    "minimumSampleAlpha",
+  ]) {
+    if (!Number.isInteger(specification[name]) || specification[name] < 0) {
+      throw new Error(`inner-edge despill ${name} must be a non-negative integer`);
+    }
+  }
+  if (specification.edgeDepthPixels < 1
+    || specification.sampleSearchPixels < specification.edgeDepthPixels
+    || specification.alphaThreshold > 254
+    || specification.minimumSampleAlpha > 255) {
+    throw new Error("inner-edge despill depth, search, and alpha thresholds are invalid");
+  }
+
+  const output = new PNG({ width: image.width, height: image.height });
+  output.data.set(image.data);
+  const endX = bounds.x + bounds.width - 1;
+  const endY = bounds.y + bounds.height - 1;
+
+  function rowInnerEdgeX(y) {
+    for (let x = bounds.x; x <= endX; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] > specification.alphaThreshold) return x;
+    }
+    return -1;
+  }
+
+  function rowSampleOffset(y) {
+    const innerEdgeX = rowInnerEdgeX(y);
+    if (innerEdgeX < 0) return -1;
+    const sampleEndX = Math.min(innerEdgeX + specification.sampleSearchPixels, endX);
+    for (let x = innerEdgeX + specification.edgeDepthPixels; x <= sampleEndX; x += 1) {
+      const offset = (y * image.width + x) * 4;
+      if (image.data[offset + 3] >= specification.minimumSampleAlpha
+        && !innerEdgeHueCandidate(image.data, offset, specification)) return offset;
+    }
+    return -1;
+  }
+
+  for (let y = bounds.y; y <= endY; y += 1) {
+    const innerEdgeX = rowInnerEdgeX(y);
+    if (innerEdgeX < 0) continue;
+    let sampleOffset = rowSampleOffset(y);
+    for (let distance = 1; sampleOffset < 0 && distance <= specification.sampleSearchPixels; distance += 1) {
+      const previousY = y - distance;
+      const nextY = y + distance;
+      if (previousY >= bounds.y) sampleOffset = rowSampleOffset(previousY);
+      if (sampleOffset < 0 && nextY <= endY) sampleOffset = rowSampleOffset(nextY);
+    }
+    if (sampleOffset < 0) continue;
+    const correctionEndX = Math.min(innerEdgeX + specification.edgeDepthPixels - 1, endX);
+    for (let x = innerEdgeX; x <= correctionEndX; x += 1) {
+      const offset = (y * image.width + x) * 4;
+      if (!innerEdgeHueCandidate(image.data, offset, specification)) continue;
+      output.data.set(image.data.subarray(sampleOffset, sampleOffset + 3), offset);
+    }
+  }
+  return output;
+}
+
+export function buildHybridLandingPlate(lowLift, neutral, specification) {
+  if (!lowLift || !neutral || lowLift.width !== neutral.width || lowLift.height !== neutral.height) {
+    throw new Error("hybrid landing inputs must have the same canvas");
+  }
+  const {
+    baseOffsetPixels = { x: 0, y: 0 },
+    neutralDistalPolygons,
+    seamY,
+    transitionStartY,
+  } = specification ?? {};
+  if (!Number.isInteger(seamY)
+    || !Number.isInteger(transitionStartY)
+    || transitionStartY < 0
+    || transitionStartY >= seamY
+    || seamY > lowLift.height) {
+    throw new Error("hybrid landing seam must be an ordered integer interval inside the canvas");
+  }
+  if (!Array.isArray(neutralDistalPolygons) || neutralDistalPolygons.length === 0) {
+    throw new Error("hybrid landing must declare neutral distal polygons");
+  }
+  if (!object(baseOffsetPixels)
+    || !Number.isInteger(baseOffsetPixels.x)
+    || !Number.isInteger(baseOffsetPixels.y)) {
+    throw new Error("hybrid landing base offset must use integer pixels");
+  }
+
+  const output = new PNG({ width: lowLift.width, height: lowLift.height });
+  for (let y = 0; y < lowLift.height; y += 1) {
+    const targetY = y + baseOffsetPixels.y;
+    if (targetY < 0 || targetY >= output.height) continue;
+    for (let x = 0; x < lowLift.width; x += 1) {
+      const targetX = x + baseOffsetPixels.x;
+      if (targetX < 0 || targetX >= output.width) continue;
+      const sourceOffset = (y * lowLift.width + x) * 4;
+      const targetOffset = (targetY * output.width + targetX) * 4;
+      output.data.set(lowLift.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
+    }
+  }
+  for (let y = transitionStartY; y < output.height; y += 1) {
+    for (let x = 0; x < output.width; x += 1) {
+      const offset = (y * output.width + x) * 4;
+      const insideDistal = neutralDistalPolygons.some((polygon) => pointInPolygon(x, y, polygon));
+      if (y >= seamY) {
+        if (insideDistal) output.data.set(neutral.data.subarray(offset, offset + 4), offset);
+        else output.data.fill(0, offset, offset + 4);
+        continue;
+      }
+      const progress = (y - transitionStartY) / (seamY - transitionStartY);
+      const liftAlpha = output.data[offset + 3];
+      const neutralAlpha = insideDistal ? neutral.data[offset + 3] : 0;
+      const blendedAlpha = liftAlpha * (1 - progress) + neutralAlpha * progress;
+      const outputAlpha = Math.round(blendedAlpha);
+      for (let channel = 0; channel < 3; channel += 1) {
+        const liftValue = output.data[offset + channel] * liftAlpha * (1 - progress);
+        const neutralValue = insideDistal
+          ? neutral.data[offset + channel] * neutralAlpha * progress
+          : 0;
+        output.data[offset + channel] = blendedAlpha === 0
+          ? 0
+          : Math.round((liftValue + neutralValue) / blendedAlpha);
+      }
+      output.data[offset + 3] = outputAlpha;
+    }
+  }
+  return output;
+}
+
 async function validateInput({
   configDirectory,
   expectedCanvas,
@@ -320,6 +650,7 @@ async function validateInput({
   polygons,
   source,
   anchor,
+  builtMembers,
 }) {
   if (!object(input)) throw new Error(`${expectedId} input must be an object`);
   assertCanvas(input.canvas, expectedCanvas, "input");
@@ -327,7 +658,8 @@ async function validateInput({
   validateCrop(input.crop, expectedCanvas, polygons);
 
   if (input.kind === "anchor-layer") {
-    if (input.expectedVariantId !== expectedId) throw new Error(`expected variant id must be ${expectedId}`);
+    const declared = input.expectedVariantId ?? input.expectedId;
+    if (declared !== expectedId) throw new Error(`expected anchor-layer id must be ${expectedId}`);
     if (!anchor || input.layer !== anchor.id) throw new Error(`${expectedId} must reference anchor layer ${anchor?.id ?? "missing"}`);
     return anchor.image;
   }
@@ -339,7 +671,18 @@ async function validateInput({
     return source.image;
   }
 
-  if (input.kind !== "edit-plate") throw new Error(`${expectedId} input kind must be anchor-layer, source-sample, or edit-plate`);
+  if (input.kind === "hybrid-landing") {
+    if (input.expectedVariantId !== expectedId) throw new Error(`expected variant id must be ${expectedId}`);
+    assertSafeId(input.baseMember, `${expectedId} hybrid base member`);
+    const lowLift = builtMembers?.get(input.baseMember);
+    if (!lowLift) throw new Error(`${expectedId} hybrid base member ${input.baseMember} must be built first`);
+    validateCrop(input.crop, expectedCanvas, input.neutralDistalPolygons);
+    return buildHybridLandingPlate(lowLift, source.image, input);
+  }
+
+  if (input.kind !== "edit-plate") {
+    throw new Error(`${expectedId} input kind must be anchor-layer, source-sample, hybrid-landing, or edit-plate`);
+  }
   const declared = input.expectedVariantId ?? input.expectedId;
   const label = input.expectedVariantId === undefined ? "repair id" : "variant id";
   if (declared !== expectedId) throw new Error(`expected ${label} must be ${expectedId}`);
@@ -416,6 +759,7 @@ async function writeArtPackage({
     if (!coverLayer) throw new Error(`repair ${repair.id} references unknown cover ${repair.cover}`);
     const cover = await readRgba(path.join(temporaryDirectory, coverLayer.file));
     const input = await validateInput({
+      anchor: { id: coverLayer.id, image: cover },
       configDirectory: path.dirname(repairsFile),
       expectedCanvas: manifest.canvas,
       expectedId: repair.id,
@@ -432,6 +776,21 @@ async function writeArtPackage({
       chromaKey: repair.input.chromaKey,
       edgeFeatherPixels: repair.input.edgeFeatherPixels,
     });
+    if (repair.input.internalOnlyDistancePixels !== undefined) {
+      image = maskToFullCatInterior(
+        image,
+        source.image,
+        repair.input.internalOnlyDistancePixels,
+        repair.input.boundaryReliefPolygons,
+        repair.input.boundaryReliefFeatherPixels,
+      );
+    }
+    if (repair.input.removeAlphaIslandsBelowPixels !== undefined) {
+      image = removeAlphaIslandsBelowPixels(image, repair.input.removeAlphaIslandsBelowPixels);
+    }
+    if (repair.input.outputBounds !== undefined) {
+      assertProximalUnderlayOutput(image, { outputBounds: repair.input.outputBounds }, repair.id);
+    }
     if (!repair.allowOutsideNeutralCover) image = maskToOpaqueCover(image, cover);
     const relative = `layers/${repair.id}.png`;
     const file = path.join(temporaryDirectory, relative);
@@ -462,6 +821,7 @@ async function writeArtPackage({
     const anchorImage = await readRgba(path.join(temporaryDirectory, anchorLayer.file));
     const members = [];
     const memberIds = new Set();
+    const builtMemberImages = new Map();
     for (const member of set.members) {
       assertSafeId(member.id, `variant ${set.id} member id`);
       if (memberIds.has(member.id)) throw new Error(`duplicate variant member id: ${set.id}/${member.id}`);
@@ -476,6 +836,7 @@ async function writeArtPackage({
         input: member.input,
         polygons: member.polygons,
         source,
+        builtMembers: builtMemberImages,
       });
       let image = extractBounded(input, {
         crop: member.input.crop,
@@ -483,11 +844,21 @@ async function writeArtPackage({
         chromaKey: member.input.chromaKey,
         edgeFeatherPixels: member.input.edgeFeatherPixels,
       });
+      if (member.input.proximalFeather !== undefined) {
+        image = featherInternalProximalCut(image, source.image, member.input.proximalFeather);
+      }
+      if (member.input.innerEdgeDespill !== undefined) {
+        image = despillInnerEdge(image, member.input.innerEdgeDespill);
+      }
+      if (member.input.removeAlphaIslandsBelowPixels !== undefined) {
+        image = removeAlphaIslandsBelowPixels(image, member.input.removeAlphaIslandsBelowPixels);
+      }
       if (member.input.constrainToAnchorAlpha) image = maskToOwnedAlpha(image, anchorImage);
       if (member.input.preserveAnchorOutsidePolygons) image = compositePatchOntoAnchor(image, anchorImage);
       if (member.neutral && !exactPixels(image, anchorImage)) {
         throw new Error(`neutral variant ${expectedId} must reproduce all source-owned anchor pixels exactly`);
       }
+      builtMemberImages.set(member.id, image);
       const relative = `variants/${set.id}/${member.id}.png`;
       const file = path.join(temporaryDirectory, relative);
       await mkdir(path.dirname(file), { recursive: true });
@@ -497,6 +868,7 @@ async function writeArtPackage({
         file: relative,
         neutral: member.neutral,
         sha256: await sha256(file),
+        ...(member.parentOverride === undefined ? {} : { parentOverride: member.parentOverride }),
         ...(member.layerOverrides === undefined ? {} : { layerOverrides: member.layerOverrides }),
       });
     }

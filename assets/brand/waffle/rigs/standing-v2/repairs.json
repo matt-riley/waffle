@@ -1160,6 +1160,152 @@
           "y": 12
         }
       }
+    },
+    {
+      "id": "walk-socket-front-left",
+      "cover": "front-upper-left",
+      "parent": "torso",
+      "drawOrder": 88,
+      "pivot": { "x": 0.357, "y": 0.557 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[450, 510], [790, 510], [790, 650], [450, 650]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-socket-front-left",
+        "crop": { "x": 450, "y": 510, "width": 340, "height": 140 },
+        "edgeFeatherPixels": 12,
+        "removeAlphaIslandsBelowPixels": 8,
+        "outputBounds": {
+          "minNonzeroPixels": 100, "maxHeight": 140, "maxY": 649,
+          "within": { "x": 450, "y": 510, "width": 340, "height": 140 },
+          "forbidden": [{ "x": 400, "y": 650, "width": 400, "height": 350 }]
+        }
+      }
+    },
+    {
+      "id": "walk-socket-front-right",
+      "cover": "front-upper-right",
+      "parent": "torso",
+      "drawOrder": 89,
+      "pivot": { "x": 0.45, "y": 0.571 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[450, 510], [790, 510], [790, 650], [450, 650]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-socket-front-right",
+        "crop": { "x": 450, "y": 510, "width": 340, "height": 140 },
+        "edgeFeatherPixels": 12,
+        "removeAlphaIslandsBelowPixels": 8,
+        "outputBounds": {
+          "minNonzeroPixels": 100, "maxHeight": 140, "maxY": 649,
+          "within": { "x": 450, "y": 510, "width": 340, "height": 140 },
+          "forbidden": [{ "x": 400, "y": 650, "width": 300, "height": 350 }]
+        }
+      }
+    },
+    {
+      "id": "walk-socket-rear-left",
+      "cover": "rear-thigh-left",
+      "parent": "torso",
+      "drawOrder": 2,
+      "pivot": { "x": 0.536, "y": 0.635 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[735, 545], [945, 545], [945, 650], [935, 700], [915, 790], [775, 790], [755, 720], [735, 650]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-socket-rear-left",
+        "crop": { "x": 735, "y": 545, "width": 210, "height": 245 },
+        "internalOnlyDistancePixels": 10,
+        "boundaryReliefPolygons": [[[875, 695], [900, 695], [900, 722], [895, 730], [890, 734], [885, 738], [875, 738]]],
+        "boundaryReliefFeatherPixels": 3,
+        "edgeFeatherPixels": 20,
+        "removeAlphaIslandsBelowPixels": 8,
+        "outputBounds": {
+          "minNonzeroPixels": 100, "maxHeight": 245, "maxY": 789,
+          "within": { "x": 735, "y": 545, "width": 210, "height": 245 },
+          "forbidden": [{ "x": 700, "y": 790, "width": 400, "height": 210 }]
+        }
+      }
+    },
+    {
+      "id": "walk-socket-rear-right",
+      "cover": "rear-thigh-right",
+      "parent": "torso",
+      "drawOrder": 15,
+      "pivot": { "x": 0.638, "y": 0.645 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[900, 535], [1120, 535], [1120, 650], [1110, 710], [1090, 790], [930, 790], [910, 720], [900, 650]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-socket-rear-right",
+        "crop": { "x": 900, "y": 535, "width": 220, "height": 255 },
+        "internalOnlyDistancePixels": 10,
+        "edgeFeatherPixels": 20,
+        "removeAlphaIslandsBelowPixels": 8,
+        "outputBounds": {
+          "minNonzeroPixels": 100, "maxHeight": 255, "maxY": 789,
+          "within": { "x": 900, "y": 535, "width": 220, "height": 255 },
+          "forbidden": [{ "x": 850, "y": 790, "width": 350, "height": 210 }]
+        }
+      }
+    },
+    {
+      "id": "walk-cover-front-left",
+      "cover": "torso",
+      "parent": "torso",
+      "drawOrder": 118,
+      "pivot": { "x": 0.45, "y": 0.56 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[600, 575], [642, 575], [646, 612], [638, 680], [606, 680], [598, 640]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-cover-front-left",
+        "crop": { "x": 598, "y": 575, "width": 49, "height": 106 },
+        "polygons": [[[600, 575], [642, 575], [646, 612], [638, 680], [606, 680], [598, 640]]],
+        "internalOnlyDistancePixels": 3,
+        "edgeFeatherPixels": 12
+      }
+    },
+    {
+      "id": "walk-cover-front-right",
+      "cover": "torso",
+      "parent": "torso",
+      "drawOrder": 123,
+      "pivot": { "x": 0.39, "y": 0.56 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[610, 580], [652, 580], [652, 645], [642, 680], [614, 680], [607, 625]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "walk-cover-front-right",
+        "crop": { "x": 607, "y": 580, "width": 46, "height": 101 },
+        "polygons": [[[610, 580], [652, 580], [652, 645], [642, 680], [614, 680], [607, 625]]],
+        "internalOnlyDistancePixels": 3,
+        "edgeFeatherPixels": 12
+      }
     }
   ],
   "overlays": [

@@ -265,6 +265,31 @@ test("CLI renders every selected frame and row-major 320/160 contact sheets dete
   );
 });
 
+test("contact sheets paint unused trailing cells with the selected background", async (t) => {
+  const fixture = await workspace(t);
+  const clip = JSON.parse(await readFile(fixture.clipPath, "utf8"));
+  clip.frameCount = 9;
+  clip.requiredClosure.lastFrame = 8;
+  clip.controls.fade = [
+    { frame: 0, value: 0, interpolation: "hold" },
+    { frame: 8, value: 0, interpolation: "hold" },
+  ];
+  await writeFile(fixture.clipPath, `${JSON.stringify(clip, null, 2)}\n`);
+  const output = repoReviewPath(t, "trailing-cell-background");
+  await renderMotionReview({
+    manifestPath: fixture.manifestPath,
+    clipPath: fixture.clipPath,
+    outputDirectory: output,
+    frames: "all",
+    background: "charcoal",
+    contactSheet: true,
+    cwd: fixture.root,
+  });
+
+  const sheet = await decoded(path.join(output, "contact-sheet-160.png"));
+  assert.deepEqual(pixel(sheet, 160 + 8, Math.round(160 * 1024 / 1536) + 8), CHARCOAL);
+});
+
 test("renderer requires explicit supported backgrounds and preserves selected frame order", async (t) => {
   const fixture = await workspace(t);
   const base = repoReviewPath(t, "backgrounds");
