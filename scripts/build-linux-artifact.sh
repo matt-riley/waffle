@@ -61,4 +61,12 @@ jq -n \
     goarch: $goarch
   }' > "$output_dir/build-metadata.json"
 
-tar -C "$output_dir" -czf "$output_dir/waffle-linux-amd64.tar.gz" waffle waffle.sha256 build-metadata.json
+TZ=UTC touch -t 197001010000 "$output_dir/waffle" "$output_dir/waffle.sha256" "$output_dir/build-metadata.json"
+
+staging_tar="$output_dir/waffle-linux-amd64.tar"
+trap 'rm -f -- "$staging_tar"' EXIT
+
+tar --uid 0 --gid 0 --uname root --gname root -C "$output_dir" -cf "$staging_tar" waffle waffle.sha256 build-metadata.json
+gzip -n -c "$staging_tar" > "$output_dir/waffle-linux-amd64.tar.gz"
+rm -f -- "$staging_tar"
+trap - EXIT
