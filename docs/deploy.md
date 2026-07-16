@@ -59,6 +59,59 @@ If the binary or state directory lives elsewhere, update `ExecStart` and the
 matching `ReadWritePaths`. `ProtectHome=read-only` permits reading the binary
 and identity file while the explicit paths permit only waffle state writes.
 
+## Linux release artifact contract
+
+Pushes to `main` build one deployable Linux release artifact after the
+deterministic quality gate succeeds. The gate is the same repository suite
+used by CI: deterministic evals plus build, vet, test, lint, and security
+workflow checks. Only after those jobs pass does the `build linux artifact`
+job run.
+
+That job publishes exactly one GitHub Actions artifact named
+`waffle-linux-amd64`. The archive file is `waffle-linux-amd64.tar.gz` and it
+contains:
+
+- `waffle` — the statically linked `linux/amd64` binary built from
+  `./cmd/waffle`
+- `waffle.sha256` — the SHA-256 digest for that binary
+- `build-metadata.json` — normalized build metadata for the deploy request
+
+`build-metadata.json` records the source commit and workflow provenance the
+infra rollout consumes:
+
+- `source_repo`
+- `source_sha`
+- `source_ref`
+- `workflow_run_id`
+- `version`
+- `goos`
+- `goarch`
+
+The artifact builder normalizes timestamps and tar ownership so repeated builds
+from the same commit produce the same payload shape.
+
+## Existing-server rollout ownership
+
+Application pushes do not create or replace Hetzner infrastructure directly.
+After the artifact upload completes, Waffle sends an infra deploy request with
+the GitHub Actions run id, artifact name, and uploaded artifact digest. The
+infra side downloads that already-built artifact and rolls it out onto the
+existing server.
+
+This split is intentional:
+
+- Waffle owns the application artifact and its provenance.
+- Infra owns the server update procedure and any host-specific rollout logic.
+- Release Please stays independent from binary deployment, so version-tag
+  publication is not the trigger for shipping the Linux binary.
+
+## No Terraform per push
+
+Every successful application push must not imply a Terraform apply. The
+per-push path is artifact build, artifact upload, and infra-owned rollout of
+the existing server. Provisioning or topology changes remain explicit
+infrastructure work, outside the normal Waffle application release path.
+
 ## launchd user agent (macOS)
 
 Save as `~/Library/LaunchAgents/com.matt-riley.waffle.plist`:
