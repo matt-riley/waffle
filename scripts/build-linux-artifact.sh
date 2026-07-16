@@ -37,10 +37,11 @@ version=$(
 (
   cd -- "$repo_root"
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags "-X main.version=$version" \
+    go build -trimpath -ldflags "-X main.version=$version" \
     -o "$output_dir/waffle" ./cmd/waffle
 )
 
+chmod 0755 "$output_dir/waffle"
 (cd -- "$output_dir" && sha256sum waffle > waffle.sha256)
 
 jq -n \
@@ -61,6 +62,7 @@ jq -n \
     goarch: $goarch
   }' > "$output_dir/build-metadata.json"
 
+chmod 0644 "$output_dir/waffle.sha256" "$output_dir/build-metadata.json"
 TZ=UTC touch -t 197001010000 "$output_dir/waffle" "$output_dir/waffle.sha256" "$output_dir/build-metadata.json"
 
 staging_tar="$output_dir/waffle-linux-amd64.tar"
