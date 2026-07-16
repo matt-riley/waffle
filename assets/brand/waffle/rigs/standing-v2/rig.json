@@ -828,6 +828,28 @@
       "sha256": "3bd015793b332cb5d92d92a58fb0c99b03d00beb056d04dd324cc204eeea3f2e"
     },
     {
+      "id": "paw-wave-chest-cover-left",
+      "file": "layers/paw-wave-chest-cover-left.png",
+      "role": "repair",
+      "parent": "torso",
+      "drawOrder": 119,
+      "visibleAtNeutral": false,
+      "blendMode": "normal",
+      "pivot": {
+        "x": 0.357,
+        "y": 0.557
+      },
+      "neutral": {
+        "x": 0,
+        "y": 0,
+        "rotationDegrees": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "limits": {},
+      "sha256": "3d6777aef0a0950a4a1cfeaaeb5f661eac4f583cbac0c5c85e071c105a130b5a"
+    },
+    {
       "id": "front-upper-right",
       "file": "layers/front-upper-right.png",
       "role": "variant-anchor",
@@ -1004,7 +1026,7 @@
         "scaleY": 1
       },
       "limits": {},
-      "sha256": "3ab00468e8b793635e67a820261d12e2ce90fc2290d218d5360302a71e119958"
+      "sha256": "b6f52faec0a25c201c56b0fd7d0219bfec2ecc1c27bd0a3c7f2c4e58b6dfa0d9"
     },
     {
       "id": "head-base",
@@ -1410,6 +1432,69 @@
               "visible": false
             }
           }
+        },
+        {
+          "id": "paw-lifted",
+          "file": "variants/front-chain-left/paw-lifted.png",
+          "neutral": false,
+          "sha256": "91029d9baad01ca5069fea8fc32185fc8312ac0ab77092d9b0a71002ecd8181c",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": {
+              "visible": false
+            },
+            "front-paw-left": {
+              "visible": false
+            },
+            "front-elbow-repair-left": {
+              "visible": false
+            },
+            "front-wrist-repair-left": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "paw-wave",
+          "file": "variants/front-chain-left/paw-wave.png",
+          "neutral": false,
+          "sha256": "b5fe2fc09ae020617bd87ec16ad127c373cbf0f8c68247b51aa471f2746d6c49",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": {
+              "visible": false
+            },
+            "front-paw-left": {
+              "visible": false
+            },
+            "front-elbow-repair-left": {
+              "visible": false
+            },
+            "front-wrist-repair-left": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "paw-landing",
+          "file": "variants/front-chain-left/paw-landing.png",
+          "neutral": false,
+          "sha256": "fb85d6a9ad19dae193ddf078bdfb776da63e0deaa72a93596507e1d3d66a3b5c",
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": {
+              "visible": false
+            },
+            "front-paw-left": {
+              "visible": false
+            },
+            "front-elbow-repair-left": {
+              "visible": false
+            },
+            "front-wrist-repair-left": {
+              "visible": false
+            }
+          }
         }
       ]
     },
@@ -1582,13 +1667,13 @@
           "id": "lifted",
           "file": "variants/front-paw-left/lifted.png",
           "neutral": false,
-          "sha256": "1ba3593c13411de56c5bd55374070b94f836b8311e406b1ce6abf7c1ded6578c"
+          "sha256": "d668a60819df8f3dbadf8de5f38b10e9567254701c3cedb1a4ac03ac409196bc"
         },
         {
           "id": "wave",
           "file": "variants/front-paw-left/wave.png",
           "neutral": false,
-          "sha256": "dba0973936a0dda3d172561004f41f644e4f4b63dacbb398b7eb5d3f43a0a830"
+          "sha256": "fca9db37ab4affb09be7c369ced8e78a43c2430cc02a8fe94ef9dd3255cb4583"
         }
       ]
     },
@@ -1605,7 +1690,7 @@
           "id": "lifted",
           "file": "variants/front-paw-right/lifted.png",
           "neutral": false,
-          "sha256": "476c4fd5168c22a97a8d09ef7e5a210d443df3790bfcc90298dec17e53fd27ca"
+          "sha256": "e8e5a3468d47d5c952131a0c01fca0ff6133a1de19a575756b5d90c33067330f"
         }
       ]
     },
@@ -1656,7 +1741,7 @@
           "id": "turn-left",
           "file": "variants/head-base/turn-left.png",
           "neutral": false,
-          "sha256": "134be924de814fbe133378c986f52d6709f16ab1b3d41c3db6812f9f9a52abc6",
+          "sha256": "51816feee692808bc232ba33110ad14a3102ccba1db6c88efd96d7b55dbfa1aa",
           "layerOverrides": {
             "ear-left": {
               "visible": false
@@ -1709,7 +1794,115 @@
           "id": "turn-right",
           "file": "variants/head-base/turn-right.png",
           "neutral": false,
-          "sha256": "7b7ce4a261990f80163af4a08882f77ec21f486f99bf110368963ab197336454",
+          "sha256": "8f01bdd06c49b422881275208436e237ea25044122604240a0fd9b454e9861bf",
+          "layerOverrides": {
+            "ear-left": {
+              "visible": false
+            },
+            "ear-right": {
+              "visible": false
+            },
+            "muzzle": {
+              "visible": false
+            },
+            "jaw-closed": {
+              "visible": false
+            },
+            "iris-left": {
+              "visible": false
+            },
+            "iris-right": {
+              "visible": false
+            },
+            "pupil-left": {
+              "visible": false
+            },
+            "pupil-right": {
+              "visible": false
+            },
+            "highlight-left": {
+              "visible": false
+            },
+            "highlight-right": {
+              "visible": false
+            },
+            "upper-lid-left": {
+              "visible": false
+            },
+            "lower-lid-left": {
+              "visible": false
+            },
+            "upper-lid-right": {
+              "visible": false
+            },
+            "lower-lid-right": {
+              "visible": false
+            },
+            "whiskers": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "blink-left",
+          "file": "variants/head-base/blink-left.png",
+          "neutral": false,
+          "sha256": "b30f372bc1a0b452f6a279adf4d05d204c3f54708a3b7dafc19b20d7bca45ce3",
+          "clipOnly": true,
+          "layerOverrides": {
+            "ear-left": {
+              "visible": false
+            },
+            "ear-right": {
+              "visible": false
+            },
+            "muzzle": {
+              "visible": false
+            },
+            "jaw-closed": {
+              "visible": false
+            },
+            "iris-left": {
+              "visible": false
+            },
+            "iris-right": {
+              "visible": false
+            },
+            "pupil-left": {
+              "visible": false
+            },
+            "pupil-right": {
+              "visible": false
+            },
+            "highlight-left": {
+              "visible": false
+            },
+            "highlight-right": {
+              "visible": false
+            },
+            "upper-lid-left": {
+              "visible": false
+            },
+            "lower-lid-left": {
+              "visible": false
+            },
+            "upper-lid-right": {
+              "visible": false
+            },
+            "lower-lid-right": {
+              "visible": false
+            },
+            "whiskers": {
+              "visible": false
+            }
+          }
+        },
+        {
+          "id": "blink-right",
+          "file": "variants/head-base/blink-right.png",
+          "neutral": false,
+          "sha256": "b74fd84f8294f3f05232a65d016a05077a34a091e6fe348239fa66eb61dda349",
+          "clipOnly": true,
           "layerOverrides": {
             "ear-left": {
               "visible": false

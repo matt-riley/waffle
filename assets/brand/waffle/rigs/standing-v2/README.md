@@ -16,7 +16,7 @@ Variant sets are mutually exclusive and registered to their anchor layer. Each s
 
 | Set | Members | Neutral |
 | --- | --- | --- |
-| `front-chain-left` | `neutral`, `landing`, `low-lift` | `neutral` |
+| `front-chain-left` | `neutral`, `low-lift`, `landing`, `paw-lifted`, `paw-wave`, `paw-landing` | `neutral` |
 | `front-chain-right` | `neutral`, `landing`, `low-lift` | `neutral` |
 | `rear-chain-left` | `neutral`, `landing`, `low-lift` | `neutral` |
 | `rear-chain-right` | `neutral`, `landing`, `low-lift` | `neutral` |
@@ -24,16 +24,20 @@ Variant sets are mutually exclusive and registered to their anchor layer. Each s
 | `front-paw-right` | `planted`, `lifted` | `planted` |
 | `rear-paw-left` | `planted`, `lifted` | `planted` |
 | `rear-paw-right` | `planted`, `lifted` | `planted` |
-| `head-base` | `neutral`, `turn-left`, `turn-right` | `neutral` |
+| `head-base` | `neutral`, `turn-left`, `turn-right`, `blink-left` (clip-only), `blink-right` (clip-only) | `neutral` |
 | `jaw` | `closed`, `open` | `closed` |
 
-The four chain sets are the walk-in-place swing states. Each opaque `low-lift` painting replaces the complete declared leg subtree and follows the source-locked torso through its private parent override. Each discrete `landing` painting bakes the registered interchange offset into the approved low-lift upper, applies a baked premultiplied blend through the overlap band, and restores exact neutral distal pixels below the concealed seam; it has no parent override or member transform. A matching hidden, feathered `walk-socket-*` underlay fills the vacated root from the approved standing master. The two front joints also use compact feathered `walk-cover-*` layers; the rear members instead blend directly into shaped underlays so no source rectangle can switch above the legs. Paw, head-turn, and jaw extremes use registered paintings, not aggressive raster rotation. Transition a painting only at a registered interchange pose while motion conceals the change. Turned head paintings replace the declared descendant face layers as a coherent state.
+The four chain sets are the walk-in-place swing states. Each opaque `low-lift` painting replaces the complete declared leg subtree and follows the source-locked torso through its private parent override. Each discrete `landing` painting bakes the registered interchange offset into the approved low-lift upper, applies a baked premultiplied blend through the overlap band, and restores exact neutral distal pixels below the concealed seam; it has no parent override or member transform. A matching hidden, feathered `walk-socket-*` underlay fills the vacated root from the approved standing master. The two front joints also use compact feathered `walk-cover-*` layers; the rear members instead blend directly into shaped underlays so no source rectangle can switch above the legs.
+
+The paw-wave acceptance clip selects `front-chain-left/paw-lifted`, `paw-wave`, and `paw-landing` as complete opaque screen-left foreleg paintings. They suppress the descendant articulated lower leg, paw, elbow repair, and wrist repair together, so lifting the paw cannot uncover the gaps and edge fragments produced by rotating a segmented raster limb. `paw-landing` is sampled directly from the approved standing source and provides a source-exact return to the planted pose. The older `front-paw-left` local variants remain available for conservative fallback assembly, but the accepted paw-wave clip does not use them.
+
+Paw, head-turn, blink, and jaw extremes use registered paintings, not aggressive raster rotation. Transition a painting only at a registered interchange pose while motion conceals the change. Turned and blinking head paintings replace all declared descendant face layers as one coherent state. The two painted blink heads are clip-only: they may be selected explicitly by a clip, but are excluded from the numeric `headTurn` thresholds.
 
 ## Controls and clips
 
 Normalized translation controls use canvas fractions; rotation controls use degrees; `breath`, `weightShift`, turn/state, blink, and jaw controls are unitless. The exact ranges and bindings in `rig.json` are authoritative and must not be widened. Shoulder/upper-leg, elbow/lower-leg, wrist/paw, hip/thigh, hock, and rear-paw rotations additionally obey their per-layer limits. `headTurn` and `jawOpen` bind numeric values to registered variant members through ordered, upper-inclusive thresholds: the first member covers the control minimum through its `max`, and each later member covers values above the preceding threshold through its own `max`. Thresholds are strictly increasing and the last equals the control maximum. Explicit `clip.variants` keys override a numeric-derived state when both target the same set.
 
-`blinkLeft` and `blinkRight` independently drive the opacity of their source-matched upper and lower lid overlays from 0 to 1. Opacity activation never translates or rotates the painted lids, so their full-canvas registration stays exact. Equal left/right values produce a synchronized blink.
+`blinkLeft` and `blinkRight` retain the original articulated upper/lower-lid opacity bindings as a legacy fallback for downstream experiments. Motion review showed that compositing those small lid fragments over the live eye produced visible rectangular edges, jagged eye detail, and progressive fidelity loss. The accepted `paw-wave` and `head-face-tail` clips therefore hold both controls at `0` and select the complete source-locked `head-base/blink-left` and `blink-right` paintings instead. Each painted blink head owns the whole registered face for its held frame and hides the ear, muzzle, jaw, eye, lid, highlight, and whisker descendants, preventing partial-feature mixing. This is a deliberate fidelity-preserving deviation from the initial articulated-lid plan.
 
 Motion clips use schema version 1 and declare `id`, `fps`, `frameCount`, `loop`, `requiredClosure`, variant keyframes, and numeric control keyframes. Numeric keys interpolate linearly unless held; variant keys always hold. Every variant set must have a deterministic frame-0 state: an unbound set requires an explicit frame-0 `clip.variants` key, while a numeric-bound set may derive it from its control. A looping clip must evaluate to exactly equal controls, variants, private layer opacity, member transforms, and world matrices at its closure frames.
 
@@ -71,3 +75,5 @@ Artwork must pass still review at full resolution, 320 px, and 160 px on warm-wh
 ## Fusion handoff
 
 Fusion mirrors `rig.json` with Loaders, Transforms, and Merges; it is downstream, never authoritative. Convert every top-left manifest pivot with `fusionY = 1 - manifestY`. Implement each clip-private `layerOpacity` track on the corresponding hidden repair or overlay Merge's Blend channel, keeping that channel separate from the published controller group; for the walk, the four `walk-socket-*` Loaders remain torso-parented and their Blends follow the exact Boolean 0/1 clip keys. Read back each MCP node, path, pivot, connection, control, variant visibility, private opacity key, and connection write before saving a verified subtree. Do not render or export through the Resolve MCP. The owner handles delivery exports.
+
+The committed [`fusion/README.md`](fusion/README.md) describes the Resolve assembly workflow and boundaries. [`fusion/assembly-record.json`](fusion/assembly-record.json) records the saved MCP assembly/readback capability proof. That proof verifies node creation, connections, spline keyframes, exact readback, and project saving; it is not the full 55-layer Waffle composition and it was not exported.

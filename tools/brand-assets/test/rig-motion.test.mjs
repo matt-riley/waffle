@@ -438,6 +438,28 @@ test("production headTurn and jawOpen controls select their registered painted s
   assert.equal(evaluateClip(manifest, clip, 1).variants.get("jaw"), "open");
 });
 
+test("production intermediate headTurn values remain directional turns rather than clip-only expressions", async () => {
+  const manifest = JSON.parse(await readFile(path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2/rig.json",
+  ), "utf8"));
+  const clip = {
+    schemaVersion: 1,
+    id: "intermediate-head-turn-probe",
+    fps: 24,
+    frameCount: 2,
+    loop: false,
+    requiredClosure: { firstFrame: 0, lastFrame: 1 },
+    variants: {},
+    controls: {
+      headTurn: [{ frame: 0, value: -0.6 }, { frame: 1, value: 0.6 }],
+    },
+  };
+
+  assert.equal(evaluateClip(manifest, clip, 0).variants.get("head-base"), "turn-left");
+  assert.equal(evaluateClip(manifest, clip, 1).variants.get("head-base"), "turn-right");
+});
+
 test("evaluateClip rejects out-of-range values, unknown controls, and missing frames", async (t) => {
   const { clip, manifest } = await rigFixture(t);
   clip.controls.bodyBob[1].value = -0.02;

@@ -270,7 +270,7 @@ test("base rebuild preserves authoritative art configs and package documentation
   assert.equal(await readFile(motionFile, "utf8"), authoredMotion);
 });
 
-test("injected rebuild failure preserves the complete 54-layer production package and final controls", async (t) => {
+test("injected rebuild failure preserves the complete 55-layer production package and final controls", async (t) => {
   const root = await workspace(t);
   const productionWaffle = path.resolve(import.meta.dirname, "../../../assets/brand/waffle");
   const waffle = path.join(root, "assets", "brand", "waffle");
@@ -299,7 +299,7 @@ test("injected rebuild failure preserves the complete 54-layer production packag
   }), /injected production rebuild failure/);
 
   const restored = JSON.parse(await readFile(path.join(outputDirectory, "rig.json"), "utf8"));
-  assert.equal(restored.layers.length, 54);
+  assert.equal(restored.layers.length, 55);
   assert.deepEqual(restored.controls, original.controls);
   for (const name of ["repairs.json", "variants.json", "GENERATION.md", "README.md"]) {
     assert.deepEqual(

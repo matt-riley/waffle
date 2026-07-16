@@ -95,20 +95,20 @@
       "polygons": [
         [
           [
-            475,
-            385
+            520,
+            370
           ],
           [
-            695,
-            385
+            730,
+            370
           ],
           [
-            695,
-            470
+            750,
+            500
           ],
           [
-            475,
-            470
+            420,
+            500
           ]
         ]
       ],
@@ -122,34 +122,35 @@
         },
         "expectedId": "neck-repair",
         "crop": {
-          "x": 475,
-          "y": 385,
-          "width": 220,
-          "height": 85
+          "x": 400,
+          "y": 360,
+          "width": 360,
+          "height": 150
         },
+        "edgeFeatherPixels": 12,
         "polygons": [
           [
             [
-              475,
-              385
+              520,
+              370
             ],
             [
-              695,
-              385
+              730,
+              370
             ],
             [
-              695,
-              470
+              750,
+              500
             ],
             [
-              475,
-              470
+              420,
+              500
             ]
           ]
         ],
         "sampleOffset": {
           "x": 0,
-          "y": -12
+          "y": 0
         }
       }
     },
@@ -1176,6 +1177,31 @@
         "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
         "canvas": { "width": 1536, "height": 1024 },
         "expectedId": "walk-socket-front-left",
+        "crop": { "x": 450, "y": 510, "width": 340, "height": 140 },
+        "edgeFeatherPixels": 12,
+        "removeAlphaIslandsBelowPixels": 8,
+        "outputBounds": {
+          "minNonzeroPixels": 100, "maxHeight": 140, "maxY": 649,
+          "within": { "x": 450, "y": 510, "width": 340, "height": 140 },
+          "forbidden": [{ "x": 400, "y": 650, "width": 400, "height": 350 }]
+        }
+      }
+    },
+    {
+      "id": "paw-wave-chest-cover-left",
+      "cover": "front-upper-left",
+      "parent": "torso",
+      "drawOrder": 119,
+      "pivot": { "x": 0.357, "y": 0.557 },
+      "visibleAtNeutral": false,
+      "allowOutsideNeutralCover": true,
+      "polygons": [[[450, 510], [790, 510], [790, 650], [450, 650]]],
+      "input": {
+        "kind": "source-sample",
+        "file": "../../poses/standing.png",
+        "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+        "canvas": { "width": 1536, "height": 1024 },
+        "expectedId": "paw-wave-chest-cover-left",
         "crop": { "x": 450, "y": 510, "width": 340, "height": 140 },
         "edgeFeatherPixels": 12,
         "removeAlphaIslandsBelowPixels": 8,

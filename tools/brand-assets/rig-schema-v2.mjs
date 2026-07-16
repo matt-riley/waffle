@@ -117,6 +117,12 @@ function validateVariants(manifest, byId) {
       memberIds.add(member.id);
       if (typeof member.neutral !== "boolean") throw new Error(`variant ${setId}/${member.id} neutral must be boolean`);
       if (member.neutral) neutralCount += 1;
+      if (member.clipOnly !== undefined && member.clipOnly !== true) {
+        throw new Error(`variant ${setId}/${member.id} clipOnly must be true when declared`);
+      }
+      if (member.neutral && member.clipOnly) {
+        throw new Error(`variant ${setId}/${member.id} neutral member cannot be clip-only`);
+      }
       declaredFile(member, `variant ${setId}/${member.id}`);
       if (member.parentOverride !== undefined) {
         if (member.neutral) throw new Error(`variant ${setId}/${member.id} neutral member cannot declare a parentOverride`);
@@ -166,7 +172,7 @@ function validateVariantThresholds(manifest, name, control, binding) {
   if (!Array.isArray(thresholds) || thresholds.length === 0) {
     throw new Error(`control ${name} variant ${binding.variant} thresholds must be a non-empty array`);
   }
-  const knownMembers = new Set(variantSet.members.map((member) => member.id));
+  const knownMembers = new Map(variantSet.members.map((member) => [member.id, member]));
   const mappedMembers = new Set();
   let previous = control.min;
   for (const [index, threshold] of thresholds.entries()) {
@@ -182,6 +188,9 @@ function validateVariantThresholds(manifest, name, control, binding) {
     if (!knownMembers.has(threshold.member)) {
       throw new Error(`control ${name} variant ${binding.variant} threshold references unknown member ${threshold.member}`);
     }
+    if (knownMembers.get(threshold.member).clipOnly) {
+      throw new Error(`control ${name} variant ${binding.variant} threshold references clip-only member ${threshold.member}`);
+    }
     mappedMembers.add(threshold.member);
     previous = threshold.max;
   }
@@ -193,8 +202,10 @@ function validateVariantThresholds(manifest, name, control, binding) {
   if (zeroState !== neutral) {
     throw new Error(`control ${name} variant ${binding.variant} must map the neutral member ${neutral} at value 0`);
   }
-  for (const member of knownMembers) {
-    if (!mappedMembers.has(member)) throw new Error(`control ${name} variant ${binding.variant} must map member ${member}`);
+  for (const [member, specification] of knownMembers) {
+    if (!specification.clipOnly && !mappedMembers.has(member)) {
+      throw new Error(`control ${name} variant ${binding.variant} must map member ${member}`);
+    }
   }
 }
 

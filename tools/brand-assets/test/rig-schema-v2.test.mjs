@@ -41,6 +41,7 @@ const PRODUCTION_HIERARCHY = {
   "front-lower-left": "front-upper-left",
   "front-paw-left": "front-lower-left",
   "walk-socket-front-left": "torso",
+  "paw-wave-chest-cover-left": "torso",
   "walk-cover-front-left": "torso",
   "front-shoulder-repair-right": "waffle-root",
   "front-elbow-repair-right": "front-upper-right",
@@ -70,7 +71,7 @@ const PRODUCTION_HIERARCHY = {
 };
 
 const PRODUCTION_VARIANTS = {
-  "front-chain-left": { layer: "front-upper-left", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
+  "front-chain-left": { layer: "front-upper-left", members: ["neutral", "low-lift", "landing", "paw-lifted", "paw-wave", "paw-landing"], neutral: "neutral" },
   "front-chain-right": { layer: "front-upper-right", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
   "rear-chain-left": { layer: "rear-thigh-left", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
   "rear-chain-right": { layer: "rear-thigh-right", members: ["neutral", "low-lift", "landing"], neutral: "neutral" },
@@ -78,7 +79,7 @@ const PRODUCTION_VARIANTS = {
   "front-paw-right": { layer: "front-paw-right", members: ["planted", "lifted"], neutral: "planted" },
   "rear-paw-left": { layer: "rear-paw-left", members: ["planted", "lifted"], neutral: "planted" },
   "rear-paw-right": { layer: "rear-paw-right", members: ["planted", "lifted"], neutral: "planted" },
-  "head-base": { layer: "head-base", members: ["neutral", "turn-left", "turn-right"], neutral: "neutral" },
+  "head-base": { layer: "head-base", members: ["neutral", "turn-left", "turn-right", "blink-left", "blink-right"], neutral: "neutral" },
   jaw: { layer: "jaw-closed", members: ["closed", "open"], neutral: "closed" },
 };
 
@@ -411,6 +412,38 @@ test("requires deterministic complete numeric variant thresholds", () => {
     mutate(invalid);
     assert.throws(() => validateRigV2Shape(invalid), message, label);
   }
+});
+
+test("numeric variant controls exclude explicitly clip-only members", () => {
+  const valid = validManifest();
+  valid.variants["front-paw-left"].members[2].clipOnly = true;
+  valid.controls.pawState = {
+    min: -1,
+    max: 1,
+    bindings: [{
+      variant: "front-paw-left",
+      thresholds: [
+        { max: -0.5, member: "lifted" },
+        { max: 0.5, member: "planted" },
+        { max: 1, member: "lifted" },
+      ],
+    }],
+  };
+  assert.doesNotThrow(() => validateRigV2Shape(valid));
+
+  const mapped = structuredClone(valid);
+  mapped.controls.pawState.bindings[0].thresholds[2].member = "wave";
+  assert.throws(
+    () => validateRigV2Shape(mapped),
+    /threshold references clip-only member wave/,
+  );
+
+  const neutral = validManifest();
+  neutral.variants["front-paw-left"].members[0].clipOnly = true;
+  assert.throws(
+    () => validateRigV2Shape(neutral),
+    /neutral member cannot be clip-only/,
+  );
 });
 
 test("requires every variant anchor to have exactly one neutral variant", () => {

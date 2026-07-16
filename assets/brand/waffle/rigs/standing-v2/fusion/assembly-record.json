@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "recordType": "fusion-assembly-readback-capability-proof",
+  "recordedDate": "2026-07-16",
+  "authorities": {
+    "rig": "../rig.json",
+    "motions": "../motions/"
+  },
+  "project": {
+    "name": "Untitled Project 2026-07-16_190245",
+    "id": "8d44e033-2534-4730-ba74-f12c05ec0a02",
+    "saved": true
+  },
+  "timeline": {
+    "name": "_mcp_waffle_smoke_test",
+    "id": "1ee153ec-a9cb-433b-ad66-af23751db944",
+    "width": 1920,
+    "height": 1080,
+    "frameCount": 120,
+    "frameRange": {
+      "start": 0,
+      "end": 119
+    }
+  },
+  "fusionComposition": {
+    "itemName": "Fusion Composition",
+    "itemId": "a1a7f172-31e6-442b-bccd-d3dd91346744",
+    "exported": false,
+    "tools": [
+      {
+        "id": "WaffleRigProof_BG",
+        "kind": "Background"
+      },
+      {
+        "id": "WaffleRigProof_Transform",
+        "kind": "Transform"
+      },
+      {
+        "id": "MediaOut1",
+        "kind": "MediaOut"
+      }
+    ],
+    "connections": [
+      {
+        "sourceTool": "WaffleRigProof_BG",
+        "targetTool": "WaffleRigProof_Transform",
+        "targetInput": "Input"
+      },
+      {
+        "sourceTool": "WaffleRigProof_Transform",
+        "targetTool": "MediaOut1",
+        "targetInput": "Input"
+      }
+    ],
+    "animation": {
+      "tool": "WaffleRigProof_Transform",
+      "input": "Angle",
+      "spline": "WaffleRigProof_TransformAngle",
+      "keyframes": [
+        {
+          "frame": 0,
+          "value": 0
+        },
+        {
+          "frame": 30,
+          "value": 8
+        },
+        {
+          "frame": 60,
+          "value": -6
+        },
+        {
+          "frame": 119,
+          "value": 0
+        }
+      ],
+      "readback": "exact"
+    }
+  },
+  "verifiedCapabilities": [
+    "create isolated timeline",
+    "insert Fusion Composition",
+    "create named Fusion tools",
+    "connect tools",
+    "create and key named spline",
+    "read tools, connections, and keyframes back exactly",
+    "save Resolve project"
+  ],
+  "limitations": [
+    "This is not the full 55-layer Waffle composition.",
+    "This is not an animation-quality acceptance proof.",
+    "No render or export was performed."
+  ]
+}

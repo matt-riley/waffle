@@ -537,6 +537,27 @@ test("builder extracts registered variants, preserves the neutral anchor exactly
   assert.deepEqual(await validateRig(inputs.manifestPath), { layerCount: 3, mismatchPixels: 0 });
 });
 
+test("builder preserves clip-only variant metadata in the generated rig", async (t) => {
+  const inputs = await fixture(t);
+  const turnLeft = inputs.variants.sets[0].members[1];
+  inputs.variants.sets[0].members.push({
+    ...structuredClone(turnLeft),
+    id: "blink-left",
+    clipOnly: true,
+    input: {
+      ...structuredClone(turnLeft.input),
+      expectedVariantId: "head-base/blink-left",
+    },
+  });
+  await writeFile(inputs.variantsFile, `${JSON.stringify(inputs.variants, null, 2)}\n`);
+
+  await buildRigV2Art(inputs);
+
+  const manifest = JSON.parse(await readFile(inputs.manifestPath, "utf8"));
+  const blink = manifest.variants["head-base"].members.find(({ id }) => id === "blink-left");
+  assert.equal(blink.clipOnly, true);
+});
+
 test("builder can preserve source-owned anchor pixels outside a bounded variant edit", async (t) => {
   const inputs = await fixture(t);
   inputs.variants.sets[0].members[1].polygons = [[[700, 500], [701, 500], [701, 501], [700, 501]]];
@@ -638,11 +659,12 @@ test("production art package has the complete registered inventory and no residu
     "tail-base-mid-repair", "tail-mid-tip-repair",
     "walk-socket-front-left", "walk-socket-front-right",
     "walk-socket-rear-left", "walk-socket-rear-right",
+    "paw-wave-chest-cover-left",
     "walk-cover-front-left", "walk-cover-front-right",
   ].toSorted();
   const expectedOverlays = ["upper-lid-left", "lower-lid-left", "upper-lid-right", "lower-lid-right"].toSorted();
   const expectedMembers = {
-    "front-chain-left": ["neutral", "low-lift", "landing"],
+    "front-chain-left": ["neutral", "low-lift", "landing", "paw-lifted", "paw-wave", "paw-landing"],
     "front-chain-right": ["neutral", "low-lift", "landing"],
     "rear-chain-left": ["neutral", "low-lift", "landing"],
     "rear-chain-right": ["neutral", "low-lift", "landing"],
@@ -650,7 +672,7 @@ test("production art package has the complete registered inventory and no residu
     "front-paw-right": ["planted", "lifted"],
     "rear-paw-left": ["planted", "lifted"],
     "rear-paw-right": ["planted", "lifted"],
-    "head-base": ["neutral", "turn-left", "turn-right"],
+    "head-base": ["neutral", "turn-left", "turn-right", "blink-left", "blink-right"],
     jaw: ["closed", "open"],
   };
   const replacedHeadChildren = [
@@ -709,7 +731,7 @@ test("production art package has the complete registered inventory and no residu
         assert.deepEqual(Object.keys(member.layerOverrides).toSorted(), replacedChainChildren[specification.id].toSorted());
         assert.ok(Object.values(member.layerOverrides).every((override) => override.visible === false));
         const image = await readRgba(path.join(productionDirectory, member.file));
-        const sourceExempt = member.id === "landing" ? sourceImage : undefined;
+        const sourceExempt = member.id === "landing" || member.id === "paw-landing" ? sourceImage : undefined;
         assert.equal(residualMagentaPixels(image, sourceExempt), 0, `${specification.id}/${member.id} residual chroma`);
         assert.equal(complementaryGreenPixels(image, sourceExempt), 0, `${specification.id}/${member.id} complementary chroma`);
         const islands = alphaIslandSizes(image);
@@ -730,10 +752,102 @@ test("production art package has the complete registered inventory and no residu
     );
     for (const member of actual.members.filter((entry) => !entry.neutral)) {
       const image = await readRgba(path.join(productionDirectory, member.file));
-      const exempt = member.id === "landing" ? sourceImage : anchorImage;
+      const exempt = member.id === "landing" || member.id === "paw-landing" ? sourceImage : anchorImage;
       assert.equal(residualMagentaPixels(image, exempt), 0, `residual chroma in ${specification.id}/${member.id}`);
       assert.equal(complementaryGreenPixels(image, exempt), 0, `complementary chroma in ${specification.id}/${member.id}`);
     }
+  }
+});
+
+test("production paw edit plates declare alpha-island cleanup only where detached source artifacts exist", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const variants = JSON.parse(await readFile(path.join(productionDirectory, "variants.json"), "utf8"));
+  const expectedCleanup = new Set([
+    "front-paw-left/lifted",
+    "front-paw-left/wave",
+    "front-paw-right/lifted",
+  ]);
+
+  for (const set of variants.sets.filter(({ id }) => id === "front-paw-left" || id === "front-paw-right")) {
+    for (const member of set.members) {
+      const id = `${set.id}/${member.id}`;
+      assert.equal(
+        member.input.removeAlphaIslandsBelowPixels,
+        expectedCleanup.has(id) ? 2_000 : undefined,
+        `${id} cleanup threshold`,
+      );
+    }
+  }
+});
+
+test("production paw cleanup removes detached plate artifacts without removing the meaningful paw", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const manifest = JSON.parse(await readFile(path.join(productionDirectory, "rig.json"), "utf8"));
+
+  for (const [setId, memberId] of [
+    ["front-paw-left", "lifted"],
+    ["front-paw-left", "wave"],
+    ["front-paw-right", "lifted"],
+  ]) {
+    const member = manifest.variants[setId].members.find(({ id }) => id === memberId);
+    const image = await readRgba(path.join(productionDirectory, member.file));
+    const islands = alphaIslandSizes(image, 0);
+    assert.equal(islands.length, 1, `${setId}/${memberId} must contain only the meaningful paw island`);
+    assert.ok(islands[0] > 10_000, `${setId}/${memberId} meaningful paw was removed or truncated`);
+  }
+});
+
+test("production screen-right head turn keeps the complete outer ear inside its extraction polygon", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const manifest = JSON.parse(await readFile(path.join(productionDirectory, "rig.json"), "utf8"));
+  const member = manifest.variants["head-base"].members.find(({ id }) => id === "turn-right");
+  const image = await readRgba(path.join(productionDirectory, member.file));
+  let outerEarPixels = 0;
+  for (let y = 100; y <= 260; y += 1) {
+    for (let x = 805; x <= 850; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] > 8) outerEarPixels += 1;
+    }
+  }
+  assert.ok(outerEarPixels > 250, `screen-right ear is vertically clipped (${outerEarPixels} retained pixels)`);
+});
+
+test("production painted head states retain connected neck and upper-shoulder coverage", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const manifest = JSON.parse(await readFile(path.join(productionDirectory, "rig.json"), "utf8"));
+  for (const memberId of ["turn-left", "turn-right", "blink-left", "blink-right"]) {
+    const member = manifest.variants["head-base"].members.find(({ id }) => id === memberId);
+    const image = await readRgba(path.join(productionDirectory, member.file));
+    const alpha = image.data[(440 * image.width + 740) * 4 + 3];
+    assert.ok(alpha > 160, `${memberId} cuts off the connected shoulder underlay (${alpha} alpha)`);
+  }
+});
+
+test("production neck repair feathers its source-sample boundary instead of exposing a rectangle", async () => {
+  const productionDirectory = path.resolve(
+    import.meta.dirname,
+    "../../../assets/brand/waffle/rigs/standing-v2",
+  );
+  const image = await readRgba(path.join(productionDirectory, "layers/neck-repair.png"));
+  const alphaAt = (x, y) => image.data[(y * image.width + x) * 4 + 3];
+  assert.ok(alphaAt(585, 425) > 200, "neck repair must retain an opaque concealed centre");
+  assert.ok(alphaAt(500, 425) > 160, "neck repair must underlay the screen-left turn seam");
+  assert.ok(alphaAt(720, 425) > 160, "neck repair must underlay the screen-right turn seam");
+  assert.ok(alphaAt(480, 450) > 160, "neck repair must widen below the turned-head silhouette");
+  assert.ok(alphaAt(470, 390) < 64, "neck repair must not protrude beside the screen-right head turn");
+  for (const [x, y] of [[450, 440], [750, 440], [585, 370], [585, 499]]) {
+    assert.ok(alphaAt(x, y) < 64, `neck repair hard edge remains at ${x},${y}`);
   }
 });
 

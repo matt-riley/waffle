@@ -868,6 +868,7 @@ async function writeArtPackage({
         file: relative,
         neutral: member.neutral,
         sha256: await sha256(file),
+        ...(member.clipOnly === true ? { clipOnly: true } : {}),
         ...(member.parentOverride === undefined ? {} : { parentOverride: member.parentOverride }),
         ...(member.layerOverrides === undefined ? {} : { layerOverrides: member.layerOverrides }),
       });

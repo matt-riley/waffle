@@ -75,6 +75,72 @@
             "neutralDistalPolygons": [[[475, 640], [621, 640], [621, 945], [475, 945]]],
             "edgeFeatherPixels": 0
           }
+        },
+        {
+          "id": "paw-lifted", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": { "visible": false },
+            "front-paw-left": { "visible": false },
+            "front-elbow-repair-left": { "visible": false },
+            "front-wrist-repair-left": { "visible": false }
+          },
+          "polygons": [[[450, 520], [625, 520], [645, 650], [615, 715], [610, 915], [475, 915], [440, 835], [455, 675]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/front-paw-left-lifted-plate-v2-key.png",
+            "sha256": "e7ddf3afd78b7c54432261201151d257c279c0945e92edb7b259b316bdf39525",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-left/paw-lifted",
+            "crop": { "x": 410, "y": 510, "width": 245, "height": 415 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "removeAlphaIslandsBelowPixels": 32,
+            "edgeFeatherPixels": 0
+          }
+        },
+        {
+          "id": "paw-wave", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": { "visible": false },
+            "front-paw-left": { "visible": false },
+            "front-elbow-repair-left": { "visible": false },
+            "front-wrist-repair-left": { "visible": false }
+          },
+          "polygons": [[[450, 520], [625, 520], [645, 650], [615, 715], [610, 945], [445, 945], [425, 845], [455, 675]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/front-paw-left-wave-plate-v2-key.png",
+            "sha256": "858fad1b352f7b8475b78f1584c9ffa87c1225d0f52bbe8d821d5942234c322a",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "front-chain-left/paw-wave",
+            "crop": { "x": 410, "y": 510, "width": 245, "height": 445 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 20, "opaqueThreshold": 220 },
+            "removeAlphaIslandsBelowPixels": 32,
+            "edgeFeatherPixels": 0
+          }
+        },
+        {
+          "id": "paw-landing", "neutral": false,
+          "parentOverride": "torso",
+          "layerOverrides": {
+            "front-lower-left": { "visible": false },
+            "front-paw-left": { "visible": false },
+            "front-elbow-repair-left": { "visible": false },
+            "front-wrist-repair-left": { "visible": false }
+          },
+          "polygons": [[[450, 510], [635, 510], [635, 715], [610, 715], [610, 995], [450, 995], [450, 815], [470, 680]]],
+          "input": {
+            "kind": "source-sample",
+            "file": "../../poses/standing.png",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedId": "front-chain-left/paw-landing",
+            "crop": { "x": 440, "y": 500, "width": 205, "height": 505 },
+            "edgeFeatherPixels": 0
+          }
         }
       ]
     },
@@ -396,7 +462,8 @@
               ],
               "transparentThreshold": 20,
               "opaqueThreshold": 220
-            }
+            },
+            "removeAlphaIslandsBelowPixels": 2000
           }
         },
         {
@@ -446,7 +513,8 @@
               ],
               "transparentThreshold": 20,
               "opaqueThreshold": 220
-            }
+            },
+            "removeAlphaIslandsBelowPixels": 2000
           }
         }
       ]
@@ -547,7 +615,8 @@
               ],
               "transparentThreshold": 20,
               "opaqueThreshold": 220
-            }
+            },
+            "removeAlphaIslandsBelowPixels": 2000
           }
         }
       ]
@@ -846,11 +915,11 @@
                 400
               ],
               [
-                720,
-                415
+                850,
+                500
               ],
               [
-                680,
+                720,
                 550
               ],
               [
@@ -908,7 +977,7 @@
           }
         },
         {
-          "id": "turn-right",
+      "id": "turn-right",
           "neutral": false,
           "layerOverrides": {
             "ear-left": { "visible": false },
@@ -933,14 +1002,14 @@
                 410,
                 40
               ],
-              [
-                800,
-                40
-              ],
-              [
-                820,
-                300
-              ],
+          [
+            860,
+            40
+          ],
+          [
+            870,
+            300
+          ],
               [
                 870,
                 335
@@ -950,11 +1019,11 @@
                 400
               ],
               [
-                720,
-                415
+                850,
+                500
               ],
               [
-                680,
+                720,
                 550
               ],
               [
@@ -1008,6 +1077,74 @@
               "transparentThreshold": 120,
               "opaqueThreshold": 235
             },
+            "edgeFeatherPixels": 16
+          }
+        },
+        {
+          "id": "blink-left",
+          "neutral": false,
+          "clipOnly": true,
+          "layerOverrides": {
+            "ear-left": { "visible": false },
+            "ear-right": { "visible": false },
+            "muzzle": { "visible": false },
+            "jaw-closed": { "visible": false },
+            "iris-left": { "visible": false },
+            "iris-right": { "visible": false },
+            "pupil-left": { "visible": false },
+            "pupil-right": { "visible": false },
+            "highlight-left": { "visible": false },
+            "highlight-right": { "visible": false },
+            "upper-lid-left": { "visible": false },
+            "lower-lid-left": { "visible": false },
+            "upper-lid-right": { "visible": false },
+            "lower-lid-right": { "visible": false },
+            "whiskers": { "visible": false }
+          },
+          "polygons": [[[380, 40], [820, 40], [830, 300], [870, 335], [870, 420], [850, 500], [780, 560], [470, 560], [430, 500], [450, 415], [350, 410], [350, 335], [380, 300]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-left-plate-v1-key.png",
+            "sha256": "ee4ae8f44ed61a5cc1ae36d70eea5f4378ab7e7bfaa7ce955a5797566bdd41ed",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "head-base/blink-left",
+            "crop": { "x": 340, "y": 30, "width": 540, "height": 540 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 120, "opaqueThreshold": 235 },
+            "edgeFeatherPixels": 16
+          }
+        },
+        {
+          "id": "blink-right",
+          "neutral": false,
+          "clipOnly": true,
+          "layerOverrides": {
+            "ear-left": { "visible": false },
+            "ear-right": { "visible": false },
+            "muzzle": { "visible": false },
+            "jaw-closed": { "visible": false },
+            "iris-left": { "visible": false },
+            "iris-right": { "visible": false },
+            "pupil-left": { "visible": false },
+            "pupil-right": { "visible": false },
+            "highlight-left": { "visible": false },
+            "highlight-right": { "visible": false },
+            "upper-lid-left": { "visible": false },
+            "lower-lid-left": { "visible": false },
+            "upper-lid-right": { "visible": false },
+            "lower-lid-right": { "visible": false },
+            "whiskers": { "visible": false }
+          },
+          "polygons": [[[380, 40], [820, 40], [830, 300], [870, 335], [870, 420], [850, 500], [780, 560], [470, 560], [430, 500], [450, 415], [350, 410], [350, 335], [380, 300]]],
+          "input": {
+            "kind": "edit-plate",
+            "file": "../../../../../.superpowers/concepts/waffle/standing-rig-v2/upper-lid-right-plate-v1-key.png",
+            "sha256": "18df8d51fbd80327adaf28aa934bc173215cd4815e569b224683311b9089ba02",
+            "sourceSha256": "3397ec54c93cb12d612353166f20600689323f3bfb93a85cd8c950f4b44a902b",
+            "canvas": { "width": 1536, "height": 1024 },
+            "expectedVariantId": "head-base/blink-right",
+            "crop": { "x": 340, "y": 30, "width": 540, "height": 540 },
+            "chromaKey": { "rgb": [255, 0, 255], "transparentThreshold": 120, "opaqueThreshold": 235 },
             "edgeFeatherPixels": 16
           }
         }
