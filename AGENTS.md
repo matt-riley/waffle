@@ -2,33 +2,32 @@
 
 ## Project Structure & Module Organization
 
-Waffle is a Go 1.25 application. The executable and command handlers live in `cmd/waffle/`. Core behavior is split into focused packages under `internal/`, such as `agent`, `gateway`, `sandbox`, `store`, and provider implementations in `internal/llm/`. Keep tests beside the code they exercise as `*_test.go`. Database migrations are ordered SQL files in `internal/store/migrations/`. Evaluation scenarios live in `evals/`; architecture, deployment, and operational notes live in `docs/`. Use `config.example.toml` as the configuration reference.
+Waffle is a Go 1.25.12 application. The executable and command handlers live in `cmd/waffle/`; core behavior is organized into focused packages under `internal/`, including `agent`, `gateway`, `sandbox`, `store`, and providers in `internal/llm/`. Keep Go tests beside their implementation as `*_test.go`. Ordered SQL migrations belong in `internal/store/migrations/`, evaluation scenarios in `evals/`, and architecture or operations documentation in `docs/`. Brand source assets live in `assets/brand/`, with supporting scripts and tests in `tools/brand-assets/`. Use `config.example.toml` as the configuration reference.
 
 ## Build, Test, and Development Commands
 
-The repository uses mise to pin Go and provide standard tasks:
+Use mise to install the pinned toolchain and run standard tasks:
 
-- `mise install` installs the pinned Go toolchain.
-- `mise run build` builds the version-stamped binary at `bin/waffle`.
-- `mise run test` runs all packages with the race detector, then runs zero-network evaluations.
-- `mise run vet` runs `go vet ./...`.
-- `mise run fmt` verifies that all Go files are formatted.
-- `mise run lint` runs `golangci-lint` across the repository.
+- `mise install` installs Go and other pinned tools.
+- `mise run build` creates the version-stamped `bin/waffle` binary.
+- `mise run test` runs `go test -race ./...` and zero-network evaluations.
+- `mise run fmt`, `mise run vet`, and `mise run lint` check formatting, static analysis, and lint rules.
+- `mise run brand-check` tests and validates brand raster assets and manifests.
 
-For focused work, use `go test ./internal/agent -run TestName`. Sandbox-specific tests are documented in `docs/sandbox-queue.md`.
+For focused iteration, run `go test ./internal/agent -run TestName`. Run locally with `go run ./cmd/waffle chat` after configuring the required provider and secrets. Sandbox-specific checks are documented in `docs/sandbox-queue.md`.
 
 ## Coding Style & Naming Conventions
 
-Run `gofmt` on every Go change; use tabs as emitted by the formatter. Follow standard Go naming: short lowercase package names, exported identifiers in `PascalCase`, and unexported identifiers in `camelCase`. Keep package boundaries aligned with responsibilities and wrap errors with context using `%w`. Avoid `nolint` suppressions unless the reason is documented.
+Format every Go change with `gofmt`; accept its tab indentation. Use short lowercase package names, `PascalCase` for exported identifiers, and `camelCase` for unexported identifiers. Keep package boundaries aligned with responsibilities, wrap errors with context using `%w`, and document any necessary `nolint` suppression.
 
 ## Testing Guidelines
 
-Use Go's `testing` package, favoring table-driven tests for multiple cases. Name tests `TestBehavior` and place them beside the implementation. Add regression tests for bug fixes and cover failure paths, cancellation, persistence, and concurrency where relevant. Run the focused package test while iterating, then `mise run test`, `mise run vet`, and `mise run lint` before opening a pull request.
+Use Go's `testing` package and table-driven tests where cases share behavior. Name tests `TestBehavior` and add regression coverage for fixes, including relevant failure, cancellation, persistence, and concurrency paths. Before submitting, run `mise run test`, `mise run fmt`, `mise run vet`, and `mise run lint`. Live provider evaluations require `WAFFLE_EVAL_LIVE=1` and valid provider configuration.
 
 ## Commit & Pull Request Guidelines
 
-History follows Conventional Commit-style subjects such as `feat:`, `fix:`, `docs:`, and `build(deps):`; issue-scoped forms like `fix(#68): ...` are also used. Keep commits focused and write imperative, specific subjects. Pull requests should explain the behavior change, link relevant issues, list verification commands, and note configuration or migration effects. Include screenshots only when terminal or user-visible output changes.
+Use Conventional Commits with focused, imperative subjects, such as `feat: add workspace cleanup`, `fix: handle cancelled runs`, `docs: clarify deployment`, or `build(deps): bump sqlite`. Issue-scoped forms such as `fix(#68): ...` are also accepted. Pull requests should explain behavior changes, link issues, list verification commands, and call out configuration or migration effects. Include screenshots only for user-visible output changes.
 
 ## Security & Configuration
 
-Never commit API keys, identities, generated databases, or local `config.toml`. Preserve deny-by-default sandbox and network policies, and document any deliberate relaxation. Treat migrations and secret-store changes as high risk and include rollback or compatibility notes.
+Never commit API keys, identities, generated databases, or local `config.toml`. Preserve deny-by-default sandbox and network policies. Treat migrations, secret-store changes, and policy relaxations as high risk; document compatibility and rollback considerations.
