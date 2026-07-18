@@ -413,6 +413,16 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	cleanup func(),
 	err error,
 ) {
+	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg))
+}
+
+func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver) (
+	agents map[string]*agent.Agent,
+	cronAgent *agent.Agent,
+	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
+	cleanup func(),
+	err error,
+) {
 	agents = make(map[string]*agent.Agent)
 	profilesMain = make(map[string]*agent.Agent)
 	profilesGroup = make(map[string]*agent.Agent)
@@ -425,7 +435,7 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	}
 
 	build := func(group string) (*agent.Agent, error) {
-		a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, group)
+		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime)
 		cleanups = append(cleanups, closer)
 		if err != nil {
 			return nil, err
@@ -479,21 +489,21 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	}
 	sort.Strings(profileNames)
 	for _, name := range profileNames {
-		mainA, mainCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupMain, name)
+		mainA, mainCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupMain, name, runtime)
 		cleanups = append(cleanups, mainCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (main): %w", name, err)
 		}
 		profilesMain[name] = mainA
 
-		groupA, groupCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupGroup, name)
+		groupA, groupCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupGroup, name, runtime)
 		cleanups = append(cleanups, groupCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (group): %w", name, err)
 		}
 		profilesGroup[name] = groupA
 
-		cronA, cronCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name)
+		cronA, cronCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupCron, name, runtime)
 		cleanups = append(cleanups, cronCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)
