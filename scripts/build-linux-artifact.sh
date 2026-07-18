@@ -68,11 +68,10 @@ TZ=UTC touch -t 197001010000 "$output_dir/waffle" "$output_dir/waffle.sha256" "$
 staging_tar="$output_dir/waffle-linux-amd64.tar"
 trap 'rm -f -- "$staging_tar"' EXIT
 
-tar_args=(--uname root --gname root)
 if tar --version 2>/dev/null | grep -q 'GNU tar'; then
-  tar_args+=(--owner=0 --group=0)
+  tar_args=(--owner=0 --group=0)
 else
-  tar_args+=(--uid 0 --gid 0)
+  tar_args=(--uid 0 --gid 0 --uname root --gname root)
 fi
 
 tar "${tar_args[@]}" -C "$output_dir" -cf "$staging_tar" waffle waffle.sha256 build-metadata.json
