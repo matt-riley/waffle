@@ -13,8 +13,9 @@ design and what was intentionally left out.
 What's here, by capability:
 
 - **Agent loop & providers** — streaming loop over one canonical message
-  format; Anthropic and any OpenAI-compatible endpoint (OpenRouter, Ollama,
-  a running workweave/router) are config, not code.
+  format; named Anthropic and OpenAI-compatible connections (including
+  OpenRouter and Ollama) can coexist, and deterministic model aliases select
+  the connection and upstream model for each request.
 - **Terminal** — `waffle chat` (`-c` resumes the last session), with native
   tools (bash, file read/write/edit, fetch).
   Fetch blocks loopback, link-local, unspecified, and private IPv4/IPv6
@@ -35,8 +36,8 @@ What's here, by capability:
   turns. Reflection holds the per-conversation group lock and skips when
   busy. `waffle session ls` shows stored summaries. Long histories are
   summarized with an in-process prefix cache; summary blocks name turn
-  ranges for `expand_context`. Optional `[provider] utility_model` is
-  used for summarization/reflection.
+  ranges for `expand_context`. Optional `[agent] utility_model` selects a
+  model alias for summarization/reflection.
 - **Skills** — agentskills.io-compatible `SKILL.md` dirs, invoked with
   `/skill`; `distill_skill` writes new ones **inactive** until
   `waffle skills activate <name>`. `waffle learn` (or `skills audit`) mines
@@ -102,8 +103,10 @@ What's here, by capability:
   `[store] retain = "365d"` runs under `serve`; `"0"` (the default) retains
   forever. Deletion cannot remove provider logs, delivered messages, or old
   backups.
-- **Deployment** — systemd and launchd service examples, headless identity
-  setup, and the loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
+- **Deployment** — a managed deployment first reaches **Installed** without a
+  provider, then `sudo waffle provider add` validates an on-host connection
+  and can move it to **Ready**. The two-state flow, systemd and launchd service
+  examples, and loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
 - **Releases** — Release Please handles version PRs, `v` tags, and GitHub
   releases independently from the binary deployment flow described below.
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
@@ -166,7 +169,9 @@ that group; otherwise host launch fails closed.
 ```sh
 go build ./cmd/waffle
 ./waffle secret init
-printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key
+credential-command | ./waffle provider add \
+  --name anthropic --type anthropic \
+  --model claude=claude-model-id --default claude --api-key-stdin
 ./waffle chat
 ```
 
@@ -203,15 +208,36 @@ database or starting Docker while that owner is live. Use the gateway `/repo`
 command instead. A stale lock is reclaimed automatically once its heartbeat is
 old and its PID is no longer alive; do not delete a lock owned by a live PID.
 
-Point it elsewhere in `~/.waffle/config.toml` — any OpenAI-compatible
-endpoint (OpenRouter, Ollama, a running workweave/router) works:
+Named connections can target different providers at the same time. Model
+aliases select one connection and one upstream model deterministically:
 
 ```toml
-[provider]
-name = "openai"
-base_url = "http://localhost:11434/v1"
+[providers.anthropic]
+type = "anthropic"
+api_key = "secret://provider/anthropic/api-key"
+
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+
+[models.claude]
+provider = "anthropic"
+model = "claude-model-id"
+
+[models.local]
+provider = "local"
 model = "qwen3:32b"
+
+[agent]
+default_model = "claude"
+utility_model = "local"
 ```
+
+Use `waffle provider add` to write this configuration and its encrypted API
+key transactionally. See [Managed host installation](docs/deploy.md#managed-host-installation)
+for interactive and non-interactive examples. The legacy singular
+`[provider]` table remains readable and is migrated on the first provider
+management write.
 
 ### Named agent profiles
 
@@ -226,7 +252,7 @@ subagent working-set broadcast (#68).
 ```toml
 [agent.profile.reviewer]
 system = "You are a strict code reviewer."
-model = "default"   # or "utility" / an explicit model id
+model = "default"   # or "utility" / a configured model alias
 sandbox = "docker"
 [agent.profile.reviewer.tools]
 allow = ["read_file", "search", "recall"]

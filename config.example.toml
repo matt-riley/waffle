@@ -10,7 +10,17 @@
 #
 # Providers are optional. A newly deployed system may omit [providers],
 # [models], default_model, and utility_model until `waffle provider add`
-# validates the first connection on the host.
+# validates the first connection on the host. Waffle connects to these named
+# connections directly and uses embedded SQLite; no external router or
+# application database is required.
+#
+# Prefer the management command over hand-editing this section because it
+# probes the upstream and commits the encrypted credential and config
+# transactionally:
+#   sudo waffle provider add
+#   sudo waffle provider model activate ALIAS
+#   sudo waffle provider model remove ALIAS [--replace-with ALIAS]
+#   sudo waffle provider remove CONNECTION
 
 [providers.anthropic]
 type = "anthropic"
