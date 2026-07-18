@@ -379,6 +379,25 @@ func TestManagerRemoveModelReassignsDefaultAndUtility(t *testing.T) {
 	}
 }
 
+func TestDeploymentDocsDescribeModelAndProviderRemovalSemantics(t *testing.T) {
+	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "deploy.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(strings.Fields(string(docs)), " ")
+	for _, want := range []string{
+		"`--replace-with` reassigns default, utility, and agent-profile references",
+		"Without it, default and utility references are cleared",
+		"can move a Ready installation back to Installed",
+		"Agent-profile references remain blocking without a replacement",
+		"Provider removal remains blocked while any model alias references the connection",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("docs/deploy.md missing model-removal guidance %q", want)
+		}
+	}
+}
+
 func TestManagerRecoversDurableJournalAfterSimulatedProcessDeath(t *testing.T) {
 	for _, phase := range []string{"secret_committed", "config_committed", "activated", "healthy"} {
 		t.Run(phase, func(t *testing.T) {

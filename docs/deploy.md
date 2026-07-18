@@ -80,10 +80,16 @@ sudo waffle provider model remove old-alias --replace-with local
 sudo waffle provider remove unused-connection
 ```
 
-Removing a model or connection is rejected while it is still referenced unless
-the model removal supplies a valid replacement. Waffle does not automatically
-fail over, load balance, or choose a provider by cost: every alias maps to one
-named connection and one upstream model.
+For model removal, `--replace-with` reassigns default, utility, and
+agent-profile references before deleting the old alias. Without it, default
+and utility references are cleared when no agent profile blocks the operation;
+removing the active default can move a Ready installation back to Installed.
+Agent-profile references remain blocking without a replacement. Provider
+removal remains blocked while any model alias references the connection, so
+remove or reassign those aliases first.
+
+Waffle does not automatically fail over, load balance, or choose a provider by
+cost: every alias maps to one named connection and one upstream model.
 
 ## Running Waffle continuously
 
