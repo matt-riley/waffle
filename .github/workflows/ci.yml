@@ -83,7 +83,7 @@ jobs:
   request-infra-deploy:
     needs: build-linux-artifact
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@54e49f29778323fa0abd5954ecd26708661cb2f2
+    uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v2
     with:
       app-name: waffle
       infra-repo: infra

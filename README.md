@@ -166,13 +166,15 @@ that group; otherwise host launch fails closed.
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.
 
+On an infra-managed host, deployment puts the management command on `PATH`
+and initializes Waffle's internal identity. Enroll a provider directly on that
+host without exposing its credential through deployment inputs:
+
 ```sh
-go build ./cmd/waffle
-./waffle secret init
-credential-command | ./waffle provider add \
+credential-command | sudo waffle provider add \
   --name anthropic --type anthropic \
   --model claude=claude-model-id --default claude --api-key-stdin
-./waffle chat
+sudo waffle provider list
 ```
 
 ## Backup and disaster recovery
