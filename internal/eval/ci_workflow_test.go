@@ -30,8 +30,8 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 	for _, want := range []string{
 		"linux-artifact-repro:",
 		"bash scripts/check-linux-artifact-repro.sh",
-		"actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0",
-		"actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0",
+		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7",
+		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6",
 		"build-linux-artifact:",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
 	} {
