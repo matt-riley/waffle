@@ -13,6 +13,7 @@ repo_root=${1:-$(
 
 source_sha=$(git -C "$repo_root" -c core.fsmonitor=false rev-parse HEAD)
 builder_rel=scripts/build-linux-artifact.sh
+tmp_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 
 file_mode() {
   local target=$1
@@ -28,12 +29,12 @@ file_mode() {
   exit 1
 }
 
-tmp_a=$(mktemp -d /private/tmp/waffle-repro-a.XXXXXX)
-tmp_b=$(mktemp -d /private/tmp/waffle-repro-b.XXXXXX)
-cache_a=$(mktemp -d /private/tmp/waffle-gocache-a.XXXXXX)
-cache_b=$(mktemp -d /private/tmp/waffle-gocache-b.XXXXXX)
-mod_a=$(mktemp -d /private/tmp/waffle-gomod-a.XXXXXX)
-mod_b=$(mktemp -d /private/tmp/waffle-gomod-b.XXXXXX)
+tmp_a=$(mktemp -d "$tmp_root/waffle-repro-a.XXXXXX")
+tmp_b=$(mktemp -d "$tmp_root/waffle-repro-b.XXXXXX")
+cache_a=$(mktemp -d "$tmp_root/waffle-gocache-a.XXXXXX")
+cache_b=$(mktemp -d "$tmp_root/waffle-gocache-b.XXXXXX")
+mod_a=$(mktemp -d "$tmp_root/waffle-gomod-a.XXXXXX")
+mod_b=$(mktemp -d "$tmp_root/waffle-gomod-b.XXXXXX")
 trap 'chmod -R -f u+w "$tmp_a" "$tmp_b" "$cache_a" "$cache_b" "$mod_a" "$mod_b" 2>/dev/null || true; rm -rf -- "$tmp_a" "$tmp_b" "$cache_a" "$cache_b" "$mod_a" "$mod_b"' EXIT
 
 git clone --quiet --no-hardlinks --local "$repo_root" "$tmp_a/repo"
