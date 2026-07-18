@@ -157,6 +157,231 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 
 }
 
+func TestLoadProviderRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.anthropic]
+type = "anthropic"
+api_key = "secret://provider/anthropic/api-key"
+max_tokens = 4096
+
+[providers.openrouter]
+type = "openai"
+api_key = "secret://provider/openrouter/api-key"
+base_url = "https://openrouter.ai/api/v1"
+
+[models.claude]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[models.claude-fast]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+max_tokens = 1024
+
+[models.gpt]
+provider = "openrouter"
+model = "openai/gpt-5.4"
+
+[agent]
+default_model = "claude"
+utility_model = "gpt"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("Providers = %#v, want two connections", cfg.Providers)
+	}
+	if got := cfg.Providers["anthropic"]; got.Type != "anthropic" || got.MaxTokens != 4096 {
+		t.Fatalf("anthropic connection = %#v", got)
+	}
+	if got := cfg.Providers["openrouter"]; got.Type != "openai" || got.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Fatalf("openrouter connection = %#v", got)
+	}
+	if cfg.Agent.DefaultModel != "claude" || cfg.Agent.UtilityModel != "gpt" {
+		t.Fatalf("agent model aliases = default %q utility %q", cfg.Agent.DefaultModel, cfg.Agent.UtilityModel)
+	}
+
+	// Provider configuration is optional: this is the normal Installed state.
+	writeFile(t, path, "[log]\nlevel = \"debug\"\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load provider-empty config: %v", err)
+	}
+	if cfg.Provider.Name != "" || len(cfg.Providers) != 0 || len(cfg.Models) != 0 {
+		t.Fatalf("provider-empty config gained a provider: legacy=%#v providers=%#v models=%#v", cfg.Provider, cfg.Providers, cfg.Models)
+	}
+}
+
+func TestResolveModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.anthropic]
+type = "anthropic"
+api_key = "secret://provider/anthropic/api-key"
+max_tokens = 4096
+
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+max_tokens = 2048
+
+[models.primary]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[models.fast]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+max_tokens = 512
+
+[models.local]
+provider = "local"
+model = "qwen3:32b"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	tests := []struct {
+		alias          string
+		connectionName string
+		providerType   string
+		upstreamModel  string
+		maxTokens      int
+	}{
+		{alias: "primary", connectionName: "anthropic", providerType: "anthropic", upstreamModel: "claude-sonnet-4-6", maxTokens: 4096},
+		{alias: "fast", connectionName: "anthropic", providerType: "anthropic", upstreamModel: "claude-haiku-4-5", maxTokens: 512},
+		{alias: "local", connectionName: "local", providerType: "openai", upstreamModel: "qwen3:32b", maxTokens: 2048},
+	}
+	for _, tt := range tests {
+		t.Run(tt.alias, func(t *testing.T) {
+			got, err := cfg.ResolveModel(tt.alias)
+			if err != nil {
+				t.Fatalf("ResolveModel: %v", err)
+			}
+			if got.Alias != tt.alias || got.ConnectionName != tt.connectionName || got.Connection.Type != tt.providerType || got.UpstreamModel != tt.upstreamModel || got.MaxTokens != tt.maxTokens {
+				t.Fatalf("ResolveModel(%q) = %#v", tt.alias, got)
+			}
+		})
+	}
+	if _, err := cfg.ResolveModel("missing"); err == nil || !strings.Contains(err.Error(), "unknown model alias") {
+		t.Fatalf("unknown alias error = %v", err)
+	}
+}
+
+func TestLoadProviderRegistryRejectsInvalidReferences(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "unknown provider reference",
+			body: "[models.main]\nprovider = \"missing\"\nmodel = \"model-1\"\n",
+			want: "unknown provider",
+		},
+		{
+			name: "invalid connection name",
+			body: "[providers.\"../escape\"]\ntype = \"anthropic\"\n",
+			want: "invalid connection name",
+		},
+		{
+			name: "unsupported provider type",
+			body: "[providers.vendor]\ntype = \"vendor-native\"\n",
+			want: "unsupported type",
+		},
+		{
+			name: "missing upstream model",
+			body: "[providers.local]\ntype = \"openai\"\n[models.main]\nprovider = \"local\"\n",
+			want: "model is required",
+		},
+		{
+			name: "invalid alias",
+			body: "[providers.local]\ntype = \"openai\"\n[models.\"bad alias\"]\nprovider = \"local\"\nmodel = \"model-1\"\n",
+			want: "invalid model alias",
+		},
+		{
+			name: "unknown default alias",
+			body: "[providers.local]\ntype = \"openai\"\n[agent]\ndefault_model = \"missing\"\n",
+			want: "agent.default_model",
+		},
+		{
+			name: "unknown utility alias",
+			body: "[providers.local]\ntype = \"openai\"\n[agent]\nutility_model = \"missing\"\n",
+			want: "agent.utility_model",
+		},
+		{
+			name: "unknown provider key",
+			body: "[providers.local]\ntype = \"openai\"\ntypo = true\n",
+			want: "unknown keys",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tt.body)
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLegacyProviderCompatibility(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[provider]
+name = "openai"
+api_key = "secret://legacy/api-key"
+base_url = "http://127.0.0.1:8080/v1"
+model = "legacy-main"
+utility_model = "legacy-utility"
+max_tokens = 1234
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Name != "openai" || cfg.Provider.Model != "legacy-main" || cfg.Provider.UtilityModel != "legacy-utility" {
+		t.Fatalf("legacy provider changed: %#v", cfg.Provider)
+	}
+	if cfg.Agent.DefaultModel != "default" || cfg.Agent.UtilityModel != "utility" {
+		t.Fatalf("legacy aliases = default %q utility %q", cfg.Agent.DefaultModel, cfg.Agent.UtilityModel)
+	}
+	main, err := cfg.ResolveModel("default")
+	if err != nil {
+		t.Fatalf("ResolveModel(default): %v", err)
+	}
+	utility, err := cfg.ResolveModel("utility")
+	if err != nil {
+		t.Fatalf("ResolveModel(utility): %v", err)
+	}
+	if main.ConnectionName != "default" || main.Connection.Type != "openai" || main.UpstreamModel != "legacy-main" || main.MaxTokens != 1234 {
+		t.Fatalf("normalized main = %#v", main)
+	}
+	if utility.ConnectionName != "default" || utility.UpstreamModel != "legacy-utility" {
+		t.Fatalf("normalized utility = %#v", utility)
+	}
+
+	// A partial legacy table retains the historical Anthropic defaults.
+	writeFile(t, path, "[provider]\nmodel = \"custom-main\"\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load partial legacy provider: %v", err)
+	}
+	if cfg.Provider.Name != "anthropic" || cfg.Provider.APIKey != "secret://anthropic/api-key" || cfg.Provider.MaxTokens != 64000 {
+		t.Fatalf("partial legacy defaults changed: %#v", cfg.Provider)
+	}
+	if got, err := cfg.ResolveModel("default"); err != nil || got.UpstreamModel != "custom-main" {
+		t.Fatalf("partial legacy default resolved to %#v, %v", got, err)
+	}
+}
+
 func TestSelfdevDefaultsAndApproval(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.toml"))
 	if err != nil {

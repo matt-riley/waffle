@@ -22,23 +22,25 @@ import (
 
 // Config is the root of config.toml.
 type Config struct {
-	Gateway   Gateway     `toml:"gateway"`
-	Provider  Provider    `toml:"provider"`
-	Channel   Channels    `toml:"channel"`
-	Sandbox   Sandbox     `toml:"sandbox"`
-	Broker    Broker      `toml:"broker"`
-	Workspace Workspace   `toml:"workspace"`
-	Store     Store       `toml:"store"`
-	GitHub    GitHub      `toml:"github"`
-	MCP       []MCPServer `toml:"mcp"`
-	Agent     Agent       `toml:"agent"`
-	Repo      Repo        `toml:"repo"`
-	Selfdev   Selfdev     `toml:"selfdev"`
-	Log       Log         `toml:"log"`
-	Limits    Limits      `toml:"limits"`
-	Jobs      JobPolicy   `toml:"jobs"`
-	Tools     Tools       `toml:"tools"`
-	Memory    Memory      `toml:"memory"`
+	Gateway   Gateway                       `toml:"gateway"`
+	Provider  Provider                      `toml:"provider"`
+	Providers map[string]ProviderConnection `toml:"providers"`
+	Models    map[string]ModelTarget        `toml:"models"`
+	Channel   Channels                      `toml:"channel"`
+	Sandbox   Sandbox                       `toml:"sandbox"`
+	Broker    Broker                        `toml:"broker"`
+	Workspace Workspace                     `toml:"workspace"`
+	Store     Store                         `toml:"store"`
+	GitHub    GitHub                        `toml:"github"`
+	MCP       []MCPServer                   `toml:"mcp"`
+	Agent     Agent                         `toml:"agent"`
+	Repo      Repo                          `toml:"repo"`
+	Selfdev   Selfdev                       `toml:"selfdev"`
+	Log       Log                           `toml:"log"`
+	Limits    Limits                        `toml:"limits"`
+	Jobs      JobPolicy                     `toml:"jobs"`
+	Tools     Tools                         `toml:"tools"`
+	Memory    Memory                        `toml:"memory"`
 	// Policy is host-side action-level tool rules (#66). Declared as
 	// [[policy.rule]] tables; unknown keys are rejected by Load.
 	Policy PolicyConfig `toml:"policy"`
@@ -195,6 +197,10 @@ type Agent struct {
 	Profiles map[string]AgentProfile `toml:"profile"`
 	// DefaultProfile is used when a run does not name a profile.
 	DefaultProfile string `toml:"default_profile"`
+	// DefaultModel is the model alias used when a run does not select one.
+	DefaultModel string `toml:"default_model"`
+	// UtilityModel is the model alias used for summarization and reflection.
+	UtilityModel string `toml:"utility_model"`
 }
 
 // ProfileNameMax is the maximum length of a profile slug (#71).
@@ -632,6 +638,82 @@ type Provider struct {
 	MaxTokens int    `toml:"max_tokens"`
 }
 
+// ProviderConnection is one named set of provider credentials and endpoint
+// settings. Type is either "anthropic" or "openai"; the latter covers any
+// OpenAI-compatible endpoint.
+type ProviderConnection struct {
+	Type      string `toml:"type"`
+	APIKey    string `toml:"api_key"`
+	BaseURL   string `toml:"base_url"`
+	MaxTokens int    `toml:"max_tokens"`
+}
+
+// ModelTarget maps a stable local alias to a provider connection and the
+// upstream model identifier sent to that provider.
+type ModelTarget struct {
+	Provider  string `toml:"provider"`
+	Model     string `toml:"model"`
+	MaxTokens int    `toml:"max_tokens"`
+}
+
+// ResolvedModel is the complete deterministic target for one model alias.
+type ResolvedModel struct {
+	Alias          string
+	ConnectionName string
+	Connection     ProviderConnection
+	UpstreamModel  string
+	MaxTokens      int
+}
+
+// ProviderConnectionNameMax is the maximum length of a provider connection
+// name or model alias. These names are also used as secret-store path parts.
+const ProviderConnectionNameMax = 64
+
+var providerRegistryNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$|^[a-z0-9]$`)
+
+// ValidProviderConnectionName reports whether name is safe for use as a
+// provider registry key and secret-store path component.
+func ValidProviderConnectionName(name string) bool {
+	return len(name) <= ProviderConnectionNameMax && providerRegistryNameRE.MatchString(name)
+}
+
+// ValidModelAlias reports whether alias is a valid model catalog key.
+func ValidModelAlias(alias string) bool {
+	return len(alias) <= ProviderConnectionNameMax && providerRegistryNameRE.MatchString(alias)
+}
+
+// ResolveModel resolves alias to exactly one connection and upstream model.
+func (c Config) ResolveModel(alias string) (ResolvedModel, error) {
+	target, ok := c.Models[alias]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("unknown model alias %q", alias)
+	}
+	connection, ok := c.Providers[target.Provider]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("model alias %q references unknown provider %q", alias, target.Provider)
+	}
+	if err := validateProviderConnection(target.Provider, connection); err != nil {
+		return ResolvedModel{}, err
+	}
+	if strings.TrimSpace(target.Model) == "" {
+		return ResolvedModel{}, fmt.Errorf("model alias %q: model is required", alias)
+	}
+	if target.MaxTokens < 0 {
+		return ResolvedModel{}, fmt.Errorf("model alias %q: max_tokens must be >= 0", alias)
+	}
+	maxTokens := target.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = connection.MaxTokens
+	}
+	return ResolvedModel{
+		Alias:          alias,
+		ConnectionName: target.Provider,
+		Connection:     connection,
+		UpstreamModel:  target.Model,
+		MaxTokens:      maxTokens,
+	}, nil
+}
+
 // Gateway configures the control plane.
 type Gateway struct {
 	// Listen is the bind address. Loopback by default: exposing the
@@ -666,12 +748,6 @@ func (c Config) LimitsFor(group string) Limits {
 func Default() Config {
 	return Config{
 		Gateway: Gateway{Listen: "127.0.0.1:8420", StatusListen: "127.0.0.1:8422"},
-		Provider: Provider{
-			Name:      "anthropic",
-			Model:     "claude-opus-4-8",
-			APIKey:    "secret://anthropic/api-key",
-			MaxTokens: 64000,
-		},
 		Channel: Channels{
 			Telegram: Telegram{Token: "secret://telegram/bot-token"},
 		},
@@ -735,12 +811,28 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// Historically, decoding [provider] layered over these Anthropic defaults.
+	// Decode it a second time with that baseline only when the legacy table is
+	// actually present, so a provider-empty config remains a valid Installed
+	// state without changing partial legacy configuration behavior.
+	if meta.IsDefined("provider") {
+		cfg = Default()
+		cfg.Provider = legacyProviderDefaults()
+		meta, err = toml.DecodeFile(path, &cfg)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse %s: %w", path, err)
+		}
+	}
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
 			keys[i] = k.String()
 		}
 		return Config{}, fmt.Errorf("unknown keys in %s: %s", path, strings.Join(keys, ", "))
+	}
+	normalizeLegacyProvider(&cfg)
+	if err := validateProviderRegistry(cfg); err != nil {
+		return Config{}, err
 	}
 	if err := validateLoopbackListen(cfg.Gateway.StatusListen); err != nil {
 		return Config{}, fmt.Errorf("gateway.status_listen: %w", err)
@@ -843,6 +935,94 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func legacyProviderDefaults() Provider {
+	return Provider{
+		Name:      "anthropic",
+		Model:     "claude-opus-4-8",
+		APIKey:    "secret://anthropic/api-key",
+		MaxTokens: 64000,
+	}
+}
+
+func normalizeLegacyProvider(cfg *Config) {
+	if len(cfg.Providers) != 0 || len(cfg.Models) != 0 || strings.TrimSpace(cfg.Provider.Name) == "" {
+		return
+	}
+	cfg.Providers = map[string]ProviderConnection{
+		"default": {
+			Type:      cfg.Provider.Name,
+			APIKey:    cfg.Provider.APIKey,
+			BaseURL:   cfg.Provider.BaseURL,
+			MaxTokens: cfg.Provider.MaxTokens,
+		},
+	}
+	cfg.Models = make(map[string]ModelTarget, 2)
+	if strings.TrimSpace(cfg.Provider.Model) != "" {
+		cfg.Models["default"] = ModelTarget{Provider: "default", Model: cfg.Provider.Model}
+		if cfg.Agent.DefaultModel == "" {
+			cfg.Agent.DefaultModel = "default"
+		}
+	}
+	if strings.TrimSpace(cfg.Provider.UtilityModel) != "" {
+		cfg.Models["utility"] = ModelTarget{Provider: "default", Model: cfg.Provider.UtilityModel}
+		if cfg.Agent.UtilityModel == "" {
+			cfg.Agent.UtilityModel = "utility"
+		}
+	}
+}
+
+func validateProviderRegistry(cfg Config) error {
+	for name, connection := range cfg.Providers {
+		if err := validateProviderConnection(name, connection); err != nil {
+			return err
+		}
+	}
+	for alias, target := range cfg.Models {
+		if !ValidModelAlias(alias) {
+			return fmt.Errorf("invalid model alias %q (want slug [a-z0-9-] max %d)", alias, ProviderConnectionNameMax)
+		}
+		if strings.TrimSpace(target.Provider) == "" {
+			return fmt.Errorf("model alias %q: provider is required", alias)
+		}
+		if _, ok := cfg.Providers[target.Provider]; !ok {
+			return fmt.Errorf("model alias %q references unknown provider %q", alias, target.Provider)
+		}
+		if strings.TrimSpace(target.Model) == "" {
+			return fmt.Errorf("model alias %q: model is required", alias)
+		}
+		if target.MaxTokens < 0 {
+			return fmt.Errorf("model alias %q: max_tokens must be >= 0", alias)
+		}
+	}
+	for field, alias := range map[string]string{
+		"agent.default_model": cfg.Agent.DefaultModel,
+		"agent.utility_model": cfg.Agent.UtilityModel,
+	} {
+		if alias == "" {
+			continue
+		}
+		if _, ok := cfg.Models[alias]; !ok {
+			return fmt.Errorf("%s references unknown model alias %q", field, alias)
+		}
+	}
+	return nil
+}
+
+func validateProviderConnection(name string, connection ProviderConnection) error {
+	if !ValidProviderConnectionName(name) {
+		return fmt.Errorf("invalid connection name %q (want slug [a-z0-9-] max %d)", name, ProviderConnectionNameMax)
+	}
+	switch connection.Type {
+	case "anthropic", "openai":
+	default:
+		return fmt.Errorf("provider connection %q: unsupported type %q (want \"anthropic\" or \"openai\")", name, connection.Type)
+	}
+	if connection.MaxTokens < 0 {
+		return fmt.Errorf("provider connection %q: max_tokens must be >= 0", name)
+	}
+	return nil
 }
 
 var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
