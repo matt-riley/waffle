@@ -48,6 +48,12 @@ type Config struct {
 	Intake Intake `toml:"intake"`
 	// CodeIntel configures optional structural-code tools (#79).
 	CodeIntel CodeIntel `toml:"codeintel"`
+
+	// legacyProviderNormalized records that Providers and Models were derived
+	// from the compatibility [provider] table. It keeps historical secret-value
+	// handling confined to that representation; explicit named providers always
+	// require connection-scoped secret references.
+	legacyProviderNormalized bool
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).
@@ -692,7 +698,7 @@ func (c Config) ResolveModel(alias string) (ResolvedModel, error) {
 	if !ok {
 		return ResolvedModel{}, fmt.Errorf("model alias %q references unknown provider %q", alias, target.Provider)
 	}
-	if err := validateProviderConnection(target.Provider, connection); err != nil {
+	if err := validateProviderConnection(target.Provider, connection, c.legacyProviderNormalized); err != nil {
 		return ResolvedModel{}, err
 	}
 	if strings.TrimSpace(target.Model) == "" {
@@ -830,7 +836,8 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("unknown keys in %s: %s", path, strings.Join(keys, ", "))
 	}
-	normalizeLegacyProvider(&cfg)
+	registryDefined := meta.IsDefined("providers") || meta.IsDefined("models")
+	normalizeLegacyProvider(&cfg, registryDefined)
 	if err := validateProviderRegistry(cfg); err != nil {
 		return Config{}, err
 	}
@@ -946,10 +953,11 @@ func legacyProviderDefaults() Provider {
 	}
 }
 
-func normalizeLegacyProvider(cfg *Config) {
-	if len(cfg.Providers) != 0 || len(cfg.Models) != 0 || strings.TrimSpace(cfg.Provider.Name) == "" {
+func normalizeLegacyProvider(cfg *Config, registryDefined bool) {
+	if registryDefined || strings.TrimSpace(cfg.Provider.Name) == "" {
 		return
 	}
+	cfg.legacyProviderNormalized = true
 	cfg.Providers = map[string]ProviderConnection{
 		"default": {
 			Type:      cfg.Provider.Name,
@@ -975,7 +983,7 @@ func normalizeLegacyProvider(cfg *Config) {
 
 func validateProviderRegistry(cfg Config) error {
 	for name, connection := range cfg.Providers {
-		if err := validateProviderConnection(name, connection); err != nil {
+		if err := validateProviderConnection(name, connection, cfg.legacyProviderNormalized); err != nil {
 			return err
 		}
 	}
@@ -1010,7 +1018,7 @@ func validateProviderRegistry(cfg Config) error {
 	return nil
 }
 
-func validateProviderConnection(name string, connection ProviderConnection) error {
+func validateProviderConnection(name string, connection ProviderConnection, allowLegacyAPIKey bool) error {
 	if !ValidProviderConnectionName(name) {
 		return fmt.Errorf("invalid connection name %q (want slug [a-z0-9-] max %d)", name, ProviderConnectionNameMax)
 	}
@@ -1021,6 +1029,10 @@ func validateProviderConnection(name string, connection ProviderConnection) erro
 	}
 	if connection.MaxTokens < 0 {
 		return fmt.Errorf("provider connection %q: max_tokens must be >= 0", name)
+	}
+	expectedAPIKey := "secret://provider/" + name + "/api-key"
+	if !allowLegacyAPIKey && connection.APIKey != "" && connection.APIKey != expectedAPIKey {
+		return fmt.Errorf("provider connection %q: api_key must be empty or %s", name, expectedAPIKey)
 	}
 	return nil
 }

@@ -332,6 +332,50 @@ func TestLoadProviderRegistryRejectsInvalidReferences(t *testing.T) {
 	}
 }
 
+func TestProviderRegistryAPIKeyReferences(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiKey  string
+		wantErr string
+	}{
+		{name: "auth-free endpoint", apiKey: ""},
+		{name: "connection-scoped secret", apiKey: "secret://provider/local/api-key"},
+		{name: "raw key", apiKey: "sk-live-secret", wantErr: "must be empty or secret://provider/local/api-key"},
+		{name: "malformed secret path", apiKey: "secret://provider/local/token", wantErr: "must be empty or secret://provider/local/api-key"},
+		{name: "different connection secret", apiKey: "secret://provider/other/api-key", wantErr: "must be empty or secret://provider/local/api-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			body := "[providers.local]\ntype = \"openai\"\n"
+			if tt.apiKey != "" {
+				body += "api_key = \"" + tt.apiKey + "\"\n"
+			}
+			writeFile(t, path, body)
+			_, err := Load(path)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Load error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	// Raw keys in the singular legacy table retain their historical behavior;
+	// the first provider-management write migrates them to encrypted storage.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[provider]\nname = \"openai\"\napi_key = \"legacy-raw-key\"\nmodel = \"legacy-model\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load legacy raw key: %v", err)
+	}
+	resolved, err := cfg.ResolveModel("default")
+	if err != nil || resolved.Connection.APIKey != "legacy-raw-key" {
+		t.Fatalf("ResolveModel legacy raw key = %#v, %v", resolved, err)
+	}
+}
+
 func TestLegacyProviderCompatibility(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `
@@ -379,6 +423,31 @@ max_tokens = 1234
 	}
 	if got, err := cfg.ResolveModel("default"); err != nil || got.UpstreamModel != "custom-main" {
 		t.Fatalf("partial legacy default resolved to %#v, %v", got, err)
+	}
+}
+
+func TestLegacyProviderExplicitEmptyRegistryTakesPrecedence(t *testing.T) {
+	for _, registry := range []string{"providers", "models"} {
+		t.Run(registry, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, `
+[provider]
+name = "anthropic"
+model = "legacy-main"
+
+[`+registry+`]
+`)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Providers) != 0 || len(cfg.Models) != 0 {
+				t.Fatalf("explicit empty [%s] did not suppress legacy normalization: providers=%#v models=%#v", registry, cfg.Providers, cfg.Models)
+			}
+			if cfg.Agent.DefaultModel != "" || cfg.Agent.UtilityModel != "" {
+				t.Fatalf("explicit empty [%s] gained legacy aliases: default=%q utility=%q", registry, cfg.Agent.DefaultModel, cfg.Agent.UtilityModel)
+			}
+		})
 	}
 }
 
