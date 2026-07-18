@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 
@@ -482,6 +484,93 @@ func TestManagerReadyRequiresActiveCommittedGeneration(t *testing.T) {
 	}
 	if status.State != "installed" {
 		t.Fatalf("stale healthy process reported %#v, want installed", status)
+	}
+}
+
+func TestManagerListUsesOneLockConsistentSnapshot(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	m.afterReadStatus = func() {
+		once.Do(func() { close(paused) })
+		<-release
+	}
+	listDone := make(chan struct{})
+	var listing []byte
+	var listErr error
+	go func() {
+		listing, listErr = m.List(context.Background())
+		close(listDone)
+	}()
+	<-paused
+	mutationDone := make(chan error, 1)
+	go func() { mutationDone <- m.RemoveModel(context.Background(), "gpt", "small") }()
+	mutationReturned := false
+	select {
+	case err := <-mutationDone:
+		mutationReturned = true
+		if !errors.Is(err, ErrLocked) {
+			t.Fatalf("mutation result while List snapshot was paused = %v, want ErrLocked", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-listDone
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if !bytes.Contains(listing, []byte(`"default_model": "gpt"`)) || !bytes.Contains(listing, []byte(`"gpt"`)) {
+		t.Fatalf("List mixed snapshots: %s", listing)
+	}
+	if mutationReturned {
+		if err := m.RemoveModel(context.Background(), "gpt", "small"); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := <-mutationDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerTestRecoversEveryCrashLeftJournalPhase(t *testing.T) {
+	for _, phase := range []string{"secret_committed", "config_committed", "activated", "healthy"} {
+		t.Run(phase, func(t *testing.T) {
+			m := newTestManager(t)
+			m.CrashAfterPhase = func(got string) error {
+				if got == phase {
+					return ErrSimulatedCrash
+				}
+				return nil
+			}
+			if err := m.Add(context.Background(), validAddRequest()); !errors.Is(err, ErrSimulatedCrash) {
+				t.Fatalf("Add error = %v", err)
+			}
+			m.CrashAfterPhase = nil
+			probes := 0
+			m.Probe = func(_ context.Context, target config.ResolvedModel, key string) error {
+				probes++
+				if target.Alias != "gpt" || key != providerTestKey {
+					t.Fatalf("probe target=%#v key=%q", target, key)
+				}
+				return nil
+			}
+			err := m.Test(context.Background(), "openai")
+			if phase == "healthy" {
+				if err != nil || probes != 1 {
+					t.Fatalf("healthy Test err=%v probes=%d", err, probes)
+				}
+			} else if err == nil || probes != 0 {
+				t.Fatalf("rolled-back Test err=%v probes=%d", err, probes)
+			}
+			if _, statErr := os.Stat(m.journalPath()); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("journal remains after Test recovery: %v", statErr)
+			}
+		})
 	}
 }
 

@@ -128,6 +128,8 @@ type Manager struct {
 	// the named resource ("secret" then "config") is durably committed.
 	AfterCommit     func(resource string) error
 	CrashAfterPhase func(phase string) error
+	// afterReadStatus is a deterministic concurrency-test seam.
+	afterReadStatus func()
 }
 
 // New returns a manager rooted in WAFFLE_HOME using the supplied identity.
@@ -312,27 +314,12 @@ func (m *Manager) Test(ctx context.Context, name string) error {
 	if m.Probe == nil {
 		return errors.New("provider probe is not configured")
 	}
-	cfg, err := config.Load(m.ConfigPath)
-	if err != nil {
-		return err
-	}
-	aliases := referencedAliases(cfg, name)
-	if len(aliases) == 0 {
-		if _, ok := cfg.Providers[name]; !ok {
-			return fmt.Errorf("provider connection %q does not exist", name)
-		}
-		return fmt.Errorf("provider connection %q has no model aliases to test", name)
-	}
-	target, err := cfg.ResolveModel(aliases[0])
-	if err != nil {
-		return err
-	}
-	key, err := m.connectionKey(target.Connection)
+	target, key, err := m.testSnapshot(ctx, name)
 	if err != nil {
 		return err
 	}
 	if err := m.Probe(ctx, target, key); err != nil {
-		return redactError(fmt.Errorf("probe provider %q model alias %q: %w", name, aliases[0], err), key)
+		return redactError(fmt.Errorf("probe provider %q model alias %q: %w", name, target.Alias, err), key)
 	}
 	return nil
 }
@@ -543,28 +530,36 @@ func equalModelMaps(a, b map[string]config.ModelTarget) bool {
 
 // Status reports Installed unless a configured default alias is healthy.
 func (m *Manager) Status(ctx context.Context) (status Status, err error) {
+	_, status, err = m.lockedConfigStatus(ctx, false)
+	return status, err
+}
+
+func (m *Manager) lockedConfigStatus(ctx context.Context, listHook bool) (cfg config.Config, status Status, err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
-		return Status{}, err
+		return config.Config{}, Status{}, err
 	}
 	defer func() { err = errors.Join(err, lease.Release()) }()
 	if err := m.recoverLocked(ctx); err != nil {
-		return Status{}, err
+		return config.Config{}, Status{}, err
 	}
-	cfg, err := config.Load(m.ConfigPath)
+	cfg, err = config.Load(m.ConfigPath)
 	if err != nil {
-		return Status{}, err
+		return config.Config{}, Status{}, err
 	}
-	return m.statusFromConfig(ctx, cfg)
+	status, err = m.statusFromConfig(ctx, cfg)
+	if err != nil {
+		return config.Config{}, Status{}, err
+	}
+	if listHook && m.afterReadStatus != nil {
+		m.afterReadStatus()
+	}
+	return cfg, status, nil
 }
 
 // List returns a deterministic, credential-free JSON document.
 func (m *Manager) List(ctx context.Context) ([]byte, error) {
-	status, err := m.Status(ctx)
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := config.Load(m.ConfigPath)
+	cfg, status, err := m.lockedConfigStatus(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -582,6 +577,34 @@ func (m *Manager) List(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	return append(b, '\n'), nil
+}
+
+func (m *Manager) testSnapshot(ctx context.Context, name string) (target config.ResolvedModel, key string, err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return config.ResolvedModel{}, "", err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return config.ResolvedModel{}, "", err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return config.ResolvedModel{}, "", err
+	}
+	aliases := referencedAliases(cfg, name)
+	if len(aliases) == 0 {
+		if _, ok := cfg.Providers[name]; !ok {
+			return config.ResolvedModel{}, "", fmt.Errorf("provider connection %q does not exist", name)
+		}
+		return config.ResolvedModel{}, "", fmt.Errorf("provider connection %q has no model aliases to test", name)
+	}
+	target, err = cfg.ResolveModel(aliases[0])
+	if err != nil {
+		return config.ResolvedModel{}, "", err
+	}
+	key, err = m.connectionKey(target.Connection)
+	return target, key, err
 }
 
 type snapshot struct {
