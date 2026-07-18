@@ -79,16 +79,3 @@ jobs:
           go-version-file: go.mod
       - name: Check Linux artifact reproducibility
         run: bash scripts/check-linux-artifact-repro.sh
-
-  request-infra-deploy:
-    needs: build-linux-artifact
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v1
-    with:
-      app-name: waffle
-      infra-repo: infra
-      artifact-run-id: ${{ github.run_id }}
-      artifact-name: waffle-linux-amd64
-      artifact-digest: ${{ needs.build-linux-artifact.outputs.artifact_digest }}
-    secrets:
-      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
