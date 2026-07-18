@@ -51,14 +51,15 @@ func LoadIdentity() (*age.X25519Identity, error) {
 // in the OS keyring. The identity string is returned either way so the CLI
 // can show it once for backup; it is never written to disk by waffle.
 func InitIdentity(printOnly bool) (*age.X25519Identity, error) {
-	// Only a definitive not-found makes it safe to create a new identity.
-	// Any other outcome — an identity exists, or the keyring cannot be read
-	// (locked keychain, DBus timeout) — must refuse: overwriting the stored
-	// identity permanently destroys access to the secret store.
-	switch _, err := LoadIdentity(); {
-	case err == nil:
+	_, err := LoadIdentity()
+	if err == nil {
 		return nil, errors.New("an identity already exists; refusing to overwrite it")
-	case !errors.Is(err, ErrNoIdentity):
+	}
+	// --print never writes to the keyring, so it must remain usable on
+	// headless machines where the keyring service is unavailable. A normal
+	// init still refuses unless absence was confirmed, because storing a new
+	// identity over an unreadable existing one would destroy access.
+	if !printOnly && !errors.Is(err, ErrNoIdentity) {
 		return nil, fmt.Errorf(
 			"cannot verify whether an identity already exists (%w); refusing to overwrite", err)
 	}

@@ -6,6 +6,7 @@ require (
 	filippo.io/age v1.3.1
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.58.0
+	github.com/pelletier/go-toml v1.9.5
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.44.0

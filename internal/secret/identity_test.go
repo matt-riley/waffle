@@ -32,19 +32,22 @@ func TestInitIdentityRefusesWhenIdentityExists(t *testing.T) {
 	}
 }
 
-func TestInitIdentityRefusesOnTransientKeyringError(t *testing.T) {
+func TestInitIdentityPrintsOnTransientKeyringErrorWithoutStoring(t *testing.T) {
 	t.Setenv(EnvIdentity, "")
 	keyring.MockInitWithError(errors.New("dbus timeout"))
 
-	// A keyring read failure means we cannot know whether an identity
-	// exists, so init must refuse rather than risk overwriting one.
-	// With printOnly nothing is stored, so a buggy guard would succeed.
-	if _, err := InitIdentity(true); err == nil ||
-		!strings.Contains(err.Error(), "refusing to overwrite") {
-		t.Fatalf("InitIdentity(printOnly) = %v, want refusal", err)
+	// --print never writes to the keyring, so it can generate a candidate for
+	// headless bootstrap even when the desktop keyring is unavailable.
+	id, err := InitIdentity(true)
+	if err != nil {
+		t.Fatalf("InitIdentity(printOnly) = %v, want generated identity", err)
 	}
-	// Without printOnly a buggy guard would fall through to keyring.Set;
-	// that path reports a "store identity" error, not a refusal.
+	if id == nil {
+		t.Fatal("InitIdentity(printOnly) returned a nil identity")
+	}
+
+	// Without --print, an unreadable keyring must still refuse because the
+	// existing identity cannot be distinguished from an absent one.
 	if _, err := InitIdentity(false); err == nil ||
 		!strings.Contains(err.Error(), "refusing to overwrite") {
 		t.Fatalf("InitIdentity = %v, want refusal", err)
