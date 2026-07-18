@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/providerconfig"
@@ -21,10 +23,13 @@ import (
 )
 
 type providerManager interface {
+	Preflight(context.Context) error
 	Add(context.Context, providerconfig.AddRequest) error
 	List(context.Context) ([]byte, error)
 	Test(context.Context, string) error
 	Remove(context.Context, string) error
+	ActivateModel(context.Context, string) error
+	RemoveModel(context.Context, string, string) error
 }
 
 var (
@@ -69,6 +74,8 @@ func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 		fmt.Fprintf(stdout, "removed provider %s\n", args[1])
 		return nil
+	case "model":
+		return providerModelCmd(ctx, args[1:], stdout)
 	case "help", "-h", "--help":
 		providerUsage(stdout)
 		return nil
@@ -88,6 +95,8 @@ Usage:
   waffle provider list [--json]
   waffle provider test <connection>
   waffle provider remove <connection>
+  waffle provider model activate <alias>
+  waffle provider model remove <alias> [--replace-with ALIAS]
 
 With no secret-input option, add prompts without echo. API keys are never
 accepted as command-line values.
@@ -119,7 +128,7 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	flags := flag.NewFlagSet("provider add", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var name, providerType, baseURL, defaultModel, utilityModel, keyFile string
-	var keyStdin bool
+	var keyStdin, legacyAuthFree bool
 	models := modelFlag{}
 	flags.StringVar(&name, "name", "", "connection name")
 	flags.StringVar(&providerType, "type", "", "provider type")
@@ -129,6 +138,7 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	flags.StringVar(&utilityModel, "utility", "", "utility model alias")
 	flags.BoolVar(&keyStdin, "api-key-stdin", false, "read API key from stdin")
 	flags.StringVar(&keyFile, "api-key-file", "", "read API key from a 0600 regular file")
+	flags.BoolVar(&legacyAuthFree, "legacy-auth-free", false, "confirm existing legacy provider intentionally needs no credential")
 	if err := flags.Parse(args); err != nil {
 		return sanitizeFlagError(err)
 	}
@@ -179,6 +189,14 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 	}
 
+	manager, err := openProviderManager()
+	if err != nil {
+		return err
+	}
+	if err := manager.Preflight(ctx); err != nil {
+		return err
+	}
+
 	var apiKey string
 	switch {
 	case keyStdin:
@@ -193,10 +211,6 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		return err
 	}
 
-	manager, err := openProviderManager()
-	if err != nil {
-		return redactProviderError(err, apiKey)
-	}
 	req := providerconfig.AddRequest{
 		ConnectionName: name,
 		Connection:     config.ProviderConnection{Type: providerType, BaseURL: baseURL},
@@ -204,6 +218,7 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		DefaultModel:   defaultModel,
 		UtilityModel:   utilityModel,
 		APIKey:         apiKey,
+		LegacyAuthFree: legacyAuthFree,
 	}
 	if err := manager.Add(ctx, req); err != nil {
 		return redactProviderError(err, apiKey)
@@ -213,6 +228,48 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		fmt.Fprintf(stdout, "Waffle is Ready with default model %s\n", defaultModel)
 	}
 	return nil
+}
+
+func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) < 2 {
+		return errors.New("usage: waffle provider model <activate|remove> <alias>")
+	}
+	manager, err := openProviderManager()
+	if err != nil {
+		return err
+	}
+	if err := manager.Preflight(ctx); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "activate":
+		if len(args) != 2 {
+			return errors.New("usage: waffle provider model activate <alias>")
+		}
+		if err := manager.ActivateModel(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "default model %s activated; Waffle is Ready\n", args[1])
+		return nil
+	case "remove":
+		flags := flag.NewFlagSet("provider model remove", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		var replacement string
+		flags.StringVar(&replacement, "replace-with", "", "replacement alias")
+		if err := flags.Parse(args[2:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("provider model remove does not accept positional arguments after alias")
+		}
+		if err := manager.RemoveModel(ctx, args[1], replacement); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "removed model alias %s\n", args[1])
+		return nil
+	default:
+		return fmt.Errorf("unknown provider model command %q", args[0])
+	}
 }
 
 func providerList(ctx context.Context, args []string, stdout io.Writer) error {
@@ -266,13 +323,28 @@ func defaultProviderManager() (providerManager, error) {
 	manager.Probe = probeProviderModel
 	manager.Restart = func(ctx context.Context) error { return runSystemctl(ctx, "restart", "waffle.service") }
 	manager.Health = providerServiceHealth
-	manager.RestoreService = func(ctx context.Context, previous providerconfig.Status) error {
-		if previous.State == "ready" {
+	manager.Stop = func(ctx context.Context) error { return runSystemctl(ctx, "stop", "waffle.service") }
+	manager.ServiceActive = providerServiceActive
+	manager.RestoreService = func(ctx context.Context, wasActive bool) error {
+		if wasActive {
 			return runSystemctl(ctx, "restart", "waffle.service")
 		}
 		return runSystemctl(ctx, "stop", "waffle.service")
 	}
 	return manager, nil
+}
+
+func providerServiceActive(ctx context.Context) (bool, error) {
+	cmd := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "waffle.service")
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 3 {
+		return false, nil
+	}
+	return false, fmt.Errorf("query waffle.service active state: %w", err)
 }
 
 func probeProviderModel(ctx context.Context, target config.ResolvedModel, apiKey string) error {
@@ -380,8 +452,20 @@ func readAllSecret(r io.Reader) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+const maxProviderKeyBytes = 64 * 1024
+
 func readModeCheckedKeyFile(path string) (string, error) {
-	info, err := os.Lstat(path)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return "", errors.New("open API key file")
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
@@ -391,9 +475,12 @@ func readModeCheckedKeyFile(path string) (string, error) {
 	if info.Mode().Perm() != 0o600 {
 		return "", fmt.Errorf("API key file %s must have mode 0600", path)
 	}
-	b, err := os.ReadFile(path)
+	b, err := io.ReadAll(io.LimitReader(f, maxProviderKeyBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(b) > maxProviderKeyBytes {
+		return "", fmt.Errorf("API key file %s is too large (max %d bytes)", path, maxProviderKeyBytes)
 	}
 	return strings.TrimSpace(string(b)), nil
 }

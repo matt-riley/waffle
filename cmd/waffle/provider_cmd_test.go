@@ -19,11 +19,21 @@ import (
 )
 
 type fakeProviderManager struct {
-	addRequest providerconfig.AddRequest
-	addErr     error
-	list       []byte
-	testName   string
-	removeName string
+	preflightErr     error
+	preflighted      bool
+	addRequest       providerconfig.AddRequest
+	addErr           error
+	list             []byte
+	testName         string
+	removeName       string
+	activateAlias    string
+	removeAlias      string
+	replacementAlias string
+}
+
+func (f *fakeProviderManager) Preflight(context.Context) error {
+	f.preflighted = true
+	return f.preflightErr
 }
 
 func (f *fakeProviderManager) Add(_ context.Context, req providerconfig.AddRequest) error {
@@ -37,6 +47,14 @@ func (f *fakeProviderManager) Test(_ context.Context, name string) error {
 }
 func (f *fakeProviderManager) Remove(_ context.Context, name string) error {
 	f.removeName = name
+	return nil
+}
+func (f *fakeProviderManager) ActivateModel(_ context.Context, alias string) error {
+	f.activateAlias = alias
+	return nil
+}
+func (f *fakeProviderManager) RemoveModel(_ context.Context, alias, replacement string) error {
+	f.removeAlias, f.replacementAlias = alias, replacement
 	return nil
 }
 
@@ -188,6 +206,61 @@ func TestProviderCommandAddRedactsManagerError(t *testing.T) {
 	err := providerCmd(context.Background(), []string{"add", "--name", "openai", "--type", "openai", "--model", "gpt=gpt-test", "--api-key-stdin"}, strings.NewReader("stdin-secret"), io.Discard, io.Discard)
 	if err == nil || strings.Contains(err.Error(), "stdin-secret") {
 		t.Fatalf("error leaked key: %v", err)
+	}
+}
+
+func TestProviderCommandPreflightsBeforeReadingSecret(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.preflightErr = errors.New("identity unavailable")
+	read := false
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) {
+		read = true
+		return "should-not-be-read", nil
+	}
+	t.Cleanup(func() { providerSecretReader = old })
+	err := providerCmd(context.Background(), []string{"add", "--name", "openai", "--type", "openai", "--model", "gpt=gpt-test"}, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "identity unavailable") {
+		t.Fatalf("error = %v, want preflight error", err)
+	}
+	if !fake.preflighted || read {
+		t.Fatalf("preflighted=%v secretRead=%v", fake.preflighted, read)
+	}
+}
+
+func TestProviderCommandModelLifecycleCommands(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	if err := providerCmd(context.Background(), []string{"model", "activate", "gpt"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := providerCmd(context.Background(), []string{"model", "remove", "gpt", "--replace-with", "small"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if fake.activateAlias != "gpt" || fake.removeAlias != "gpt" || fake.replacementAlias != "small" {
+		t.Fatalf("model calls = activate:%q remove:%q replace:%q", fake.activateAlias, fake.removeAlias, fake.replacementAlias)
+	}
+}
+
+func TestProviderCommandKeyFileRejectsSymlinkAndOversize(t *testing.T) {
+	installFakeProviderManager(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readModeCheckedKeyFile(link); err == nil {
+		t.Fatal("symlink key file accepted")
+	}
+	large := filepath.Join(dir, "large")
+	if err := os.WriteFile(large, bytes.Repeat([]byte("x"), maxProviderKeyBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readModeCheckedKeyFile(large); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversize error = %v", err)
 	}
 }
 

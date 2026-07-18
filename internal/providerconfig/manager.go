@@ -5,12 +5,14 @@ package providerconfig
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -30,6 +32,9 @@ var (
 	// ErrReferenced means a connection cannot be removed while model aliases
 	// still point at it.
 	ErrReferenced = errors.New("provider connection is referenced")
+	// ErrSimulatedCrash is used only by deterministic recovery tests. The
+	// transaction is intentionally left on disk exactly as a dead process would.
+	ErrSimulatedCrash = errors.New("simulated provider transaction process death")
 )
 
 // Probe validates one concrete provider/model pair without mutating live state.
@@ -43,6 +48,38 @@ type AddRequest struct {
 	DefaultModel   string
 	UtilityModel   string
 	APIKey         string
+	LegacyAuthFree bool
+}
+
+// Preflight establishes identity, path, syntax, and recovery readiness before
+// the CLI asks an operator to disclose a provider credential.
+func (m *Manager) Preflight(ctx context.Context) (err error) {
+	if m.Identity == nil {
+		return errors.New("secret-store identity is required")
+	}
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.ConfigPath), 0o700); err != nil {
+		return err
+	}
+	raw, _, _, err := readSnapshot(m.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if _, err := tomltree.LoadBytes(raw); err != nil {
+		return fmt.Errorf("parse config syntax tree: %w", err)
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return err
+	}
+	return ensureCanonicalManagedSource(raw, cfg)
 }
 
 // Status is the stable deployment lifecycle shape consumed by host tooling.
@@ -76,19 +113,21 @@ type ModelSummary struct {
 // Manager's callbacks keep systemd and HTTP health outside the transaction
 // engine, making every failure boundary deterministic in tests.
 type Manager struct {
-	ConfigPath  string
-	SecretsPath string
-	LockPath    string
-	Identity    *age.X25519Identity
-	Probe       Probe
-	Restart     func(context.Context) error
-	Health      func(context.Context) error
-	// RestoreService is called after files are rolled back. The status is the
-	// pre-transaction state, allowing a host adapter to restart or stop Waffle.
-	RestoreService func(context.Context, Status) error
+	ConfigPath    string
+	SecretsPath   string
+	LockPath      string
+	Identity      *age.X25519Identity
+	Probe         Probe
+	Restart       func(context.Context) error
+	Stop          func(context.Context) error
+	Health        func(context.Context) error
+	ServiceActive func(context.Context) (bool, error)
+	// RestoreService restores the independently captured active/inactive state.
+	RestoreService func(context.Context, bool) error
 	// AfterCommit is an observation/fault-injection hook. It is invoked after
 	// the named resource ("secret" then "config") is durably committed.
-	AfterCommit func(resource string) error
+	AfterCommit     func(resource string) error
+	CrashAfterPhase func(phase string) error
 }
 
 // New returns a manager rooted in WAFFLE_HOME using the supplied identity.
@@ -120,12 +159,18 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
 
 	if err := validateAdd(req); err != nil {
 		return err
 	}
-	before, err := m.capture()
+	before, err := m.capture(ctx)
 	if err != nil {
+		return err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
 		return err
 	}
 	if _, exists := before.cfg.Providers[req.ConnectionName]; exists {
@@ -136,11 +181,7 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 			return fmt.Errorf("model alias %q already exists", alias)
 		}
 	}
-	previousStatus, err := m.statusFromConfig(ctx, before.cfg)
-	if err != nil {
-		return err
-	}
-	legacyKey, err := m.legacyCredential(before.cfg)
+	legacyKey, err := m.legacyCredential(before.cfg, req.LegacyAuthFree)
 	if err != nil {
 		return redactError(err, req.APIKey)
 	}
@@ -167,6 +208,10 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := validateAddCandidate(before.cfg, candidate, req, connection); err != nil {
+		_ = os.Remove(configStage)
 		return err
 	}
 	defer func() { _ = os.Remove(configStage) }()
@@ -201,7 +246,7 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 		}
 	}
 
-	return m.commit(ctx, before, configStage, secretStage, candidate, previousStatus, req.APIKey)
+	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, req.APIKey)
 }
 
 // Remove deletes an unreferenced connection and its scoped credential.
@@ -211,11 +256,17 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
 	if !config.ValidProviderConnectionName(name) {
 		return fmt.Errorf("invalid connection name %q", name)
 	}
-	before, err := m.capture()
+	before, err := m.capture(ctx)
 	if err != nil {
+		return err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
 		return err
 	}
 	if _, ok := before.cfg.Providers[name]; !ok {
@@ -225,16 +276,20 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 	if len(refs) > 0 {
 		return fmt.Errorf("%w: %q is used by model aliases %s", ErrReferenced, name, strings.Join(refs, ", "))
 	}
-	previousStatus, err := m.statusFromConfig(ctx, before.cfg)
-	if err != nil {
-		return err
-	}
 	configStage, candidate, err := m.stageConfig(before.configBytes, func(doc *tomlDocument, cfg config.Config) error {
 		migrateLegacyDocument(doc, cfg, false)
 		doc.deleteTable("providers." + name)
 		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if _, stillPresent := candidate.Providers[name]; stillPresent {
+		_ = os.Remove(configStage)
+		return fmt.Errorf("semantic provider removal failed for %q; refusing secret mutation", name)
+	}
+	if err := validateRemoveCandidate(before.cfg, candidate, name); err != nil {
+		_ = os.Remove(configStage)
 		return err
 	}
 	defer func() { _ = os.Remove(configStage) }()
@@ -249,7 +304,7 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 		return err
 	}
 	defer func() { _ = os.Remove(secretStage) }()
-	return m.commit(ctx, before, configStage, secretStage, candidate, previousStatus, "")
+	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, "")
 }
 
 // Test probes the first alias for a named connection using its encrypted key.
@@ -282,8 +337,220 @@ func (m *Manager) Test(ctx context.Context, name string) error {
 	return nil
 }
 
+// ActivateModel validates an existing alias, makes it the default, and moves
+// an Installed host to Ready transactionally.
+func (m *Manager) ActivateModel(ctx context.Context, alias string) (err error) {
+	if !config.ValidModelAlias(alias) {
+		return fmt.Errorf("invalid model alias %q", alias)
+	}
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return err
+	}
+	target, err := before.cfg.ResolveModel(alias)
+	if err != nil {
+		return err
+	}
+	stage, candidate, err := m.stageConfig(before.configBytes, func(doc *tomlDocument, _ config.Config) error {
+		doc.setValue("agent", "default_model", strconv.Quote(alias))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(stage) }()
+	if candidate.Agent.DefaultModel != alias {
+		return errors.New("semantic default-model activation failed")
+	}
+	expectedAgent := before.cfg.Agent
+	expectedAgent.DefaultModel = alias
+	if !reflect.DeepEqual(candidate.Providers, before.cfg.Providers) ||
+		!reflect.DeepEqual(candidate.Models, before.cfg.Models) ||
+		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
+		return errors.New("unrelated configuration changed during model activation")
+	}
+	secretStage, err := m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(secretStage) }()
+	key, err := m.connectionKey(target.Connection)
+	if err != nil {
+		return err
+	}
+	if m.Probe == nil {
+		return errors.New("provider probe is not configured")
+	}
+	if err := m.Probe(ctx, target, key); err != nil {
+		return redactError(fmt.Errorf("probe model alias %q: %w", alias, err), key)
+	}
+	return m.commit(ctx, before, stage, secretStage, candidate, Status{}, key)
+}
+
+// RemoveModel deletes an alias. replacement reassigns default, utility, and
+// profile references; without it, default/utility references are cleared and
+// profile references fail closed.
+func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := before.cfg.Models[alias]; !ok {
+		return fmt.Errorf("model alias %q does not exist", alias)
+	}
+	if replacement == alias {
+		return errors.New("replacement alias must differ from removed alias")
+	}
+	if replacement != "" {
+		if _, ok := before.cfg.Models[replacement]; !ok {
+			return fmt.Errorf("replacement model alias %q does not exist", replacement)
+		}
+	}
+	for name, profile := range before.cfg.Agent.Profiles {
+		if profile.Model == alias && replacement == "" {
+			return fmt.Errorf("model alias %q is referenced by agent profile %q; use --replace-with", alias, name)
+		}
+	}
+	stage, candidate, err := m.stageConfig(before.configBytes, func(doc *tomlDocument, cfg config.Config) error {
+		doc.deleteTable("models." + alias)
+		if cfg.Agent.DefaultModel == alias {
+			if replacement == "" {
+				doc.deleteValue("agent", "default_model")
+			} else {
+				doc.setValue("agent", "default_model", strconv.Quote(replacement))
+			}
+		}
+		if cfg.Agent.UtilityModel == alias {
+			if replacement == "" {
+				doc.deleteValue("agent", "utility_model")
+			} else {
+				doc.setValue("agent", "utility_model", strconv.Quote(replacement))
+			}
+		}
+		for name, profile := range cfg.Agent.Profiles {
+			if profile.Model != alias {
+				continue
+			}
+			table := "agent.profile." + name
+			if _, _, ok := doc.tableSpan(table); !ok {
+				return fmt.Errorf("agent profile %q must use canonical [%s] table form before reassignment", name, table)
+			}
+			doc.setValue(table, "model", strconv.Quote(replacement))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(stage) }()
+	if _, ok := candidate.Models[alias]; ok {
+		return errors.New("semantic model removal failed")
+	}
+	if before.cfg.Agent.DefaultModel == alias && candidate.Agent.DefaultModel != replacement {
+		return errors.New("semantic default-model reassignment failed")
+	}
+	expectedModels := make(map[string]config.ModelTarget, len(before.cfg.Models)-1)
+	for name, target := range before.cfg.Models {
+		if name != alias {
+			expectedModels[name] = target
+		}
+	}
+	expectedAgent := before.cfg.Agent
+	if expectedAgent.DefaultModel == alias {
+		expectedAgent.DefaultModel = replacement
+	}
+	if expectedAgent.UtilityModel == alias {
+		expectedAgent.UtilityModel = replacement
+	}
+	if replacement != "" && len(expectedAgent.Profiles) > 0 {
+		profiles := make(map[string]config.AgentProfile, len(expectedAgent.Profiles))
+		for name, profile := range expectedAgent.Profiles {
+			if profile.Model == alias {
+				profile.Model = replacement
+			}
+			profiles[name] = profile
+		}
+		expectedAgent.Profiles = profiles
+	}
+	if !equalProviderMaps(candidate.Providers, before.cfg.Providers) ||
+		!equalModelMaps(candidate.Models, expectedModels) ||
+		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
+		return errors.New("unrelated configuration changed during model removal")
+	}
+	secretStage, err := m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(secretStage) }()
+	if replacement != "" && candidate.Agent.DefaultModel == replacement {
+		target, resolveErr := candidate.ResolveModel(replacement)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		key, keyErr := m.connectionKey(target.Connection)
+		if keyErr != nil {
+			return keyErr
+		}
+		if m.Probe == nil {
+			return errors.New("provider probe is not configured")
+		}
+		if probeErr := m.Probe(ctx, target, key); probeErr != nil {
+			return redactError(probeErr, key)
+		}
+	}
+	return m.commit(ctx, before, stage, secretStage, candidate, Status{}, "")
+}
+
+func equalProviderMaps(a, b map[string]config.ProviderConnection) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, value := range a {
+		if other, ok := b[name]; !ok || other != value {
+			return false
+		}
+	}
+	return true
+}
+
+func equalModelMaps(a, b map[string]config.ModelTarget) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, value := range a {
+		if other, ok := b[name]; !ok || other != value {
+			return false
+		}
+	}
+	return true
+}
+
 // Status reports Installed unless a configured default alias is healthy.
-func (m *Manager) Status(ctx context.Context) (Status, error) {
+func (m *Manager) Status(ctx context.Context) (status Status, err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return Status{}, err
+	}
 	cfg, err := config.Load(m.ConfigPath)
 	if err != nil {
 		return Status{}, err
@@ -293,11 +560,11 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 
 // List returns a deterministic, credential-free JSON document.
 func (m *Manager) List(ctx context.Context) ([]byte, error) {
-	cfg, err := config.Load(m.ConfigPath)
+	status, err := m.Status(ctx)
 	if err != nil {
 		return nil, err
 	}
-	status, err := m.statusFromConfig(ctx, cfg)
+	cfg, err := config.Load(m.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -318,16 +585,20 @@ func (m *Manager) List(ctx context.Context) ([]byte, error) {
 }
 
 type snapshot struct {
-	configBytes []byte
-	secretBytes []byte
-	configMode  fs.FileMode
-	secretMode  fs.FileMode
-	configExist bool
-	secretExist bool
-	cfg         config.Config
+	configBytes   []byte
+	secretBytes   []byte
+	configMode    fs.FileMode
+	secretMode    fs.FileMode
+	configExist   bool
+	secretExist   bool
+	cfg           config.Config
+	readyBytes    []byte
+	readyMode     fs.FileMode
+	readyExist    bool
+	serviceActive bool
 }
 
-func (m *Manager) capture() (snapshot, error) {
+func (m *Manager) capture(ctx context.Context) (snapshot, error) {
 	configBytes, configMode, configExist, err := readSnapshot(m.ConfigPath)
 	if err != nil {
 		return snapshot{}, err
@@ -340,7 +611,24 @@ func (m *Manager) capture() (snapshot, error) {
 	if err != nil {
 		return snapshot{}, err
 	}
-	return snapshot{configBytes, secretBytes, configMode, secretMode, configExist, secretExist, cfg}, nil
+	readyBytes, readyMode, readyExist, err := readSnapshot(m.readyPath())
+	if err != nil {
+		return snapshot{}, err
+	}
+	if m.ServiceActive == nil {
+		return snapshot{}, errors.New("service active-state callback is not configured")
+	}
+	active, err := m.ServiceActive(ctx)
+	if err != nil {
+		return snapshot{}, fmt.Errorf("capture service active state: %w", err)
+	}
+	return snapshot{
+		configBytes: configBytes, secretBytes: secretBytes,
+		configMode: configMode, secretMode: secretMode,
+		configExist: configExist, secretExist: secretExist, cfg: cfg,
+		readyBytes: readyBytes, readyMode: readyMode, readyExist: readyExist,
+		serviceActive: active,
+	}, nil
 }
 
 func (m *Manager) acquire(ctx context.Context) (*instance.Lease, error) {
@@ -364,6 +652,9 @@ func (m *Manager) stageConfig(original []byte, mutate func(*tomlDocument, config
 	}
 	base, err := config.Load(m.ConfigPath)
 	if err != nil {
+		return "", config.Config{}, err
+	}
+	if err := ensureCanonicalManagedSource(original, base); err != nil {
 		return "", config.Config{}, err
 	}
 	doc := newTOMLDocument(original)
@@ -416,34 +707,39 @@ func (m *Manager) stageSecrets(original []byte, mutate func(secret.Store) error)
 	return stage, nil
 }
 
-func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, previous Status, key string) (err error) {
+func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, _ Status, key string) (err error) {
+	journal := transactionJournal{
+		Phase: "prepared", ConfigExisted: before.configExist, SecretExisted: before.secretExist,
+		ReadyExisted: before.readyExist, ConfigMode: uint32(before.configMode),
+		SecretMode: uint32(before.secretMode), ReadyMode: uint32(before.readyMode),
+		ServiceActive: before.serviceActive,
+	}
 	if err := writeBackups(m, before); err != nil {
 		return err
 	}
-	committed := false
+	if err := m.writeJournal(journal); err != nil {
+		return err
+	}
 	defer func() {
-		if err == nil {
-			removeErr := errors.Join(removeIfExists(m.ConfigPath+".bak"), removeIfExists(m.SecretsPath+".bak"))
-			err = errors.Join(err, removeErr)
+		if err == nil || errors.Is(err, ErrSimulatedCrash) {
 			return
 		}
-		if committed {
-			restoreErr := restoreSnapshot(m, before)
-			if m.RestoreService != nil {
-				restoreErr = errors.Join(restoreErr, m.RestoreService(ctx, previous))
-			}
-			err = errors.Join(redactError(err, key), restoreErr)
-		}
+		err = errors.Join(redactError(err, key), m.recoverLocked(ctx))
 	}()
 
 	if err = commitStage(secretStage, m.SecretsPath, 0o600); err != nil {
 		return err
 	}
-	committed = true
 	if m.AfterCommit != nil {
 		if err = m.AfterCommit("secret"); err != nil {
 			return err
 		}
+	}
+	if err = m.advanceJournal(&journal, "secret_committed"); err != nil {
+		return err
+	}
+	if err = m.crashPoint("secret_committed"); err != nil {
+		return err
 	}
 	if err = commitStage(configStage, m.ConfigPath, 0o600); err != nil {
 		return err
@@ -453,19 +749,58 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 			return err
 		}
 	}
+	if err = m.advanceJournal(&journal, "config_committed"); err != nil {
+		return err
+	}
+	if err = m.crashPoint("config_committed"); err != nil {
+		return err
+	}
+
 	if candidate.Agent.DefaultModel == "" {
-		return nil
+		if before.serviceActive {
+			if m.Stop == nil {
+				return errors.New("service stop callback is not configured")
+			}
+			if err = m.Stop(ctx); err != nil {
+				return fmt.Errorf("stop waffle service: %w", err)
+			}
+		}
+		if err = removeIfExists(m.readyPath()); err != nil {
+			return err
+		}
+	} else {
+		if m.Restart == nil || m.Health == nil {
+			return errors.New("service activation callbacks are not configured")
+		}
+		if err = m.Restart(ctx); err != nil {
+			return fmt.Errorf("restart waffle service: %w", err)
+		}
 	}
-	if m.Restart == nil || m.Health == nil {
-		return errors.New("service activation callbacks are not configured")
+	if err = m.advanceJournal(&journal, "activated"); err != nil {
+		return err
 	}
-	if err = m.Restart(ctx); err != nil {
-		return fmt.Errorf("restart waffle service: %w", err)
+	if err = m.crashPoint("activated"); err != nil {
+		return err
 	}
-	if err = m.Health(ctx); err != nil {
-		return fmt.Errorf("waffle health check: %w", err)
+	if candidate.Agent.DefaultModel != "" {
+		if err = m.Health(ctx); err != nil {
+			return fmt.Errorf("waffle health check: %w", err)
+		}
+		configBytes, readErr := os.ReadFile(m.ConfigPath)
+		if readErr != nil {
+			return readErr
+		}
+		if err = writeDurable(m.readyPath(), generationBytes(configBytes), 0o600); err != nil {
+			return err
+		}
 	}
-	return nil
+	if err = m.advanceJournal(&journal, "healthy"); err != nil {
+		return err
+	}
+	if err = m.crashPoint("healthy"); err != nil {
+		return err
+	}
+	return m.finalizeTransaction()
 }
 
 func (m *Manager) statusFromConfig(ctx context.Context, cfg config.Config) (Status, error) {
@@ -476,7 +811,25 @@ func (m *Manager) statusFromConfig(ctx context.Context, cfg config.Config) (Stat
 	if _, err := cfg.ResolveModel(cfg.Agent.DefaultModel); err != nil {
 		return Status{}, err
 	}
-	if m.Health != nil && m.Health(ctx) == nil {
+	if m.ServiceActive == nil {
+		return Status{}, errors.New("service active-state callback is not configured")
+	}
+	active, err := m.ServiceActive(ctx)
+	if err != nil || !active {
+		return status, err
+	}
+	configBytes, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		return Status{}, err
+	}
+	readyBytes, err := os.ReadFile(m.readyPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return status, nil
+		}
+		return Status{}, err
+	}
+	if string(readyBytes) == string(generationBytes(configBytes)) && m.Health != nil && m.Health(ctx) == nil {
 		status.State = "ready"
 	}
 	return status, nil
@@ -552,7 +905,7 @@ func migrateLegacyDocument(doc *tomlDocument, cfg config.Config, credentialMigra
 	}
 }
 
-func (m *Manager) legacyCredential(cfg config.Config) (string, error) {
+func (m *Manager) legacyCredential(cfg config.Config, explicitAuthFree bool) (string, error) {
 	if cfg.ProviderRegistrySource() != config.ProviderRegistryLegacy {
 		return "", nil
 	}
@@ -565,7 +918,13 @@ func (m *Manager) legacyCredential(cfg config.Config) (string, error) {
 		case "openai":
 			env = "OPENAI_API_KEY"
 		}
-		return os.Getenv(env), nil
+		if value := os.Getenv(env); value != "" {
+			return value, nil
+		}
+		if explicitAuthFree {
+			return "", nil
+		}
+		return "", fmt.Errorf("legacy provider credential is not visible to this management process; preserve it in [provider].api_key or a secret reference, or explicitly confirm auth-free intent")
 	}
 	if !secret.IsRef(connection.APIKey) {
 		return connection.APIKey, nil
@@ -578,6 +937,94 @@ func (m *Manager) legacyCredential(cfg config.Config) (string, error) {
 		return "", fmt.Errorf("resolve legacy provider credential: %w", err)
 	}
 	return value, nil
+}
+
+func ensureCanonicalManagedSource(raw []byte, cfg config.Config) error {
+	text := string(raw)
+	inlineManaged := regexp.MustCompile(`(?m)^\s*(provider|providers|models|agent)\s*=\s*\{`)
+	if inlineManaged.MatchString(text) {
+		return errors.New("managed provider TOML must use canonical table form; inline tables cannot be safely rewritten")
+	}
+	doc := newTOMLDocument(raw)
+	if cfg.ProviderRegistrySource() == config.ProviderRegistryLegacy {
+		if _, _, ok := doc.tableSpan("provider"); !ok {
+			return errors.New("legacy provider TOML must use canonical [provider] table form before management")
+		}
+	}
+	for name := range cfg.Providers {
+		if cfg.ProviderRegistrySource() == config.ProviderRegistryLegacy {
+			break
+		}
+		if _, _, ok := doc.tableSpan("providers." + name); !ok {
+			return fmt.Errorf("provider %q must use canonical [providers.%s] table form before management", name, name)
+		}
+	}
+	for alias := range cfg.Models {
+		if cfg.ProviderRegistrySource() == config.ProviderRegistryLegacy {
+			break
+		}
+		if _, _, ok := doc.tableSpan("models." + alias); !ok {
+			return fmt.Errorf("model alias %q must use canonical [models.%s] table form before management", alias, alias)
+		}
+	}
+	return nil
+}
+
+func validateAddCandidate(before, candidate config.Config, req AddRequest, connection config.ProviderConnection) error {
+	got, ok := candidate.Providers[req.ConnectionName]
+	if !ok || got != connection {
+		return fmt.Errorf("semantic provider addition failed for %q; refusing secret mutation", req.ConnectionName)
+	}
+	for alias, requested := range req.Models {
+		requested.Provider = req.ConnectionName
+		if gotTarget, ok := candidate.Models[alias]; !ok || gotTarget != requested {
+			return fmt.Errorf("semantic model addition failed for %q; refusing secret mutation", alias)
+		}
+	}
+	if req.DefaultModel != "" && candidate.Agent.DefaultModel != req.DefaultModel {
+		return errors.New("semantic default-model update failed; refusing secret mutation")
+	}
+	for name, old := range before.Providers {
+		if before.ProviderRegistrySource() == config.ProviderRegistryLegacy {
+			continue
+		}
+		if gotOld, ok := candidate.Providers[name]; !ok || gotOld != old {
+			return fmt.Errorf("unrelated provider %q changed during mutation", name)
+		}
+	}
+	if before.ProviderRegistrySource() != config.ProviderRegistryLegacy {
+		for alias, old := range before.Models {
+			if gotOld, ok := candidate.Models[alias]; !ok || gotOld != old {
+				return fmt.Errorf("unrelated model alias %q changed during mutation", alias)
+			}
+		}
+	}
+	expectedAgent := before.Agent
+	if req.DefaultModel != "" {
+		expectedAgent.DefaultModel = req.DefaultModel
+	}
+	if req.UtilityModel != "" {
+		expectedAgent.UtilityModel = req.UtilityModel
+	}
+	if before.ProviderRegistrySource() != config.ProviderRegistryLegacy && !reflect.DeepEqual(candidate.Agent, expectedAgent) {
+		return errors.New("unrelated agent configuration changed during provider addition")
+	}
+	return nil
+}
+
+func validateRemoveCandidate(before, candidate config.Config, removed string) error {
+	for name, old := range before.Providers {
+		if name == removed {
+			continue
+		}
+		if got, ok := candidate.Providers[name]; !ok || got != old {
+			return fmt.Errorf("unrelated provider %q changed during removal", name)
+		}
+	}
+	if !reflect.DeepEqual(before.Models, candidate.Models) || !reflect.DeepEqual(before.Agent, candidate.Agent) {
+		return errors.New("unrelated models or agent configuration changed during provider removal")
+	}
+	return nil
 }
 
 func setConnection(doc *tomlDocument, name string, connection config.ProviderConnection) {
@@ -802,6 +1249,11 @@ func writeStage(destination string, data []byte, mode fs.FileMode) (string, erro
 }
 
 func writeBackups(m *Manager, before snapshot) error {
+	for _, path := range []string{m.ConfigPath + ".bak", m.SecretsPath + ".bak", m.readyPath() + ".bak"} {
+		if err := removeIfExists(path); err != nil {
+			return err
+		}
+	}
 	if before.configExist {
 		if err := writeDurable(m.ConfigPath+".bak", before.configBytes, before.configMode); err != nil {
 			return err
@@ -812,21 +1264,106 @@ func writeBackups(m *Manager, before snapshot) error {
 			return err
 		}
 	}
+	if before.readyExist {
+		if err := writeDurable(m.readyPath()+".bak", before.readyBytes, before.readyMode); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func restoreSnapshot(m *Manager, before snapshot) error {
-	return errors.Join(
-		restoreOne(m.SecretsPath, before.secretBytes, before.secretMode, before.secretExist),
-		restoreOne(m.ConfigPath, before.configBytes, before.configMode, before.configExist),
-	)
+type transactionJournal struct {
+	Phase         string `json:"phase"`
+	ConfigExisted bool   `json:"config_existed"`
+	SecretExisted bool   `json:"secret_existed"`
+	ReadyExisted  bool   `json:"ready_existed"`
+	ConfigMode    uint32 `json:"config_mode"`
+	SecretMode    uint32 `json:"secret_mode"`
+	ReadyMode     uint32 `json:"ready_mode"`
+	ServiceActive bool   `json:"service_active"`
 }
 
-func restoreOne(path string, data []byte, mode fs.FileMode, existed bool) error {
-	if !existed {
-		return removeIfExists(path)
+func (m *Manager) journalPath() string { return m.LockPath + ".transaction.json" }
+func (m *Manager) readyPath() string   { return m.LockPath + ".ready-generation" }
+
+func generationBytes(configBytes []byte) []byte {
+	sum := sha256.Sum256(configBytes)
+	return []byte(fmt.Sprintf("%x\n", sum[:]))
+}
+
+func (m *Manager) writeJournal(j transactionJournal) error {
+	b, err := json.Marshal(j)
+	if err != nil {
+		return err
 	}
-	return writeDurable(path, data, mode)
+	return writeDurable(m.journalPath(), append(b, '\n'), 0o600)
+}
+
+func (m *Manager) advanceJournal(j *transactionJournal, phase string) error {
+	j.Phase = phase
+	return m.writeJournal(*j)
+}
+
+func (m *Manager) crashPoint(phase string) error {
+	if m.CrashAfterPhase == nil {
+		return nil
+	}
+	return m.CrashAfterPhase(phase)
+}
+
+func (m *Manager) recoverLocked(ctx context.Context) error {
+	b, err := os.ReadFile(m.journalPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var j transactionJournal
+	if err := json.Unmarshal(b, &j); err != nil {
+		return fmt.Errorf("parse provider transaction journal: %w", err)
+	}
+	if j.Phase == "healthy" || j.Phase == "rolled_back" {
+		return m.finalizeTransaction()
+	}
+	if m.RestoreService == nil {
+		return errors.New("cannot recover provider transaction: service restore callback is not configured")
+	}
+	restore := errors.Join(
+		restoreFromBackup(m.SecretsPath, m.SecretsPath+".bak", fs.FileMode(j.SecretMode), j.SecretExisted),
+		restoreFromBackup(m.ConfigPath, m.ConfigPath+".bak", fs.FileMode(j.ConfigMode), j.ConfigExisted),
+		restoreFromBackup(m.readyPath(), m.readyPath()+".bak", fs.FileMode(j.ReadyMode), j.ReadyExisted),
+	)
+	if restore != nil {
+		return restore
+	}
+	if err := m.RestoreService(ctx, j.ServiceActive); err != nil {
+		return fmt.Errorf("restore previous service state: %w", err)
+	}
+	if err := m.advanceJournal(&j, "rolled_back"); err != nil {
+		return err
+	}
+	return m.finalizeTransaction()
+}
+
+func restoreFromBackup(destination, backup string, mode fs.FileMode, existed bool) error {
+	if !existed {
+		return removeIfExists(destination)
+	}
+	b, err := os.ReadFile(backup)
+	if err != nil {
+		return fmt.Errorf("recover %s from backup: %w", destination, err)
+	}
+	return writeDurable(destination, b, mode)
+}
+
+func (m *Manager) finalizeTransaction() error {
+	return errors.Join(
+		removeIfExists(m.ConfigPath+".bak"),
+		removeIfExists(m.SecretsPath+".bak"),
+		removeIfExists(m.readyPath()+".bak"),
+		removeIfExists(m.journalPath()),
+	)
 }
 
 func writeDurable(path string, data []byte, mode fs.FileMode) error {

@@ -45,6 +45,7 @@ func TestManagerAddCommitsSecretBeforeConfigAndClearsBackupsAfterReady(t *testin
 		restarted = true
 		return nil
 	}
+	m.ServiceActive = func(context.Context) (bool, error) { return restarted, nil }
 	m.Health = func(context.Context) error {
 		if !restarted {
 			t.Fatal("health called before restart")
@@ -292,6 +293,198 @@ func TestManagerFirstWriteMigratesLegacyProviderWithoutCredentialInConfig(t *tes
 	assertStoredSecret(t, m, "provider/default/api-key", legacyKey)
 }
 
+func TestManagerRejectsQuotedAndInlineManagedTOMLBeforeSecretMutation(t *testing.T) {
+	for _, body := range []string{
+		"[providers.\"openai\"]\ntype = \"openai\"\n",
+		"providers = { openai = { type = \"openai\" } }\n",
+		"['provider']\nname = \"anthropic\"\nmodel = \"old\"\napi_key = \"legacy\"\n",
+	} {
+		t.Run(strings.ReplaceAll(body[:min(len(body), 12)], "\n", "_"), func(t *testing.T) {
+			m := newTestManager(t)
+			if err := os.WriteFile(m.ConfigPath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			beforeSecrets := readMaybe(t, m.SecretsPath)
+			err := m.Add(context.Background(), validAddRequest())
+			if err == nil || !strings.Contains(err.Error(), "canonical") {
+				t.Fatalf("Add error = %v, want canonical-source refusal", err)
+			}
+			assertBytesEqual(t, m.SecretsPath, beforeSecrets)
+		})
+	}
+}
+
+func TestManagerLegacyEmptyCredentialFailsClosed(t *testing.T) {
+	m := newTestManager(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	legacy := "[provider]\nname = \"anthropic\"\nmodel = \"claude-old\"\n"
+	if err := os.WriteFile(m.ConfigPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig := readMaybe(t, m.ConfigPath)
+	beforeSecrets := readMaybe(t, m.SecretsPath)
+	err := m.Add(context.Background(), validAddRequest())
+	if err == nil || !strings.Contains(err.Error(), "legacy provider credential") {
+		t.Fatalf("Add error = %v, want fail-closed credential guidance", err)
+	}
+	assertBytesEqual(t, m.ConfigPath, beforeConfig)
+	assertBytesEqual(t, m.SecretsPath, beforeSecrets)
+}
+
+func TestManagerActivateAndRemoveModelAvoidInstalledDeadEnd(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.DefaultModel = ""
+	req.UtilityModel = ""
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ActivateModel(context.Background(), "gpt"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Status(context.Background())
+	if err != nil || status.State != "ready" || status.DefaultModel != "gpt" {
+		t.Fatalf("activated status = %#v err=%v", status, err)
+	}
+	if err := m.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	status, err = m.Status(context.Background())
+	if err != nil || status.State != "installed" || status.DefaultModel != "" {
+		t.Fatalf("removed status = %#v err=%v", status, err)
+	}
+	if err := m.Remove(context.Background(), "openai"); err != nil {
+		t.Fatalf("remove unreferenced provider: %v", err)
+	}
+}
+
+func TestManagerRemoveModelReassignsDefaultAndUtility(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveModel(context.Background(), "gpt", "small"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.DefaultModel != "small" || cfg.Agent.UtilityModel != "small" {
+		t.Fatalf("agent aliases = default:%q utility:%q", cfg.Agent.DefaultModel, cfg.Agent.UtilityModel)
+	}
+}
+
+func TestManagerRecoversDurableJournalAfterSimulatedProcessDeath(t *testing.T) {
+	for _, phase := range []string{"secret_committed", "config_committed", "activated", "healthy"} {
+		t.Run(phase, func(t *testing.T) {
+			m := newTestManager(t)
+			beforeConfig := readMaybe(t, m.ConfigPath)
+			beforeSecrets := readMaybe(t, m.SecretsPath)
+			m.CrashAfterPhase = func(got string) error {
+				if got == phase {
+					return ErrSimulatedCrash
+				}
+				return nil
+			}
+			err := m.Add(context.Background(), validAddRequest())
+			if !errors.Is(err, ErrSimulatedCrash) {
+				t.Fatalf("Add error = %v, want simulated crash after %s", err, phase)
+			}
+			m.CrashAfterPhase = nil
+			status, recoverErr := m.Status(context.Background())
+			if recoverErr != nil {
+				t.Fatal(recoverErr)
+			}
+			if phase == "healthy" {
+				if status.State != "ready" {
+					t.Fatalf("healthy-generation recovery = %#v", status)
+				}
+				return
+			}
+			if status.State != "installed" {
+				t.Fatalf("rollback recovery = %#v", status)
+			}
+			assertBytesEqual(t, m.ConfigPath, beforeConfig)
+			assertBytesEqual(t, m.SecretsPath, beforeSecrets)
+		})
+	}
+}
+
+func TestManagerRollbackRestoresActualActiveServiceState(t *testing.T) {
+	m := newTestManager(t)
+	active := true
+	m.ServiceActive = func(context.Context) (bool, error) { return active, nil }
+	m.RestoreService = func(_ context.Context, wasActive bool) error {
+		active = wasActive
+		return nil
+	}
+	m.Restart = func(context.Context) error {
+		active = false
+		return errors.New("restart failed")
+	}
+	if err := m.Add(context.Background(), validAddRequest()); err == nil {
+		t.Fatal("Add succeeded, want restart failure")
+	}
+	if !active {
+		t.Fatal("rollback did not restore previously active service")
+	}
+}
+
+func TestManagerCrashRecoveryRestoresOriginallyAbsentFiles(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.Remove(m.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(m.SecretsPath); err != nil {
+		t.Fatal(err)
+	}
+	m.CrashAfterPhase = func(phase string) error {
+		if phase == "config_committed" {
+			return ErrSimulatedCrash
+		}
+		return nil
+	}
+	if err := m.Add(context.Background(), validAddRequest()); !errors.Is(err, ErrSimulatedCrash) {
+		t.Fatalf("Add error = %v", err)
+	}
+	m.CrashAfterPhase = nil
+	if _, err := m.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{m.ConfigPath, m.SecretsPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("originally absent %s was not removed: %v", path, err)
+		}
+	}
+}
+
+func TestManagerReadyRequiresActiveCommittedGeneration(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.Add(context.Background(), validAddRequest()); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(m.ConfigPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n# generation changed without activation\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "installed" {
+		t.Fatalf("stale healthy process reported %#v, want installed", status)
+	}
+}
+
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	dir := t.TempDir()
@@ -309,14 +502,18 @@ func newTestManager(t *testing.T) *Manager {
 	if err := store.Set("existing/value", "preserve-me"); err != nil {
 		t.Fatal(err)
 	}
+	active := false
 	return &Manager{
-		ConfigPath:  configPath,
-		SecretsPath: secretsPath,
-		LockPath:    filepath.Join(dir, "provider-config.lock"),
-		Identity:    id,
-		Probe:       func(context.Context, config.ResolvedModel, string) error { return nil },
-		Restart:     func(context.Context) error { return nil },
-		Health:      func(context.Context) error { return nil },
+		ConfigPath:     configPath,
+		SecretsPath:    secretsPath,
+		LockPath:       filepath.Join(dir, "provider-config.lock"),
+		Identity:       id,
+		Probe:          func(context.Context, config.ResolvedModel, string) error { return nil },
+		Restart:        func(context.Context) error { active = true; return nil },
+		Health:         func(context.Context) error { return nil },
+		ServiceActive:  func(context.Context) (bool, error) { return active, nil },
+		Stop:           func(context.Context) error { active = false; return nil },
+		RestoreService: func(_ context.Context, wasActive bool) error { active = wasActive; return nil },
 	}
 }
 
