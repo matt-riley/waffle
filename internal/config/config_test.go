@@ -451,6 +451,32 @@ model = "legacy-main"
 	}
 }
 
+func TestProviderRegistrySourceTracksLoadPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want ProviderRegistrySource
+	}{
+		{name: "none", body: "[log]\nlevel = \"debug\"\n", want: ProviderRegistryNone},
+		{name: "legacy", body: "[provider]\nname = \"anthropic\"\nmodel = \"legacy\"\n", want: ProviderRegistryLegacy},
+		{name: "explicit", body: "[providers.local]\ntype = \"openai\"\n[models.local]\nprovider = \"local\"\nmodel = \"qwen\"\n", want: ProviderRegistryExplicit},
+		{name: "explicit-empty", body: "[provider]\nname = \"anthropic\"\nmodel = \"legacy\"\n[providers]\n", want: ProviderRegistryExplicit},
+		{name: "mixed", body: "[provider]\nname = \"anthropic\"\nmodel = \"legacy\"\n[providers.local]\ntype = \"openai\"\n[models.local]\nprovider = \"local\"\nmodel = \"qwen\"\n", want: ProviderRegistryExplicit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tc.body)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.ProviderRegistrySource(); got != tc.want {
+				t.Fatalf("ProviderRegistrySource = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSelfdevDefaultsAndApproval(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.toml"))
 	if err != nil {

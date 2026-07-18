@@ -86,6 +86,37 @@ func TestProxyAccountsReturnedProviderUsageAndEnforcesBothCaps(t *testing.T) {
 	}
 }
 
+func TestKeylessUpstreamDoesNotInjectEmptyAuthHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("X-Api-Key = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	b := New(nil, []Upstream{{Name: "local", BaseURL: upstream.URL}})
+	token, err := b.Mint(context.Background(), "keyless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/local/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
 func TestConcurrentDeclaredTokenReservationsCannotOvershoot(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0

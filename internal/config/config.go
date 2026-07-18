@@ -54,6 +54,10 @@ type Config struct {
 	// handling confined to that representation; explicit named providers always
 	// require connection-scoped secret references.
 	legacyProviderNormalized bool
+	// providerRegistryExplicit records the presence of [providers] or [models],
+	// including an intentionally empty table. Map length cannot represent that
+	// precedence decision after TOML decoding.
+	providerRegistryExplicit bool
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).
@@ -671,6 +675,33 @@ type ResolvedModel struct {
 	MaxTokens      int
 }
 
+// ProviderRegistrySource identifies how the effective provider registry was
+// established. It preserves explicit-empty precedence without exposing
+// mutable loader internals.
+type ProviderRegistrySource string
+
+const (
+	ProviderRegistryNone     ProviderRegistrySource = "none"
+	ProviderRegistryLegacy   ProviderRegistrySource = "legacy"
+	ProviderRegistryExplicit ProviderRegistrySource = "explicit"
+)
+
+// ProviderRegistrySource reports whether provider connections were explicitly
+// configured or normalized from the singular compatibility table. Programmatic
+// configs containing registry entries are treated as explicit.
+func (c Config) ProviderRegistrySource() ProviderRegistrySource {
+	if c.providerRegistryExplicit {
+		return ProviderRegistryExplicit
+	}
+	if c.legacyProviderNormalized {
+		return ProviderRegistryLegacy
+	}
+	if len(c.Providers) > 0 || len(c.Models) > 0 {
+		return ProviderRegistryExplicit
+	}
+	return ProviderRegistryNone
+}
+
 // ProviderConnectionNameMax is the maximum length of a provider connection
 // name or model alias. These names are also used as secret-store path parts.
 const ProviderConnectionNameMax = 64
@@ -837,6 +868,7 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unknown keys in %s: %s", path, strings.Join(keys, ", "))
 	}
 	registryDefined := meta.IsDefined("providers") || meta.IsDefined("models")
+	cfg.providerRegistryExplicit = registryDefined
 	normalizeLegacyProvider(&cfg, registryDefined)
 	if err := validateProviderRegistry(cfg); err != nil {
 		return Config{}, err

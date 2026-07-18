@@ -118,8 +118,14 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 	}()
 
+	providerLabel := cfg.Provider.Name
+	if runtime, ok := c.agent.Provider.(*modelRuntimeResolver); ok {
+		if target, resolveErr := runtime.resolveTarget(c.agent.Model); resolveErr == nil {
+			providerLabel = fmt.Sprintf("%s (%s)", target.ConnectionName, target.Connection.Type)
+		}
+	}
 	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
-		c.agent.Model, cfg.Provider.Name, c.current.ID)
+		c.agent.Model, providerLabel, c.current.ID)
 	if len(c.history) > 0 {
 		fmt.Fprintf(stdout, "(continuing with %d earlier turns)\n", len(c.history))
 	}
@@ -1002,6 +1008,9 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 			Model:          model,
 			Tools:          effectiveTools,
 			RequestedTools: requestedTools,
+		}
+		if target, targetErr := resolveRuntimeModelTarget(cfg, model); targetErr == nil {
+			cp.MaxTokens = target.MaxTokens
 		}
 		if p.MaxTokens > 0 {
 			cp.MaxTokens = p.MaxTokens

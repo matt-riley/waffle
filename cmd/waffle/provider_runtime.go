@@ -102,15 +102,20 @@ func (r *modelRuntimeResolver) resolve(alias string) (llm.Provider, config.Resol
 }
 
 func (r *modelRuntimeResolver) resolveTarget(alias string) (config.ResolvedModel, error) {
-	if len(r.cfg.Providers) > 0 || len(r.cfg.Models) > 0 {
-		target, err := r.cfg.ResolveModel(alias)
+	return resolveRuntimeModelTarget(r.cfg, alias)
+}
+
+func resolveRuntimeModelTarget(cfg config.Config, alias string) (config.ResolvedModel, error) {
+	source := cfg.ProviderRegistrySource()
+	if source != config.ProviderRegistryNone {
+		target, err := cfg.ResolveModel(alias)
 		if err == nil {
-			if r.cfg.Provider.Name != "" && target.Connection.APIKey == "" {
+			if source == config.ProviderRegistryLegacy && target.Connection.APIKey == "" {
 				target.Connection.APIKey = envKey(target.Connection.Type)
 			}
 			return target, nil
 		}
-		if r.cfg.Provider.Name == "" {
+		if source == config.ProviderRegistryExplicit {
 			return target, err
 		}
 		// A normalized legacy registry still permits historical profile model
@@ -118,15 +123,15 @@ func (r *modelRuntimeResolver) resolveTarget(alias string) (config.ResolvedModel
 	}
 	// Compatibility for callers that construct Config values directly instead
 	// of loading a legacy [provider] table through config.Load.
-	providerType := r.cfg.Provider.Name
+	providerType := cfg.Provider.Name
 	if providerType == "" {
 		providerType = "anthropic"
 	}
 	upstreamModel := alias
 	if upstreamModel == "" {
-		upstreamModel = r.cfg.Provider.Model
+		upstreamModel = cfg.Provider.Model
 	}
-	apiKey := r.cfg.Provider.APIKey
+	apiKey := cfg.Provider.APIKey
 	if apiKey == "" {
 		apiKey = envKey(providerType)
 	}
@@ -136,18 +141,18 @@ func (r *modelRuntimeResolver) resolveTarget(alias string) (config.ResolvedModel
 		Connection: config.ProviderConnection{
 			Type:      providerType,
 			APIKey:    apiKey,
-			BaseURL:   r.cfg.Provider.BaseURL,
-			MaxTokens: r.cfg.Provider.MaxTokens,
+			BaseURL:   cfg.Provider.BaseURL,
+			MaxTokens: cfg.Provider.MaxTokens,
 		},
 		UpstreamModel: upstreamModel,
-		MaxTokens:     r.cfg.Provider.MaxTokens,
+		MaxTokens:     cfg.Provider.MaxTokens,
 	}, nil
 }
 
 func resolveRuntimeProfileModel(cfg config.Config, profile config.AgentProfile) (string, error) {
 	// An explicit registry has no singular provider. Its profile values are
 	// aliases, with "default" and "utility" selecting the agent aliases.
-	if cfg.Provider.Name == "" && (len(cfg.Providers) > 0 || len(cfg.Models) > 0) {
+	if cfg.ProviderRegistrySource() == config.ProviderRegistryExplicit {
 		alias := strings.TrimSpace(profile.Model)
 		switch alias {
 		case "", "default":
@@ -240,7 +245,7 @@ func resolveProviderConnectionSecret(connection config.ProviderConnection) (stri
 }
 
 func runtimeUtilityModel(cfg config.Config) string {
-	if len(cfg.Providers) > 0 || len(cfg.Models) > 0 {
+	if cfg.ProviderRegistrySource() != config.ProviderRegistryNone {
 		return cfg.Agent.UtilityModel
 	}
 	return cfg.Provider.UtilityModel

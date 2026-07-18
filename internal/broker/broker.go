@@ -118,7 +118,9 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 				// the only place a raw credential touches a request.
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("X-Api-Key")
-				pr.Out.Header.Set(header, value)
+				if header != "" {
+					pr.Out.Header.Set(header, value)
+				}
 			},
 		}
 		b.upstreams[u.Name] = proxy

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,13 +21,20 @@ import (
 type runtimeRecordingProvider struct {
 	mu       sync.Mutex
 	requests []llm.Request
+	response string
 }
 
 func (p *runtimeRecordingProvider) Complete(_ context.Context, req llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
 	p.mu.Unlock()
-	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant}}, nil
+	return &llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+			Type: llm.BlockText,
+			Text: p.response,
+		}}},
+	}, nil
 }
 
 func (p *runtimeRecordingProvider) lastRequest(t *testing.T) llm.Request {
@@ -341,4 +351,221 @@ func TestModelRuntimeResolverNamedSecretReferenceFailsClosedWithoutStore(t *test
 	if key != "" {
 		t.Fatalf("failed named secret resolution returned key %q", key)
 	}
+}
+
+func TestModelRuntimeResolverLoadedMixedRegistryNeverFallsBackToLegacy(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "must-not-reach-keyless-local")
+	cfg := loadRuntimeConfig(t, `
+[provider]
+name = "anthropic"
+model = "legacy-model"
+utility_model = "legacy-utility"
+api_key = "legacy-literal"
+
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+
+[models.local]
+provider = "local"
+model = "qwen3:32b"
+
+[agent]
+default_model = "local"
+`)
+	var factoryKey string
+	factoryCalls := 0
+	resolver := newModelRuntimeResolverWith(cfg, map[string]providerFactory{
+		"anthropic": func(_, _ string) llm.Provider { factoryCalls++; return &runtimeRecordingProvider{} },
+		"openai": func(key, _ string) llm.Provider {
+			factoryCalls++
+			factoryKey = key
+			return &runtimeRecordingProvider{}
+		},
+	}, resolveProviderConnectionSecret)
+	if _, err := resolver.Complete(context.Background(), llm.Request{Model: "local"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if factoryKey != "" {
+		t.Fatalf("keyless named connection inherited %q", factoryKey)
+	}
+	if _, err := resolver.Complete(context.Background(), llm.Request{Model: "not-enrolled"}, nil); err == nil || !strings.Contains(err.Error(), "unknown model alias") {
+		t.Fatalf("unknown alias error = %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factory calls = %d, unknown alias selected legacy provider", factoryCalls)
+	}
+	profileModel, err := resolveRuntimeProfileModel(cfg, config.AgentProfile{Model: "default"})
+	if err != nil || profileModel != "local" {
+		t.Fatalf("default profile model = %q, %v", profileModel, err)
+	}
+}
+
+func TestModelRuntimeResolverLoadedExplicitEmptyRegistrySuppressesLegacy(t *testing.T) {
+	cfg := loadRuntimeConfig(t, `
+[provider]
+name = "anthropic"
+model = "legacy-model"
+utility_model = "legacy-utility"
+api_key = "legacy-literal"
+
+[providers]
+`)
+	factoryCalls := 0
+	resolver := newModelRuntimeResolverWith(cfg, map[string]providerFactory{
+		"anthropic": func(_, _ string) llm.Provider { factoryCalls++; return &runtimeRecordingProvider{} },
+	}, resolveProviderConnectionSecret)
+	if _, err := resolver.Complete(context.Background(), llm.Request{Model: "legacy-model"}, nil); err == nil || !strings.Contains(err.Error(), "unknown model alias") {
+		t.Fatalf("explicit-empty registry error = %v", err)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("explicit-empty registry selected %d legacy providers", factoryCalls)
+	}
+	if got := runtimeUtilityModel(cfg); got != "" {
+		t.Fatalf("explicit-empty registry resurrected legacy utility model %q", got)
+	}
+}
+
+func TestServeModelAliasBrokerUsesOnlyEffectiveNamedConnections(t *testing.T) {
+	cfg := runtimeRegistryConfig()
+	cfg.Provider = config.Provider{Name: "anthropic", APIKey: "secret://anthropic/api-key", BaseURL: "https://stale.invalid"}
+	cfg.Providers["local"] = config.ProviderConnection{Type: "openai", BaseURL: "http://127.0.0.1:11434/v1"}
+	var resolved []string
+	upstreams := brokerUpstreamsWithSecretResolver(cfg, func(connection config.ProviderConnection) (string, func(string) string, error) {
+		resolved = append(resolved, connection.APIKey)
+		switch connection.APIKey {
+		case "secret://provider/claude-cloud/api-key":
+			return "anthropic-key", nil, nil
+		case "secret://provider/openrouter/api-key":
+			return "openrouter-key", nil, nil
+		case "":
+			return "", nil, nil
+		default:
+			return "", nil, fmt.Errorf("unexpected secret %q", connection.APIKey)
+		}
+	})
+	if len(upstreams) != 3 {
+		t.Fatalf("upstreams = %#v", upstreams)
+	}
+	want := map[string]struct {
+		base, header, value string
+	}{
+		"claude-cloud": {base: "https://anthropic.invalid", header: "x-api-key", value: "anthropic-key"},
+		"openrouter":   {base: "https://openrouter.invalid/v1", header: "Authorization", value: "Bearer openrouter-key"},
+		"local":        {base: "http://127.0.0.1:11434/v1"},
+	}
+	for _, upstream := range upstreams {
+		expected, ok := want[upstream.Name]
+		if !ok {
+			t.Fatalf("unexpected upstream %#v", upstream)
+		}
+		if upstream.BaseURL != expected.base || upstream.Header != expected.header || upstream.Value != expected.value {
+			t.Fatalf("upstream %q = %#v, want %#v", upstream.Name, upstream, expected)
+		}
+	}
+	for _, ref := range resolved {
+		if ref == "secret://anthropic/api-key" {
+			t.Fatalf("stale legacy secret was resolved: %#v", resolved)
+		}
+	}
+}
+
+func TestServeModelAliasBrokerRetainsOnlyNormalizedLegacyEnvironmentFallback(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "legacy-broker-key")
+	cfg := loadRuntimeConfig(t, `
+[provider]
+name = "openai"
+model = "gpt-legacy"
+api_key = ""
+`)
+	var resolved config.ProviderConnection
+	upstreams := brokerUpstreamsWithSecretResolver(cfg, func(connection config.ProviderConnection) (string, func(string) string, error) {
+		resolved = connection
+		return connection.APIKey, nil, nil
+	})
+	if resolved.APIKey != "legacy-broker-key" {
+		t.Fatalf("normalized legacy broker api key = %q", resolved.APIKey)
+	}
+	if len(upstreams) != 1 || upstreams[0].Name != "default" || upstreams[0].Value != "Bearer legacy-broker-key" {
+		t.Fatalf("legacy upstreams = %#v", upstreams)
+	}
+}
+
+func TestChatModelAliasChildProfileUsesResolvedTokenDefault(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := runtimeRegistryConfig()
+	cfg.Models["writer"] = config.ModelTarget{Provider: "claude-cloud", Model: "claude-upstream", MaxTokens: 111}
+	cfg.Models["researcher"] = config.ModelTarget{Provider: "openrouter", Model: "research-upstream", MaxTokens: 333}
+	cfg.Agent.Subagents = true
+	cfg.Agent.Profiles = map[string]config.AgentProfile{"research": {Model: "researcher"}}
+	childProvider := &runtimeRecordingProvider{response: "```json\n{\"status\":\"done\",\"summary\":\"reviewed\"}\n```"}
+	runtime := newModelRuntimeResolverWith(cfg, map[string]providerFactory{
+		"anthropic": func(_, _ string) llm.Provider { return &runtimeRecordingProvider{} },
+		"openai":    func(_, _ string) llm.Provider { return childProvider },
+	}, func(config.ProviderConnection) (string, func(string) string, error) { return "", nil, nil })
+	a, cleanup, err := buildAgentWithProfileRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "", runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := a.Tools.Run(ctx, "spawn_subagent", json.RawMessage(`{"task":"review","profile":"research"}`)); err != nil {
+		t.Fatal(err)
+	}
+	got := childProvider.lastRequest(t)
+	if got.Model != "research-upstream" || got.MaxTokens != 333 {
+		t.Fatalf("child upstream = %s/%d, want research-upstream/333", got.Model, got.MaxTokens)
+	}
+
+	cfg.Agent.Profiles["research"] = config.AgentProfile{Model: "researcher", MaxTokens: 444}
+	profiles := childProfilesFromConfig(cfg, nil)
+	if got := profiles["research"].MaxTokens; got != 444 {
+		t.Fatalf("explicit child profile max_tokens = %d, want 444", got)
+	}
+}
+
+func TestChatModelAliasBannerShowsConnectionAndType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+
+[models.writer]
+provider = "local"
+model = "qwen3:32b"
+
+[agent]
+default_model = "writer"
+subagents = false
+learn = false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := chatCmd(context.Background(), nil, strings.NewReader(""), &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "writer via local (openai)") {
+		t.Fatalf("chat banner = %q", got)
+	}
+}
+
+func loadRuntimeConfig(t *testing.T, body string) config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
