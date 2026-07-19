@@ -281,9 +281,11 @@ Waffle keeps its two main `main`-branch automations independent:
 - Release Please runs on every push to `main` (and on manual
   `workflow_dispatch`) to open or update the version bump PR, then creates
   `v`-prefixed tags and GitHub releases when that PR is merged.
-- The binary deployment flow runs on successful `main` pushes and uses the
+- The Linux artifact flow runs on successful `main` pushes and uses the
   git-derived version available at that exact commit, whether or not Release
-  Please creates a release during the same push.
+  Please creates a release during the same push. Infra's zero-input operation
+  discovers that artifact by default; immediate cross-repo dispatch is an
+  optional GitHub App integration.
 
 That separation keeps semantic versioning and GitHub release publication
 decoupled from the Linux artifact build/deployment path.
