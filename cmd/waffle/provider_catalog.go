@@ -29,6 +29,15 @@ type providerCatalogue interface {
 	Invalidate(string) error
 }
 
+type catalogueOutput struct {
+	Connection string               `json:"connection"`
+	FetchedAt  time.Time            `json:"fetched_at"`
+	AgeSeconds int64                `json:"age_seconds"`
+	Stale      bool                 `json:"stale"`
+	Warning    string               `json:"warning,omitempty"`
+	Models     []modelcatalog.Model `json:"models"`
+}
+
 type catalogueSourceFactory func(modelcatalog.Connection, string, bool) (modelcatalog.Source, error)
 
 type providerCatalogueService struct {

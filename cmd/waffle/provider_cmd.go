@@ -18,6 +18,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/secret"
 )
@@ -25,6 +26,8 @@ import (
 type providerManager interface {
 	Preflight(context.Context) error
 	Add(context.Context, providerconfig.AddRequest) error
+	AddModel(context.Context, providerconfig.AddModelRequest) error
+	CatalogSnapshot(context.Context, string) (providerconfig.CatalogSnapshot, error)
 	List(context.Context) ([]byte, error)
 	Test(context.Context, string) error
 	Remove(context.Context, string) error
@@ -49,6 +52,8 @@ func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		return providerAdd(ctx, args[1:], stdin, stdout, stderr)
 	case "list":
 		return providerList(ctx, args[1:], stdout)
+	case "models":
+		return providerModels(ctx, args[1:], stdout, stderr)
 	case "test":
 		if len(args) != 2 {
 			return errors.New("usage: waffle provider test <connection>")
@@ -73,6 +78,15 @@ func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		if err := manager.Remove(ctx, args[1]); err != nil {
 			return err
 		}
+		catalogue, err := openProviderCatalogue()
+		if err != nil {
+			fmt.Fprintln(stderr, "warning: provider removed but model catalogue cache could not be invalidated")
+			fmt.Fprintf(stdout, "removed provider %s\n", args[1])
+			return nil
+		}
+		if err := catalogue.Invalidate(args[1]); err != nil {
+			fmt.Fprintln(stderr, "warning: provider removed but model catalogue cache could not be invalidated")
+		}
 		fmt.Fprintf(stdout, "removed provider %s\n", args[1])
 		return nil
 	case "model":
@@ -94,8 +108,10 @@ Usage:
                       [--model ALIAS=UPSTREAM]... [--default ALIAS] [--utility ALIAS]
                       [--api-key-stdin | --api-key-file PATH]
   waffle provider list [--json]
+  waffle provider models <connection> [--search QUERY] [--refresh] [--json]
   waffle provider test <connection>
   waffle provider remove <connection>
+  waffle provider model add <connection> <upstream-id> [--alias ALIAS] [--default] [--utility]
   waffle provider model activate <alias>
   waffle provider model remove <alias> [--replace-with ALIAS]
 
@@ -233,7 +249,15 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 
 func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) < 2 {
-		return errors.New("usage: waffle provider model <activate|remove> <alias>")
+		return errors.New("usage: waffle provider model <add|activate|remove> ...")
+	}
+	var addRequest providerconfig.AddModelRequest
+	if args[0] == "add" {
+		var err error
+		addRequest, err = parseProviderModelAddArgs(args[1:])
+		if err != nil {
+			return err
+		}
 	}
 	manager, err := openProviderManager()
 	if err != nil {
@@ -243,6 +267,12 @@ func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) erro
 		return err
 	}
 	switch args[0] {
+	case "add":
+		if err := manager.AddModel(ctx, addRequest); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "added model alias %s for provider %s\n", addRequest.Alias, addRequest.ConnectionName)
+		return nil
 	case "activate":
 		if len(args) != 2 {
 			return errors.New("usage: waffle provider model activate <alias>")
@@ -271,6 +301,196 @@ func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) erro
 	default:
 		return fmt.Errorf("unknown provider model command %q", args[0])
 	}
+}
+
+func parseProviderModelAddArgs(args []string) (providerconfig.AddModelRequest, error) {
+	if len(args) < 2 {
+		return providerconfig.AddModelRequest{}, errors.New("usage: waffle provider model add <connection> <upstream-id> [--alias ALIAS] [--default] [--utility]")
+	}
+	request := providerconfig.AddModelRequest{
+		ConnectionName: args[0],
+		UpstreamModel:  args[1],
+	}
+	aliasSet := false
+	defaultSet := false
+	utilitySet := false
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--alias":
+			if aliasSet {
+				return providerconfig.AddModelRequest{}, errors.New("provider model add option --alias was supplied more than once")
+			}
+			if i+1 >= len(args) {
+				return providerconfig.AddModelRequest{}, errors.New("provider model add option --alias requires a value")
+			}
+			i++
+			request.Alias = args[i]
+			aliasSet = true
+		case "--default":
+			if defaultSet {
+				return providerconfig.AddModelRequest{}, errors.New("provider model add option --default was supplied more than once")
+			}
+			request.Default = true
+			defaultSet = true
+		case "--utility":
+			if utilitySet {
+				return providerconfig.AddModelRequest{}, errors.New("provider model add option --utility was supplied more than once")
+			}
+			request.Utility = true
+			utilitySet = true
+		default:
+			return providerconfig.AddModelRequest{}, fmt.Errorf("unknown provider model add option %q", args[i])
+		}
+	}
+	if !aliasSet {
+		alias, err := modelcatalog.AliasFor(request.UpstreamModel)
+		if err != nil {
+			return providerconfig.AddModelRequest{}, err
+		}
+		request.Alias = alias
+	}
+	return request, nil
+}
+
+type providerModelsOptions struct {
+	connection string
+	search     string
+	refresh    bool
+	json       bool
+}
+
+func parseProviderModelsArgs(args []string) (providerModelsOptions, error) {
+	var options providerModelsOptions
+	searchSet := false
+	refreshSet := false
+	jsonSet := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--search":
+			if searchSet {
+				return providerModelsOptions{}, errors.New("provider models option --search was supplied more than once")
+			}
+			if i+1 >= len(args) {
+				return providerModelsOptions{}, errors.New("provider models option --search requires a value")
+			}
+			i++
+			options.search = args[i]
+			searchSet = true
+		case "--refresh":
+			if refreshSet {
+				return providerModelsOptions{}, errors.New("provider models option --refresh was supplied more than once")
+			}
+			options.refresh = true
+			refreshSet = true
+		case "--json":
+			if jsonSet {
+				return providerModelsOptions{}, errors.New("provider models option --json was supplied more than once")
+			}
+			options.json = true
+			jsonSet = true
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return providerModelsOptions{}, fmt.Errorf("unknown provider models option %q", args[i])
+			}
+			if options.connection != "" {
+				return providerModelsOptions{}, fmt.Errorf("unexpected provider models argument %q", args[i])
+			}
+			options.connection = args[i]
+		}
+	}
+	if options.connection == "" {
+		return providerModelsOptions{}, errors.New("usage: waffle provider models <connection> [--search QUERY] [--refresh] [--json]")
+	}
+	return options, nil
+}
+
+func providerModels(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	options, err := parseProviderModelsArgs(args)
+	if err != nil {
+		return err
+	}
+	manager, err := openProviderManager()
+	if err != nil {
+		return err
+	}
+	snapshot, err := manager.CatalogSnapshot(ctx, options.connection)
+	if err != nil {
+		return err
+	}
+	connection, _, err := effectiveCatalogConnection(options.connection, snapshot.Connection, snapshot.ScopeID)
+	if err != nil {
+		return err
+	}
+	catalogue, err := openProviderCatalogue()
+	if err != nil {
+		return err
+	}
+	result, err := catalogue.Models(ctx, connection, snapshot.APIKey, options.refresh)
+	if err != nil {
+		return redactCatalogueError(err, snapshot.APIKey, snapshot.ScopeID)
+	}
+	models := result.Models
+	if options.search != "" {
+		models = modelcatalog.Search(models, options.search)
+	}
+	models = redactCatalogueModels(models, snapshot.APIKey, snapshot.ScopeID)
+	warning := redactCatalogueText(result.Warning, snapshot.APIKey, snapshot.ScopeID)
+	if options.json {
+		return json.NewEncoder(stdout).Encode(catalogueOutput{
+			Connection: options.connection,
+			FetchedAt:  result.FetchedAt,
+			AgeSeconds: int64(result.Age / time.Second),
+			Stale:      result.Stale,
+			Warning:    warning,
+			Models:     models,
+		})
+	}
+	if warning != "" {
+		fmt.Fprintf(stderr, "warning: %s\n", modelcatalog.SafeText(warning))
+	}
+	for _, model := range models {
+		capabilities := make([]string, len(model.Capabilities))
+		for i, capability := range model.Capabilities {
+			capabilities[i] = modelcatalog.SafeText(capability)
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\n",
+			modelcatalog.SafeText(model.DisplayName),
+			modelcatalog.SafeText(model.ID),
+			strings.Join(capabilities, ", "),
+		)
+	}
+	return nil
+}
+
+func redactCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {
+	redacted := make([]modelcatalog.Model, len(models))
+	for i, model := range models {
+		model.ID = redactCatalogueText(model.ID, private...)
+		model.DisplayName = redactCatalogueText(model.DisplayName, private...)
+		model.Owner = redactCatalogueText(model.Owner, private...)
+		model.Capabilities = append([]string(nil), model.Capabilities...)
+		for j := range model.Capabilities {
+			model.Capabilities[j] = redactCatalogueText(model.Capabilities[j], private...)
+		}
+		redacted[i] = model
+	}
+	return redacted
+}
+
+func redactCatalogueText(value string, private ...string) string {
+	for _, privateValue := range private {
+		if privateValue != "" {
+			value = strings.ReplaceAll(value, privateValue, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func redactCatalogueError(err error, private ...string) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(redactCatalogueText(err.Error(), private...))
 }
 
 func providerList(ctx context.Context, args []string, stdout io.Writer) error {
