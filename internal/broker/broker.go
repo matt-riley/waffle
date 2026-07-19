@@ -112,13 +112,16 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		header, value := u.Header, u.Value
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
+				trimDuplicateBasePath(pr.Out.URL, target)
 				pr.SetURL(target)
 				pr.Out.Host = target.Host
 				// Strip the sandbox's token, inject the real key. This is
 				// the only place a raw credential touches a request.
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("X-Api-Key")
-				pr.Out.Header.Set(header, value)
+				if header != "" {
+					pr.Out.Header.Set(header, value)
+				}
 			},
 		}
 		b.upstreams[u.Name] = proxy
@@ -290,7 +293,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	name, rest, escapedRest := splitUpstreamRoute(r.URL)
 	proxy, ok := b.upstreams[name]
 	if !ok {
 		http.Error(w, "unknown upstream", http.StatusNotFound)
@@ -317,6 +320,10 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	r.URL.Path = "/" + rest
+	r.URL.RawPath = "/" + escapedRest
+	if r.URL.RawPath == r.URL.Path {
+		r.URL.RawPath = ""
+	}
 	capture := &usageResponseWriter{ResponseWriter: w}
 	proxy.ServeHTTP(capture, r)
 	if b.Usage != nil {
@@ -324,6 +331,47 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			b.record(context.WithoutCancel(r.Context()), token, sessionID, "usage-error", err.Error())
 		}
 	}
+}
+
+// splitUpstreamRoute returns the local connection name and provider-relative
+// decoded/escaped paths. Keeping both forms in sync prevents an escaped RawPath
+// from retaining Waffle's /<connection>/ routing prefix upstream.
+func splitUpstreamRoute(u *url.URL) (name, rest, escapedRest string) {
+	name, rest, _ = strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+	_, escapedRest, _ = strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	return name, rest, escapedRest
+}
+
+// trimDuplicateBasePath accepts both broker request forms for compatibility:
+// /<connection>/chat/completions and /<connection>/v1/chat/completions when
+// the configured provider base already ends in /v1. ReverseProxy.SetURL joins
+// the remaining request path onto the base, so remove one matching base prefix
+// first while preserving escaped path segments.
+func trimDuplicateBasePath(requestURL, target *url.URL) {
+	path, trimmed := trimURLPathPrefix(requestURL.Path, target.Path)
+	if !trimmed {
+		return
+	}
+	escapedPath, escapedTrimmed := trimURLPathPrefix(requestURL.EscapedPath(), target.EscapedPath())
+	requestURL.Path = path
+	requestURL.RawPath = ""
+	if escapedTrimmed && escapedPath != path {
+		requestURL.RawPath = escapedPath
+	}
+}
+
+func trimURLPathPrefix(path, prefix string) (string, bool) {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" || prefix == "/" {
+		return path, false
+	}
+	if path == prefix {
+		return "/", true
+	}
+	if strings.HasPrefix(path, prefix+"/") {
+		return strings.TrimPrefix(path, prefix), true
+	}
+	return path, false
 }
 
 const maxRequestInspectBytes = 1 << 20

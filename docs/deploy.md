@@ -1,4 +1,97 @@
-# Running waffle continuously
+# Deploying and running Waffle
+
+## Managed host installation
+
+The protected **Deploy Waffle** operation has no provider, model, database,
+or application-secret inputs. It installs a verified Waffle binary, systemd
+unit, state directories, management command on `PATH`, age identity, and the
+embedded SQLite store location. A successful first deployment reports
+**Installed** and the next command:
+
+```sh
+sudo waffle provider add
+```
+
+Installed is a complete, manageable installation. It does not require an API
+key, and `waffle.service` may remain inactive. Waffle has no Workweave Router,
+Postgres, or Pub/Sub emulator runtime; it connects directly to the provider
+connections enrolled on the host.
+
+Run the bare command for guided enrollment. It prompts for a connection name,
+provider type, optional base URL, one or more `ALIAS=UPSTREAM` models, default
+and utility aliases, and a hidden API key. Use `-` at optional prompts to leave
+the value unset. Selecting a default alias probes the upstream, commits the
+configuration and encrypted credential, starts Waffle, verifies `/healthz`,
+and reports **Ready**. A failed probe, restart, or health check restores the
+previous configuration, secret store, and service state.
+
+For granular automation, pipe the key on standard input without placing it in
+the process arguments:
+
+```sh
+credential-command | sudo waffle provider add \
+  --name anthropic \
+  --type anthropic \
+  --model claude=claude-model-id \
+  --default claude \
+  --api-key-stdin
+```
+
+Alternatively, point at a root-owned regular file whose exact mode is `0600`:
+
+```sh
+sudo waffle provider add \
+  --name openai \
+  --type openai \
+  --model gpt=gpt-model-id \
+  --api-key-file /root/provider-api-key
+```
+
+The file option rejects symlinks, non-regular files, wider permissions, and
+oversized values. There is deliberately no `--api-key VALUE` option. Auth-free
+local OpenAI-compatible endpoints can leave the hidden API-key prompt empty.
+
+Connections and aliases are independent, so one installation can use models
+from several providers:
+
+```sh
+sudo waffle provider add \
+  --name local \
+  --type openai \
+  --base-url http://127.0.0.1:11434/v1 \
+  --model local=qwen3:32b
+
+sudo waffle provider list
+sudo waffle provider test local
+```
+
+`provider list --json` exposes the stable `installed` or `ready` lifecycle
+state without credentials. On an Installed system, adding a provider without
+selecting a default keeps it Installed; activate a validated alias later with:
+
+```sh
+sudo waffle provider model activate local
+```
+
+Model and connection removal are explicit:
+
+```sh
+sudo waffle provider model remove old-alias --replace-with local
+sudo waffle provider remove unused-connection
+```
+
+For model removal, `--replace-with` reassigns default, utility, and
+agent-profile references before deleting the old alias. Without it, default
+and utility references are cleared when no agent profile blocks the operation;
+removing the active default can move a Ready installation back to Installed.
+Agent-profile references remain blocking without a replacement. Provider
+removal remains blocked while any model alias references the connection, so
+remove or reassign those aliases first.
+
+Waffle does not automatically fail over, load balance, or choose a provider by
+cost: every alias maps to one named connection and one upstream model.
+
+## Running Waffle continuously
 
 `waffle serve` is a host process. Run it as the owner account so its state
 directory and secret store are available, and keep the unauthenticated admin
@@ -104,6 +197,13 @@ This split is intentional:
 - Infra owns the server update procedure and any host-specific rollout logic.
 - Release Please stays independent from binary deployment, so version-tag
   publication is not the trigger for shipping the Linux binary.
+
+The handoff contains only immutable artifact provenance: artifact name,
+Actions run ID, and digest. Provider credentials, model choices, database
+credentials, and host topology never pass through the application workflow.
+Routine artifact rollout preserves the lifecycle state: an Installed system
+receives the verified binary without forced activation, while a Ready system
+restarts and must return to health or rolls back to the previous binary.
 
 ## No Terraform per push
 

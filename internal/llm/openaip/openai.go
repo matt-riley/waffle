@@ -1,8 +1,7 @@
 // Package openaip translates waffle's canonical LLM types to the OpenAI
 // Chat Completions dialect. This one provider covers OpenAI itself plus the
-// long tail of compatible endpoints — OpenRouter, Ollama, vLLM, and a
-// running workweave/router — which is what makes waffle's no-lock-in
-// principle real (docs/plan.md).
+// long tail of compatible endpoints — OpenRouter, Ollama, Gemini, and vLLM —
+// which is what makes waffle's no-lock-in principle real (docs/plan.md).
 package openaip
 
 import (

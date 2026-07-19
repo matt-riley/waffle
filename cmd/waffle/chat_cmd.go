@@ -22,8 +22,6 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
-	"github.com/matt-riley/waffle/internal/llm/anthropicp"
-	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
 	policypkg "github.com/matt-riley/waffle/internal/policy"
@@ -120,8 +118,14 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 	}()
 
+	providerLabel := cfg.Provider.Name
+	if runtime, ok := c.agent.Provider.(*modelRuntimeResolver); ok {
+		if target, resolveErr := runtime.resolveTarget(c.agent.Model); resolveErr == nil {
+			providerLabel = fmt.Sprintf("%s (%s)", target.ConnectionName, target.Connection.Type)
+		}
+	}
 	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
-		c.agent.Model, cfg.Provider.Name, c.current.ID)
+		c.agent.Model, providerLabel, c.current.ID)
 	if len(c.history) > 0 {
 		fmt.Fprintf(stdout, "(continuing with %d earlier turns)\n", len(c.history))
 	}
@@ -556,11 +560,15 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 // docker) and which tools it may use. The returned cleanup stops any sandbox
 // container; call it when done (it is never nil).
 func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group string) (*agent.Agent, func(), error) {
-	return buildAgentWithProfile(ctx, cfg, ws, skills, sessions, group, "")
+	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", newModelRuntimeResolver(cfg))
 }
 
 // buildAgentWithProfile is buildAgent with an optional named profile (#71).
 func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string) (*agent.Agent, func(), error) {
+	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg))
+}
+
+func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver) (*agent.Agent, func(), error) {
 	cleanup := func() {}
 	pol := cfg.AgentPolicy(group)
 	profileName = strings.TrimSpace(profileName)
@@ -622,25 +630,6 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 			engine.ObserveSuccess(session.IDFromContext(ctx), name, input)
 		}
 	}
-	apiKey, redact, err := resolveAPIKey(cfg.Provider)
-	if err != nil {
-		return nil, cleanup, err
-	}
-
-	var provider llm.Provider
-	switch cfg.Provider.Name {
-	case "anthropic", "":
-		provider = anthropicp.New(apiKey, cfg.Provider.BaseURL)
-	case "openai":
-		base := cfg.Provider.BaseURL
-		if base == "" {
-			base = "https://api.openai.com/v1"
-		}
-		provider = openaip.New(apiKey, base)
-	default:
-		return nil, cleanup, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", cfg.Provider.Name)
-	}
-
 	var closers []func()
 	cleanup = func() {
 		for i := len(closers) - 1; i >= 0; i-- {
@@ -795,11 +784,18 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	}
 
 	// Model selection: default | utility | explicit (#71).
-	model, err := cfg.ResolveProfileModel(profile)
+	model, err := resolveRuntimeProfileModel(cfg, profile)
 	if err != nil {
 		return nil, cleanup, err
 	}
-	maxTokens := cfg.Provider.MaxTokens
+	if runtime == nil {
+		runtime = newModelRuntimeResolver(cfg)
+	}
+	_, resolvedModel, _, err := runtime.resolve(model)
+	if err != nil {
+		return nil, cleanup, err
+	}
+	maxTokens := resolvedModel.MaxTokens
 	if profile.MaxTokens > 0 {
 		maxTokens = profile.MaxTokens
 	}
@@ -814,11 +810,11 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	if cfg.Agent.Subagents {
 		subTools := tool.Restrict(tool.Combine(boxes...), toolPolicy)
 		sub := agent.SubagentTool{
-			Provider:            provider,
+			Provider:            runtime,
 			Tools:               subTools,
 			Model:               model,
 			MaxTokens:           maxTokens,
-			Redact:              redact,
+			Redact:              runtime.redact,
 			BroadcastWorkingSet: true,
 			WorkingSetBroadcast: "", // filled below if non-empty at build time; runtime inject via note
 			Log:                 slog.Default(),
@@ -854,15 +850,15 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 		}
 	}
 	return &agent.Agent{
-		Provider:      provider,
+		Provider:      runtime,
 		Tools:         toolbox,
 		System:        sys,
 		Model:         model,
-		UtilityModel:  cfg.Provider.UtilityModel,
+		UtilityModel:  runtimeUtilityModel(cfg),
 		Profile:       effectiveProfile,
 		MaxTokens:     maxTokens,
 		MaxIterations: maxIter,
-		Redact:        redact,
+		Redact:        runtime.redact,
 		Spill:         spillStore,
 		Usage:         usagepkg.New(&store.Store{DB: sessions.DB()}),
 		Limits: func() usagepkg.Limits {
@@ -1000,7 +996,7 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 				sys = loaded
 			}
 		}
-		model, err := cfg.ResolveProfileModel(p)
+		model, err := resolveRuntimeProfileModel(cfg, p)
 		if err != nil {
 			// Skip profiles that cannot resolve model; spawn will report unknown/error
 			// if selected. Prefer fail-open registry over failing parent build.
@@ -1012,6 +1008,9 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 			Model:          model,
 			Tools:          effectiveTools,
 			RequestedTools: requestedTools,
+		}
+		if target, targetErr := resolveRuntimeModelTarget(cfg, model); targetErr == nil {
+			cp.MaxTokens = target.MaxTokens
 		}
 		if p.MaxTokens > 0 {
 			cp.MaxTokens = p.MaxTokens

@@ -1,21 +1,51 @@
-# Example waffle config showing named agent profiles (#71).
-# Copy to $WAFFLE_HOME/config.toml and adjust. Profiles are a *trust boundary*
-# (system, model, tools, sandbox) — not personality presets alone.
+# Example waffle config showing named provider connections, deterministic model
+# aliases, and named agent profiles. Copy to $WAFFLE_HOME/config.toml and
+# adjust. Profiles are a *trust boundary* (system, model, tools, sandbox) — not
+# personality presets alone.
 #
 # Migration: existing installs with no [agent.profile] section keep today's
-# default agent construction as the effective "main" profile. No change required.
+# default agent construction as the effective "main" profile. The legacy
+# singular [provider] table also remains supported and is normalized in memory.
+# No change required for either existing configuration form.
+#
+# Providers are optional. A newly deployed system may omit [providers],
+# [models], default_model, and utility_model until `waffle provider add`
+# validates the first connection on the host. Waffle connects to these named
+# connections directly and uses embedded SQLite; no external router or
+# application database is required.
+#
+# Prefer the management command over hand-editing this section because it
+# probes the upstream and commits the encrypted credential and config
+# transactionally:
+#   sudo waffle provider add
+#   sudo waffle provider model activate ALIAS
+#   sudo waffle provider model remove ALIAS [--replace-with ALIAS]
+#   sudo waffle provider remove CONNECTION
 
-[provider]
-name = "anthropic"
-# api_key is usually supplied via the secret store / env; shown for clarity.
-# api_key = "sk-..."
-model = "claude-sonnet-4-20250514"
-utility_model = "claude-haiku-4-20250414"
+[providers.anthropic]
+type = "anthropic"
+api_key = "secret://provider/anthropic/api-key"
 max_tokens = 8192
 
-# Optional: default when a run does not name a profile.
-# [agent]
-# default_profile = "main"
+[providers.openrouter]
+# "openai" covers OpenAI and OpenAI-compatible endpoints such as OpenRouter
+# and Ollama. Auth-free local endpoints may omit api_key.
+type = "openai"
+api_key = "secret://provider/openrouter/api-key"
+base_url = "https://openrouter.ai/api/v1"
+
+[models.claude]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[models.gpt]
+provider = "openrouter"
+model = "openai/gpt-5.4"
+
+[agent]
+default_profile = "main"
+default_model = "claude"
+utility_model = "gpt"
 
 # --- main: owner interactive default (explicit for documentation) ----------
 [agent.profile.main]

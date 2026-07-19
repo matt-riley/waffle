@@ -3,8 +3,8 @@
 A personal AI agent, written in Go, that you run on your own hardware. It
 combines hermes-agent's learning loop and memory, nanoclaw's minimal
 single-writer architecture and isolation model, openclaw's gateway/trust
-design, and workweave/router's provider layer. Background and rationale for
-each borrowed idea are in [research.md](./research.md).
+design, and a direct multi-provider layer. Background and rationale for each
+borrowed idea are in [research.md](./research.md).
 
 ## Design principles
 
@@ -58,8 +58,8 @@ each borrowed idea are in [research.md](./research.md).
              │                     │                      (stdio only)    │
              │                     │  provider proxy ──► Anthropic /      │
              │                     │  (only key holder)   OpenAI-compat   │
-             │                     │                   (Ollama/router/    │
-             │                     │                    Gemini endpoint)  │
+	             │                     │                   (Ollama / Gemini / │
+	             │                     │                    custom endpoint)  │
                                    └──────────┬───────────────────────────┘
                                               │ single-writer SQLite queues
                                    ┌──────────┴───────────┐
@@ -105,7 +105,7 @@ name turn ranges for `expand_context`. Full history stays in SQLite and
 remains searchable via FTS5. Optional `[provider] utility_model` is used
 for summarization and reflection.
 
-### Provider layer (from workweave/router)
+### Direct provider layer
 
 `internal/llm` defines the canonical types (`Message`, `ToolCall`,
 `ContentBlock`, streaming events) and a `Provider` interface. Translators
@@ -113,16 +113,14 @@ implement it for Anthropic Messages and OpenAI Chat Completions
 (covers OpenRouter, Ollama, Gemini's OpenAI-compatible endpoint, and most
 local servers). There is **no** first-class `gemini/` package — use
 `name = "openai"` with Gemini's compatible `base_url` (see
-[Deviations](#deviations)). A `baseURL`-only "openai-compatible" provider
-means a running [workweave/router](https://github.com/workweave/router)
-instance slots in as just another endpoint — that is the recommended way to
-get smart multi-model routing rather than reimplementing cluster scoring
-in-tree.
+[Deviations](#deviations)). Named connections and model aliases select these
+providers directly; a generic OpenAI-compatible endpoint remains supported
+without adding an intermediary runtime service.
 
 The *provider proxy* is a thin HTTP listener inside the gateway that
 sandboxed sessions call with scoped `wk_...` tokens; it injects the real key,
-enforces per-session policy/limits, and forwards upstream (nanoclaw's Agent
-Vault + router's two-tier key model). Provider dispatch atomically reserves a
+enforces per-session policy/limits, and forwards upstream (following
+nanoclaw's Agent Vault pattern). Provider dispatch atomically reserves a
 declared output maximum plus a text-prompt byte upper bound. Missing/invalid
 maxima, external image/file inputs, provider-side context handles, and unknown
 request extensions reserve the remaining allowance because their token cost
@@ -533,7 +531,7 @@ incomplete work; they are choices to stay small enough to read (principle 2).
 1. **Gemini provider** — no `internal/llm/gemini/`. Point the OpenAI-compatible
    provider at Gemini's compatible endpoint (`name = "openai"`, suitable
    `base_url` and model). One translator covers OpenRouter, Ollama, Gemini,
-   and weave-router.
+   and other OpenAI-compatible endpoints.
 2. **bubbletea TUI** — cut. `waffle chat` is a line-oriented REPL (stdin/stdout
    with light ANSI), not a full-screen TUI. Keeps the terminal surface
    reviewable and dependency-free beyond `golang.org/x/term` for raw input
@@ -561,7 +559,7 @@ optional/cut items above plus anything still open on the tracker:
 | Full-screen TUI | not shipped | deliberate; line REPL |
 | MCP over HTTP/SSE | not shipped | deliberate; stdio-only |
 | In-process host hooks (Lua/JS) | deferred | extension-surface decision (#41) |
-| Smart routing in-tree | out of scope | use weave-router as an endpoint |
+| Smart routing in-tree | out of scope | select explicit model aliases or use provider-hosted routing |
 
 Cross-check open GitHub issues for anything newer than this table; the
 deviations above are closed by design, not backlog.
@@ -615,8 +613,7 @@ unattended recurring jobs, including scheduled repo work.*
 **Phase 7 — The learning loops.** Post-task skill distillation, in-use
 skill refinement, memory-curation nudges; the self-development loop
 (`waffle upgrade`, `waffle doctor`, `waffle rollback`, skill→Go-tool
-promotion via self-PRs); optional weave-router deployment docs for smart
-model routing; second channel (Discord) remains optional and **not
+promotion via self-PRs); second channel (Discord) remains optional and **not
 shipped** (see [Deviations](#deviations)).
 
 **Phase 7 mine→propose→validate (#65).** Offline loop owned by `waffle learn`
@@ -697,9 +694,10 @@ trust: agent-group tool lists → action rules → sandbox executor.
 - **Anthropic-first, never Anthropic-only:** Phase 1 ships both the Anthropic
   and openai-compatible translators so the no-lock-in property is real from
   the first release.
-- **Buy routing, build the loop:** smart model routing stays out of tree
-  (use workweave/router as an endpoint); the agent loop, memory, and skills
-  are the parts worth owning.
+- **Keep routing explicit, build the loop:** named direct-provider connections
+  and model aliases make selection auditable; provider-hosted routing remains
+  available through generic compatible endpoints. The agent loop, memory, and
+  skills are the parts worth owning.
 - **Loop on host, tools in sandbox:** waffle deliberately diverges from
   nanoclaw here (nanoclaw runs the whole agent in the container). One loop
   implementation, memory/skills stay host-side, and containers need nothing

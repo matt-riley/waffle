@@ -41,6 +41,41 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 	}
 }
 
+func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/ci.yml")
+	jobStart := strings.Index(workflow, "  request-infra-deploy:\n")
+	if jobStart < 0 {
+		t.Fatalf("workflow lacks request-infra-deploy job:\n%s", workflow)
+	}
+	job := workflow[jobStart:]
+
+	for _, want := range []string{
+		"needs: build-linux-artifact",
+		"uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v2",
+		"artifact-run-id: ${{ github.run_id }}",
+		"artifact-name: waffle-linux-amd64",
+		"artifact-digest: ${{ needs.build-linux-artifact.outputs.artifact_digest }}",
+	} {
+		if !strings.Contains(job, want) {
+			t.Fatalf("deploy request job missing %q:\n%s", want, job)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"api-key",
+		"provider-key",
+		"router",
+		"postgres",
+		"database-password",
+		"anthropic",
+		"openai",
+	} {
+		if strings.Contains(strings.ToLower(job), forbidden) {
+			t.Fatalf("deploy request job forwards provider or infrastructure detail %q:\n%s", forbidden, job)
+		}
+	}
+}
+
 func TestCheckLinuxArtifactReproScriptIsExecutableAndPortable(t *testing.T) {
 	scriptPath := readRepoPath(t, "scripts/check-linux-artifact-repro.sh")
 	info, err := os.Stat(scriptPath)
