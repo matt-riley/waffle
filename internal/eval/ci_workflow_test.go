@@ -51,6 +51,7 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 
 	for _, want := range []string{
 		"needs: build-linux-artifact",
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.APP_ID != ''",
 		"uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v2",
 		"artifact-run-id: ${{ github.run_id }}",
 		"artifact-name: waffle-linux-amd64",

@@ -186,10 +186,17 @@ from the same commit produce the same payload shape.
 ## Existing-server rollout ownership
 
 Application pushes do not create or replace Hetzner infrastructure directly.
-After the artifact upload completes, Waffle sends an infra deploy request with
-the GitHub Actions run id, artifact name, and uploaded artifact digest. The
-infra side downloads that already-built artifact and rolls it out onto the
-existing server.
+After the artifact upload completes, Infra's zero-input **Operate Waffle**
+workflow (and its scheduled discovery job) can resolve the latest successful
+run, artifact name, and uploaded digest, then roll that already-built artifact
+out to the existing server. This default path keeps cross-repository GitHub App
+credentials in Infra.
+
+Immediate push-triggered handoff is optional. If the Waffle repository has an
+`APP_ID` variable and matching `PRIVATE_KEY` Actions secret, CI sends the same
+immutable provenance through the released shared workflow. Without that
+explicit opt-in, the handoff job is skipped and artifact publication remains
+successful; no setup credential is required in Waffle.
 
 This split is intentional:
 
