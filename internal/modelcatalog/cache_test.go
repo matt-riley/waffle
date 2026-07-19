@@ -93,7 +93,9 @@ func TestStoreConcurrentRefreshMakesOneRequest(t *testing.T) {
 		store.Now = func() time.Time { return cacheTestNow }
 	}
 	connection := testConnection("primary")
-	if err := stores[0].Save(connection, []Model{{ID: "old"}}, cacheTestNow.Add(-time.Hour)); err != nil {
+	// Keep the original and refreshed timestamps identical to prove coalescing
+	// observes an atomic record-generation change rather than only FetchedAt.
+	if err := stores[0].Save(connection, []Model{{ID: "old"}}, cacheTestNow); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -233,6 +235,162 @@ func TestStoreRejectsMismatchedCorruptAndSymlinkRecords(t *testing.T) {
 		}
 		if _, err := store.Load(connection); err == nil {
 			t.Fatal("Load() error = nil, want symlink rejection")
+		}
+	})
+}
+
+func TestStoreRejectsUnsafeConnectionBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+	}{
+		{name: "userinfo", baseURL: "https://catalog-user:password-that-must-not-be-cached@api.example.com/v1"},
+		{name: "query", baseURL: "https://api.example.com/v1?api_key=password-that-must-not-be-cached"},
+		{name: "fragment", baseURL: "https://api.example.com/v1#password-that-must-not-be-cached"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			connection := testConnection("primary")
+			connection.BaseURL = tt.baseURL
+			err := store.Save(connection, []Model{{ID: "model"}}, cacheTestNow)
+			if err == nil {
+				t.Fatal("Save() error = nil, want unsafe base URL rejection")
+			}
+			if strings.Contains(err.Error(), "password-that-must-not-be-cached") {
+				t.Fatalf("Save() leaked base URL credential in error: %v", err)
+			}
+			if _, statErr := os.Stat(store.Root); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unsafe base URL touched cache root: %v", statErr)
+			}
+			b, readErr := os.ReadFile(filepath.Join(store.Root, connection.Name+".json"))
+			if readErr == nil && bytes.Contains(b, []byte("password-that-must-not-be-cached")) {
+				t.Fatalf("cache record contains base URL credential: %s", b)
+			}
+		})
+	}
+}
+
+func TestStoreLoadRejectsUnsafeRoot(t *testing.T) {
+	t.Run("wrong mode", func(t *testing.T) {
+		store := newTestStore(t)
+		connection := testConnection("primary")
+		if err := store.Save(connection, []Model{{ID: "cached"}}, cacheTestNow); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+		if err := os.Chmod(store.Root, 0o755); err != nil {
+			t.Fatalf("Chmod(root) error = %v", err)
+		}
+		if _, err := store.Load(connection); err == nil {
+			t.Fatal("Load() error = nil, want unsafe root mode rejection")
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		realStore := newTestStore(t)
+		connection := testConnection("primary")
+		if err := realStore.Save(connection, []Model{{ID: "cached"}}, cacheTestNow); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+		link := filepath.Join(t.TempDir(), "catalogue-link")
+		if err := os.Symlink(realStore.Root, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		store := &Store{Root: link, TTL: DefaultTTL, Now: func() time.Time { return cacheTestNow }}
+		if _, err := store.Load(connection); err == nil {
+			t.Fatal("Load() error = nil, want symlink root rejection")
+		}
+	})
+}
+
+func TestStoreLoadRejectsEmptyScope(t *testing.T) {
+	store := newTestStore(t)
+	connection := testConnection("primary")
+	connection.ScopeID = ""
+	writeRawRecord(t, store, connection.Name, `{"schema_version":1,"connection":{"name":"primary","type":"openai","base_url":"https://api.example.com","scope_id":""},"fetched_at":"2026-07-19T12:00:00Z","models":[{"id":"cached"}]}`)
+	if _, err := store.Load(connection); err == nil {
+		t.Fatal("Load() error = nil, want empty scope rejection")
+	}
+}
+
+func TestStoreLoadRequiresExactFileMode(t *testing.T) {
+	store := newTestStore(t)
+	connection := testConnection("primary")
+	if err := store.Save(connection, []Model{{ID: "cached"}}, cacheTestNow); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	path := filepath.Join(store.Root, connection.Name+".json")
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatalf("Chmod(record) error = %v", err)
+	}
+	if _, err := store.Load(connection); err == nil {
+		t.Fatal("Load() error = nil, want non-0600 record rejection")
+	}
+}
+
+func TestStoreSaveAndInvalidateRejectUnsafeExistingTargets(t *testing.T) {
+	t.Run("save symlink", func(t *testing.T) {
+		store := newTestStore(t)
+		connection := testConnection("primary")
+		if err := os.MkdirAll(store.Root, 0o700); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+		target := filepath.Join(t.TempDir(), "target.json")
+		wantTarget := []byte("do not replace")
+		if err := os.WriteFile(target, wantTarget, 0o600); err != nil {
+			t.Fatalf("WriteFile(target) error = %v", err)
+		}
+		path := filepath.Join(store.Root, connection.Name+".json")
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := store.Save(connection, []Model{{ID: "new"}}, cacheTestNow); err == nil {
+			t.Fatal("Save() error = nil, want existing symlink rejection")
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("cache target was replaced: info/error = %v/%v", info, err)
+		}
+		gotTarget, err := os.ReadFile(target)
+		if err != nil || !bytes.Equal(gotTarget, wantTarget) {
+			t.Fatalf("symlink target changed: bytes/error = %q/%v", gotTarget, err)
+		}
+	})
+
+	t.Run("invalidate symlink", func(t *testing.T) {
+		store := newTestStore(t)
+		connection := testConnection("primary")
+		if err := os.MkdirAll(store.Root, 0o700); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+		target := filepath.Join(t.TempDir(), "target.json")
+		if err := os.WriteFile(target, []byte("do not remove"), 0o600); err != nil {
+			t.Fatalf("WriteFile(target) error = %v", err)
+		}
+		path := filepath.Join(store.Root, connection.Name+".json")
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := store.Invalidate(connection.Name); err == nil {
+			t.Fatal("Invalidate() error = nil, want existing symlink rejection")
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("symlink was removed: %v", err)
+		}
+	})
+
+	t.Run("invalidate directory", func(t *testing.T) {
+		store := newTestStore(t)
+		connection := testConnection("primary")
+		path := filepath.Join(store.Root, connection.Name+".json")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("MkdirAll(target) error = %v", err)
+		}
+		if err := store.Invalidate(connection.Name); err == nil {
+			t.Fatal("Invalidate() error = nil, want existing directory rejection")
+		}
+		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+			t.Fatalf("directory target was removed: info/error = %v/%v", info, err)
 		}
 	})
 }
