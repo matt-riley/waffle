@@ -266,6 +266,78 @@ func TestProviderCommandBareAddDiscoversAndSelectsDefaultUtilityAndFavourites(t 
 	}
 }
 
+func TestProviderCommandGuidedDiscoveryRedactsCredentialFromRenderedModels(t *testing.T) {
+	const apiKey = "echoed-api-key"
+	const upstream = "vendor/echoed-api-key-model"
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = "scope"
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(modelcatalog.Model{
+		ID:            upstream,
+		DisplayName:   "Echoed echoed-api-key name",
+		Owner:         "owner-echoed-api-key",
+		Capabilities:  []string{"capability-echoed-api-key"},
+		ContextWindow: 128000,
+	})}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, apiKey, nil)
+
+	var stdout, stderr bytes.Buffer
+	if err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n1\n-\nn\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String() + stderr.String()
+	if strings.Contains(output, apiKey) {
+		t.Fatalf("guided discovery rendered active credential: %q", output)
+	}
+	if !strings.Contains(output, "[REDACTED]") {
+		t.Fatalf("guided discovery output did not mark redacted fields: %q", output)
+	}
+	if got := fake.addRequest.Models["vendor-echoed-api-key-model"].Model; got != upstream {
+		t.Fatalf("selected raw upstream = %q, want %q; Add request = %#v", got, upstream, fake.addRequest)
+	}
+}
+
+func TestProviderCommandNumericExactIDsReachAdd(t *testing.T) {
+	tests := []struct {
+		name       string
+		models     []modelcatalog.Model
+		selection  string
+		wantAlias  string
+		wantTarget string
+	}{
+		{
+			name:       "known numeric ID wins over row number",
+			models:     []modelcatalog.Model{{ID: "2"}, {ID: "alpha"}},
+			selection:  "2",
+			wantAlias:  "2",
+			wantTarget: "2",
+		},
+		{
+			name:       "explicit unknown numeric ID",
+			models:     []modelcatalog.Model{{ID: "alpha"}},
+			selection:  "id:8675309",
+			wantAlias:  "8675309",
+			wantTarget: "8675309",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := installFakeProviderManager(t)
+			fake.addScopeID = "scope"
+			installFakeProviderCatalogue(t, &fakeProviderCatalogue{result: discoveredCatalogue(tt.models...)})
+			installProviderSecretReader(t, "secret", nil)
+
+			input := strings.NewReader("openai\n\n" + tt.selection + "\n-\nn\n")
+			if err := providerCmd(t.Context(), []string{"add"}, input, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if got := fake.addRequest.Models[tt.wantAlias].Model; got != tt.wantTarget {
+				t.Fatalf("numeric exact selection target = %q, want %q; Add request = %#v", got, tt.wantTarget, fake.addRequest)
+			}
+		})
+	}
+}
+
 func TestProviderCommandSmallCatalogueDisplaysDirectly(t *testing.T) {
 	fake := installFakeProviderManager(t)
 	fake.addScopeID = "scope"
@@ -377,6 +449,26 @@ func TestProviderCommandDiscoveryEmptyOffersManualEntryWithoutCache(t *testing.T
 	}
 }
 
+func TestProviderCommandDiscoveryCancellationDoesNotOfferManualFallback(t *testing.T) {
+	for _, wantErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(wantErr.Error(), func(t *testing.T) {
+			fake := installFakeProviderManager(t)
+			catalogue := &fakeProviderCatalogue{discoverErr: fmt.Errorf("discovery stopped: %w", wantErr)}
+			installFakeProviderCatalogue(t, catalogue)
+			installProviderSecretReader(t, "secret", nil)
+
+			var stdout, stderr bytes.Buffer
+			err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n"), &stdout, &stderr)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("error = %v, want %v", err, wantErr)
+			}
+			if strings.Contains(strings.ToLower(stderr.String()), "manual") || fake.addRequest.ConnectionName != "" || catalogue.saveCalls != 0 {
+				t.Fatalf("canceled discovery entered fallback or mutation: stdout=%q stderr=%q add=%#v saves=%d", stdout.String(), stderr.String(), fake.addRequest, catalogue.saveCalls)
+			}
+		})
+	}
+}
+
 func TestProviderCommandExplicitModelsBypassDiscovery(t *testing.T) {
 	fake := installFakeProviderManager(t)
 	catalogue := &fakeProviderCatalogue{discoverErr: errors.New("must not discover"), saveErr: errors.New("must not save")}
@@ -449,6 +541,29 @@ func TestProviderCommandPreflightStillPrecedesSecretAndDiscovery(t *testing.T) {
 	}
 	if !fake.preflighted || secretRead || catalogue.discoverCalls != 0 {
 		t.Fatalf("ordering preflight=%t secret=%t discovery=%d", fake.preflighted, secretRead, catalogue.discoverCalls)
+	}
+}
+
+func TestProviderCommandHiddenKeyPromptFailureStopsBeforeSecret(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	catalogue := &fakeProviderCatalogue{}
+	installFakeProviderCatalogue(t, catalogue)
+	secretRead := false
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) {
+		secretRead = true
+		return "secret", nil
+	}
+	t.Cleanup(func() { providerSecretReader = old })
+
+	outputErr := errors.New("hidden prompt output failed")
+	stderr := &failOnSubstringWriter{substring: "API key", err: outputErr}
+	err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n"), io.Discard, stderr)
+	if !errors.Is(err, outputErr) {
+		t.Fatalf("error = %v, want hidden prompt output error", err)
+	}
+	if secretRead || catalogue.discoverCalls != 0 || !fake.preflighted {
+		t.Fatalf("hidden prompt failure ordering preflight=%t secret=%t discovery=%d", fake.preflighted, secretRead, catalogue.discoverCalls)
 	}
 }
 
@@ -967,6 +1082,19 @@ func maxNumberedCatalogueRun(output string) int {
 type countingReader struct {
 	reader io.Reader
 	reads  int
+}
+
+type failOnSubstringWriter struct {
+	bytes.Buffer
+	substring string
+	err       error
+}
+
+func (w *failOnSubstringWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.substring) {
+		return 0, w.err
+	}
+	return w.Buffer.Write(p)
 }
 
 func (r *countingReader) Read(p []byte) (int, error) {

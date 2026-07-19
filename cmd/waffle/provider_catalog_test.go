@@ -405,6 +405,27 @@ func TestProviderCatalogServiceRedactsRefreshErrors(t *testing.T) {
 	}
 }
 
+func TestProviderCatalogServicePreservesCancellationThroughRedaction(t *testing.T) {
+	for _, wantErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(wantErr.Error(), func(t *testing.T) {
+			service := &providerCatalogueService{
+				newSource: func(modelcatalog.Connection, string, bool) (modelcatalog.Source, error) {
+					return &testCatalogueSource{err: fmt.Errorf("request with secret stopped: %w", wantErr)}, nil
+				},
+			}
+			_, err := service.Discover(t.Context(), modelcatalog.Connection{
+				Name: "primary", Type: "openai", BaseURL: openaip.DefaultBaseURL,
+			}, "secret")
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("Discover() error = %v, want %v", err, wantErr)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("Discover() cancellation leaked active key: %v", err)
+			}
+		})
+	}
+}
+
 type testCatalogueSource struct {
 	models []modelcatalog.Model
 	err    error

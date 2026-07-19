@@ -93,7 +93,7 @@ func promptLineNoReadAhead(r io.Reader, w io.Writer, label, defaultValue string)
 	return value, nil
 }
 
-func renderCataloguePage(w io.Writer, models []modelcatalog.Model, page int) (int, error) {
+func renderCataloguePage(w io.Writer, models []modelcatalog.Model, page int, private ...string) (int, error) {
 	if len(models) == 0 {
 		return 0, errors.New("model catalogue has no matching entries")
 	}
@@ -107,8 +107,8 @@ func renderCataloguePage(w io.Writer, models []modelcatalog.Model, page int) (in
 		return 0, err
 	}
 	for index, model := range models[start:end] {
-		displayName := modelcatalog.SafeText(model.DisplayName)
-		id := modelcatalog.SafeText(model.ID)
+		displayName := safeCatalogueText(model.DisplayName, private...)
+		id := safeCatalogueText(model.ID, private...)
 		if displayName == "" {
 			if _, err := fmt.Fprintf(w, "  %d. %s\n", index+1, id); err != nil {
 				return 0, err
@@ -122,7 +122,7 @@ func renderCataloguePage(w io.Writer, models []modelcatalog.Model, page int) (in
 	return end - start, nil
 }
 
-func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []modelcatalog.Model, optional bool) (modelcatalog.Model, bool, error) {
+func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []modelcatalog.Model, optional bool, private ...string) (modelcatalog.Model, bool, error) {
 	if len(models) == 0 {
 		return modelcatalog.Model{}, false, errors.New("discovered model catalogue is empty")
 	}
@@ -130,20 +130,20 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 	page := 0
 	displayed := false
 	if len(models) <= 50 {
-		if _, err := renderCataloguePage(w, current, page); err != nil {
+		if _, err := renderCataloguePage(w, current, page, private...); err != nil {
 			return modelcatalog.Model{}, false, err
 		}
 		displayed = true
 	}
 
 	for {
-		prompt := label + " (search term, exact ID"
+		prompt := label + " (search term, exact ID, id:UNKNOWN-ID"
 		if optional {
 			prompt += ", or - for none"
 		}
 		prompt += ")"
 		if displayed {
-			prompt = label + " (number, exact ID, search, n, p"
+			prompt = label + " (number, exact ID, id:UNKNOWN-ID, search, n, p"
 			if optional {
 				prompt += ", or -"
 			}
@@ -162,6 +162,20 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 			}
 			continue
 		}
+		for _, model := range models {
+			if model.ID == value {
+				return model, true, nil
+			}
+		}
+		if exactID, ok := strings.CutPrefix(value, "id:"); ok {
+			if exactID == "" {
+				if _, err := fmt.Fprintln(w, "The id: exact-ID form requires a model ID."); err != nil {
+					return modelcatalog.Model{}, false, err
+				}
+				continue
+			}
+			return modelcatalog.Model{ID: exactID}, true, nil
+		}
 		if number, parseErr := strconv.Atoi(value); parseErr == nil {
 			start := page * cataloguePageSize
 			if displayed && number >= 1 && start+number <= len(current) && number <= cataloguePageSize {
@@ -172,11 +186,6 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 			}
 			continue
 		}
-		for _, model := range models {
-			if model.ID == value {
-				return model, true, nil
-			}
-		}
 		switch strings.ToLower(value) {
 		case "n", "next":
 			if !displayed || (page+1)*cataloguePageSize >= len(current) {
@@ -186,7 +195,7 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 				continue
 			}
 			page++
-			if _, err := renderCataloguePage(w, current, page); err != nil {
+			if _, err := renderCataloguePage(w, current, page, private...); err != nil {
 				return modelcatalog.Model{}, false, err
 			}
 			continue
@@ -198,7 +207,7 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 				continue
 			}
 			page--
-			if _, err := renderCataloguePage(w, current, page); err != nil {
+			if _, err := renderCataloguePage(w, current, page, private...); err != nil {
 				return modelcatalog.Model{}, false, err
 			}
 			continue
@@ -206,21 +215,21 @@ func selectCatalogueModel(r io.Reader, w io.Writer, label string, models []model
 
 		matches := modelcatalog.Search(models, value)
 		if len(matches) == 0 {
-			if _, err := fmt.Fprintf(w, "Using exact model ID %s.\n", modelcatalog.SafeText(value)); err != nil {
+			if _, err := fmt.Fprintf(w, "Using exact model ID %s.\n", safeCatalogueText(value, private...)); err != nil {
 				return modelcatalog.Model{}, false, err
 			}
 			return modelcatalog.Model{ID: value}, true, nil
 		}
 		current = matches
 		page = 0
-		if _, err := renderCataloguePage(w, current, page); err != nil {
+		if _, err := renderCataloguePage(w, current, page, private...); err != nil {
 			return modelcatalog.Model{}, false, err
 		}
 		displayed = true
 	}
 }
 
-func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model, existing map[string]struct{}) (map[string]config.ModelTarget, string, string, error) {
+func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model, existing map[string]struct{}, private ...string) (map[string]config.ModelTarget, string, string, error) {
 	favourites := make(map[string]config.ModelTarget)
 	usedAliases := make(map[string]struct{}, len(existing))
 	for alias := range existing {
@@ -235,7 +244,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 		alias, aliasErr := modelcatalog.AliasFor(model.ID)
 		if aliasErr == nil {
 			if _, collision := usedAliases[alias]; !collision {
-				if _, err := fmt.Fprintf(w, "Using model alias %s for %s.\n", alias, modelcatalog.SafeText(model.ID)); err != nil {
+				if _, err := fmt.Fprintf(w, "Using model alias %s for %s.\n", safeCatalogueText(alias, private...), safeCatalogueText(model.ID, private...)); err != nil {
 					return "", err
 				}
 				favourites[alias] = config.ModelTarget{Model: model.ID}
@@ -243,27 +252,27 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 				upstreamAliases[model.ID] = alias
 				return alias, nil
 			}
-			if _, err := fmt.Fprintf(w, "model alias %q already exists; choose an explicit alias.\n", alias); err != nil {
+			if _, err := fmt.Fprintf(w, "model alias %q already exists; choose an explicit alias.\n", safeCatalogueText(alias, private...)); err != nil {
 				return "", err
 			}
 		} else {
-			if _, err := fmt.Fprintf(w, "%s; choose an explicit alias.\n", aliasErr); err != nil {
+			if _, err := fmt.Fprintf(w, "%s; choose an explicit alias.\n", safeCatalogueText(aliasErr.Error(), private...)); err != nil {
 				return "", err
 			}
 		}
 		for {
-			explicit, err := promptLineNoReadAhead(r, w, "Model alias for "+modelcatalog.SafeText(model.ID), "")
+			explicit, err := promptLineNoReadAhead(r, w, "Model alias for "+safeCatalogueText(model.ID, private...), "")
 			if err != nil {
 				return "", err
 			}
 			if !config.ValidModelAlias(explicit) {
-				if _, err := fmt.Fprintf(w, "invalid model alias %q (want slug [a-z0-9-] max %d).\n", explicit, config.ProviderConnectionNameMax); err != nil {
+				if _, err := fmt.Fprintf(w, "invalid model alias %q (want slug [a-z0-9-] max %d).\n", safeCatalogueText(explicit, private...), config.ProviderConnectionNameMax); err != nil {
 					return "", err
 				}
 				continue
 			}
 			if _, collision := usedAliases[explicit]; collision {
-				if _, err := fmt.Fprintf(w, "model alias %q already exists.\n", explicit); err != nil {
+				if _, err := fmt.Fprintf(w, "model alias %q already exists.\n", safeCatalogueText(explicit, private...)); err != nil {
 					return "", err
 				}
 				continue
@@ -275,7 +284,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 		}
 	}
 
-	defaultSelection, selected, err := selectCatalogueModel(r, w, "Default model", models, true)
+	defaultSelection, selected, err := selectCatalogueModel(r, w, "Default model", models, true, private...)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -287,7 +296,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 		}
 	}
 
-	utilitySelection, selected, err := selectCatalogueModel(r, w, "Utility model (- uses default)", models, true)
+	utilitySelection, selected, err := selectCatalogueModel(r, w, "Utility model (- uses default)", models, true, private...)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -303,7 +312,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 		if _, err := fmt.Fprintln(w, "Select at least one favourite model for this provider."); err != nil {
 			return nil, "", "", err
 		}
-		selection, _, selectionErr := selectCatalogueModel(r, w, "Favourite model", models, false)
+		selection, _, selectionErr := selectCatalogueModel(r, w, "Favourite model", models, false, private...)
 		if selectionErr != nil {
 			return nil, "", "", selectionErr
 		}
@@ -321,7 +330,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 		case "", "n", "no":
 			return favourites, defaultAlias, utilityAlias, nil
 		case "y", "yes":
-			selection, _, selectionErr := selectCatalogueModel(r, w, "Favourite model", models, false)
+			selection, _, selectionErr := selectCatalogueModel(r, w, "Favourite model", models, false, private...)
 			if selectionErr != nil {
 				return nil, "", "", selectionErr
 			}
@@ -334,6 +343,10 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 			}
 		}
 	}
+}
+
+func safeCatalogueText(value string, private ...string) string {
+	return modelcatalog.SafeText(redactCatalogueText(value, private...))
 }
 
 func resolveProviderPreset(kind, override string) (providerPreset, error) {

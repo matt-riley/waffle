@@ -267,7 +267,9 @@ func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 		return err
 	}
 
-	fmt.Fprint(stderr, "API key (input hidden; leave empty for an auth-free endpoint): ")
+	if _, err := fmt.Fprint(stderr, "API key (input hidden; leave empty for an auth-free endpoint): "); err != nil {
+		return fmt.Errorf("write API key prompt: %w", err)
+	}
 	apiKey, err := providerSecretReader(stdin, stderr)
 	if err != nil {
 		return err
@@ -281,6 +283,12 @@ func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 	catalogue, discoveryErr = openProviderCatalogue()
 	if discoveryErr == nil {
 		discoveryResult, discoveryErr = catalogue.Discover(ctx, discoveryConnection, apiKey)
+		switch {
+		case errors.Is(discoveryErr, context.Canceled):
+			return context.Canceled
+		case errors.Is(discoveryErr, context.DeadlineExceeded):
+			return context.DeadlineExceeded
+		}
 		if discoveryErr == nil && len(discoveryResult.Models) == 0 {
 			discoveryErr = errors.New("model discovery returned an empty catalogue")
 		}
@@ -303,7 +311,7 @@ func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 		}
 	} else {
 		fmt.Fprintf(stderr, "Discovered %d available models.\n", len(discoveryResult.Models))
-		models, defaultModel, utilityModel, err = selectFavouriteModels(stdin, stderr, discoveryResult.Models, existingAliases)
+		models, defaultModel, utilityModel, err = selectFavouriteModels(stdin, stderr, discoveryResult.Models, existingAliases, apiKey)
 		if err != nil {
 			return err
 		}
@@ -322,7 +330,7 @@ func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 	}
 	fmt.Fprintf(stdout, "provider %s validated and saved\n", name)
 	if defaultModel != "" {
-		fmt.Fprintf(stdout, "Waffle is Ready with default model %s\n", defaultModel)
+		fmt.Fprintf(stdout, "Waffle is Ready with default model %s\n", safeCatalogueText(defaultModel, apiKey))
 	}
 	if discoveryErr != nil {
 		return nil
@@ -875,7 +883,16 @@ func sanitizeFlagError(err error) error {
 }
 
 func redactProviderError(err error, key string) error {
-	if err == nil || key == "" {
+	if err == nil {
+		return err
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
+	if key == "" {
 		return err
 	}
 	return errors.New(strings.ReplaceAll(err.Error(), key, "[REDACTED]"))
