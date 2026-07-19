@@ -96,6 +96,9 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			err = cerr
 		}
 	}()
+	if len(cfg.Providers) == 0 && strings.TrimSpace(cfg.Provider.Name) == "" {
+		return errors.New("no provider configured; run `sudo waffle provider add` on a managed host")
+	}
 	if profileName != "" {
 		if !config.ValidProfileName(profileName) && profileName != "main" {
 			return fmt.Errorf("invalid profile name %q", profileName)
