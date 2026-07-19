@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -590,6 +591,365 @@ func TestManagerTestRecoversEveryCrashLeftJournalPhase(t *testing.T) {
 				t.Fatalf("journal remains after Test recovery: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestManagerAddModelCommitsExactAliasAndRoles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		def     bool
+		utility bool
+	}{
+		{name: "no role"},
+		{name: "default only", def: true},
+		{name: "utility only", utility: true},
+		{name: "both roles", def: true, utility: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager(t)
+			enrollConnectionWithoutRoles(t, m, false)
+			beforeCfg, err := config.Load(m.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeSecrets := readMaybe(t, m.SecretsPath)
+			probes := 0
+			m.Probe = func(_ context.Context, target config.ResolvedModel, key string) error {
+				probes++
+				if target.Alias != "favourite" || target.ConnectionName != "openai" || target.UpstreamModel != "gpt-upstream-exact" {
+					t.Fatalf("probe target = %#v", target)
+				}
+				if key != providerTestKey {
+					t.Fatalf("probe key = %q, want provider test key", key)
+				}
+				return nil
+			}
+
+			err = m.AddModel(context.Background(), AddModelRequest{
+				ConnectionName: "openai",
+				Alias:          "favourite",
+				UpstreamModel:  "gpt-upstream-exact",
+				Default:        tc.def,
+				Utility:        tc.utility,
+			})
+			if err != nil {
+				t.Fatalf("AddModel: %v", err)
+			}
+			if probes != 1 {
+				t.Fatalf("probe count = %d, want 1", probes)
+			}
+			got, err := config.Load(m.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Providers, beforeCfg.Providers) {
+				t.Fatalf("providers changed:\n got %#v\nwant %#v", got.Providers, beforeCfg.Providers)
+			}
+			if got.Models["gpt"] != beforeCfg.Models["gpt"] || got.Models["favourite"] != (config.ModelTarget{Provider: "openai", Model: "gpt-upstream-exact"}) || len(got.Models) != len(beforeCfg.Models)+1 {
+				t.Fatalf("models = %#v", got.Models)
+			}
+			wantAgent := beforeCfg.Agent
+			if tc.def {
+				wantAgent.DefaultModel = "favourite"
+			}
+			if tc.utility {
+				wantAgent.UtilityModel = "favourite"
+			}
+			if !reflect.DeepEqual(got.Agent, wantAgent) {
+				t.Fatalf("agent = %#v, want %#v", got.Agent, wantAgent)
+			}
+			assertBytesEqual(t, m.SecretsPath, beforeSecrets)
+			if body := readMaybe(t, m.ConfigPath); !bytes.Contains(body, []byte("# keep this comment")) || !bytes.Contains(body, []byte("level = \"debug\"")) {
+				t.Fatalf("AddModel changed unrelated TOML:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestManagerAddModelProbeFailureRollsBack(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, false)
+	before := captureManagerState(t, m)
+	m.Probe = func(context.Context, config.ResolvedModel, string) error {
+		return errors.New("probe rejected " + providerTestKey)
+	}
+
+	err := m.AddModel(context.Background(), AddModelRequest{ConnectionName: "openai", Alias: "favourite", UpstreamModel: "gpt-new", Default: true})
+	if err == nil || !strings.Contains(err.Error(), "probe") {
+		t.Fatalf("AddModel error = %v, want probe failure", err)
+	}
+	if strings.Contains(err.Error(), providerTestKey) {
+		t.Fatalf("AddModel error leaked credential: %v", err)
+	}
+	assertManagerState(t, m, before)
+}
+
+func TestManagerAddModelLifecycleFailureRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		restartErr error
+		healthErr  error
+	}{
+		{name: "restart", restartErr: errors.New("restart failed " + providerTestKey)},
+		{name: "health", healthErr: errors.New("health failed " + providerTestKey)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager(t)
+			enrollConnectionWithoutRoles(t, m, false)
+			active := false
+			m.ServiceActive = func(context.Context) (bool, error) { return active, nil }
+			m.Restart = func(context.Context) error {
+				active = true
+				return tc.restartErr
+			}
+			m.Health = func(context.Context) error { return tc.healthErr }
+			m.RestoreService = func(_ context.Context, wasActive bool) error {
+				active = wasActive
+				return nil
+			}
+			before := captureManagerState(t, m)
+
+			err := m.AddModel(context.Background(), AddModelRequest{ConnectionName: "openai", Alias: "favourite", UpstreamModel: "gpt-new", Default: true})
+			if err == nil {
+				t.Fatal("AddModel succeeded, want lifecycle failure")
+			}
+			if strings.Contains(err.Error(), providerTestKey) {
+				t.Fatalf("AddModel error leaked credential: %v", err)
+			}
+			assertManagerState(t, m, before)
+		})
+	}
+}
+
+func TestManagerAddModelRejectsUnknownConnectionInvalidAliasAndCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  AddModelRequest
+		want string
+	}{
+		{name: "unknown connection", req: AddModelRequest{ConnectionName: "missing", Alias: "new", UpstreamModel: "gpt-new"}, want: "does not exist"},
+		{name: "invalid alias", req: AddModelRequest{ConnectionName: "openai", Alias: "BAD ALIAS", UpstreamModel: "gpt-new"}, want: "invalid model alias"},
+		{name: "missing upstream", req: AddModelRequest{ConnectionName: "openai", Alias: "new", UpstreamModel: "  "}, want: "upstream model is required"},
+		{name: "alias collision", req: AddModelRequest{ConnectionName: "openai", Alias: "gpt", UpstreamModel: "gpt-new"}, want: "already exists"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager(t)
+			enrollConnectionWithoutRoles(t, m, false)
+			before := captureManagerState(t, m)
+			probes := 0
+			m.Probe = func(context.Context, config.ResolvedModel, string) error { probes++; return nil }
+
+			err := m.AddModel(context.Background(), tc.req)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AddModel error = %v, want %q", err, tc.want)
+			}
+			if probes != 0 {
+				t.Fatalf("probe count = %d, want 0", probes)
+			}
+			if strings.Contains(err.Error(), providerTestKey) {
+				t.Fatalf("AddModel error leaked credential: %v", err)
+			}
+			assertManagerState(t, m, before)
+		})
+	}
+}
+
+func TestManagerCatalogSnapshotReturnsConnectionAndDecryptedKey(t *testing.T) {
+	m := newTestManager(t)
+	m.Random = bytes.NewReader(bytes.Repeat([]byte{0xab}, 32))
+	enrollConnectionWithoutRoles(t, m, false)
+	before := captureManagerState(t, m)
+
+	snapshot, err := m.CatalogSnapshot(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("CatalogSnapshot: %v", err)
+	}
+	if snapshot.Connection != (config.ProviderConnection{Type: "openai", APIKey: "secret://provider/openai/api-key", BaseURL: "https://api.openai.example/v1"}) {
+		t.Fatalf("connection = %#v", snapshot.Connection)
+	}
+	if snapshot.APIKey != providerTestKey {
+		t.Fatalf("APIKey = %q, want decrypted provider key", snapshot.APIKey)
+	}
+	if snapshot.ScopeID != strings.Repeat("ab", 32) {
+		t.Fatalf("ScopeID = %q", snapshot.ScopeID)
+	}
+	assertStoredSecret(t, m, "provider/openai/catalog-scope", snapshot.ScopeID)
+	assertManagerState(t, m, before)
+	if bytes.Contains(readMaybe(t, m.ConfigPath), []byte(snapshot.ScopeID)) {
+		t.Fatal("config serialized catalogue scope")
+	}
+}
+
+func TestManagerCatalogSnapshotSupportsAuthFreeAndRejectsUnknownConnection(t *testing.T) {
+	m := newTestManager(t)
+	m.Random = bytes.NewReader(bytes.Repeat([]byte{0x7c}, 32))
+	enrollConnectionWithoutRoles(t, m, true)
+
+	snapshot, err := m.CatalogSnapshot(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("CatalogSnapshot auth-free: %v", err)
+	}
+	if snapshot.APIKey != "" || snapshot.ScopeID != strings.Repeat("7c", 32) || snapshot.Connection.APIKey != "" {
+		t.Fatalf("auth-free snapshot = %#v", snapshot)
+	}
+	before := captureManagerState(t, m)
+	_, err = m.CatalogSnapshot(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("CatalogSnapshot error = %v, want unknown connection", err)
+	}
+	if strings.Contains(err.Error(), providerTestKey) {
+		t.Fatalf("CatalogSnapshot error leaked credential: %v", err)
+	}
+	assertManagerState(t, m, before)
+}
+
+func TestManagerEnrollmentScopesDifferAcrossRemoveAndReAdd(t *testing.T) {
+	m := newTestManager(t)
+	m.Random = bytes.NewReader(append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...))
+	enrollConnectionWithoutRoles(t, m, false)
+	first, err := m.CatalogSnapshot(context.Background(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Remove(context.Background(), "openai"); err != nil {
+		t.Fatal(err)
+	}
+	store := secret.OpenFile(m.SecretsPath, m.Identity)
+	for _, name := range []string{"provider/openai/api-key", "provider/openai/catalog-scope"} {
+		if _, err := store.Get(name); !errors.Is(err, secret.ErrNotFound) {
+			t.Fatalf("removed secret %q error = %v, want ErrNotFound", name, err)
+		}
+	}
+	enrollConnectionWithoutRoles(t, m, false)
+	second, err := m.CatalogSnapshot(context.Background(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ScopeID == second.ScopeID || first.ScopeID != strings.Repeat("11", 32) || second.ScopeID != strings.Repeat("22", 32) {
+		t.Fatalf("scope IDs first=%q second=%q", first.ScopeID, second.ScopeID)
+	}
+}
+
+func TestManagerCatalogSnapshotBackfillsLegacyScopeUnderLock(t *testing.T) {
+	t.Run("backfill", func(t *testing.T) {
+		m := newTestManager(t)
+		enrollConnectionWithoutRoles(t, m, false)
+		store := secret.OpenFile(m.SecretsPath, m.Identity)
+		if err := store.Delete("provider/openai/catalog-scope"); err != nil {
+			t.Fatal(err)
+		}
+		m.Random = bytes.NewReader(bytes.Repeat([]byte{0xcd}, 32))
+		before := captureManagerState(t, m)
+		lease, err := instance.Default(m.LockPath).Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, lockedErr := m.CatalogSnapshot(context.Background(), "openai")
+		if err := lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+		if !errors.Is(lockedErr, ErrLocked) {
+			t.Fatalf("CatalogSnapshot under held lock error = %v, want ErrLocked", lockedErr)
+		}
+		assertManagerState(t, m, before)
+
+		snapshot, err := m.CatalogSnapshot(context.Background(), "openai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.ScopeID != strings.Repeat("cd", 32) {
+			t.Fatalf("backfilled scope = %q", snapshot.ScopeID)
+		}
+		if got := readMaybe(t, m.ConfigPath); !bytes.Equal(got, before.config) {
+			t.Fatal("scope backfill modified config")
+		}
+		if got := readMaybe(t, m.readyPath()); !bytes.Equal(got, before.ready) {
+			t.Fatal("scope backfill modified ready generation")
+		}
+		active, err := m.ServiceActive(context.Background())
+		if err != nil || active != before.serviceActive {
+			t.Fatalf("scope backfill service active=%v err=%v", active, err)
+		}
+		assertStoredSecret(t, m, "existing/value", "preserve-me")
+		assertStoredSecret(t, m, "provider/openai/api-key", providerTestKey)
+		assertStoredSecret(t, m, "provider/openai/catalog-scope", snapshot.ScopeID)
+		names, err := store.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNames := []string{"existing/value", "provider/openai/api-key", "provider/openai/catalog-scope"}
+		if !reflect.DeepEqual(names, wantNames) {
+			t.Fatalf("secret names = %v, want %v", names, wantNames)
+		}
+	})
+
+	t.Run("generation failure", func(t *testing.T) {
+		m := newTestManager(t)
+		enrollConnectionWithoutRoles(t, m, false)
+		if err := secret.OpenFile(m.SecretsPath, m.Identity).Delete("provider/openai/catalog-scope"); err != nil {
+			t.Fatal(err)
+		}
+		m.Random = strings.NewReader("short")
+		before := captureManagerState(t, m)
+		_, err := m.CatalogSnapshot(context.Background(), "openai")
+		if err == nil || !strings.Contains(err.Error(), "catalogue access") {
+			t.Fatalf("CatalogSnapshot error = %v, want catalogue access failure", err)
+		}
+		if strings.Contains(err.Error(), providerTestKey) {
+			t.Fatalf("CatalogSnapshot error leaked credential: %v", err)
+		}
+		assertManagerState(t, m, before)
+	})
+}
+
+type managerState struct {
+	config        []byte
+	secrets       []byte
+	ready         []byte
+	serviceActive bool
+}
+
+func captureManagerState(t *testing.T, m *Manager) managerState {
+	t.Helper()
+	active, err := m.ServiceActive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return managerState{
+		config:        readMaybe(t, m.ConfigPath),
+		secrets:       readMaybe(t, m.SecretsPath),
+		ready:         readMaybe(t, m.readyPath()),
+		serviceActive: active,
+	}
+}
+
+func assertManagerState(t *testing.T, m *Manager, want managerState) {
+	t.Helper()
+	assertBytesEqual(t, m.ConfigPath, want.config)
+	assertBytesEqual(t, m.SecretsPath, want.secrets)
+	assertBytesEqual(t, m.readyPath(), want.ready)
+	active, err := m.ServiceActive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != want.serviceActive {
+		t.Fatalf("service active = %v, want %v", active, want.serviceActive)
+	}
+}
+
+func enrollConnectionWithoutRoles(t *testing.T, m *Manager, authFree bool) {
+	t.Helper()
+	req := validAddRequest()
+	req.DefaultModel = ""
+	req.UtilityModel = ""
+	if authFree {
+		req.APIKey = ""
+	}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatalf("enroll connection: %v", err)
 	}
 }
 

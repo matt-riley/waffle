@@ -5,10 +5,13 @@ package providerconfig
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -49,6 +52,22 @@ type AddRequest struct {
 	UtilityModel   string
 	APIKey         string
 	LegacyAuthFree bool
+}
+
+// AddModelRequest adds one model alias to an existing provider connection.
+type AddModelRequest struct {
+	ConnectionName string
+	Alias          string
+	UpstreamModel  string
+	Default        bool
+	Utility        bool
+}
+
+// CatalogSnapshot is the private provider catalogue input for one enrollment.
+type CatalogSnapshot struct {
+	Connection config.ProviderConnection
+	APIKey     string
+	ScopeID    string
 }
 
 // Preflight establishes identity, path, syntax, and recovery readiness before
@@ -117,6 +136,7 @@ type Manager struct {
 	SecretsPath   string
 	LockPath      string
 	Identity      *age.X25519Identity
+	Random        io.Reader
 	Probe         Probe
 	Restart       func(context.Context) error
 	Stop          func(context.Context) error
@@ -151,6 +171,7 @@ func New(identity *age.X25519Identity) (*Manager, error) {
 		SecretsPath: secretsPath,
 		LockPath:    filepath.Join(home, "provider-config.lock"),
 		Identity:    identity,
+		Random:      rand.Reader,
 	}, nil
 }
 
@@ -182,6 +203,10 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 		if _, exists := before.cfg.Models[alias]; exists {
 			return fmt.Errorf("model alias %q already exists", alias)
 		}
+	}
+	scopeID, err := m.newCatalogScope()
+	if err != nil {
+		return redactError(err, req.APIKey)
 	}
 	legacyKey, err := m.legacyCredential(before.cfg, req.LegacyAuthFree)
 	if err != nil {
@@ -224,10 +249,12 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 				return err
 			}
 		}
-		if req.APIKey == "" {
-			return nil
+		if req.APIKey != "" {
+			if err := store.Set(secretName(req.ConnectionName), req.APIKey); err != nil {
+				return err
+			}
 		}
-		return store.Set(secretName(req.ConnectionName), req.APIKey)
+		return store.Set(catalogScopeName(req.ConnectionName), scopeID)
 	})
 	if err != nil {
 		return redactError(err, req.APIKey)
@@ -296,11 +323,10 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 	}
 	defer func() { _ = os.Remove(configStage) }()
 	secretStage, err := m.stageSecrets(before.secretBytes, func(store secret.Store) error {
-		deleteErr := store.Delete(secretName(name))
-		if errors.Is(deleteErr, secret.ErrNotFound) {
-			return nil
-		}
-		return deleteErr
+		return errors.Join(
+			deleteSecretIfPresent(store, secretName(name)),
+			deleteSecretIfPresent(store, catalogScopeName(name)),
+		)
 	})
 	if err != nil {
 		return err
@@ -322,6 +348,116 @@ func (m *Manager) Test(ctx context.Context, name string) error {
 		return redactError(fmt.Errorf("probe provider %q model alias %q: %w", name, target.Alias, err), key)
 	}
 	return nil
+}
+
+// CatalogSnapshot returns the private inputs needed to discover one
+// connection's catalogue. Legacy enrollments receive a scope on first access.
+func (m *Manager) CatalogSnapshot(ctx context.Context, name string) (snapshot CatalogSnapshot, err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return CatalogSnapshot{}, err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return CatalogSnapshot{}, err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return CatalogSnapshot{}, err
+	}
+	connection, ok := cfg.Providers[name]
+	if !ok {
+		return CatalogSnapshot{}, fmt.Errorf("provider connection %q does not exist", name)
+	}
+	key, err := m.connectionKey(connection)
+	if err != nil {
+		return CatalogSnapshot{}, err
+	}
+	if m.Identity == nil {
+		return CatalogSnapshot{}, errors.New("catalogue access: secret-store identity is required")
+	}
+	store := secret.OpenFile(m.SecretsPath, m.Identity)
+	scopeID, err := store.Get(catalogScopeName(name))
+	if errors.Is(err, secret.ErrNotFound) {
+		scopeID, err = m.newCatalogScope()
+		if err != nil {
+			return CatalogSnapshot{}, redactError(err, key)
+		}
+		if err := store.Set(catalogScopeName(name), scopeID); err != nil {
+			return CatalogSnapshot{}, redactError(fmt.Errorf("catalogue access: persist enrollment scope: %w", err), key)
+		}
+	} else if err != nil {
+		return CatalogSnapshot{}, redactError(fmt.Errorf("catalogue access: load enrollment scope: %w", err), key)
+	}
+	return CatalogSnapshot{Connection: connection, APIKey: key, ScopeID: scopeID}, nil
+}
+
+// AddModel adds one favourite alias and optional agent roles transactionally.
+func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	if err := validateAddModel(req); err != nil {
+		return err
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
+		return err
+	}
+	if _, ok := before.cfg.Providers[req.ConnectionName]; !ok {
+		return fmt.Errorf("provider connection %q does not exist", req.ConnectionName)
+	}
+	if _, ok := before.cfg.Models[req.Alias]; ok {
+		return fmt.Errorf("model alias %q already exists", req.Alias)
+	}
+
+	target := config.ModelTarget{Provider: req.ConnectionName, Model: req.UpstreamModel}
+	configStage, candidate, err := m.stageConfig(before.configBytes, func(doc *tomlDocument, _ config.Config) error {
+		setModel(doc, req.Alias, target)
+		if req.Default {
+			doc.setValue("agent", "default_model", strconv.Quote(req.Alias))
+		}
+		if req.Utility {
+			doc.setValue("agent", "utility_model", strconv.Quote(req.Alias))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(configStage) }()
+	if err := validateAddModelCandidate(before.cfg, candidate, req, target); err != nil {
+		return err
+	}
+
+	secretStage, err := m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(secretStage) }()
+	resolved, err := candidate.ResolveModel(req.Alias)
+	if err != nil {
+		return err
+	}
+	key, err := m.connectionKey(resolved.Connection)
+	if err != nil {
+		return err
+	}
+	if m.Probe == nil {
+		return errors.New("provider probe is not configured")
+	}
+	if err := m.Probe(ctx, resolved, key); err != nil {
+		return redactError(fmt.Errorf("probe model alias %q: %w", req.Alias, err), key)
+	}
+	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, key)
 }
 
 // ActivateModel validates an existing alias, makes it the default, and moves
@@ -902,6 +1038,43 @@ func validateAdd(req AddRequest) error {
 	return nil
 }
 
+func validateAddModel(req AddModelRequest) error {
+	if !config.ValidProviderConnectionName(req.ConnectionName) {
+		return fmt.Errorf("invalid connection name %q", req.ConnectionName)
+	}
+	if !config.ValidModelAlias(req.Alias) {
+		return fmt.Errorf("invalid model alias %q", req.Alias)
+	}
+	if strings.TrimSpace(req.UpstreamModel) == "" {
+		return fmt.Errorf("model alias %q: upstream model is required", req.Alias)
+	}
+	return nil
+}
+
+func validateAddModelCandidate(before, candidate config.Config, req AddModelRequest, target config.ModelTarget) error {
+	if got, ok := candidate.Models[req.Alias]; !ok || got != target {
+		return fmt.Errorf("semantic model addition failed for %q", req.Alias)
+	}
+	expectedModels := make(map[string]config.ModelTarget, len(before.Models)+1)
+	for alias, existing := range before.Models {
+		expectedModels[alias] = existing
+	}
+	expectedModels[req.Alias] = target
+	expectedAgent := before.Agent
+	if req.Default {
+		expectedAgent.DefaultModel = req.Alias
+	}
+	if req.Utility {
+		expectedAgent.UtilityModel = req.Alias
+	}
+	if !equalProviderMaps(candidate.Providers, before.Providers) ||
+		!equalModelMaps(candidate.Models, expectedModels) ||
+		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
+		return errors.New("unrelated provider, model, or agent configuration changed during model addition")
+	}
+	return nil
+}
+
 func migrateLegacyDocument(doc *tomlDocument, cfg config.Config, credentialMigrated bool) {
 	if cfg.ProviderRegistrySource() != config.ProviderRegistryLegacy {
 		return
@@ -1215,6 +1388,28 @@ func sortedKeys[V any](m map[string]V) []string {
 
 func secretName(connection string) string { return "provider/" + connection + "/api-key" }
 func secretRef(connection string) string  { return "secret://" + secretName(connection) }
+
+func catalogScopeName(connection string) string { return "provider/" + connection + "/catalog-scope" }
+
+func deleteSecretIfPresent(store secret.Store, name string) error {
+	err := store.Delete(name)
+	if errors.Is(err, secret.ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (m *Manager) newCatalogScope() (string, error) {
+	random := m.Random
+	if random == nil {
+		random = rand.Reader
+	}
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(random, b); err != nil {
+		return "", fmt.Errorf("catalogue access: generate enrollment scope: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
 
 func redactError(err error, key string) error {
 	if err == nil || key == "" {
