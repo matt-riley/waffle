@@ -19,6 +19,9 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
+// DefaultBaseURL is the OpenAI API's default versioned endpoint.
+const DefaultBaseURL = "https://api.openai.com/v1"
+
 // maxAccumulatedBytes caps text and tool call argument accumulation in
 // readStream to prevent unbounded memory growth from verbose or malicious
 // streams. Text and tool call arguments are budgeted separately (each up to

@@ -38,7 +38,7 @@ func newModelRuntimeResolver(cfg config.Config) *modelRuntimeResolver {
 		},
 		"openai": func(apiKey, baseURL string) llm.Provider {
 			if baseURL == "" {
-				baseURL = "https://api.openai.com/v1"
+				baseURL = openaip.DefaultBaseURL
 			}
 			return openaip.New(apiKey, baseURL)
 		},
