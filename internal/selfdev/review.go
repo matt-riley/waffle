@@ -105,16 +105,7 @@ func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
 	if err != nil {
 		return err
 	}
-	model := reviewerModel(cfg.Provider)
-	env, err := providerEnvName(cfg.Provider.Name)
-	if err != nil {
-		return err
-	}
-	key, err := secret.ResolveRef(cfg.Provider.APIKey, env)
-	if err != nil {
-		return err
-	}
-	provider, err := doctorProvider(cfg.Provider, key)
+	reviewer, err := configuredReviewer(cfg)
 	if err != nil {
 		return err
 	}
@@ -126,7 +117,7 @@ func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
 	if err != nil {
 		return fmt.Errorf("resolve reviewed commit: %w", err)
 	}
-	findings, err := (Reviewer{Provider: provider, Model: model}).Review(ctx, diff, "upgrade "+ref)
+	findings, err := reviewer.Review(ctx, diff, "upgrade "+ref)
 	if err != nil {
 		return err
 	}
@@ -135,6 +126,37 @@ func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
 		return err
 	}
 	return enforceReview(filepath.Join(home, "selfdev-reviews.jsonl"), ReviewRecord{CommitSHA: strings.TrimSpace(sha), Approval: approval, Findings: findings})
+}
+
+func configuredReviewer(cfg config.Config) (Reviewer, error) {
+	if cfg.ProviderRegistrySource() == config.ProviderRegistryExplicit {
+		alias := strings.TrimSpace(cfg.Agent.UtilityModel)
+		if alias == "" {
+			alias = strings.TrimSpace(cfg.Agent.DefaultModel)
+		}
+		if alias == "" {
+			return Reviewer{}, fmt.Errorf("reviewer is not configured: agent.default_model is empty")
+		}
+		provider, target, _, err := namedProvider(cfg, alias)
+		if err != nil {
+			return Reviewer{}, err
+		}
+		return Reviewer{Provider: provider, Model: target.UpstreamModel}, nil
+	}
+	model := reviewerModel(cfg.Provider)
+	env, err := providerEnvName(cfg.Provider.Name)
+	if err != nil {
+		return Reviewer{}, err
+	}
+	key, err := secret.ResolveRef(cfg.Provider.APIKey, env)
+	if err != nil {
+		return Reviewer{}, err
+	}
+	provider, err := doctorProvider(cfg.Provider, key)
+	if err != nil {
+		return Reviewer{}, err
+	}
+	return Reviewer{Provider: provider, Model: model}, nil
 }
 
 func reviewerModel(provider config.Provider) string {

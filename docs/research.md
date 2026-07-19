@@ -1,18 +1,15 @@
 # Research: prior art for waffle
 
-Research date: 2026-07-03. Four projects were studied as inputs to waffle's design:
+Research date: 2026-07-03. Three projects were studied as inputs to waffle's design:
 [hermes-agent](https://github.com/NousResearch/hermes-agent),
 [nanoclaw](https://github.com/nanocoai/nanoclaw),
-[openclaw](https://github.com/openclaw/openclaw), and
-[workweave/router](https://github.com/workweave/router).
+[openclaw](https://github.com/openclaw/openclaw).
 
 The short version: hermes-agent shows what a *capable* personal agent looks like
 (learning loop, memory, skills, scheduling), nanoclaw shows how to keep the
 implementation *small and trustworthy* (single-writer SQLite IPC, container
 isolation, skills-install-code instead of config), openclaw shows a mature
-*gateway/channel* architecture and its security posture, and workweave/router
-shows how to build the *provider layer* in Go (protocol translation + smart
-model routing).
+*gateway/channel* architecture and its security posture.
 
 ---
 
@@ -147,47 +144,6 @@ nodes, wake-word voice, and a Live Canvas).
 ecosystem. nanoclaw exists precisely because OpenClaw's surface area became
 hard to audit; waffle should start with 1–2 channels done well.
 
----
-
-## 4. workweave/router ("Weave Router")
-
-**What it is.** A Go (~84%) drop-in LLM proxy that routes each request to the
-best model for the prompt. Directly relevant twice over: it solves waffle's
-provider-abstraction problem *and* it is a reference for idiomatic Go in this
-domain.
-
-**Architecture.**
-- *Protocol translation:* natively speaks Anthropic Messages
-  (`/v1/messages`), OpenAI Chat Completions (`/v1/chat/completions`), and
-  Gemini `generateContent` — any client dialect to any upstream provider,
-  with streaming, tool use, and vision preserved across translations.
-- *Smart routing:* a cluster scorer derived from Avengers-Pro
-  ("Performance–Efficiency Optimized Routing", arXiv:2508.12631) picks the
-  model per request in <50 ms using a small on-box embedding model — no
-  external calls, no hand-written heuristics. `/v1/route` returns the routing
-  decision without calling upstream. Claims 40–70% cost reduction.
-- *BYOK key model:* upstream provider keys stay on your box in `.env.local`,
-  encrypted at rest; clients authenticate with separate `rk_...` router
-  tokens. The router is the only thing that ever holds real keys.
-- *Ops:* Postgres for state, OTLP traces out of the box, web dashboard,
-  integrations for Claude Code / Codex / opencode.
-
-**What waffle should take.**
-- The canonical-message-format + per-provider translation design for the
-  provider layer.
-- The two-tier key model (`rk_` tokens vs. upstream keys) — it composes
-  perfectly with nanoclaw's keys-never-in-the-sandbox rule: sandboxes get a
-  scoped router token, never a provider key.
-- OTLP tracing from day one.
-- Pragmatically: waffle can simply *point at* a running Weave Router as an
-  OpenAI/Anthropic-compatible base URL and get multi-provider + smart routing
-  for free, before (or instead of) building routing in-house.
-
-**What waffle should not take.** Postgres and the dashboard. waffle is
-single-user; SQLite is the right store everywhere.
-
----
-
 ## Synthesis — the design waffle inherits
 
 | Concern | Chosen approach | Borrowed from |
@@ -197,8 +153,8 @@ single-user; SQLite is the right store everywhere.
 | Host↔sandbox IPC | Single-writer SQLite queue pairs | nanoclaw |
 | Trust model | Owner session on host; others sandboxed w/ tool policy | openclaw |
 | Sender auth | Pairing codes for unknown DMs | openclaw |
-| Credentials | Host-side proxy injects keys; sandboxes get scoped tokens | nanoclaw + router |
-| Provider layer | Canonical message type + translators; optional smart routing | router |
+| Credentials | Host-side proxy injects keys; sandboxes get scoped tokens | nanoclaw |
+| Provider layer | Canonical message type + direct provider translators | hermes provider-agnostic stance |
 | Skills | `SKILL.md` dirs, agentskills.io-compatible, learning loop later | hermes, openclaw |
 | Memory | Curated memory files + SQLite FTS5 recall + summarization | hermes |
 | Scheduling | Built-in cron with delivery to any channel | hermes |

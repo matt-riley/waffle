@@ -272,8 +272,7 @@ Start here:
 - [docs/research.md](docs/research.md) — research on the projects it draws
   from: [hermes-agent](https://github.com/NousResearch/hermes-agent),
   [nanoclaw](https://github.com/nanocoai/nanoclaw),
-  [openclaw](https://github.com/openclaw/openclaw), and
-  [workweave/router](https://github.com/workweave/router)
+  and [openclaw](https://github.com/openclaw/openclaw)
 
 ## Release automation
 

@@ -635,7 +635,7 @@ type Telegram struct {
 // Provider selects and configures the LLM backend.
 type Provider struct {
 	// Name is "anthropic" or "openai" (any OpenAI-compatible endpoint:
-	// OpenAI, OpenRouter, Ollama, a running workweave/router, ...).
+	// OpenAI, OpenRouter, Ollama, Gemini, vLLM, ...).
 	Name  string `toml:"name"`
 	Model string `toml:"model"`
 	// UtilityModel, when set, is used for summarization and reflection (#61)

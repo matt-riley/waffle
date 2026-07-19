@@ -72,6 +72,70 @@ func providerCheck(ctx context.Context, p config.Provider) (string, error) {
 	return "authenticated completion", nil
 }
 
+// providerCheckConfig probes the same effective default model that chat and
+// serve resolve. Explicit registries fail closed on their named secret; the
+// legacy table retains its historical environment fallback.
+func providerCheckConfig(ctx context.Context, cfg config.Config) (string, error) {
+	if cfg.ProviderRegistrySource() != config.ProviderRegistryExplicit {
+		return providerCheck(ctx, cfg.Provider)
+	}
+	alias := strings.TrimSpace(cfg.Agent.DefaultModel)
+	if alias == "" {
+		if len(cfg.Providers) == 0 && len(cfg.Models) == 0 {
+			return "no provider configured (skipped)", nil
+		}
+		return "", fmt.Errorf("agent.default_model is not configured")
+	}
+	provider, target, _, err := namedProvider(cfg, alias)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
+	defer cancel()
+	_, err = provider.Complete(ctx, llm.Request{
+		Model:     target.UpstreamModel,
+		MaxTokens: 1,
+		Messages:  []llm.Message{llm.UserText("health check")},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	return "authenticated completion", nil
+}
+
+func namedProvider(cfg config.Config, alias string) (llm.Provider, config.ResolvedModel, string, error) {
+	target, err := cfg.ResolveModel(alias)
+	if err != nil {
+		return nil, config.ResolvedModel{}, "", err
+	}
+	key, err := namedProviderKey(target.Connection)
+	if err != nil {
+		return nil, config.ResolvedModel{}, "", fmt.Errorf("model alias %q connection %q: resolve credentials: %w", alias, target.ConnectionName, err)
+	}
+	provider, err := providerForConnection(target.Connection, key)
+	if err != nil {
+		return nil, config.ResolvedModel{}, "", fmt.Errorf("model alias %q connection %q: %w", alias, target.ConnectionName, err)
+	}
+	return provider, target, key, nil
+}
+
+func namedProviderKey(connection config.ProviderConnection) (string, error) {
+	if connection.APIKey == "" {
+		return "", nil
+	}
+	if !secret.IsRef(connection.APIKey) {
+		return "", fmt.Errorf("named provider api_key must be a secret reference")
+	}
+	store, err := secret.TryOpen()
+	if err != nil {
+		return "", err
+	}
+	if store == nil {
+		return "", fmt.Errorf("no secret store is available: run `waffle secret init`")
+	}
+	return secret.Resolve(store, connection.APIKey)
+}
+
 func providerEnvName(name string) (string, error) {
 	switch name {
 	case "anthropic", "":
@@ -95,6 +159,21 @@ func doctorProvider(p config.Provider, key string) (llm.Provider, error) {
 		return openaip.New(key, baseURL), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q (want \"anthropic\" or \"openai\")", p.Name)
+	}
+}
+
+func providerForConnection(connection config.ProviderConnection, key string) (llm.Provider, error) {
+	switch connection.Type {
+	case "anthropic":
+		return anthropicp.New(key, connection.BaseURL), nil
+	case "openai":
+		baseURL := connection.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.openai.com/v1"
+		}
+		return openaip.New(key, baseURL), nil
+	default:
+		return nil, fmt.Errorf("unsupported provider type %q", connection.Type)
 	}
 }
 
@@ -163,7 +242,7 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	// A one-token authenticated completion exercises the provider path that
 	// chat and upgrade ultimately depend on. Missing credentials are an
 	// intentional unconfigured state; all other probe failures block doctor.
-	info, err := providerCheck(ctx, cfg.Provider)
+	info, err := providerCheckConfig(ctx, cfg)
 	add("provider reachable", err, info)
 
 	if _, err := exec.LookPath("golangci-lint"); err != nil {

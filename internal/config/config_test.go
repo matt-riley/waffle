@@ -939,6 +939,36 @@ func TestProfileDocumentationAcceptance(t *testing.T) {
 	}
 }
 
+func TestActiveDocsAndSourceDoNotReferenceWorkweaveRouter(t *testing.T) {
+	paths := []string{
+		"../../README.md",
+		"../../docs/research.md",
+		"../../docs/plan.md",
+		"config.go",
+		"../llm/openaip/openai.go",
+	}
+	forbidden := []string{
+		"workweave/router",
+		"weave-router",
+		"weave router",
+		"ollama/router",
+		"router's two-tier key model",
+	}
+
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		lower := strings.ToLower(string(body))
+		for _, phrase := range forbidden {
+			if strings.Contains(lower, phrase) {
+				t.Errorf("%s contains retired Router reference %q", path, phrase)
+			}
+		}
+	}
+}
+
 func TestIntakeConfigRejectsBadConcurrencyAndLabelRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `[[intake.github]]
