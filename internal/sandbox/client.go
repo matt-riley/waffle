@@ -19,9 +19,9 @@ import (
 const runnerNoHealthWait = 10 * time.Second
 
 // runnerStartupWait is the cold-start allowance for the first-ever runner
-// heartbeat, measured from client creation (for Docker sandboxes the client
-// is created right after `docker run`, so this approximates container
-// start). A cold container can take well over runnerNoHealthWait to boot
+// heartbeat, measured from the client's startup anchor. StartDocker resets
+// that anchor after `docker run`, so image pulls do not consume the runner's
+// allowance. A cold container can take well over runnerNoHealthWait to boot
 // the in-container runner, so a first tool call must not declare it dead on
 // an Exec-relative window alone; a live runner heartbeats within seconds of
 // booting, so no heartbeat by this bound means it is genuinely missing.
@@ -44,8 +44,8 @@ type Client struct {
 	inbound  *sql.DB // writer
 	outbound *sql.DB // reader
 
-	// startedAt anchors the cold-start allowance for the first heartbeat;
-	// set when the client is created (≈ container start for Docker).
+	// startedAt anchors the cold-start allowance for the first heartbeat.
+	// NewClient sets it initially; StartDocker resets it after container launch.
 	startedAt time.Time
 
 	// Detection windows, defaulted from the constants above in NewClient;

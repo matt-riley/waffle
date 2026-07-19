@@ -228,6 +228,62 @@ func TestDockerRunArgs(t *testing.T) {
 	}
 }
 
+func TestStartDockerInitializesQueueBeforeLaunchingContainer(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte(`#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-v" ]; then
+		mount=$2
+		case "$mount" in
+			*:/waffle/queue)
+				queue_dir=${mount%:/waffle/queue}
+				test -f "$queue_dir/inbound.db"
+				test -f "$queue_dir/outbound.db"
+				: > "$WAFFLE_TEST_DOCKER_STARTED"
+				exit 0
+				;;
+		esac
+		shift 2
+		continue
+	fi
+	shift
+done
+echo "queue mount not found" >&2
+exit 1
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	containerStarted := filepath.Join(t.TempDir(), "started")
+	t.Setenv("WAFFLE_TEST_DOCKER_STARTED", containerStarted)
+
+	runner := filepath.Join(t.TempDir(), "waffle")
+	if err := os.WriteFile(runner, []byte("runner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	queueDir := filepath.Join(t.TempDir(), "sandbox")
+	executor, err := StartDocker(context.Background(), DockerOpts{
+		QueueDir: queueDir,
+		SelfPath: runner,
+	})
+	if err != nil {
+		t.Fatalf("StartDocker: %v", err)
+	}
+	startedInfo, err := os.Stat(containerStarted)
+	if err != nil {
+		t.Fatalf("stat container start marker: %v", err)
+	}
+	if executor.client.startedAt.Before(startedInfo.ModTime()) {
+		t.Fatalf("client startup allowance began at %s before container launch at %s",
+			executor.client.startedAt, startedInfo.ModTime())
+	}
+	if err := executor.client.Close(); err != nil {
+		t.Fatalf("close queue client: %v", err)
+	}
+}
+
 func TestDockerCloseIgnoresAlreadyRemovedContainer(t *testing.T) {
 	binDir := t.TempDir()
 	docker := filepath.Join(binDir, "docker")
