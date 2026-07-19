@@ -33,9 +33,10 @@ type providerManager interface {
 }
 
 var (
-	openProviderManager  = defaultProviderManager
-	providerSecretReader = readSecretValue
-	providerHealthRetry  = 250 * time.Millisecond
+	openProviderManager   = defaultProviderManager
+	openProviderCatalogue = defaultProviderCatalogue
+	providerSecretReader  = readSecretValue
+	providerHealthRetry   = 250 * time.Millisecond
 )
 
 func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
