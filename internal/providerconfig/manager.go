@@ -438,11 +438,18 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 		return err
 	}
 
-	secretStage, err := m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
-	if err != nil {
-		return err
+	secretStage := ""
+	if before.secretExist {
+		secretStage, err = m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
+		if err != nil {
+			return err
+		}
 	}
-	defer func() { _ = os.Remove(secretStage) }()
+	defer func() {
+		if secretStage != "" {
+			_ = os.Remove(secretStage)
+		}
+	}()
 	resolved, err := candidate.ResolveModel(req.Alias)
 	if err != nil {
 		return err
@@ -883,11 +890,13 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 		if err == nil || errors.Is(err, ErrSimulatedCrash) {
 			return
 		}
-		err = errors.Join(redactError(err, key), m.recoverLocked(ctx))
+		err = errors.Join(redactError(err, key), redactError(m.recoverLocked(ctx), key))
 	}()
 
-	if err = commitStage(secretStage, m.SecretsPath, 0o600); err != nil {
-		return err
+	if secretStage != "" {
+		if err = commitStage(secretStage, m.SecretsPath, 0o600); err != nil {
+			return err
+		}
 	}
 	if m.AfterCommit != nil {
 		if err = m.AfterCommit("secret"); err != nil {

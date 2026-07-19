@@ -662,6 +662,32 @@ func TestManagerAddModelCommitsExactAliasAndRoles(t *testing.T) {
 			if body := readMaybe(t, m.ConfigPath); !bytes.Contains(body, []byte("# keep this comment")) || !bytes.Contains(body, []byte("level = \"debug\"")) {
 				t.Fatalf("AddModel changed unrelated TOML:\n%s", body)
 			}
+			status, err := m.Status(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantState := "installed"
+			if tc.def {
+				wantState = "ready"
+			}
+			if status.State != wantState || status.DefaultModel != wantAgent.DefaultModel {
+				t.Fatalf("status = %#v, want state=%q default=%q", status, wantState, wantAgent.DefaultModel)
+			}
+			active, err := m.ServiceActive(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if active != tc.def {
+				t.Fatalf("service active = %v, want %v", active, tc.def)
+			}
+			ready := readMaybe(t, m.readyPath())
+			if tc.def {
+				if want := generationBytes(readMaybe(t, m.ConfigPath)); !bytes.Equal(ready, want) {
+					t.Fatalf("ready generation = %q, want %q", ready, want)
+				}
+			} else if ready != nil {
+				t.Fatalf("installed state wrote ready generation %q", ready)
+			}
 		})
 	}
 }
@@ -684,14 +710,54 @@ func TestManagerAddModelProbeFailureRollsBack(t *testing.T) {
 	assertManagerState(t, m, before)
 }
 
+func TestManagerAddModelAuthFreeWithoutSecretsPreservesAbsence(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.Remove(m.SecretsPath); err != nil {
+		t.Fatal(err)
+	}
+	initial := "# auth-free provider\n[providers.local]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:11434/v1\"\n\n[models.existing]\nprovider = \"local\"\nmodel = \"existing-upstream\"\n"
+	if err := os.WriteFile(m.ConfigPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.Probe = func(_ context.Context, target config.ResolvedModel, key string) error {
+		if target.Alias != "favourite" || target.ConnectionName != "local" || target.UpstreamModel != "new-upstream" {
+			t.Fatalf("probe target = %#v", target)
+		}
+		if key != "" {
+			t.Fatalf("auth-free probe key = %q, want empty", key)
+		}
+		return nil
+	}
+
+	if err := m.AddModel(context.Background(), AddModelRequest{ConnectionName: "local", Alias: "favourite", UpstreamModel: "new-upstream"}); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+	if _, err := os.Stat(m.SecretsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-op secret stage created secrets file: %v", err)
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models["existing"] != (config.ModelTarget{Provider: "local", Model: "existing-upstream"}) || cfg.Models["favourite"] != (config.ModelTarget{Provider: "local", Model: "new-upstream"}) {
+		t.Fatalf("models = %#v", cfg.Models)
+	}
+}
+
 func TestManagerAddModelLifecycleFailureRollsBack(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		restartErr error
 		healthErr  error
+		restoreErr error
 	}{
 		{name: "restart", restartErr: errors.New("restart failed " + providerTestKey)},
 		{name: "health", healthErr: errors.New("health failed " + providerTestKey)},
+		{
+			name:       "restart and restore errors",
+			restartErr: errors.New("restart failed " + providerTestKey),
+			restoreErr: errors.New("restore failed " + providerTestKey),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestManager(t)
@@ -705,7 +771,7 @@ func TestManagerAddModelLifecycleFailureRollsBack(t *testing.T) {
 			m.Health = func(context.Context) error { return tc.healthErr }
 			m.RestoreService = func(_ context.Context, wasActive bool) error {
 				active = wasActive
-				return nil
+				return tc.restoreErr
 			}
 			before := captureManagerState(t, m)
 
@@ -713,12 +779,32 @@ func TestManagerAddModelLifecycleFailureRollsBack(t *testing.T) {
 			if err == nil {
 				t.Fatal("AddModel succeeded, want lifecycle failure")
 			}
-			if strings.Contains(err.Error(), providerTestKey) {
-				t.Fatalf("AddModel error leaked credential: %v", err)
-			}
+			assertErrorTreeRedacted(t, err)
 			assertManagerState(t, m, before)
 		})
 	}
+}
+
+func assertErrorTreeRedacted(t *testing.T, err error) {
+	t.Helper()
+	var walk func(error)
+	walk = func(current error) {
+		if current == nil {
+			return
+		}
+		if strings.Contains(current.Error(), providerTestKey) {
+			t.Fatalf("error tree leaked credential: %v", current)
+		}
+		switch unwrapped := current.(type) {
+		case interface{ Unwrap() []error }:
+			for _, child := range unwrapped.Unwrap() {
+				walk(child)
+			}
+		case interface{ Unwrap() error }:
+			walk(unwrapped.Unwrap())
+		}
+	}
+	walk(err)
 }
 
 func TestManagerAddModelRejectsUnknownConnectionInvalidAliasAndCollision(t *testing.T) {
