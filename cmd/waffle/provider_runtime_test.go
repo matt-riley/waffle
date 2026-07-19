@@ -574,6 +574,40 @@ func TestChatProviderlessConfigStopsWithSetupGuidance(t *testing.T) {
 	}
 }
 
+func TestChatExplicitEmptyProviderRegistryOverridesLegacyFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	configBody := "[provider]\nname = \"anthropic\"\nmodel = \"legacy\"\n\n[providers]\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err := chatCmd(context.Background(), nil, strings.NewReader("hey\n"), &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "sudo waffle provider add") {
+		t.Fatalf("explicit-empty provider chat error = %v, want provider setup guidance", err)
+	}
+	if strings.Contains(stdout.String(), "anthropic") {
+		t.Fatalf("explicit-empty provider registry selected legacy Anthropic: %q", stdout.String())
+	}
+}
+
+func TestChatLegacyProviderConfigurationStillStarts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "legacy-test-key")
+	configBody := "[provider]\nname = \"anthropic\"\nmodel = \"legacy\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := chatCmd(context.Background(), nil, strings.NewReader(""), &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("legacy provider chat: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "legacy via default (anthropic)") {
+		t.Fatalf("legacy chat banner = %q", stdout.String())
+	}
+}
+
 func loadRuntimeConfig(t *testing.T, body string) config.Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
