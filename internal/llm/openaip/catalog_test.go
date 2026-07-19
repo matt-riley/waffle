@@ -133,6 +133,21 @@ func TestCatalogRejectsOversizedMalformedAndNonSuccessResponses(t *testing.T) {
 			},
 		},
 		{
+			name:   "non-success response redacts API key",
+			apiKey: "secret-key",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("credential secret-key was rejected"))
+			}),
+			wantError: "401 Unauthorized",
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if strings.Contains(err.Error(), "secret-key") {
+					t.Fatalf("error contains active API key: %q", err)
+				}
+			},
+		},
+		{
 			name: "malformed JSON",
 			handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(`{"data":[`))

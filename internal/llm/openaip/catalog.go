@@ -84,7 +84,11 @@ func (c *Catalog) listModels(ctx context.Context, path string) ([]modelcatalog.M
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, resp.StatusCode, fmt.Errorf("openai catalogue: %s: %s", resp.Status, strings.TrimSpace(modelcatalog.SafeText(string(body))))
+		bodyText := string(body)
+		if c.APIKey != "" {
+			bodyText = strings.ReplaceAll(bodyText, c.APIKey, strings.Repeat("*", len(c.APIKey)))
+		}
+		return nil, resp.StatusCode, fmt.Errorf("openai catalogue: %s: %s", resp.Status, strings.TrimSpace(modelcatalog.SafeText(bodyText)))
 	}
 
 	limited := &io.LimitedReader{R: resp.Body, N: maxCatalogResponseBytes + 1}
