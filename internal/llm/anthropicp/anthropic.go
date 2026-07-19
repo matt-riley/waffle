@@ -14,8 +14,12 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
-// DefaultModel is used when the request doesn't name one.
-const DefaultModel = "claude-opus-4-8"
+const (
+	// DefaultBaseURL is the Anthropic API's default endpoint.
+	DefaultBaseURL = "https://api.anthropic.com"
+	// DefaultModel is used when the request doesn't name one.
+	DefaultModel = "claude-opus-4-8"
+)
 
 // Provider calls the Anthropic Messages API.
 type Provider struct {
