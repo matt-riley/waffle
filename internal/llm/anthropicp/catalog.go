@@ -181,11 +181,13 @@ func (b *boundedCatalogBody) Close() error {
 
 type anthropicCatalogError struct {
 	message string
-	cause   error
+	match   error
 }
 
 func (e *anthropicCatalogError) Error() string { return e.message }
-func (e *anthropicCatalogError) Unwrap() error { return e.cause }
+func (e *anthropicCatalogError) Is(target error) bool {
+	return e.match != nil && errors.Is(e.match, target)
+}
 
 func sanitizeAnthropicCatalogError(apiKey string, err error) error {
 	message := err.Error()
@@ -194,7 +196,20 @@ func sanitizeAnthropicCatalogError(apiKey string, err error) error {
 	}
 	return &anthropicCatalogError{
 		message: "anthropic catalogue: " + modelcatalog.SafeText(message),
-		cause:   err,
+		match:   safeAnthropicCatalogMatch(err),
+	}
+}
+
+func safeAnthropicCatalogMatch(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, errAnthropicCatalogResponseTooLarge):
+		return errAnthropicCatalogResponseTooLarge
+	default:
+		return nil
 	}
 }
 

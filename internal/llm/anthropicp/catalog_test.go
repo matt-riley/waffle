@@ -2,6 +2,7 @@ package anthropicp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -117,6 +118,12 @@ func TestCatalogRejectsOversizedMalformedAndNonSuccessResponses(t *testing.T) {
 				_, _ = fmt.Fprintf(w, `{"data":[{"id":"%s"}],"has_more":false}`, strings.Repeat("x", 16*1024*1024))
 			}),
 			wantError: "exceeds 16777216 bytes",
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if !errors.Is(err, errAnthropicCatalogResponseTooLarge) {
+					t.Fatalf("errors.Is(error, response too large) = false; error = %v", err)
+				}
+			},
 		},
 		{
 			name: "malformed JSON",
@@ -210,6 +217,32 @@ func TestCatalogRejectsOversizedMalformedAndNonSuccessResponses(t *testing.T) {
 	})
 }
 
+func TestCatalogSanitizesEntireProviderErrorChain(t *testing.T) {
+	t.Parallel()
+
+	const apiKey = "secret-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"credential secret-key was rejected"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := NewCatalog(apiKey, server.URL).ListModels(context.Background())
+	if err == nil {
+		t.Fatal("ListModels() error = nil, want provider error")
+	}
+	assertErrorTreeOmits(t, err, apiKey)
+
+	var sdkAPIError interface {
+		DumpRequest(bool) []byte
+		RawJSON() string
+	}
+	if errors.As(err, &sdkAPIError) {
+		t.Fatalf("errors.As recovered unsafe SDK API error: request = %q response = %q", sdkAPIError.DumpRequest(false), sdkAPIError.RawJSON())
+	}
+}
+
 func TestCatalogHonorsCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -218,16 +251,50 @@ func TestCatalogHonorsCancellation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	start := time.Now()
-	_, err := NewCatalog("test-key", server.URL).ListModels(ctx)
-	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
-		t.Fatalf("ListModels() error = %v, want context canceled", err)
+	deadlineCtx, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancelDeadline)
+
+	for _, tt := range []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{name: "canceled", ctx: canceledCtx, want: context.Canceled},
+		{name: "deadline exceeded", ctx: deadlineCtx, want: context.DeadlineExceeded},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Now()
+			_, err := NewCatalog("test-key", server.URL).ListModels(tt.ctx)
+			if err == nil || !strings.Contains(err.Error(), tt.want.Error()) {
+				t.Fatalf("ListModels() error = %v, want %v", err, tt.want)
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("errors.Is(ListModels() error, %v) = false; error = %v", tt.want, err)
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("ListModels() took %v after cancellation", elapsed)
+			}
+		})
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("ListModels() took %v after cancellation", elapsed)
+}
+
+func assertErrorTreeOmits(t *testing.T, err error, forbidden string) {
+	t.Helper()
+	if err == nil {
+		return
 	}
+	if strings.Contains(err.Error(), forbidden) {
+		t.Fatalf("error chain contains active API key: %q", err)
+	}
+	if many, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range many.Unwrap() {
+			assertErrorTreeOmits(t, child, forbidden)
+		}
+		return
+	}
+	assertErrorTreeOmits(t, errors.Unwrap(err), forbidden)
 }
 
 func anthropicModelJSON(id, displayName string, maxInputTokens int64) string {
