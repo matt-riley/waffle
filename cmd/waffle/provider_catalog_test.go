@@ -69,6 +69,21 @@ func TestProviderPresetDefaultsAndOverrides(t *testing.T) {
 			}
 		})
 	}
+
+	for _, baseURL := range []string{
+		"http://[::1]:11434/custom/v1",
+		"https://gateway.example:8443/custom/models/v1",
+	} {
+		t.Run("valid "+baseURL, func(t *testing.T) {
+			preset, err := resolveProviderPreset("openai-compatible", baseURL)
+			if err != nil {
+				t.Fatalf("resolveProviderPreset() error = %v", err)
+			}
+			if preset.StoredBaseURL != baseURL {
+				t.Fatalf("stored base URL = %q, want %q", preset.StoredBaseURL, baseURL)
+			}
+		})
+	}
 }
 
 func TestProviderPresetRejectsUnsafeAndMissingURLs(t *testing.T) {
@@ -83,6 +98,7 @@ func TestProviderPresetRejectsUnsafeAndMissingURLs(t *testing.T) {
 		"/v1",
 		"ftp://models.example/v1",
 		"https:///v1",
+		"https://:443/v1",
 		"https://user:password@models.example/v1",
 		"https://models.example/v1?account=secret",
 		"https://models.example/v1#credentials",
@@ -223,9 +239,16 @@ func TestProviderCatalogServiceNewEnrollmentNeverReadsCache(t *testing.T) {
 		t.Fatalf("default cache root = %q, want %q", defaultService.store.Root, want)
 	}
 	committedConnection := connection
-	committedConnection.ScopeID = "committed-scope"
+	committedConnection.ScopeID = " committed-opaque-scope "
 	if err := opened.Save(committedConnection, result.Models, result.FetchedAt); err != nil {
 		t.Fatalf("Save() error = %v", err)
+	}
+	saved, err := defaultService.store.Load(committedConnection)
+	if err != nil {
+		t.Fatalf("Load() saved cache error = %v", err)
+	}
+	if saved.Connection.ScopeID != committedConnection.ScopeID {
+		t.Fatalf("saved scope ID = %q, want unaltered opaque scope %q", saved.Connection.ScopeID, committedConnection.ScopeID)
 	}
 	cachePath := filepath.Join(home, "cache", "model-catalogs", connection.Name+".json")
 	if _, err := os.Stat(cachePath); err != nil {
@@ -236,6 +259,22 @@ func TestProviderCatalogServiceNewEnrollmentNeverReadsCache(t *testing.T) {
 	}
 	if _, err := os.Stat(cachePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalidated cache stat error = %v, want not exist", err)
+	}
+}
+
+func TestProviderCatalogServiceSaveRequiresCommittedScope(t *testing.T) {
+	service := &providerCatalogueService{}
+	for _, scopeID := range []string{"", " \t "} {
+		connection := modelcatalog.Connection{
+			Name:    "primary",
+			Type:    "openai",
+			BaseURL: openaip.DefaultBaseURL,
+			ScopeID: scopeID,
+		}
+		err := service.Save(connection, []modelcatalog.Model{{ID: "model"}}, time.Now())
+		if err == nil || !strings.Contains(err.Error(), "scope ID") {
+			t.Fatalf("Save() scope %q error = %v, want scope ID error before store access", scopeID, err)
+		}
 	}
 }
 

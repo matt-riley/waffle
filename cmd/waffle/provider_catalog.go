@@ -163,6 +163,9 @@ func (s *providerCatalogueService) Models(ctx context.Context, connection modelc
 }
 
 func (s *providerCatalogueService) Save(connection modelcatalog.Connection, models []modelcatalog.Model, fetchedAt time.Time) error {
+	if strings.TrimSpace(connection.ScopeID) == "" {
+		return errors.New("model catalogue connection scope ID is empty")
+	}
 	if s == nil || s.store == nil {
 		return errors.New("model catalogue store is not configured")
 	}
@@ -196,7 +199,7 @@ func normalizeProviderBaseURL(baseURL string) (string, error) {
 	if err != nil {
 		return "", errors.New("must be a valid absolute HTTP(S) URL")
 	}
-	if !parsed.IsAbs() || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
+	if !parsed.IsAbs() || parsed.Hostname() == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", errors.New("must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil {
