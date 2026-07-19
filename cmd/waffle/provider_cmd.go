@@ -104,7 +104,7 @@ func providerUsage(w io.Writer) {
 	fmt.Fprint(w, `Manage provider connections and model aliases on this host.
 
 Usage:
-  waffle provider add [--name NAME] [--type anthropic|openai] [--base-url URL]
+  waffle provider add [--name NAME] [--type anthropic|openai|openrouter|openai-compatible] [--base-url URL]
                       [--model ALIAS=UPSTREAM]... [--default ALIAS] [--utility ALIAS]
                       [--api-key-stdin | --api-key-file PATH]
   waffle provider list [--json]
@@ -141,7 +141,7 @@ func (m *modelFlag) Set(value string) error {
 }
 
 func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	interactive := len(args) == 0
+	guided := len(args) == 0
 	flags := flag.NewFlagSet("provider add", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var name, providerType, baseURL, defaultModel, utilityModel, keyFile string
@@ -165,47 +165,23 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	if keyStdin && keyFile != "" {
 		return errors.New("--api-key-stdin and --api-key-file are mutually exclusive")
 	}
-	var err error
-	if name == "" {
-		name, err = promptValue(stdin, stderr, "connection name")
-		if err != nil {
-			return err
-		}
+	if !guided && len(models) == 0 {
+		return errors.New("provider add automation requires at least one --model ALIAS=UPSTREAM")
 	}
-	if providerType == "" {
-		providerType, err = promptValue(stdin, stderr, "provider type (anthropic|openai)")
-		if err != nil {
-			return err
-		}
+	if !guided && name == "" {
+		return errors.New("provider add automation requires --name")
 	}
-	if interactive {
-		baseURL, err = promptOptional(stdin, stderr, "base URL (or - for provider default)")
-		if err != nil {
-			return err
-		}
+	if !guided && providerType == "" {
+		return errors.New("provider add automation requires --type")
 	}
-	if len(models) == 0 {
-		value, promptErr := promptValue(stdin, stderr, "models (comma-separated ALIAS=UPSTREAM)")
-		if promptErr != nil {
-			return promptErr
-		}
-		for _, model := range strings.Split(value, ",") {
-			if err := models.Set(model); err != nil {
-				return err
-			}
-		}
-	}
-	if interactive {
-		defaultModel, err = promptOptional(stdin, stderr, "default model alias (or - to remain Installed)")
-		if err != nil {
-			return err
-		}
-		utilityModel, err = promptOptional(stdin, stderr, "utility model alias (or - for none)")
-		if err != nil {
-			return err
-		}
+	if guided {
+		return providerAddGuided(ctx, stdin, stdout, stderr)
 	}
 
+	preset, err := resolveProviderPreset(providerType, baseURL)
+	if err != nil {
+		return err
+	}
 	manager, err := openProviderManager()
 	if err != nil {
 		return err
@@ -230,7 +206,7 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 
 	req := providerconfig.AddRequest{
 		ConnectionName: name,
-		Connection:     config.ProviderConnection{Type: providerType, BaseURL: baseURL},
+		Connection:     config.ProviderConnection{Type: preset.RuntimeType, BaseURL: preset.StoredBaseURL},
 		Models:         map[string]config.ModelTarget(models),
 		DefaultModel:   defaultModel,
 		UtilityModel:   utilityModel,
@@ -245,6 +221,210 @@ func providerAdd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		fmt.Fprintf(stdout, "Waffle is Ready with default model %s\n", defaultModel)
 	}
 	return nil
+}
+
+func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+	presetName, err := promptLineNoReadAhead(stdin, stderr, "Provider (openai|anthropic|openrouter|openai-compatible)", "")
+	if err != nil {
+		return err
+	}
+	presetName = strings.ToLower(strings.TrimSpace(presetName))
+	switch presetName {
+	case "openai", "anthropic", "openrouter", "openai-compatible":
+	default:
+		return fmt.Errorf("unsupported provider preset %q", presetName)
+	}
+	name, err := promptLineNoReadAhead(stdin, stderr, "Connection name", presetName)
+	if err != nil {
+		return err
+	}
+	baseURL := ""
+	if presetName == "openai-compatible" {
+		baseURL, err = promptLineNoReadAhead(stdin, stderr, "Base URL", "")
+		if err != nil {
+			return err
+		}
+	}
+	preset, err := resolveProviderPreset(presetName, baseURL)
+	if err != nil {
+		return err
+	}
+	connection := config.ProviderConnection{Type: preset.RuntimeType, BaseURL: preset.StoredBaseURL}
+	discoveryConnection, _, err := effectiveCatalogConnection(name, connection, "")
+	if err != nil {
+		return err
+	}
+
+	manager, err := openProviderManager()
+	if err != nil {
+		return err
+	}
+	if err := manager.Preflight(ctx); err != nil {
+		return err
+	}
+	existingAliases, err := listExistingProviderAliases(ctx, manager, stderr)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprint(stderr, "API key (input hidden; leave empty for an auth-free endpoint): ")
+	apiKey, err := providerSecretReader(stdin, stderr)
+	if err != nil {
+		return err
+	}
+
+	var (
+		catalogue       providerCatalogue
+		discoveryResult modelcatalog.Result
+		discoveryErr    error
+	)
+	catalogue, discoveryErr = openProviderCatalogue()
+	if discoveryErr == nil {
+		discoveryResult, discoveryErr = catalogue.Discover(ctx, discoveryConnection, apiKey)
+		if discoveryErr == nil && len(discoveryResult.Models) == 0 {
+			discoveryErr = errors.New("model discovery returned an empty catalogue")
+		}
+	}
+
+	var models map[string]config.ModelTarget
+	var defaultModel, utilityModel string
+	if discoveryErr != nil {
+		fmt.Fprintf(stderr, "warning: model discovery failed: %s\n", modelcatalog.SafeText(redactCatalogueText(discoveryErr.Error(), apiKey)))
+		manual, promptErr := promptYesNo(stdin, stderr, "Enter models manually? [Y/n]", true)
+		if promptErr != nil {
+			return promptErr
+		}
+		if !manual {
+			return redactCatalogueError(discoveryErr, apiKey)
+		}
+		models, defaultModel, utilityModel, err = promptManualProviderModels(stdin, stderr)
+		if err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(stderr, "Discovered %d available models.\n", len(discoveryResult.Models))
+		models, defaultModel, utilityModel, err = selectFavouriteModels(stdin, stderr, discoveryResult.Models, existingAliases)
+		if err != nil {
+			return err
+		}
+	}
+
+	req := providerconfig.AddRequest{
+		ConnectionName: name,
+		Connection:     connection,
+		Models:         models,
+		DefaultModel:   defaultModel,
+		UtilityModel:   utilityModel,
+		APIKey:         apiKey,
+	}
+	if err := manager.Add(ctx, req); err != nil {
+		return redactProviderError(err, apiKey)
+	}
+	fmt.Fprintf(stdout, "provider %s validated and saved\n", name)
+	if defaultModel != "" {
+		fmt.Fprintf(stdout, "Waffle is Ready with default model %s\n", defaultModel)
+	}
+	if discoveryErr != nil {
+		return nil
+	}
+
+	snapshot, err := manager.CatalogSnapshot(ctx, name)
+	if err != nil {
+		warnProviderCatalogueCache(stderr)
+		return nil
+	}
+	committedConnection, _, err := effectiveCatalogConnection(name, snapshot.Connection, snapshot.ScopeID)
+	if err != nil {
+		warnProviderCatalogueCache(stderr)
+		return nil
+	}
+	if err := catalogue.Save(committedConnection, discoveryResult.Models, discoveryResult.FetchedAt); err != nil {
+		warnProviderCatalogueCache(stderr)
+	}
+	return nil
+}
+
+func listExistingProviderAliases(ctx context.Context, manager providerManager, stderr io.Writer) (map[string]struct{}, error) {
+	aliases := make(map[string]struct{})
+	b, err := manager.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list existing model aliases: %w", err)
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return aliases, nil
+	}
+	var listing providerconfig.Listing
+	if err := json.Unmarshal(b, &listing); err != nil {
+		return nil, fmt.Errorf("decode existing model aliases: %w", err)
+	}
+	names := make([]string, 0, len(listing.Models))
+	for alias := range listing.Models {
+		aliases[alias] = struct{}{}
+		names = append(names, alias)
+	}
+	sort.Strings(names)
+	if len(names) > 0 {
+		fmt.Fprintf(stderr, "Existing model aliases: %s\n", strings.Join(names, ", "))
+	}
+	return aliases, nil
+}
+
+func promptYesNo(stdin io.Reader, stderr io.Writer, label string, defaultYes bool) (bool, error) {
+	for {
+		value, err := promptLineNoReadAhead(stdin, stderr, label, "")
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(value) {
+		case "":
+			return defaultYes, nil
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(stderr, "Enter y or n.")
+		}
+	}
+}
+
+func promptManualProviderModels(stdin io.Reader, stderr io.Writer) (map[string]config.ModelTarget, string, string, error) {
+	value, err := promptLineNoReadAhead(stdin, stderr, "Models (comma-separated ALIAS=UPSTREAM)", "")
+	if err != nil {
+		return nil, "", "", err
+	}
+	parsed := modelFlag{}
+	for _, model := range strings.Split(value, ",") {
+		if err := parsed.Set(model); err != nil {
+			return nil, "", "", err
+		}
+	}
+	defaultModel, err := promptLineNoReadAhead(stdin, stderr, "Default model alias (or - to remain Installed)", "")
+	if err != nil {
+		return nil, "", "", err
+	}
+	if defaultModel == "-" {
+		defaultModel = ""
+	}
+	utilityModel, err := promptLineNoReadAhead(stdin, stderr, "Utility model alias (or - to use default)", "")
+	if err != nil {
+		return nil, "", "", err
+	}
+	if utilityModel == "-" {
+		utilityModel = ""
+	}
+	for label, alias := range map[string]string{"default": defaultModel, "utility": utilityModel} {
+		if alias != "" {
+			if _, ok := parsed[alias]; !ok {
+				return nil, "", "", fmt.Errorf("%s model alias %q is not part of the manual enrollment", label, alias)
+			}
+		}
+	}
+	return map[string]config.ModelTarget(parsed), defaultModel, utilityModel, nil
+}
+
+func warnProviderCatalogueCache(stderr io.Writer) {
+	fmt.Fprintln(stderr, "warning: provider was saved but its model catalogue cache could not be updated")
 }
 
 func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) error {
@@ -643,26 +823,6 @@ func runSystemctl(ctx context.Context, action, unit string) error {
 		return fmt.Errorf("systemctl %s %s: %w: %s", action, unit, err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func promptValue(stdin io.Reader, stderr io.Writer, label string) (string, error) {
-	fmt.Fprintf(stderr, "%s: ", label)
-	var value string
-	if _, err := fmt.Fscan(stdin, &value); err != nil {
-		return "", fmt.Errorf("read %s: %w", label, err)
-	}
-	return strings.TrimSpace(value), nil
-}
-
-func promptOptional(stdin io.Reader, stderr io.Writer, label string) (string, error) {
-	value, err := promptValue(stdin, stderr, label)
-	if err != nil {
-		return "", err
-	}
-	if value == "-" {
-		return "", nil
-	}
-	return value, nil
 }
 
 func readAllSecret(r io.Reader) (string, error) {

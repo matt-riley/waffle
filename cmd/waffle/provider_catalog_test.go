@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -278,6 +279,44 @@ func TestProviderCatalogServiceSaveRequiresCommittedScope(t *testing.T) {
 	}
 }
 
+func TestPromptLineNoReadAheadPreservesHiddenSecretInputAndCapsLines(t *testing.T) {
+	reader := &oneBytePromptReader{reader: strings.NewReader("openrouter\nhidden-secret\n"), strict: true}
+	var output strings.Builder
+	value, err := promptLineNoReadAhead(reader, &output, "Provider", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "openrouter" {
+		t.Fatalf("prompt value = %q", value)
+	}
+	reader.strict = false
+	remaining, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(remaining) != "hidden-secret\n" {
+		t.Fatalf("remaining input = %q, want untouched hidden secret", remaining)
+	}
+
+	tooLong := strings.NewReader(strings.Repeat("x", 64*1024+1) + "\n")
+	if _, err := promptLineNoReadAhead(tooLong, io.Discard, "value", ""); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("oversize line error = %v", err)
+	}
+}
+
+func TestCataloguePromptsStopOnOutputAndEOFErrors(t *testing.T) {
+	outputErr := errors.New("terminal output failed")
+	if _, err := promptLineNoReadAhead(strings.NewReader("must-not-be-read\n"), errorWriter{err: outputErr}, "Provider", ""); !errors.Is(err, outputErr) {
+		t.Fatalf("prompt output error = %v, want %v", err, outputErr)
+	}
+	if _, err := promptLineNoReadAhead(strings.NewReader(""), io.Discard, "Provider", ""); !errors.Is(err, io.EOF) {
+		t.Fatalf("prompt EOF error = %v, want EOF", err)
+	}
+	if _, err := renderCataloguePage(errorWriter{err: outputErr}, []modelcatalog.Model{{ID: "model"}}, 0); !errors.Is(err, outputErr) {
+		t.Fatalf("render output error = %v, want %v", err, outputErr)
+	}
+}
+
 func TestProviderCatalogServiceUsesFreshExpiredAndForcedCache(t *testing.T) {
 	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -378,6 +417,24 @@ func (s *testCatalogueSource) ListModels(context.Context) ([]modelcatalog.Model,
 }
 
 type catalogueRoundTripper func(*http.Request) (*http.Response, error)
+
+type oneBytePromptReader struct {
+	reader io.Reader
+	strict bool
+}
+
+type errorWriter struct {
+	err error
+}
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func (r *oneBytePromptReader) Read(p []byte) (int, error) {
+	if r.strict && len(p) != 1 {
+		return 0, fmt.Errorf("prompt requested %d bytes, want exactly 1", len(p))
+	}
+	return r.reader.Read(p)
+}
 
 func (f catalogueRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 

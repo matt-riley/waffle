@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,7 @@ type fakeProviderManager struct {
 	snapshot         providerconfig.CatalogSnapshot
 	snapshotName     string
 	snapshotErr      error
+	snapshotCalls    int
 	list             []byte
 	testName         string
 	removeName       string
@@ -57,6 +60,7 @@ func (f *fakeProviderManager) AddModel(_ context.Context, req providerconfig.Add
 	return f.addModelErr
 }
 func (f *fakeProviderManager) CatalogSnapshot(_ context.Context, name string) (providerconfig.CatalogSnapshot, error) {
+	f.snapshotCalls++
 	f.snapshotName = name
 	return f.snapshot, f.snapshotErr
 }
@@ -75,6 +79,8 @@ func (f *fakeProviderManager) Remove(_ context.Context, name string) error {
 
 type fakeProviderCatalogue struct {
 	result          modelcatalog.Result
+	discoverErr     error
+	discoverCalls   int
 	modelsErr       error
 	modelsCalls     int
 	connection      modelcatalog.Connection
@@ -84,10 +90,17 @@ type fakeProviderCatalogue struct {
 	invalidateErr   error
 	invalidateCalls int
 	events          *[]string
+	saveConnection  modelcatalog.Connection
+	saveModels      []modelcatalog.Model
+	saveFetchedAt   time.Time
+	saveErr         error
+	saveCalls       int
 }
 
-func (f *fakeProviderCatalogue) Discover(context.Context, modelcatalog.Connection, string) (modelcatalog.Result, error) {
-	return modelcatalog.Result{}, errors.New("unexpected catalogue discovery")
+func (f *fakeProviderCatalogue) Discover(_ context.Context, connection modelcatalog.Connection, apiKey string) (modelcatalog.Result, error) {
+	f.discoverCalls++
+	f.connection, f.apiKey = connection, apiKey
+	return f.result, f.discoverErr
 }
 
 func (f *fakeProviderCatalogue) Models(_ context.Context, connection modelcatalog.Connection, apiKey string, force bool) (modelcatalog.Result, error) {
@@ -96,8 +109,12 @@ func (f *fakeProviderCatalogue) Models(_ context.Context, connection modelcatalo
 	return f.result, f.modelsErr
 }
 
-func (f *fakeProviderCatalogue) Save(modelcatalog.Connection, []modelcatalog.Model, time.Time) error {
-	return errors.New("unexpected catalogue save")
+func (f *fakeProviderCatalogue) Save(connection modelcatalog.Connection, models []modelcatalog.Model, fetchedAt time.Time) error {
+	f.saveCalls++
+	f.saveConnection = connection
+	f.saveModels = append([]modelcatalog.Model(nil), models...)
+	f.saveFetchedAt = fetchedAt
+	return f.saveErr
 }
 
 func (f *fakeProviderCatalogue) Invalidate(name string) error {
@@ -181,17 +198,320 @@ func TestProviderCommandAddUsesHiddenSecretReaderByDefault(t *testing.T) {
 
 func TestProviderCommandBareAddCollectsAnActivatingEnrollment(t *testing.T) {
 	fake := installFakeProviderManager(t)
+	fake.addScopeID = "scope"
+	installFakeProviderCatalogue(t, &fakeProviderCatalogue{result: discoveredCatalogue(
+		modelcatalog.Model{ID: "gpt-test"},
+		modelcatalog.Model{ID: "gpt-small"},
+	)})
 	old := providerSecretReader
 	providerSecretReader = func(io.Reader, io.Writer) (string, error) { return "hidden-secret", nil }
 	t.Cleanup(func() { providerSecretReader = old })
-	// Optional values use "-" so token-oriented prompting never needs to
-	// buffer ahead of the terminal password reader.
-	input := strings.NewReader("openai openai - gpt=gpt-test,small=gpt-small gpt small")
+	input := strings.NewReader("openai\n\n1\n2\nn\n")
 	if err := providerCmd(context.Background(), []string{"add"}, input, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if fake.addRequest.DefaultModel != "gpt" || fake.addRequest.UtilityModel != "small" || len(fake.addRequest.Models) != 2 {
+	if fake.addRequest.DefaultModel != "gpt-test" || fake.addRequest.UtilityModel != "gpt-small" || len(fake.addRequest.Models) != 2 {
 		t.Fatalf("bare add request = %#v", fake.addRequest)
+	}
+}
+
+func TestProviderCommandBareAddDiscoversAndSelectsDefaultUtilityAndFavourites(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = "committed-openrouter-scope"
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(
+		modelcatalog.Model{ID: "anthropic/claude-3.7-sonnet", DisplayName: "Claude Sonnet 3.7"},
+		modelcatalog.Model{ID: "anthropic/claude-sonnet-4.6", DisplayName: "Claude Sonnet 4.6"},
+		modelcatalog.Model{ID: "google/gemini-2.0-flash", DisplayName: "Gemini 2.0 Flash"},
+		modelcatalog.Model{ID: "mistralai/mistral-small", DisplayName: "Mistral Small"},
+	)}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "hidden-openrouter-key", nil)
+
+	input := strings.NewReader("openrouter\n\nclaude sonnet\n2\ngemini\n1\ny\nmistral\n1\nn\n")
+	var stdout, stderr bytes.Buffer
+	if err := providerCmd(t.Context(), []string{"add"}, input, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	wantModels := map[string]string{
+		"anthropic-claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+		"google-gemini-2-0-flash":     "google/gemini-2.0-flash",
+		"mistralai-mistral-small":     "mistralai/mistral-small",
+	}
+	if fake.addRequest.ConnectionName != "openrouter" || fake.addRequest.Connection.Type != "openai" || fake.addRequest.Connection.BaseURL != openRouterBaseURL {
+		t.Fatalf("Add connection = %#v", fake.addRequest)
+	}
+	if len(fake.addRequest.Models) != len(wantModels) {
+		t.Fatalf("Add models = %#v, want %v", fake.addRequest.Models, wantModels)
+	}
+	for alias, upstream := range wantModels {
+		if got := fake.addRequest.Models[alias]; got != (config.ModelTarget{Model: upstream}) {
+			t.Fatalf("Add model %q = %#v, want upstream %q; all models = %#v", alias, got, upstream, fake.addRequest.Models)
+		}
+	}
+	if fake.addRequest.DefaultModel != "anthropic-claude-sonnet-4-6" || fake.addRequest.UtilityModel != "google-gemini-2-0-flash" {
+		t.Fatalf("Add roles = default %q utility %q", fake.addRequest.DefaultModel, fake.addRequest.UtilityModel)
+	}
+	if catalogue.discoverCalls != 1 || catalogue.modelsCalls != 0 || catalogue.apiKey != "hidden-openrouter-key" {
+		t.Fatalf("catalogue calls discover=%d models=%d key=%q", catalogue.discoverCalls, catalogue.modelsCalls, catalogue.apiKey)
+	}
+	if catalogue.connection.Name != "openrouter" || catalogue.connection.Type != "openai" || catalogue.connection.BaseURL != openRouterBaseURL || catalogue.connection.ScopeID != "" {
+		t.Fatalf("discovery connection = %+v", catalogue.connection)
+	}
+	if catalogue.saveCalls != 1 || catalogue.saveConnection.ScopeID != "committed-openrouter-scope" || fake.snapshotCalls != 1 {
+		t.Fatalf("post-commit snapshot/save calls=%d/%d connection=%+v", fake.snapshotCalls, catalogue.saveCalls, catalogue.saveConnection)
+	}
+	if strings.Contains(stderr.String(), "base URL") {
+		t.Fatalf("OpenRouter preset unexpectedly asked for a URL: %q", stderr.String())
+	}
+}
+
+func TestProviderCommandSmallCatalogueDisplaysDirectly(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = "scope"
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(
+		modelcatalog.Model{ID: "gpt-4.1", DisplayName: "GPT 4.1"},
+		modelcatalog.Model{ID: "gpt-4.1-mini", DisplayName: "GPT 4.1 Mini"},
+	)}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "secret", nil)
+
+	var stderr bytes.Buffer
+	if err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n1\n-\nn\n"), io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	output := stderr.String()
+	if !strings.Contains(output, "gpt-4.1") || !strings.Contains(output, "gpt-4.1-mini") {
+		t.Fatalf("small catalogue was not displayed directly: %q", output)
+	}
+	if !strings.Contains(output, "Utility model") || !strings.Contains(output, "uses default") {
+		t.Fatalf("utility prompt did not explain '-' fallback semantics: %q", output)
+	}
+	if fake.addRequest.DefaultModel != "gpt-4-1" || len(fake.addRequest.Models) != 1 {
+		t.Fatalf("Add request = %#v", fake.addRequest)
+	}
+}
+
+func TestProviderCommandLargeCatalogueSearchesAndPaginatesTwenty(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = "scope"
+	models := make([]modelcatalog.Model, 51)
+	for i := range models {
+		models[i] = modelcatalog.Model{ID: fmt.Sprintf("vendor/model-%02d", i+1), DisplayName: fmt.Sprintf("Model %02d", i+1)}
+	}
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(models...)}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "secret", nil)
+
+	var stderr bytes.Buffer
+	input := strings.NewReader("openai\n\nmodel\nn\n1\n-\nn\n")
+	if err := providerCmd(t.Context(), []string{"add"}, input, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if max := maxNumberedCatalogueRun(stderr.String()); max > 20 {
+		t.Fatalf("catalogue page displayed %d rows, want at most 20:\n%s", max, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Page 1") || !strings.Contains(stderr.String(), "Page 2") {
+		t.Fatalf("large catalogue did not paginate: %q", stderr.String())
+	}
+	if fake.addRequest.Models["vendor-model-21"].Model != "vendor/model-21" {
+		t.Fatalf("next-page selection = %#v", fake.addRequest.Models)
+	}
+}
+
+func TestProviderCommandAliasCollisionPromptsExplicitAlias(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = "scope"
+	fake.list = providerListingWithAliases(t, "vendor-model")
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(modelcatalog.Model{ID: "vendor/model", DisplayName: "Vendor Model"})}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "secret", nil)
+
+	var stderr bytes.Buffer
+	input := strings.NewReader("openai\nprimary\n1\nBAD ALIAS\nselected-model\n-\nn\n")
+	if err := providerCmd(t.Context(), []string{"add"}, input, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if fake.addRequest.Models["selected-model"].Model != "vendor/model" {
+		t.Fatalf("Add models = %#v", fake.addRequest.Models)
+	}
+	if !strings.Contains(stderr.String(), "already exists") || !strings.Contains(stderr.String(), "invalid model alias") {
+		t.Fatalf("collision/validation prompts missing: %q", stderr.String())
+	}
+}
+
+func TestProviderCommandDiscoveryFailureOffersManualEntryWithoutCache(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	catalogue := &fakeProviderCatalogue{discoverErr: errors.New("upstream rejected hidden-secret")}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "hidden-secret", nil)
+
+	var stderr bytes.Buffer
+	input := strings.NewReader("anthropic\n\ny\nclaude=claude-manual\nclaude\n-\n")
+	if err := providerCmd(t.Context(), []string{"add"}, input, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if fake.addRequest.Models["claude"].Model != "claude-manual" || fake.addRequest.DefaultModel != "claude" {
+		t.Fatalf("manual Add request = %#v", fake.addRequest)
+	}
+	if catalogue.discoverCalls != 1 || catalogue.modelsCalls != 0 || catalogue.saveCalls != 0 {
+		t.Fatalf("catalogue calls discover=%d models=%d save=%d", catalogue.discoverCalls, catalogue.modelsCalls, catalogue.saveCalls)
+	}
+	if strings.Contains(stderr.String(), "hidden-secret") || !strings.Contains(stderr.String(), "[REDACTED]") || !strings.Contains(strings.ToLower(stderr.String()), "manual") {
+		t.Fatalf("manual fallback output was unsafe or incomplete: %q", stderr.String())
+	}
+}
+
+func TestProviderCommandDiscoveryEmptyOffersManualEntryWithoutCache(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue()}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "hidden-secret", nil)
+
+	input := strings.NewReader("anthropic\n\ny\nclaude=claude-manual\nclaude\n-\n")
+	if err := providerCmd(t.Context(), []string{"add"}, input, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if fake.addRequest.Models["claude"].Model != "claude-manual" || catalogue.discoverCalls != 1 || catalogue.modelsCalls != 0 || catalogue.saveCalls != 0 {
+		t.Fatalf("empty discovery fallback add=%#v catalogue=%+v", fake.addRequest, catalogue)
+	}
+}
+
+func TestProviderCommandExplicitModelsBypassDiscovery(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	catalogue := &fakeProviderCatalogue{discoverErr: errors.New("must not discover"), saveErr: errors.New("must not save")}
+	installFakeProviderCatalogue(t, catalogue)
+
+	err := providerCmd(t.Context(), []string{
+		"add", "--name", "automated", "--type", "openai", "--model", "gpt=gpt-exact", "--default", "gpt", "--api-key-stdin",
+	}, strings.NewReader("automation-secret\n"), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalogue.discoverCalls != 0 || catalogue.modelsCalls != 0 || catalogue.saveCalls != 0 {
+		t.Fatalf("explicit enrollment touched catalogue: %+v", catalogue)
+	}
+	if fake.addRequest.Models["gpt"].Model != "gpt-exact" {
+		t.Fatalf("Add request = %#v", fake.addRequest)
+	}
+}
+
+func TestProviderCommandNonInteractiveMissingModelFailsBeforeSecret(t *testing.T) {
+	installFakeProviderManager(t)
+	reader := &countingReader{reader: strings.NewReader("must-not-be-read")}
+	err := providerCmd(t.Context(), []string{"add", "--name", "automated", "--type", "openai", "--api-key-stdin"}, reader, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--model") {
+		t.Fatalf("error = %v, want missing --model", err)
+	}
+	if reader.reads != 0 {
+		t.Fatalf("stdin reads = %d, want zero", reader.reads)
+	}
+}
+
+func TestProviderCommandPartialFlagAutomationDoesNotEnterGuidedDiscovery(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	catalogue := &fakeProviderCatalogue{}
+	installFakeProviderCatalogue(t, catalogue)
+	secretRead := false
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) {
+		secretRead = true
+		return "secret", nil
+	}
+	t.Cleanup(func() { providerSecretReader = old })
+
+	var stderr bytes.Buffer
+	err := providerCmd(t.Context(), []string{"add", "--name", "partial"}, strings.NewReader("openai\n"), io.Discard, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "--model") {
+		t.Fatalf("error = %v, want explicit automation error", err)
+	}
+	if secretRead || catalogue.discoverCalls != 0 || fake.preflighted || stderr.Len() != 0 {
+		t.Fatalf("partial automation prompted or progressed: secret=%t discover=%d preflight=%t stderr=%q", secretRead, catalogue.discoverCalls, fake.preflighted, stderr.String())
+	}
+}
+
+func TestProviderCommandPreflightStillPrecedesSecretAndDiscovery(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.preflightErr = errors.New("identity unavailable")
+	catalogue := &fakeProviderCatalogue{}
+	installFakeProviderCatalogue(t, catalogue)
+	secretRead := false
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) {
+		secretRead = true
+		return "secret", nil
+	}
+	t.Cleanup(func() { providerSecretReader = old })
+
+	err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "identity unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+	if !fake.preflighted || secretRead || catalogue.discoverCalls != 0 {
+		t.Fatalf("ordering preflight=%t secret=%t discovery=%d", fake.preflighted, secretRead, catalogue.discoverCalls)
+	}
+}
+
+func TestProviderCommandBareAddRejectsInvalidConnectionBeforeSecret(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	secretRead := false
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) {
+		secretRead = true
+		return "secret", nil
+	}
+	t.Cleanup(func() { providerSecretReader = old })
+
+	err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\nBAD NAME\n"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid connection name") {
+		t.Fatalf("error = %v", err)
+	}
+	if secretRead || fake.preflighted {
+		t.Fatalf("invalid guided input progressed to preflight/secret: preflight=%t secret=%t", fake.preflighted, secretRead)
+	}
+}
+
+func TestProviderCommandFailedAddDoesNotSaveCatalogue(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.addErr = errors.New("transaction failed")
+	catalogue := &fakeProviderCatalogue{result: discoveredCatalogue(modelcatalog.Model{ID: "gpt-4.1"})}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, "secret", nil)
+
+	err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n1\n-\nn\n"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "transaction failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if catalogue.saveCalls != 0 || fake.snapshotCalls != 0 {
+		t.Fatalf("post-failure snapshot/save calls = %d/%d", fake.snapshotCalls, catalogue.saveCalls)
+	}
+}
+
+func TestProviderCommandCacheSaveFailureWarnsAfterCommittedSuccess(t *testing.T) {
+	const apiKey = "cache-warning-secret"
+	const scopeID = "committed-private-scope"
+	fake := installFakeProviderManager(t)
+	fake.addScopeID = scopeID
+	catalogue := &fakeProviderCatalogue{
+		result:  discoveredCatalogue(modelcatalog.Model{ID: "gpt-4.1"}),
+		saveErr: errors.New("cannot save " + apiKey + " in " + scopeID),
+	}
+	installFakeProviderCatalogue(t, catalogue)
+	installProviderSecretReader(t, apiKey, nil)
+
+	var stdout, stderr bytes.Buffer
+	err := providerCmd(t.Context(), []string{"add"}, strings.NewReader("openai\n\n1\n-\nn\n"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("provider add returned post-commit cache error: %v", err)
+	}
+	if fake.addRequest.ConnectionName == "" || fake.snapshotCalls != 1 || fake.snapshotName != "openai" || catalogue.saveCalls != 1 || catalogue.saveConnection.ScopeID != scopeID {
+		t.Fatalf("commit/snapshot/save state add=%#v snapshots=%d name=%q saves=%d connection=%+v", fake.addRequest, fake.snapshotCalls, fake.snapshotName, catalogue.saveCalls, catalogue.saveConnection)
+	}
+	if !strings.Contains(stdout.String(), "provider openai validated and saved") || !strings.Contains(strings.ToLower(stderr.String()), "warning") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), apiKey) || strings.Contains(stderr.String(), scopeID) {
+		t.Fatalf("cache warning leaked private values: %q", stderr.String())
 	}
 }
 
@@ -590,6 +910,68 @@ func installFakeProviderCatalogue(t *testing.T, fake providerCatalogue) {
 	old := openProviderCatalogue
 	openProviderCatalogue = func() (providerCatalogue, error) { return fake, nil }
 	t.Cleanup(func() { openProviderCatalogue = old })
+}
+
+func discoveredCatalogue(models ...modelcatalog.Model) modelcatalog.Result {
+	return modelcatalog.Result{Record: modelcatalog.Record{
+		SchemaVersion: modelcatalog.SchemaVersion,
+		FetchedAt:     time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC),
+		Models:        models,
+	}}
+}
+
+func installProviderSecretReader(t *testing.T, value string, err error) {
+	t.Helper()
+	old := providerSecretReader
+	providerSecretReader = func(io.Reader, io.Writer) (string, error) { return value, err }
+	t.Cleanup(func() { providerSecretReader = old })
+}
+
+func providerListingWithAliases(t *testing.T, aliases ...string) []byte {
+	t.Helper()
+	listing := providerconfig.Listing{
+		State:     "installed",
+		Providers: map[string]providerconfig.ProviderSummary{},
+		Models:    map[string]providerconfig.ModelSummary{},
+	}
+	for _, alias := range aliases {
+		listing.Models[alias] = providerconfig.ModelSummary{Provider: "existing", Model: "upstream"}
+	}
+	b, err := json.Marshal(listing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func maxNumberedCatalogueRun(output string) int {
+	maxRun, run := 0, 0
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		fields := strings.Fields(trimmed)
+		if len(fields) > 0 && strings.HasSuffix(fields[0], ".") {
+			var number int
+			if _, err := fmt.Sscanf(fields[0], "%d.", &number); err == nil {
+				run++
+				if run > maxRun {
+					maxRun = run
+				}
+				continue
+			}
+		}
+		run = 0
+	}
+	return maxRun
+}
+
+type countingReader struct {
+	reader io.Reader
+	reads  int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	return r.reader.Read(p)
 }
 
 var _ = config.ProviderConnection{}
