@@ -9,14 +9,25 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/chat"
 )
 
-const serverCloseTimeout = 5 * time.Second
+const (
+	serverCloseTimeout = 5 * time.Second
+	serverWriteTimeout = 5 * time.Second
+	serverAuditTimeout = 2 * time.Second
+	maxRequestIDBytes  = 128
+)
+
+var errServerWriteInterrupted = errors.New("chat wire server write interrupted")
+var errServerWriteCorrupted = errors.New("chat wire server write partially emitted")
 
 // Factory constructs one isolated backend for one accepted connection.
 type Factory func(context.Context) (chat.Backend, error)
@@ -75,22 +86,27 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 	defer func() { _ = conn.Close() }()
 	if audit != nil {
 		audit(ctx, conn, "connected")
-		defer audit(ctx, conn, "disconnected")
+		defer func() {
+			auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), serverAuditTimeout)
+			defer auditCancel()
+			audit(auditCtx, conn, "disconnected")
+		}()
 	}
 
-	codec := NewServerCodec(conn, conn)
-	writer := &serverWriter{codec: codec}
+	trackedWriter := &serverTrackedWriter{conn: conn}
+	codec := NewServerCodec(conn, trackedWriter)
+	writer := &serverWriter{conn: conn, codec: codec, trackedWriter: trackedWriter}
 	openFrame, err := codec.Decode()
 	if err != nil {
 		_ = writer.stableError("", "protocol_error", "invalid chat protocol frame")
 		return
 	}
-	if openFrame.Type != TypeOpen {
-		_ = writer.stableError(openFrame.ID, "open_required", "open must be the first chat request")
+	if !validRequestID(openFrame.ID) {
+		_ = writer.stableError("", "invalid_request", "invalid chat request id")
 		return
 	}
-	if openFrame.ID == "" {
-		_ = writer.stableError("", "invalid_request", "chat request id is required")
+	if openFrame.Type != TypeOpen {
+		_ = writer.stableError(openFrame.ID, "open_required", "open must be the first chat request")
 		return
 	}
 	var options chat.OpenOptions
@@ -109,17 +125,25 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 	}
 
 	var activeMu sync.Mutex
-	active := false
+	var active *activeTurnState
 	var turnGroup sync.WaitGroup
+	var deferredMu sync.Mutex
+	var deferred []deferredServerFrame
+	deferFrame := func(frameType, id string, payload any) {
+		deferredMu.Lock()
+		deferred = append(deferred, deferredServerFrame{frameType: frameType, id: id, payload: payload})
+		deferredMu.Unlock()
+	}
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			activeMu.Lock()
 			turnActive := active
 			activeMu.Unlock()
+			writer.interrupt()
 			cancel()
-			if turnActive {
-				backend.Cancel()
+			if turnActive != nil {
+				turnActive.stop(backend)
 			}
 			turnGroup.Wait()
 			closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), serverCloseTimeout)
@@ -146,18 +170,18 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 			}
 			return
 		}
+		if frame.Type != TypeCancel && !validRequestID(frame.ID) {
+			if err := writer.stableError("", "invalid_request", "invalid chat request id"); err != nil {
+				return
+			}
+			continue
+		}
 		switch frame.Type {
 		case TypeOpen:
 			if err := writer.stableError(frame.ID, "already_open", "chat connection is already open"); err != nil {
 				return
 			}
 		case TypeTurn:
-			if frame.ID == "" {
-				if err := writer.stableError("", "invalid_request", "chat request id is required"); err != nil {
-					return
-				}
-				continue
-			}
 			var turn TurnPayload
 			if err := decodePayload(frame, &turn); err != nil {
 				if err := writer.stableError(frame.ID, "invalid_request", "invalid turn request"); err != nil {
@@ -165,24 +189,28 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 				}
 				continue
 			}
+			turnCtx, turnCancel := context.WithCancel(ctx)
+			turnState := &activeTurnState{cancel: turnCancel}
 			activeMu.Lock()
-			if active {
+			if active != nil {
 				activeMu.Unlock()
+				turnCancel()
 				if err := writer.stableError(frame.ID, "turn_active", "a chat turn is already active"); err != nil {
 					return
 				}
 				continue
 			}
-			active = true
+			active = turnState
 			turnGroup.Add(1)
 			activeMu.Unlock()
-			go func(id, input string) {
+			go func(id, input string, turnCtx context.Context, turnCancel context.CancelFunc, turnState *activeTurnState) {
 				defer turnGroup.Done()
+				defer turnCancel()
 				var eventMu sync.Mutex
 				acceptEvents := true
 				var doneEvent chat.Event
 				var streamErr error
-				turnErr := backend.Turn(ctx, input, func(event chat.Event) {
+				turnErr := backend.Turn(turnCtx, input, func(event chat.Event) {
 					eventMu.Lock()
 					if !acceptEvents {
 						eventMu.Unlock()
@@ -201,8 +229,8 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 						if err := writer.send(frameType, id, event); err != nil {
 							streamErr = err
 							eventMu.Unlock()
-							backend.Cancel()
-							if !errors.Is(err, ErrFrameTooLarge) {
+							turnState.stop(backend)
+							if !errors.Is(err, ErrFrameTooLarge) && !errors.Is(err, errServerWriteInterrupted) {
 								cancel()
 								_ = conn.Close()
 							}
@@ -222,10 +250,16 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 				}
 
 				activeMu.Lock()
-				active = false
+				if active == turnState {
+					active = nil
+				}
 				activeMu.Unlock()
 
 				if streamErr != nil {
+					if errors.Is(streamErr, errServerWriteInterrupted) {
+						deferFrame(TypeTurnDone, id, doneEvent)
+						return
+					}
 					if responseWriteFailure(writer, id, "turn_failed", "chat turn failed", streamErr) {
 						cancel()
 						_ = conn.Close()
@@ -233,19 +267,17 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 					return
 				}
 				if err := writer.send(TypeTurnDone, id, doneEvent); err != nil {
+					if errors.Is(err, errServerWriteInterrupted) {
+						deferFrame(TypeTurnDone, id, doneEvent)
+						return
+					}
 					if responseWriteFailure(writer, id, "turn_failed", "chat turn failed", err) {
 						cancel()
 						_ = conn.Close()
 					}
 				}
-			}(frame.ID, turn.Text)
+			}(frame.ID, turn.Text, turnCtx, turnCancel, turnState)
 		case TypeCommand:
-			if frame.ID == "" {
-				if err := writer.stableError("", "invalid_request", "chat request id is required"); err != nil {
-					return
-				}
-				continue
-			}
 			var command chat.ParsedCommand
 			if err := decodePayload(frame, &command); err != nil {
 				if err := writer.stableError(frame.ID, "invalid_request", "invalid command request"); err != nil {
@@ -253,10 +285,11 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 				}
 				continue
 			}
+			commandCtx, commandCancel := context.WithCancel(ctx)
 			var streamErr error
 			var eventMu sync.Mutex
 			acceptEvents := true
-			result, err := backend.Command(ctx, command, func(event chat.Event) {
+			result, err := backend.Command(commandCtx, command, func(event chat.Event) {
 				eventMu.Lock()
 				if !acceptEvents {
 					eventMu.Unlock()
@@ -270,8 +303,8 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 					if err := writer.send(frameType, frame.ID, event); err != nil {
 						streamErr = err
 						eventMu.Unlock()
-						backend.Cancel()
-						if !errors.Is(err, ErrFrameTooLarge) {
+						commandCancel()
+						if !errors.Is(err, ErrFrameTooLarge) && !errors.Is(err, errServerWriteInterrupted) {
 							cancel()
 							_ = conn.Close()
 						}
@@ -280,6 +313,7 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 				}
 				eventMu.Unlock()
 			})
+			commandCancel()
 			eventMu.Lock()
 			acceptEvents = false
 			eventMu.Unlock()
@@ -305,15 +339,22 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 			activeMu.Lock()
 			turnActive := active
 			activeMu.Unlock()
-			if turnActive {
-				backend.Cancel()
+			if turnActive != nil {
+				turnActive.stop(backend)
 			}
 		case TypeClose:
-			if frame.ID == "" {
-				_ = writer.stableError("", "invalid_request", "chat request id is required")
-				continue
-			}
 			cleanup()
+			if err := writer.resume(); err != nil {
+				return
+			}
+			deferredMu.Lock()
+			finalFrames := append([]deferredServerFrame(nil), deferred...)
+			deferredMu.Unlock()
+			for _, finalFrame := range finalFrames {
+				if err := writer.send(finalFrame.frameType, finalFrame.id, finalFrame.payload); err != nil {
+					return
+				}
+			}
 			_ = writer.send(TypeGoodbye, frame.ID, nil)
 			return
 		}
@@ -321,8 +362,40 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 }
 
 type serverWriter struct {
-	mu    sync.Mutex
-	codec *Codec
+	mu            sync.Mutex
+	conn          net.Conn
+	codec         *Codec
+	trackedWriter *serverTrackedWriter
+	writeTimeout  time.Duration
+	interrupted   atomic.Bool
+	corrupted     atomic.Bool
+}
+
+type serverTrackedWriter struct {
+	conn    net.Conn
+	written atomic.Int64
+}
+
+func (w *serverTrackedWriter) Write(payload []byte) (int, error) {
+	n, err := w.conn.Write(payload)
+	w.written.Add(int64(n))
+	return n, err
+}
+
+type activeTurnState struct {
+	cancel     context.CancelFunc
+	cancelOnce sync.Once
+}
+
+func (s *activeTurnState) stop(backend chat.Backend) {
+	s.cancel()
+	s.cancelOnce.Do(backend.Cancel)
+}
+
+type deferredServerFrame struct {
+	frameType string
+	id        string
+	payload   any
 }
 
 // responseWriteFailure reports whether the connection must be abandoned.
@@ -330,6 +403,9 @@ type serverWriter struct {
 // error can still be sent safely. I/O failures may have left a partial line and
 // therefore require closing the connection instead of appending another frame.
 func responseWriteFailure(writer *serverWriter, id, code, message string, cause error) bool {
+	if errors.Is(cause, errServerWriteInterrupted) {
+		return false
+	}
 	if errors.Is(cause, ErrFrameTooLarge) {
 		return writer.stableError(id, code, message) != nil
 	}
@@ -345,14 +421,68 @@ func (w *serverWriter) send(frameType, id string, payload any) error {
 	if err != nil {
 		return err
 	}
-	frame.ID = sanitizeString(frame.ID)
 	frame.Payload, err = sanitizePayload(frame.Payload)
 	if err != nil {
 		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.codec.Encode(frame)
+	if w.interrupted.Load() {
+		return errServerWriteInterrupted
+	}
+	if w.trackedWriter != nil {
+		w.trackedWriter.written.Store(0)
+	}
+	if w.conn != nil {
+		timeout := w.writeTimeout
+		if timeout <= 0 {
+			timeout = serverWriteTimeout
+		}
+		if err := w.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("set chat wire write deadline: %w", err)
+		}
+		defer w.conn.SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort reset on a closing connection
+		if w.interrupted.Load() {
+			_ = w.conn.SetWriteDeadline(time.Now())
+			return errServerWriteInterrupted
+		}
+	}
+	err = w.codec.Encode(frame)
+	if err != nil && w.trackedWriter != nil && w.trackedWriter.written.Load() > 0 {
+		w.corrupted.Store(true)
+		return fmt.Errorf("%w: %v", errServerWriteCorrupted, err)
+	}
+	if err != nil && w.interrupted.Load() {
+		return errServerWriteInterrupted
+	}
+	return err
+}
+
+func (w *serverWriter) interrupt() {
+	w.interrupted.Store(true)
+	if w.conn != nil {
+		_ = w.conn.SetWriteDeadline(time.Now())
+	}
+}
+
+func (w *serverWriter) resume() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.corrupted.Load() {
+		return errServerWriteCorrupted
+	}
+	if w.conn != nil {
+		if err := w.conn.SetWriteDeadline(time.Time{}); err != nil {
+			return fmt.Errorf("reset chat wire write deadline: %w", err)
+		}
+		if w.trackedWriter != nil {
+			w.codec = NewServerCodec(nil, w.trackedWriter)
+		} else {
+			w.codec = NewServerCodec(nil, w.conn)
+		}
+	}
+	w.interrupted.Store(false)
+	return nil
 }
 
 func eventFrameType(kind chat.EventKind) (string, bool) {
@@ -409,13 +539,38 @@ func sanitizeValue(value any) any {
 		return value
 	case map[string]any:
 		clean := make(map[string]any, len(value))
-		for key, item := range value {
-			clean[sanitizeString(key)] = sanitizeValue(item)
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			base := sanitizeString(key)
+			candidate := base
+			for suffix := 2; ; suffix++ {
+				if _, exists := clean[candidate]; !exists {
+					break
+				}
+				candidate = fmt.Sprintf("%s#%d", base, suffix)
+			}
+			clean[candidate] = sanitizeValue(value[key])
 		}
 		return clean
 	default:
 		return value
 	}
+}
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDBytes || !utf8.ValidString(id) || sanitizeString(id) != id {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeString(value string) string {

@@ -15,7 +15,11 @@ import (
 	"github.com/matt-riley/waffle/internal/chat"
 )
 
-const clientCloseTimeout = 5 * time.Second
+const (
+	clientCloseTimeout  = 5 * time.Second
+	clientWriteTimeout  = 5 * time.Second
+	clientCancelTimeout = 250 * time.Millisecond
+)
 
 // RemoteError is a stable, redacted error returned by the chat service.
 type RemoteError struct {
@@ -32,9 +36,10 @@ func (e *RemoteError) Error() string {
 
 // Client implements chat.Backend over a local Unix connection.
 type Client struct {
-	conn    net.Conn
-	codec   *Codec
-	writeMu sync.Mutex
+	conn       net.Conn
+	codec      *Codec
+	writeInit  sync.Once
+	writeToken chan struct{}
 
 	pendingMu sync.Mutex
 	pending   map[string]chan Frame
@@ -161,7 +166,7 @@ func (c *Client) Command(ctx context.Context, command chat.ParsedCommand, emit f
 
 // Cancel asks the service to cancel only this connection's active turn.
 func (c *Client) Cancel() {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), clientCancelTimeout)
 	defer cancel()
 	frame, err := newFrame(TypeCancel, "", nil)
 	if err == nil {
@@ -290,14 +295,20 @@ func (c *Client) nextResponse(ctx context.Context, responses <-chan Frame) (Fram
 }
 
 func (c *Client) writeFrame(ctx context.Context, frame Frame) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := c.conn.SetWriteDeadline(deadline); err != nil {
-			return fmt.Errorf("set chat write deadline: %w", err)
-		}
-		defer c.conn.SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort reset on a closing connection
+	c.writeInit.Do(func() { c.writeToken = make(chan struct{}, 1) })
+	select {
+	case c.writeToken <- struct{}{}:
+		defer func() { <-c.writeToken }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+	writeCtx, cancel := boundedContext(ctx, clientWriteTimeout)
+	defer cancel()
+	deadline, _ := writeCtx.Deadline()
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("set chat write deadline: %w", err)
+	}
+	defer c.conn.SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort reset on a closing connection
 	if err := c.codec.Encode(frame); err != nil {
 		return fmt.Errorf("send chat %s: %w", frame.Type, err)
 	}

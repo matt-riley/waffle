@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -419,4 +420,74 @@ func waitForClientEvent(t *testing.T, mu *sync.Mutex, events *[]chat.Event, kind
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("did not receive %s", kind)
+}
+
+func TestClientCancelAndCloseAreBoundedBehindBlockedWrite(t *testing.T) {
+	t.Run("cancel", func(t *testing.T) {
+		client, peer, entered, writeDone := blockedWriteClient(t)
+		defer func() { _ = peer.Close() }()
+		<-entered
+		cancelDone := make(chan struct{})
+		go func() {
+			client.Cancel()
+			close(cancelDone)
+		}()
+		select {
+		case <-cancelDone:
+		case <-time.After(350 * time.Millisecond):
+			_ = client.conn.Close()
+			<-writeDone
+			t.Fatal("Cancel waited indefinitely behind an earlier write")
+		}
+		_ = client.conn.Close()
+		<-writeDone
+	})
+
+	t.Run("close", func(t *testing.T) {
+		client, peer, entered, writeDone := blockedWriteClient(t)
+		defer func() { _ = peer.Close() }()
+		<-entered
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		err := client.Close(ctx)
+		if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+			t.Fatalf("Close took %s behind an earlier write", elapsed)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want deadline exceeded", err)
+		}
+		<-writeDone
+	})
+}
+
+type writeObservedConn struct {
+	net.Conn
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (c *writeObservedConn) Write(payload []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(payload)
+}
+
+func blockedWriteClient(t *testing.T) (*Client, net.Conn, <-chan struct{}, <-chan error) {
+	t.Helper()
+	clientSide, peer := net.Pipe()
+	observed := &writeObservedConn{Conn: clientSide, entered: make(chan struct{})}
+	client := &Client{
+		conn:      observed,
+		codec:     NewClientCodec(observed, observed),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
+	}
+	frame, err := newFrame(TypeTurn, "blocked", TurnPayload{Text: strings.Repeat("x", MaxFrameBytes/2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- client.writeFrame(context.Background(), frame) }()
+	return client, peer, observed.entered, writeDone
 }
