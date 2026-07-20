@@ -9,9 +9,8 @@ borrowed idea are in [research.md](./research.md).
 ## Design principles
 
 1. **One binary.** `waffle` compiles to a single static binary containing the
-   gateway, the agent runtime, the terminal chat REPL, and all channel
+   gateway, the agent runtime, the terminal chat TUI, and all channel
    adapters. No Node, no Python, no service mesh. Subcommands select the role.
-   (A full-screen TUI was deliberately cut — see [Deviations](#deviations).)
 2. **Small enough to read.** nanoclaw's discipline: any subsystem should be
    reviewable by one person in one sitting. Features that threaten this get
    cut or become optional modules.
@@ -354,7 +353,7 @@ be delegated. Surface binds:
 |---|---|
 | Channel groups | `waffle session profile <channel:chat> <name>` (audited) |
 | Cron jobs | `waffle cron add … --profile name` |
-| Chat REPL | `waffle chat --profile name` |
+| Chat TUI/plain mode | `waffle chat --profile name` |
 | Repo workspaces | `waffle ws open owner/repo --profile name` (stored on workspace) |
 
 New channel groups default to empty profile → effective `main` via the profile
@@ -532,15 +531,11 @@ incomplete work; they are choices to stay small enough to read (principle 2).
    provider at Gemini's compatible endpoint (`name = "openai"`, suitable
    `base_url` and model). One translator covers OpenRouter, Ollama, Gemini,
    and other OpenAI-compatible endpoints.
-2. **bubbletea TUI** — cut. `waffle chat` is a line-oriented REPL (stdin/stdout
-   with light ANSI), not a full-screen TUI. Keeps the terminal surface
-   reviewable and dependency-free beyond `golang.org/x/term` for raw input
-   where needed.
-3. **MCP SDK** — hand-rolled stdio JSON-RPC in `internal/mcp` instead of
+2. **MCP SDK** — hand-rolled stdio JSON-RPC in `internal/mcp` instead of
    `modelcontextprotocol/go-sdk`. **stdio-only; no HTTP/SSE transport.** The
    surface waffle needs (initialize, tools/list, tools/call) is small enough
    to own; an SDK would pull a large dependency graph for little gain.
-4. **Channel deps** — Telegram is hand-rolled Bot API HTTP in
+3. **Channel deps** — Telegram is hand-rolled Bot API HTTP in
    `internal/channel/telegram` (no `go-telegram/bot`). **Discord is optional
    and not shipped** (`bwmarrin/discordgo` never added; a second channel
    remains an optional later addition under principle 2).
@@ -554,9 +549,8 @@ optional/cut items above plus anything still open on the tracker:
 
 | Gap | Status | Notes |
 |---|---|---|
-| Discord adapter | not shipped | deliberate; see deviation 4 |
+| Discord adapter | not shipped | deliberate; see deviation 3 |
 | Native Gemini package | not shipped | deliberate; use OpenAI-compat |
-| Full-screen TUI | not shipped | deliberate; line REPL |
 | MCP over HTTP/SSE | not shipped | deliberate; stdio-only |
 | In-process host hooks (Lua/JS) | deferred | extension-surface decision (#41) |
 | Smart routing in-tree | out of scope | select explicit model aliases or use provider-hosted routing |
@@ -580,9 +574,9 @@ provider key is configured).
 
 **Phase 1 — The loop (the heart).** `internal/llm` canonical types +
 Anthropic and openai-compatible providers; agent loop with streaming; host
-tools (`bash`, file ops, `fetch`); `waffle chat` line REPL (not a
-bubbletea TUI — see [Deviations](#deviations)). *Milestone: a useful
-Claude-backed terminal agent.*
+tools (`bash`, file ops, `fetch`); `waffle chat` Focused Conversation TUI with
+deterministic plain fallback and a local Unix-socket backend. *Milestone: a
+useful terminal agent.*
 
 **Phase 2 — Persistence, skills, memory.** Sessions/turns in SQLite; FTS5
 recall + `remember` tool; workspace prompt files; `SKILL.md` loading and

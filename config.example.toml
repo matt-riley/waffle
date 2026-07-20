@@ -46,7 +46,9 @@
 # utility_model, or secret.
 
 # Optional standalone local chat service. Managed deployments normally receive
-# /run/waffle/chat.sock from systemd socket activation instead.
+# /run/waffle/chat.sock from systemd socket activation instead. This server
+# setting does not change client selection: `waffle chat` stays in direct mode
+# unless --socket or WAFFLE_CHAT_SOCKET explicitly selects a socket.
 # Standalone mode authorizes the effective service UID. Every requested and
 # canonical ancestor must be owned by root or that UID; group/other-writable
 # ancestors must be sticky. The dedicated parent must be a real, same-UID 0700

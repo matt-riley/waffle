@@ -68,6 +68,18 @@ func TestModelAdaptsToTerminalBackgroundUnlessColorDisabled(t *testing.T) {
 	}
 }
 
+func TestListOverlayDoesNotShowPhantomTruncation(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 80, Height: 24, NoColor: true})
+	m.applyResult(chat.ParsedCommand{Name: chat.CommandModels}, chat.Result{Models: []chat.Model{
+		{Alias: "gpt", Provider: "fixture", Upstream: "model-a", Current: true},
+		{Alias: "claude", Provider: "fixture", Upstream: "model-b"},
+	}})
+
+	if got := m.renderOverlay(76); strings.Contains(got, "…") {
+		t.Fatalf("two-item overlay reports phantom truncation:\n%s", got)
+	}
+}
+
 func snapshotModel(width, height int, noColor bool) *Model {
 	state := chat.State{SessionID: "01SNAPSHOT", Title: "Focused deploy", ModelAlias: "gpt", ConnectionMode: "local", History: []llm.Message{llm.UserText("Explain the failed deploy.")}}
 	m := New(newFakeBackend(state), chat.OpenOptions{}, Options{Width: width, Height: height, NoColor: noColor})

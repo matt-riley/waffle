@@ -1,5 +1,5 @@
 // Command waffle is the personal agent binary. One executable carries every
-// role — gateway, chat REPL, sandbox runner — selected by subcommand
+// role — gateway, terminal chat, sandbox runner — selected by subcommand
 // (docs/plan.md).
 package main
 
@@ -191,7 +191,7 @@ Usage:
   waffle <command> [arguments]
 
 Commands:
-  chat      interactive terminal session (-c continues the last session)
+  chat      focused terminal chat (--continue, --profile, --socket, --plain)
   serve     run the gateway (channels from config.toml)
   status    show active and recent gateway runs
   pair      approve your accounts on connected channels

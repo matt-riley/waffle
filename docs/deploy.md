@@ -51,6 +51,35 @@ encrypted credential, starts Waffle, verifies `/healthz`, and reports
 configuration, secret store, and service state. Cache-write failure after a
 successful commit is only a warning and does not undo the enrolled provider.
 
+### Managed chat socket
+
+In Ready state, the managed host activates the coupled units in this order:
+
+```sh
+systemctl enable --now waffle-chat.socket
+systemctl is-active --quiet waffle-chat.socket
+systemctl is-active --quiet waffle.service
+curl --fail --silent --show-error http://127.0.0.1:8422/healthz
+systemctl enable waffle.service
+```
+
+`waffle-chat.socket` creates `/run/waffle/chat.sock` as `root:sudo` mode
+`0660` and passes its `waffle-chat` descriptor to `waffle.service`. It is a
+local Unix socket, not a TCP or tailnet listener. Installed state stops and
+disables `waffle.service` first and `waffle-chat.socket` second; rollout and
+rollback manage the binary, wrapper, and both units as one compatible set.
+
+After rollout, the ordinary operator smoke test is:
+
+```sh
+printf '/status\n/exit\n' | waffle chat --plain
+```
+
+Run it without `sudo`. The managed wrapper selects `/run/waffle/chat.sock`
+before any privileged configuration or identity access. See
+[Chat](chat.md) for the TUI, connection precedence, commands, security
+boundary, and troubleshooting.
+
 For an enrolled connection, `provider models` reads an owner-only catalogue
 cache under the Waffle home. Directories are mode `0700`, records are mode
 `0600`, and a fresh record is reused for 24 hours. The cache is distinct from

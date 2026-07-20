@@ -566,7 +566,6 @@ func (m *Model) resize(width, height int) {
 	contentWidth := max(20, m.width-4)
 	m.viewport.SetWidth(contentWidth)
 	m.composer.SetWidth(max(12, contentWidth-4))
-	m.overlayList.SetSize(min(max(20, m.width-12), 76), min(max(5, m.height-10), 16))
 	m.syncLayout()
 	m.syncViewport(wasBottom)
 	if !wasBottom {
@@ -587,6 +586,10 @@ func (m *Model) syncLayout() {
 	fixed := headerHeight + 1 + composerHeight + 1 + paletteHeight
 	m.viewport.SetHeight(max(1, m.height-fixed))
 	m.viewport.YPosition = headerHeight + 1
+	m.overlayList.SetSize(
+		min(max(20, m.width-12), 76),
+		min(12, max(4, m.viewport.Height()-4)),
+	)
 }
 
 func (m *Model) syncViewport(follow bool) {

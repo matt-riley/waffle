@@ -1,12 +1,12 @@
 # waffle
 
 A personal AI agent, written in Go, that runs on your own hardware — one
-binary containing the agent loop, a messaging gateway, a terminal chat REPL,
+binary containing the agent loop, a messaging gateway, a focused terminal chat,
 and a provider-agnostic LLM layer.
 
 Status: **phases 0–4 fully delivered; phases 5–7 landed with deliberate
-cuts** (line REPL instead of a full-screen TUI, OpenAI-compatible Gemini,
-stdio-only MCP, Telegram only — Discord not shipped). See
+cuts** (OpenAI-compatible Gemini, stdio-only MCP, Telegram only — Discord not
+shipped). See
 [docs/plan.md](docs/plan.md) ([Deviations](docs/plan.md#deviations)) for the
 design and what was intentionally left out.
 
@@ -16,8 +16,12 @@ What's here, by capability:
   format; named Anthropic and OpenAI-compatible connections (including
   OpenRouter and Ollama) can coexist, and deterministic model aliases select
   the connection and upstream model for each request.
-- **Terminal** — `waffle chat` (`-c` resumes the last session), with native
-  tools (bash, file read/write/edit, fetch).
+- **Terminal** — `waffle chat` opens the keyboard-first Focused Conversation
+  TUI; `-c`/`--continue` resumes the last session, and redirected I/O or
+  `--plain` uses deterministic plain text. On a managed host it connects to
+  the running service without `sudo`; standalone use remains direct. See the
+  [chat guide](docs/chat.md). Native tools include bash, file
+  read/write/edit, and fetch.
   Fetch blocks loopback, link-local, unspecified, and private IPv4/IPv6
   destinations by default (including redirects). For deliberate local use,
   allow exact CIDRs or host:port destinations with
@@ -106,7 +110,8 @@ What's here, by capability:
 - **Deployment** — a managed deployment first reaches **Installed** without a
   provider, then `sudo waffle provider add` validates an on-host connection
   and can move it to **Ready**. The two-state flow, systemd and launchd service
-  examples, and loopback `/healthz` probe are in [docs/deploy.md](docs/deploy.md).
+  examples, local chat socket, and loopback `/healthz` probe are in
+  [docs/deploy.md](docs/deploy.md).
 - **Releases** — Release Please handles version PRs, `v` tags, and GitHub
   releases independently from the binary deployment flow described below.
 - **Automation** — `waffle cron` schedules jobs (prompt + cron + delivery
