@@ -727,8 +727,12 @@ func TestHelpOverlayIncludesSearchablePaginatedKeyReference(t *testing.T) {
 	m.openResolved, m.opened, m.connected = true, true, true
 	m.applyResult(chat.ParsedCommand{Name: chat.CommandHelp}, chat.Result{Commands: chat.Commands()})
 	var all strings.Builder
+	enterDetail := ""
 	for _, raw := range m.overlayList.Items() {
 		item := raw.(overlayItem)
+		if item.title == "Enter" {
+			enterDetail = item.detail
+		}
 		all.WriteString(item.title)
 		all.WriteByte(' ')
 		all.WriteString(item.detail)
@@ -738,6 +742,9 @@ func TestHelpOverlayIncludesSearchablePaginatedKeyReference(t *testing.T) {
 		if !strings.Contains(all.String(), want) {
 			t.Errorf("help key reference missing %q:\n%s", want, all.String())
 		}
+	}
+	if !strings.Contains(enterDetail, "send composer input") || !strings.Contains(enterDetail, "select an overlay item") {
+		t.Fatalf("Enter help detail=%q want composer-send and overlay-select behaviors", enterDetail)
 	}
 	if m.overlayList.Paginator.TotalPages <= 1 {
 		t.Fatalf("help pages=%d want paginated key and command reference", m.overlayList.Paginator.TotalPages)

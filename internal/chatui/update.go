@@ -499,6 +499,7 @@ func commandItems(commands []chat.Command) []list.Item {
 func helpItems(commands []chat.Command) []list.Item {
 	items := commandItems(commands)
 	keys := []overlayItem{
+		{title: "Enter", detail: "send composer input or select an overlay item"},
 		{title: "Ctrl+C", detail: "cancel active turn; press twice when idle to exit"},
 		{title: "Ctrl+D", detail: "exit when the composer is empty"},
 		{title: "Escape", detail: "cancel active turn or close the current overlay"},
