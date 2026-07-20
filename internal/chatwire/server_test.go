@@ -54,6 +54,41 @@ func TestServerRequiresOpenBeforeCreatingBackend(t *testing.T) {
 	}
 }
 
+func TestServerReportsClientProtocolVersionMismatch(t *testing.T) {
+	t.Parallel()
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) {
+		return newWireFake("unused"), nil
+	}, nil)
+	defer stop()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := fmt.Fprintln(conn, `{"version":7,"type":"open","id":"mismatch"}`); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := NewClientCodec(conn, nil).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Type != TypeError {
+		t.Fatalf("frame = %+v", frame)
+	}
+	var payload ErrorPayload
+	if err := decodePayload(frame, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "protocol_version_mismatch" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	for _, want := range []string{"client version 7", "service version 1", "deploy", "binary", "service"} {
+		if !strings.Contains(strings.ToLower(payload.Message), want) {
+			t.Fatalf("message = %q, want %q", payload.Message, want)
+		}
+	}
+}
+
 func TestServerRedactsStateEventsResultsAndErrors(t *testing.T) {
 	t.Parallel()
 
@@ -498,6 +533,79 @@ func TestServerOversizedCommandDoesNotCancelConcurrentTurn(t *testing.T) {
 	client.Cancel()
 	if err := <-turnDone; err != nil {
 		t.Fatalf("Turn after explicit cancel: %v", err)
+	}
+}
+
+func TestServerBlockingCommandRemainsCancelableAndBounded(t *testing.T) {
+	t.Parallel()
+	backend := newWireFake("blocking-command")
+	backend.blockCommand = true
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, commandErr := client.Command(ctx, chat.ParsedCommand{Name: chat.CommandSkill, Args: "slow"}, nil)
+		firstDone <- commandErr
+	}()
+	backend.waitCommandStarted(t)
+	_, err = client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus}, nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code != "command_active" {
+		t.Fatalf("second command = %#v", err)
+	}
+	client.Cancel()
+	select {
+	case err := <-firstDone:
+		if !errors.As(err, &remote) || remote.Code != "command_failed" {
+			t.Fatalf("canceled command = %#v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel did not unblock command")
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	backend.waitClosed(t)
+}
+
+func TestServerCloseAndEOFReapBlockingCommand(t *testing.T) {
+	for _, mode := range []string{"close", "eof"} {
+		t.Run(mode, func(t *testing.T) {
+			backend := newWireFake(mode)
+			backend.blockCommand = true
+			path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+			defer stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			go func() {
+				_, _ = client.Command(ctx, chat.ParsedCommand{Name: chat.CommandRepo, Args: "owner/repo"}, nil)
+			}()
+			backend.waitCommandStarted(t)
+			if mode == "close" {
+				if err := client.Close(ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := client.conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			backend.waitClosed(t)
+		})
 	}
 }
 
@@ -972,23 +1080,25 @@ func TestServeReturnsUnexpectedListenerError(t *testing.T) {
 }
 
 type wireFakeBackend struct {
-	mu            sync.Mutex
-	state         chat.State
-	turnStarted   chan struct{}
-	turnReleased  chan struct{}
-	closed        chan struct{}
-	startedOnce   sync.Once
-	releasedOnce  sync.Once
-	closedOnce    sync.Once
-	blockTurn     bool
-	ignoreCancel  bool
-	turnEvent     chat.Event
-	turnErr       error
-	commandEvent  chat.Event
-	blockCommand  bool
-	commandResult chat.Result
-	cancels       int
-	closes        int
+	mu             sync.Mutex
+	state          chat.State
+	turnStarted    chan struct{}
+	turnReleased   chan struct{}
+	closed         chan struct{}
+	startedOnce    sync.Once
+	releasedOnce   sync.Once
+	closedOnce     sync.Once
+	blockTurn      bool
+	ignoreCancel   bool
+	turnEvent      chat.Event
+	turnErr        error
+	commandEvent   chat.Event
+	blockCommand   bool
+	commandStarted chan struct{}
+	commandOnce    sync.Once
+	commandResult  chat.Result
+	cancels        int
+	closes         int
 }
 
 type errorListener struct{ err error }
@@ -1034,11 +1144,12 @@ func (c *blockingReturnConn) Write(payload []byte) (int, error) {
 
 func newWireFake(id string) *wireFakeBackend {
 	return &wireFakeBackend{
-		state:         chat.State{SessionID: id, Title: id, ConnectionMode: "unix"},
-		turnStarted:   make(chan struct{}),
-		turnReleased:  make(chan struct{}),
-		closed:        make(chan struct{}),
-		commandResult: chat.Result{Title: "status", Text: id},
+		state:          chat.State{SessionID: id, Title: id, ConnectionMode: "unix"},
+		turnStarted:    make(chan struct{}),
+		turnReleased:   make(chan struct{}),
+		closed:         make(chan struct{}),
+		commandStarted: make(chan struct{}),
+		commandResult:  chat.Result{Title: "status", Text: id},
 	}
 }
 
@@ -1067,13 +1178,24 @@ func (b *wireFakeBackend) Turn(ctx context.Context, _ string, emit func(chat.Eve
 }
 
 func (b *wireFakeBackend) Command(ctx context.Context, _ chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+	b.commandOnce.Do(func() { close(b.commandStarted) })
 	if b.commandEvent.Kind != "" && emit != nil {
 		emit(b.commandEvent)
 	}
 	if b.blockCommand {
 		<-ctx.Done()
+		return chat.Result{}, ctx.Err()
 	}
 	return b.commandResult, nil
+}
+
+func (b *wireFakeBackend) waitCommandStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-b.commandStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend command did not start")
+	}
 }
 
 func (b *wireFakeBackend) Cancel() {

@@ -100,6 +100,18 @@ func TestCodecRejectsInvalidInboundFrames(t *testing.T) {
 	}
 }
 
+func TestCodecProtocolVersionErrorPreservesVersions(t *testing.T) {
+	t.Parallel()
+	_, err := NewServerCodec(strings.NewReader(`{"version":7,"type":"open"}`+"\n"), nil).Decode()
+	var mismatch *ProtocolVersionError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("Decode error = %#v, want ProtocolVersionError", err)
+	}
+	if mismatch.Got != 7 || mismatch.Want != ProtocolVersion {
+		t.Fatalf("mismatch = %+v", mismatch)
+	}
+}
+
 func TestCodecRejectsInvalidOutboundFrames(t *testing.T) {
 	t.Parallel()
 

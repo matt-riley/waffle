@@ -338,7 +338,7 @@ func TestModelConfirmationAckAfterTerminalEventDoesNotMaskTurnFailure(t *testing
 	m = updateForTest(t, m, eventMsg{operationID: 17, event: chat.Event{Kind: chat.EventTurnDone, IsError: true}})
 	updated, ackCmd := m.Update(key(tea.KeyEnter))
 	m = updated.(*Model)
-	if ackCmd != nil || m.deferredCommand == nil {
+	if ackCmd == nil || m.deferredCommand != nil {
 		t.Fatalf("confirmation ack cmd=%v deferred=%+v", ackCmd != nil, m.deferredCommand)
 	}
 	m = updateForTest(t, m, turnDoneMsg{operationID: 17, err: &chatwire.RemoteError{Code: "turn_failed", Message: "provider exploded"}})
@@ -355,12 +355,12 @@ func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 		wantCalls    int
 		secondResult func(chat.ParsedCommand) chat.Result
 	}{
-		{name: "new", input: "/new", wantCalls: 3, secondResult: func(command chat.ParsedCommand) chat.Result {
-			if command.Args == "confirm" {
-				state := chat.State{SessionID: "new"}
-				return chat.Result{State: &state}
+		{name: "new", input: "/new", wantCalls: 2, secondResult: func(command chat.ParsedCommand) chat.Result {
+			if command.Args != "confirm" {
+				t.Fatalf("deferred active /new args=%q, want confirm", command.Args)
 			}
-			return chat.Result{Text: "Start a new session?", Confirm: true}
+			state := chat.State{SessionID: "new"}
+			return chat.Result{State: &state}
 		}},
 		{name: "resume", input: "/resume target", wantCalls: 2, secondResult: func(chat.ParsedCommand) chat.Result {
 			state := chat.State{SessionID: "target", History: []llm.Message{llm.UserText("resumed")}}
@@ -380,6 +380,9 @@ func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 				if calls == 1 {
 					return chat.Result{Text: "active confirmation", Confirm: true}, nil
 				}
+				if tt.name == "new" {
+					releaseOnce.Do(func() { close(turnRelease) })
+				}
 				return tt.secondResult(command), nil
 			}
 			m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
@@ -398,7 +401,11 @@ func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 			<-firstDone
 			updated, ackCmd := m.Update(key(tea.KeyEnter))
 			m = updated.(*Model)
-			if ackCmd != nil || m.deferredCommand == nil {
+			if tt.name == "new" {
+				if ackCmd == nil || m.deferredCommand != nil {
+					t.Fatalf("ack cmd=%v deferred=%+v", ackCmd != nil, m.deferredCommand)
+				}
+			} else if ackCmd != nil || m.deferredCommand == nil {
 				t.Fatalf("ack cmd=%v deferred=%+v", ackCmd != nil, m.deferredCommand)
 			}
 			m.composer.SetValue("must remain blocked")
@@ -413,21 +420,22 @@ func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 			if blocked != nil {
 				t.Fatal("command was not blocked while deferred command waited")
 			}
-			m, combined, _ := consumePump(t, m, pump)
-			parts := expandBatch(t, combined)
-			if len(parts) != 2 {
-				t.Fatalf("deferred batch has %d commands", len(parts))
-			}
-			reissueDone := runCommandAsync(parts[0])
-			pump = parts[1]
-			m, pump, _ = consumePump(t, m, pump)
-			<-reissueDone
 			if tt.name == "new" {
-				updated, confirmCmd := m.Update(key(tea.KeyEnter))
-				m = updated.(*Model)
-				confirmDone := runCommandAsync(confirmCmd)
+				reissueDone := runCommandAsync(ackCmd)
+				m, pump, _ = consumePump(t, m, pump)
 				m, _, _ = consumePump(t, m, pump)
-				<-confirmDone
+				<-reissueDone
+			} else {
+				var combined tea.Cmd
+				m, combined, _ = consumePump(t, m, pump)
+				parts := expandBatch(t, combined)
+				if len(parts) != 2 {
+					t.Fatalf("deferred batch has %d commands", len(parts))
+				}
+				reissueDone := runCommandAsync(parts[0])
+				pump = parts[1]
+				m, _, _ = consumePump(t, m, pump)
+				<-reissueDone
 			}
 			if m.state.SessionID == "" {
 				t.Fatal("session change did not complete")
@@ -443,6 +451,50 @@ func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 			m.pumpStopOnce.Do(func() { close(m.pumpStop) })
 		})
 	}
+}
+
+func TestModelSkillCommandIsBusyCancelableAndEndsOnce(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	backend := &asyncBackend{}
+	backend.turn = func(string, func(chat.Event)) error { return nil }
+	backend.command = func(command chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+		if command.Name != chat.CommandSkill {
+			t.Fatalf("command = %+v", command)
+		}
+		close(started)
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: "partial"})
+		<-release
+		return chat.Result{}, context.Canceled
+	}
+	backend.cancel = func() { once.Do(func() { close(release) }) }
+	m := New(backend, chat.OpenOptions{}, Options{Width: 96, Height: 28})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.composer.SetValue("/skill slow")
+	updated, command := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	done := runCommandAsync(command)
+	<-started
+	if !m.commandActive || !strings.Contains(m.renderFooter(96), "Esc cancel") {
+		t.Fatalf("skill command not presented busy: active=%v footer=%q", m.commandActive, m.renderFooter(96))
+	}
+	updated, _ = m.Update(key(tea.KeyEscape))
+	m = updated.(*Model)
+	if backend.cancelCalls != 1 {
+		t.Fatalf("cancel calls = %d", backend.cancelCalls)
+	}
+	pump := m.waitEventCmd()
+	m, pump, _ = consumePump(t, m, pump)
+	m, _, _ = consumePump(t, m, pump)
+	<-done
+	if m.commandActive {
+		t.Fatal("skill command remained active")
+	}
+	if got := m.messages[len(m.messages)-1].text; got != "Command cancelled." {
+		t.Fatalf("terminal message = %q", got)
+	}
+	m.pumpStopOnce.Do(func() { close(m.pumpStop) })
 }
 
 func TestModelExecutedCancellationStaysConnectedAndTransportLossDisconnects(t *testing.T) {
@@ -552,7 +604,7 @@ func TestModelOpenFailureRetainsBackendConnectionMode(t *testing.T) {
 	}
 }
 
-func TestModelActiveConfirmationCancelsWaitsAndReissues(t *testing.T) {
+func TestModelActiveNewConfirmationStartsRuntimeOwnedDrain(t *testing.T) {
 	backend := newFakeBackend(chat.State{})
 	m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
 	m.opened, m.connected, m.turnActive = true, true, true
@@ -560,12 +612,13 @@ func TestModelActiveConfirmationCancelsWaitsAndReissues(t *testing.T) {
 	m.applyResult(command, chat.Result{Text: "wait for active turn", Confirm: true})
 	updated, cmd := m.Update(key(tea.KeyEnter))
 	m = updated.(*Model)
-	if cmd != nil || backend.cancelCalls != 1 {
+	if cmd == nil || backend.cancelCalls != 0 || m.deferredCommand != nil {
 		t.Fatalf("ack cmd=%v cancels=%d", cmd != nil, backend.cancelCalls)
 	}
-	_, cmd = m.Update(turnDoneMsg{})
-	if cmd == nil {
-		t.Fatal("turn completion did not reissue /new")
+	updated, _ = m.Update(turnDoneMsg{})
+	m = updated.(*Model)
+	if m.deferredCommand != nil {
+		t.Fatal("turn completion queued a duplicate /new")
 	}
 }
 

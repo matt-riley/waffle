@@ -249,6 +249,11 @@ func TestClientRejectsServerVersionMismatch(t *testing.T) {
 	if !errors.Is(err, ErrProtocolVersion) {
 		t.Fatalf("Open error = %v, want %v", err, ErrProtocolVersion)
 	}
+	for _, want := range []string{"client version 1", "service version 2", "deploy", "binary", "service"} {
+		if !strings.Contains(strings.ToLower(err.Error()), want) {
+			t.Fatalf("Open error = %q, want actionable %q guidance", err, want)
+		}
+	}
 }
 
 func TestClientReturnsStableRemoteError(t *testing.T) {

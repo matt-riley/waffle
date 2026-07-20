@@ -97,6 +97,10 @@ func (c *Client) Open(ctx context.Context, options chat.OpenOptions) (chat.State
 	defer c.finishRequest(id)
 	frame, err := c.nextResponse(ctx, responses)
 	if err != nil {
+		var mismatch *ProtocolVersionError
+		if errors.As(err, &mismatch) {
+			return chat.State{}, fmt.Errorf("chat protocol mismatch: client version %d, service version %d; deploy the matching Waffle binary and waffle service together: %w", ProtocolVersion, mismatch.Got, err)
+		}
 		return chat.State{}, err
 	}
 	if frame.Type == TypeError {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/repopolicy"
@@ -473,6 +476,45 @@ func TestChatRuntimeCancelOnlyCancelsActiveTurn(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeActiveNewOneConfirmationPreservesOldHistory(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &runtimeBlockingProvider{started: make(chan struct{})}
+	runtime.agent.Provider = provider
+	turnDone := make(chan error, 1)
+	go func() { turnDone <- runtime.Turn(ctx, "preserve this", nil) }()
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil)
+	if err != nil || !result.Confirm {
+		t.Fatalf("active /new = %+v, %v", result, err)
+	}
+	result, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, nil)
+	if err != nil {
+		t.Fatalf("single confirmation: %v", err)
+	}
+	if err := <-turnDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("active turn error = %v", err)
+	}
+	if result.State == nil || result.State.SessionID == state.SessionID {
+		t.Fatalf("new state = %+v", result.State)
+	}
+	turns, err := sessions.Turns(ctx, state.SessionID)
+	if err != nil || len(turns) != 1 || turns[0].Text() != "preserve this" {
+		t.Fatalf("old turns = %+v, %v", turns, err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, nil); err == nil {
+		t.Fatal("stale confirmation succeeded")
+	}
+}
+
 func TestChatRuntimeCommandResults(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -811,6 +853,288 @@ func TestChatRuntimeExitWarnsOnReflectionFailureAndCleansUpOnce(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeRedactsTurnFailureAndPreservesCause(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "opaque-provider-canary-7391"
+	providerErr := errors.New("provider failed with " + secret)
+	runtime.agent.Redact = func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") }
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: providerErr}}}
+	var events []chatpkg.Event
+	err := runtime.Turn(ctx, "hello", func(event chatpkg.Event) { events = append(events, event) })
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted:test]") {
+		t.Fatalf("Turn error = %v", err)
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("Turn error lost cause: %v", err)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Text, secret) {
+			t.Fatalf("event leaked secret: %+v", event)
+		}
+	}
+}
+
+func TestRedactChatStateDoesNotMutateHistoryAndCoversToolPayloads(t *testing.T) {
+	const secret = "opaque-history-canary-2551"
+	toolUse := &llm.ToolUse{ID: secret, Name: "read", Input: json.RawMessage(`{"path":"` + secret + `"}`)}
+	toolResult := &llm.ToolResult{ToolUseID: secret, Content: secret}
+	history := []llm.Message{{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockToolUse, Text: secret, ToolUse: toolUse}, {Type: llm.BlockToolResult, ToolResult: toolResult}}}}
+	state := chatpkg.State{History: append([]llm.Message(nil), history...)}
+	redacted := redactChatState(state, func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") })
+	if strings.Contains(fmt.Sprintf("%+v", redacted.History), secret) || strings.Contains(string(redacted.History[0].Blocks[0].ToolUse.Input), secret) {
+		t.Fatalf("redacted history leaked secret: %+v", redacted.History)
+	}
+	if history[0].Blocks[0].Text != secret || history[0].Blocks[0].ToolUse.ID != secret || !strings.Contains(string(history[0].Blocks[0].ToolUse.Input), secret) || history[0].Blocks[1].ToolResult.Content != secret {
+		t.Fatalf("redaction mutated runtime history: %+v", history)
+	}
+}
+
+func TestChatRuntimeRedactsReflectionWarning(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "opaque-reflection-canary-4826"
+	runtime.agent.Redact = func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") }
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: errors.New("reflection failed with " + secret)}}}
+	runtime.history = []llm.Message{llm.UserText("question"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}}}
+	runtime.persisted = len(runtime.history)
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request /new = %+v, %v", result, err)
+	}
+	var events []chatpkg.Event
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, func(event chatpkg.Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := result.Text
+	for _, event := range events {
+		visible += "\n" + event.Text
+	}
+	if strings.Contains(visible, secret) || !strings.Contains(visible, "[redacted:test]") {
+		t.Fatalf("visible warning = %q", visible)
+	}
+}
+
+func TestChatRuntimeSocketRedactsConfiguredReflectionCanary(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	socketDir, err := os.MkdirTemp("/tmp", "waffle-chat-redact-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	path := filepath.Join(socketDir, "chat.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- chatwire.Serve(ctx, listener, func(context.Context) (chatpkg.Backend, error) { return runtime, nil }, nil)
+	}()
+	client, err := chatwire.Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "opaque-socket-reflection-6017"
+	runtime.agent.Redact = func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") }
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: errors.New("reflection failed with " + secret)}}}
+	runtime.history = []llm.Message{llm.UserText("question"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}}}
+	runtime.persisted = len(runtime.history)
+	if result, err := client.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request /new = %+v, %v", result, err)
+	}
+	var events []chatpkg.Event
+	result, err := client.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, func(event chatpkg.Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := result.Text
+	for _, event := range events {
+		visible += "\n" + event.Text
+	}
+	if strings.Contains(visible, secret) || !strings.Contains(visible, "[redacted:test]") {
+		t.Fatalf("socket-visible warning = %q", visible)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	_ = listener.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chatwire serve did not stop")
+	}
+}
+
+func TestChatRuntimeSessionOwnershipBusySwitchCloseAndReacquire(t *testing.T) {
+	ctx := context.Background()
+	first, sessions := newRuntimeFixture(t, configuredChatModels())
+	target, err := sessions.Create(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := newChatSessionOwners()
+	first.sessionOwners = owners
+	if _, err := first.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newRuntimeAgainstSameStore(t, configuredChatModels(), sessions)
+	second.sessionOwners = owners
+	secondState, err := second.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("busy resume error = %v", err)
+	}
+	if second.current.ID != secondState.SessionID {
+		t.Fatalf("busy resume changed session to %s", second.current.ID)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil || result.State == nil || result.State.SessionID != target.ID {
+		t.Fatalf("resume after release = %+v, %v", result, err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	third := newRuntimeAgainstSameStore(t, configuredChatModels(), sessions)
+	third.sessionOwners = owners
+	if _, err := third.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatalf("reacquire after switch close: %v", err)
+	}
+}
+
+func TestChatRuntimeSessionOwnershipAllowsDifferentSessions(t *testing.T) {
+	ctx := context.Background()
+	first, sessions := newRuntimeFixture(t, configuredChatModels())
+	owners := newChatSessionOwners()
+	first.sessionOwners = owners
+	second := newRuntimeAgainstSameStore(t, configuredChatModels(), sessions)
+	second.sessionOwners = owners
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, runtime := range []*chatRuntime{first, second} {
+		wg.Add(1)
+		go func(runtime *chatRuntime) {
+			defer wg.Done()
+			_, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+			errs <- err
+		}(runtime)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.current.ID == second.current.ID {
+		t.Fatalf("different opens shared session %s", first.current.ID)
+	}
+}
+
+func TestChatRuntimeSocketSessionOwnershipSwitchCloseAndReacquire(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, sessions := newRuntimeFixture(t, configuredChatModels())
+	target, err := sessions.Create(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := newChatSessionOwners()
+	factory := func(context.Context) (chatpkg.Backend, error) {
+		runtime, runtimeErr := newChatRuntime(ctx, configuredChatModels(), &store.Store{DB: sessions.DB()})
+		if runtimeErr == nil {
+			runtime.sessionOwners = owners
+		}
+		return runtime, runtimeErr
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "waffle-chat-owner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	listener, err := net.Listen("unix", filepath.Join(socketDir, "chat.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- chatwire.Serve(ctx, listener, factory, nil) }()
+	dial := func() *chatwire.Client {
+		client, dialErr := chatwire.Dial(ctx, listener.Addr().String())
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		return client
+	}
+	first := dial()
+	if _, err := first.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatal(err)
+	}
+	second := dial()
+	secondState, err := second.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	var remote *chatwire.RemoteError
+	if !errors.As(err, &remote) || remote.Code != "session_active" || !strings.Contains(remote.Message, "already active") {
+		t.Fatalf("busy socket resume = %#v", err)
+	}
+	status, err := second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, nil)
+	if err != nil || status.State == nil || status.State.SessionID != secondState.SessionID {
+		t.Fatalf("state after busy resume = %+v, %v", status, err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil || resumed.State == nil || resumed.State.SessionID != target.ID {
+		t.Fatalf("resume after close = %+v, %v", resumed, err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	third := dial()
+	if _, err := third.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatalf("reacquire after switched owner close: %v", err)
+	}
+	if err := third.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	_ = listener.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chatwire serve did not stop")
+	}
+}
+
 func TestChatRuntimeNewReflectsOldSessionAndRestoresProfileModel(t *testing.T) {
 	ctx := context.Background()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
@@ -851,6 +1175,70 @@ func TestChatRuntimeNewReflectsOldSessionAndRestoresProfileModel(t *testing.T) {
 	}
 	if result.State == nil || result.State.SessionID == state.SessionID || result.State.ModelAlias != "claude" || runtime.agent.Model != "claude" {
 		t.Fatalf("new result=%+v agent=%q", result, runtime.agent.Model)
+	}
+}
+
+func TestChatRuntimeResumeReflectsSessionBeingLeft(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.history = []llm.Message{llm.UserText("question"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}}}
+	for _, message := range runtime.history {
+		if err := sessions.AppendTurn(ctx, state.SessionID, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.persisted = len(runtime.history)
+	target, err := sessions.Create(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{response: llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "resume summary"}}},
+	}}}}
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil || result.State == nil || result.State.SessionID != target.ID {
+		t.Fatalf("resume = %+v, %v", result, err)
+	}
+	old, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Summary != "resume summary" {
+		t.Fatalf("old summary = %q", old.Summary)
+	}
+}
+
+func TestChatRuntimeResumeReflectionFailureWarnsRedactedAndStillSwitches(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.history = []llm.Message{llm.UserText("question"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}}}
+	runtime.persisted = len(runtime.history)
+	target, err := sessions.Create(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "opaque-resume-reflection-1934"
+	runtime.agent.Redact = func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") }
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: errors.New("reflection failed with " + secret)}}}
+	var events []chatpkg.Event
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, func(event chatpkg.Event) { events = append(events, event) })
+	if err != nil || result.State == nil || result.State.SessionID != target.ID {
+		t.Fatalf("resume = %+v, %v", result, err)
+	}
+	visible := result.Text
+	for _, event := range events {
+		visible += "\n" + event.Text
+	}
+	if strings.Contains(visible, secret) || !strings.Contains(visible, "[redacted:test]") || !strings.Contains(visible, "warning") {
+		t.Fatalf("visible warning = %q", visible)
 	}
 }
 

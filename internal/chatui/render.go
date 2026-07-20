@@ -149,13 +149,13 @@ func (m *Model) renderComposer(width int) string {
 func (m *Model) renderFooter(width int) string {
 	left := "/help  /model  /sessions"
 	if m.width < 72 {
-		if m.turnActive {
+		if m.turnActive || m.commandActive {
 			return left + "  ·  working…"
 		}
 		return left
 	}
 	right := "Alt+↵ newline · ↵ send"
-	if m.turnActive {
+	if m.turnActive || m.commandActive {
 		right = "Esc cancel · working…"
 	} else if m.inputTokens > 0 || m.outputTokens > 0 {
 		right = fmt.Sprintf("%d in · %d out · %s", m.inputTokens, m.outputTokens, right)

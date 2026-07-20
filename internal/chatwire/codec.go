@@ -120,7 +120,7 @@ func (c *Codec) readLine() ([]byte, error) {
 
 func validateFrame(frame Frame, allowed map[string]struct{}) error {
 	if frame.Version != ProtocolVersion {
-		return fmt.Errorf("%w: got %d, want %d", ErrProtocolVersion, frame.Version, ProtocolVersion)
+		return &ProtocolVersionError{Got: frame.Version, Want: ProtocolVersion, ID: frame.ID}
 	}
 	if _, ok := allowed[frame.Type]; !ok {
 		return fmt.Errorf("%w: %q", ErrFrameType, frame.Type)

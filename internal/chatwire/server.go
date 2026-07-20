@@ -98,6 +98,12 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 	writer := &serverWriter{conn: conn, codec: codec, trackedWriter: trackedWriter}
 	openFrame, err := codec.Decode()
 	if err != nil {
+		var mismatch *ProtocolVersionError
+		if errors.As(err, &mismatch) {
+			message := fmt.Sprintf("chat protocol mismatch: client version %d, service version %d; deploy the matching Waffle binary and waffle service together", mismatch.Got, ProtocolVersion)
+			_ = writer.stableError(mismatch.ID, "protocol_version_mismatch", message)
+			return
+		}
 		_ = writer.stableError("", "protocol_error", "invalid chat protocol frame")
 		return
 	}
@@ -127,6 +133,9 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 	var activeMu sync.Mutex
 	var active *activeTurnState
 	var turnGroup sync.WaitGroup
+	var commandMu sync.Mutex
+	var activeCommand *activeTurnState
+	var commandGroup sync.WaitGroup
 	var deferredMu sync.Mutex
 	var deferred []deferredServerFrame
 	deferFrame := func(frameType, id string, payload any) {
@@ -140,12 +149,19 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 			activeMu.Lock()
 			turnActive := active
 			activeMu.Unlock()
+			commandMu.Lock()
+			command := activeCommand
+			commandMu.Unlock()
 			writer.interrupt()
 			cancel()
 			if turnActive != nil {
 				turnActive.stop(backend)
 			}
+			if command != nil {
+				command.cancel()
+			}
 			turnGroup.Wait()
+			commandGroup.Wait()
 			closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), serverCloseTimeout)
 			defer closeCancel()
 			_ = backend.Close(closeCtx)
@@ -155,7 +171,7 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 
 	state, err := backend.Open(ctx, options)
 	if err != nil {
-		_ = writer.stableError(openFrame.ID, "open_failed", "could not open chat")
+		_ = writeBackendError(writer, openFrame.ID, "open_failed", "could not open chat", err)
 		return
 	}
 	if err := writer.send(TypeReady, openFrame.ID, state); err != nil {
@@ -286,61 +302,93 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 				continue
 			}
 			commandCtx, commandCancel := context.WithCancel(ctx)
-			var streamErr error
-			var eventMu sync.Mutex
-			acceptEvents := true
-			result, err := backend.Command(commandCtx, command, func(event chat.Event) {
-				eventMu.Lock()
-				if !acceptEvents {
-					eventMu.Unlock()
+			commandState := &activeTurnState{cancel: commandCancel}
+			commandMu.Lock()
+			if activeCommand != nil {
+				commandMu.Unlock()
+				commandCancel()
+				if err := writer.stableError(frame.ID, "command_active", "a chat command is already active"); err != nil {
 					return
 				}
-				if streamErr != nil {
-					eventMu.Unlock()
-					return
-				}
-				if frameType, ok := eventFrameType(event.Kind); ok {
-					if err := writer.send(frameType, frame.ID, event); err != nil {
-						streamErr = err
-						eventMu.Unlock()
-						commandCancel()
-						if !errors.Is(err, ErrFrameTooLarge) && !errors.Is(err, errServerWriteInterrupted) {
-							cancel()
-							_ = conn.Close()
-						}
+				continue
+			}
+			activeCommand = commandState
+			commandGroup.Add(1)
+			commandMu.Unlock()
+			go func(id string, parsed chat.ParsedCommand, commandCtx context.Context, commandCancel context.CancelFunc, commandState *activeTurnState) {
+				defer commandGroup.Done()
+				defer commandCancel()
+				var streamErr error
+				var eventMu sync.Mutex
+				acceptEvents := true
+				result, commandErr := backend.Command(commandCtx, parsed, func(event chat.Event) {
+					eventMu.Lock()
+					defer eventMu.Unlock()
+					if !acceptEvents || streamErr != nil {
 						return
 					}
-				}
+					if frameType, ok := eventFrameType(event.Kind); ok {
+						if err := writer.send(frameType, id, event); err != nil {
+							streamErr = err
+							commandState.cancel()
+							if !errors.Is(err, ErrFrameTooLarge) && !errors.Is(err, errServerWriteInterrupted) {
+								cancel()
+								_ = conn.Close()
+							}
+						}
+					}
+				})
+				eventMu.Lock()
+				acceptEvents = false
 				eventMu.Unlock()
-			})
-			commandCancel()
-			eventMu.Lock()
-			acceptEvents = false
-			eventMu.Unlock()
-			if streamErr != nil {
-				if responseWriteFailure(writer, frame.ID, "command_failed", "chat command failed", streamErr) {
-					cancel()
-					_ = conn.Close()
+				if streamErr != nil {
+					if responseWriteFailure(writer, id, "command_failed", "chat command failed", streamErr) {
+						cancel()
+						_ = conn.Close()
+					}
+					commandMu.Lock()
+					if activeCommand == commandState {
+						activeCommand = nil
+					}
+					commandMu.Unlock()
 					return
 				}
-				continue
-			}
-			if err != nil {
-				if err := writer.stableError(frame.ID, "command_failed", "chat command failed"); err != nil {
+				if commandErr != nil {
+					if err := writeBackendError(writer, id, "command_failed", "chat command failed", commandErr); err != nil && responseWriteFailure(writer, id, "command_failed", "chat command failed", err) {
+						cancel()
+						_ = conn.Close()
+					}
+					commandMu.Lock()
+					if activeCommand == commandState {
+						activeCommand = nil
+					}
+					commandMu.Unlock()
 					return
 				}
-				continue
-			}
-			if err := writer.send(TypeCommandResult, frame.ID, result); err != nil {
-				_ = responseWriteFailure(writer, frame.ID, "command_failed", "chat command failed", err)
-				return
-			}
+				if err := writer.send(TypeCommandResult, id, result); err != nil {
+					if responseWriteFailure(writer, id, "command_failed", "chat command failed", err) {
+						cancel()
+						_ = conn.Close()
+					}
+				}
+				commandMu.Lock()
+				if activeCommand == commandState {
+					activeCommand = nil
+				}
+				commandMu.Unlock()
+			}(frame.ID, command, commandCtx, commandCancel, commandState)
 		case TypeCancel:
 			activeMu.Lock()
 			turnActive := active
 			activeMu.Unlock()
 			if turnActive != nil {
 				turnActive.stop(backend)
+			}
+			commandMu.Lock()
+			command := activeCommand
+			commandMu.Unlock()
+			if command != nil {
+				command.cancel()
 			}
 		case TypeClose:
 			cleanup()
@@ -359,6 +407,18 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 			return
 		}
 	}
+}
+
+func writeBackendError(writer *serverWriter, id, fallbackCode, fallbackMessage string, backendErr error) error {
+	type stableBackendError interface {
+		ErrorCode() string
+		SafeMessage() string
+	}
+	var stable stableBackendError
+	if errors.As(backendErr, &stable) && stable.ErrorCode() != "" && stable.SafeMessage() != "" {
+		return writer.stableError(id, stable.ErrorCode(), stable.SafeMessage())
+	}
+	return writer.stableError(id, fallbackCode, fallbackMessage)
 }
 
 type serverWriter struct {

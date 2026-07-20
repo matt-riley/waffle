@@ -74,10 +74,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.continuePump(next)
 	case commandResultMsg:
+		requestedCancel := m.commandCancelRequested
+		m.commandActive = false
+		m.commandCancelRequested = false
+		m.stateChangeActive = false
 		if msg.err != nil {
 			m.pendingConfirm = chat.ParsedCommand{}
 			if m.state.ConnectionMode == "unix" && !connectionUsable(msg.err) {
 				m.disconnect(msg.err)
+			} else if requestedCancel && isExpectedCommandCancellation(msg.err) {
+				m.messages = append(m.messages, messageCard{role: roleNotice, text: "Command cancelled."})
 			} else {
 				m.messages = append(m.messages, messageCard{role: roleError, text: msg.err.Error()})
 			}
@@ -159,8 +165,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
-		if m.turnActive {
-			m.markTurnCancelRequested()
+		if m.turnActive || m.commandActive {
+			if m.turnActive {
+				m.markTurnCancelRequested()
+			}
+			m.commandCancelRequested = m.commandActive
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -181,8 +190,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Code == tea.KeyEscape {
-		if m.turnActive {
-			m.markTurnCancelRequested()
+		if m.turnActive || m.commandActive {
+			if m.turnActive {
+				m.markTurnCancelRequested()
+			}
+			m.commandCancelRequested = m.commandActive
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -266,7 +278,7 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		m.syncViewport(true)
 		return m, nil
 	}
-	if m.deferredCommand != nil && (!ok || command.Name != chat.CommandExit) {
+	if (m.deferredCommand != nil || m.stateChangeActive || m.commandActive) && (!ok || command.Name != chat.CommandExit) {
 		return m, nil
 	}
 	if m.turnActive && !ok {
@@ -292,6 +304,10 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) startCommand(command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
+	if command.Name == chat.CommandSkill || command.Name == chat.CommandRepo || command.Name == chat.CommandResume && command.Args != "" || command.Name == chat.CommandNew && command.Args == "confirm" {
+		m.commandActive = true
+		m.commandCancelRequested = false
+	}
 	return m.commandCmd(m.nextOperation(), command, startedDuringTurn)
 }
 
@@ -300,6 +316,14 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Code == tea.KeyEnter && m.overlayList.FilterState() != list.Filtering {
 		if m.overlay == overlayConfirm && m.confirmNeedsTurnDrain {
 			command := m.pendingConfirm
+			if command.Name == chat.CommandNew && command.Args == "" {
+				command.Args = "confirm"
+				m.stateChangeActive = true
+				m.confirmNeedsTurnDrain = false
+				m.overlay = overlayNone
+				_ = m.composer.Focus()
+				return m, m.startCommand(command, true)
+			}
 			m.confirmNeedsTurnDrain = false
 			m.overlay = overlayNone
 			_ = m.composer.Focus()
@@ -357,6 +381,14 @@ func isExpectedCancellation(err error) bool {
 	}
 	var coded interface{ ErrorCode() string }
 	return errors.As(err, &coded) && coded.ErrorCode() == "turn_failed"
+}
+
+func isExpectedCommandCancellation(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var coded interface{ ErrorCode() string }
+	return errors.As(err, &coded) && coded.ErrorCode() == "command_failed"
 }
 
 func (m *Model) markTurnCancelRequested() {

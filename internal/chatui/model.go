@@ -80,17 +80,20 @@ type Model struct {
 	ctx     context.Context
 	state   chat.State
 
-	viewport              viewport.Model
-	composer              textarea.Model
-	overlayList           list.Model
-	messages              []messageCard
-	tools                 []toolRow
-	palette               []chat.Command
-	overlay               overlayKind
-	overlayResult         chat.Result
-	pendingConfirm        chat.ParsedCommand
-	deferredCommand       *chat.ParsedCommand
-	confirmNeedsTurnDrain bool
+	viewport               viewport.Model
+	composer               textarea.Model
+	overlayList            list.Model
+	messages               []messageCard
+	tools                  []toolRow
+	palette                []chat.Command
+	overlay                overlayKind
+	overlayResult          chat.Result
+	pendingConfirm         chat.ParsedCommand
+	deferredCommand        *chat.ParsedCommand
+	stateChangeActive      bool
+	commandActive          bool
+	commandCancelRequested bool
+	confirmNeedsTurnDrain  bool
 
 	paletteVisible   bool
 	paletteIndex     int

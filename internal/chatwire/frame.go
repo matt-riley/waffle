@@ -40,6 +40,23 @@ var (
 	ErrMalformedFrame  = errors.New("malformed chat wire frame")
 )
 
+// ProtocolVersionError preserves both protocol versions (and the request ID
+// when one was decoded) so handshake callers can provide actionable guidance.
+type ProtocolVersionError struct {
+	Got  int
+	Want int
+	ID   string
+}
+
+func (e *ProtocolVersionError) Error() string {
+	if e == nil {
+		return ErrProtocolVersion.Error()
+	}
+	return fmt.Sprintf("%s: got %d, want %d", ErrProtocolVersion, e.Got, e.Want)
+}
+
+func (e *ProtocolVersionError) Unwrap() error { return ErrProtocolVersion }
+
 // Frame is the protocol's versioned NDJSON envelope.
 type Frame struct {
 	Version int             `json:"version"`

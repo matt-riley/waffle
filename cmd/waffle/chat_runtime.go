@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,8 @@ type chatRuntime struct {
 	closeErr            error
 	closed              bool
 	profileAgentBuilder func(context.Context, string) (*agent.Agent, func(), error)
+	sessionOwners       *chatSessionOwners
+	ownedSessionID      string
 }
 
 type repoInstall struct {
@@ -83,6 +86,12 @@ func newChatRuntime(_ context.Context, cfg config.Config, st *store.Store) (*cha
 }
 
 func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
+	state, err := r.open(ctx, options)
+	redact := r.runtimeRedactor()
+	return redactChatState(state, redact), redactChatError(err, redact)
+}
+
+func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -147,6 +156,11 @@ func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		}
 		history = session.Repair(history)
 	}
+	if !r.sessionOwners.acquire(r, current.ID) {
+		cleanup()
+		resourceCancel()
+		return chatpkg.State{}, sessionAlreadyActiveError{sessionID: current.ID}
+	}
 
 	r.agent = built
 	r.agentCleanup = cleanup
@@ -157,6 +171,7 @@ func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.resourceCancel = resourceCancel
 	r.capabilities = append([]string(nil), options.Capabilities...)
 	r.current = current
+	r.ownedSessionID = current.ID
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = ""
@@ -171,6 +186,17 @@ func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (ch
 }
 
 func (r *chatRuntime) Command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	redact := r.runtimeRedactor()
+	redactedEmit := func(event chatpkg.Event) {
+		if emit != nil {
+			emit(redactChatEvent(event, redact))
+		}
+	}
+	result, err := r.command(ctx, command, redactedEmit)
+	return redactChatResult(result, redact), redactChatError(err, redact)
+}
+
+func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	if command.Name == chatpkg.CommandExit {
 		return r.runCommand(ctx, command, emit)
 	}
@@ -228,7 +254,7 @@ func (r *chatRuntime) runCommand(ctx context.Context, command chatpkg.ParsedComm
 	case chatpkg.CommandSessions:
 		return r.commandSessions(ctx, "Recent sessions")
 	case chatpkg.CommandResume:
-		return r.commandResume(ctx, command.Args)
+		return r.commandResume(ctx, command.Args, emit)
 	case chatpkg.CommandStatus:
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -267,7 +293,7 @@ func (r *chatRuntime) commandNew(ctx context.Context, args string, emit func(cha
 		if r.current == nil {
 			return chatpkg.Result{}, errors.New("chat runtime is not open")
 		}
-		if r.agentCancel == nil && !r.blockTurns {
+		if !r.blockTurns {
 			r.pendingNewSessionID = r.current.ID
 		}
 		return chatpkg.Result{Confirm: true, Text: "Start a new session?"}, nil
@@ -276,9 +302,11 @@ func (r *chatRuntime) commandNew(ctx context.Context, args string, emit func(cha
 		return chatpkg.Result{}, errors.New("usage: /new")
 	}
 	r.mu.Lock()
-	pending := r.current != nil && r.pendingNewSessionID != "" && r.pendingNewSessionID == r.current.ID && r.agentCancel == nil && !r.blockTurns
-	r.pendingNewSessionID = ""
+	pending := r.current != nil && r.pendingNewSessionID != "" && r.pendingNewSessionID == r.current.ID && !r.blockTurns
+	turnCancel := r.agentCancel
+	turnDone := r.turnDone
 	if pending {
+		r.pendingNewSessionID = ""
 		r.blockTurns = true
 	}
 	r.mu.Unlock()
@@ -286,6 +314,16 @@ func (r *chatRuntime) commandNew(ctx context.Context, args string, emit func(cha
 		return chatpkg.Result{}, errors.New("no pending /new confirmation")
 	}
 	defer r.endExclusiveChange()
+	if turnCancel != nil {
+		turnCancel()
+		if turnDone != nil {
+			select {
+			case <-turnDone:
+			case <-ctx.Done():
+				return chatpkg.Result{}, fmt.Errorf("wait for active chat turn: %w", ctx.Err())
+			}
+		}
+	}
 	reflectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	reflectErr := r.reflectSession(reflectCtx)
 	cancel()
@@ -346,7 +384,11 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if !r.sessionOwners.transfer(r, r.current.ID, current.ID) {
+		return 0, sessionAlreadyActiveError{sessionID: current.ID}
+	}
 	r.current = current
+	r.ownedSessionID = current.ID
 	r.history = nil
 	r.persisted = 0
 	r.modelError = ""
@@ -375,11 +417,28 @@ func chatSessions(sessions []session.Session) []chatpkg.Session {
 	return out
 }
 
-func (r *chatRuntime) commandResume(ctx context.Context, id string) (chatpkg.Result, error) {
+func (r *chatRuntime) commandResume(ctx context.Context, id string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return r.commandSessions(ctx, "Resume a session")
 	}
+	r.mu.Lock()
+	if r.current == nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	if r.agentCancel != nil {
+		r.mu.Unlock()
+		return chatpkg.Result{Confirm: true, Text: "A turn is active; confirm before resuming another session."}, nil
+	}
+	if r.blockTurns {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("a chat command is changing runtime state")
+	}
+	r.blockTurns = true
+	r.mu.Unlock()
+	defer r.endExclusiveChange()
+
 	target, err := r.sessions.Get(ctx, id)
 	if err != nil {
 		return chatpkg.Result{}, err
@@ -403,19 +462,31 @@ func (r *chatRuntime) commandResume(ctx context.Context, id string) (chatpkg.Res
 			model = target.ModelAlias
 		}
 	}
+	reflectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	reflectErr := r.reflectSession(reflectCtx)
+	cancel()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.agentCancel != nil {
-		return chatpkg.Result{Confirm: true, Text: "A turn is active; confirm before resuming another session."}, nil
+	if !r.sessionOwners.transfer(r, r.current.ID, target.ID) {
+		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
 	}
 	r.current = target
+	r.ownedSessionID = target.ID
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = modelError
 	r.agent.Model = model
 	state := r.stateLocked(r.capabilities)
-	return chatpkg.Result{Text: "resumed session " + target.ID, State: &state}, nil
+	text := "resumed session " + target.ID
+	if reflectErr != nil {
+		warning := "warning: " + reflectErr.Error()
+		text = warning + "\n" + text
+		if emit != nil {
+			emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: warning, IsError: true})
+		}
+	}
+	return chatpkg.Result{Text: text, State: &state}, nil
 }
 
 func (r *chatRuntime) commandUsage(ctx context.Context) (chatpkg.Result, error) {
@@ -690,6 +761,14 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		r.mu.Unlock()
 		return chatpkg.Result{Confirm: true, Text: "A turn started while the workspace was opening; confirm before switching sessions."}, nil
 	}
+	oldSessionID := ""
+	if r.current != nil {
+		oldSessionID = r.current.ID
+	}
+	if !r.sessionOwners.transfer(r, oldSessionID, target.ID) {
+		r.mu.Unlock()
+		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
+	}
 	oldClient := r.wsClient
 	oldCleanup := r.agentCleanup
 	r.wsClient = install.client
@@ -699,6 +778,7 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	cleanupAdopted = true
 	r.profileName = profileName
 	r.current = target
+	r.ownedSessionID = target.ID
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = modelError
@@ -867,6 +947,16 @@ func (r *chatRuntime) providerLabelLocked() string {
 }
 
 func (r *chatRuntime) Turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
+	redact := r.runtimeRedactor()
+	redactedEmit := func(event chatpkg.Event) {
+		if emit != nil {
+			emit(redactChatEvent(event, redact))
+		}
+	}
+	return redactChatError(r.turn(ctx, input, redactedEmit), redact)
+}
+
+func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -1025,7 +1115,15 @@ func (r *chatRuntime) switchToWorkspaceSession(ctx context.Context, sessionID st
 	turns = session.Repair(turns)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	oldSessionID := ""
+	if r.current != nil {
+		oldSessionID = r.current.ID
+	}
+	if !r.sessionOwners.transfer(r, oldSessionID, target.ID) {
+		return sessionAlreadyActiveError{sessionID: target.ID}
+	}
 	r.current = target
+	r.ownedSessionID = target.ID
 	r.history = turns
 	r.persisted = len(turns)
 	if r.agent != nil && target.ModelAlias != "" {
@@ -1086,6 +1184,11 @@ func (r *chatRuntime) reflectSession(ctx context.Context) error {
 }
 
 func (r *chatRuntime) Close(ctx context.Context) error {
+	err := r.close(ctx)
+	return redactChatError(err, r.runtimeRedactor())
+}
+
+func (r *chatRuntime) close(ctx context.Context) error {
 	r.Cancel()
 	r.commandMu.Lock()
 	defer r.commandMu.Unlock()
@@ -1127,6 +1230,145 @@ func (r *chatRuntime) Close(ctx context.Context) error {
 		if agentCleanup != nil {
 			agentCleanup()
 		}
+		r.mu.Lock()
+		ownedSessionID := r.ownedSessionID
+		r.ownedSessionID = ""
+		r.mu.Unlock()
+		r.sessionOwners.release(r, ownedSessionID)
 	})
 	return r.closeErr
+}
+
+type redactedChatRuntimeError struct {
+	cause   error
+	message string
+}
+
+func (e *redactedChatRuntimeError) Error() string { return e.message }
+func (e *redactedChatRuntimeError) Unwrap() error { return e.cause }
+
+func (r *chatRuntime) runtimeRedactor() func(string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.agent != nil && r.agent.Redact != nil {
+		return r.agent.Redact
+	}
+	return func(value string) string { return value }
+}
+
+func redactChatError(err error, redact func(string) string) error {
+	if err == nil {
+		return nil
+	}
+	message := redact(err.Error())
+	if message == err.Error() {
+		return err
+	}
+	return &redactedChatRuntimeError{cause: err, message: message}
+}
+
+func redactChatEvent(event chatpkg.Event, redact func(string) string) chatpkg.Event {
+	event.Text = redact(event.Text)
+	event.ToolName = redact(event.ToolName)
+	if event.State != nil {
+		state := redactChatState(*event.State, redact)
+		event.State = &state
+	}
+	return event
+}
+
+func redactChatResult(result chatpkg.Result, redact func(string) string) chatpkg.Result {
+	result.Title = redact(result.Title)
+	result.Text = redact(result.Text)
+	for i := range result.Models {
+		result.Models[i].Alias = redact(result.Models[i].Alias)
+		result.Models[i].Provider = redact(result.Models[i].Provider)
+		result.Models[i].Upstream = redact(result.Models[i].Upstream)
+	}
+	for i := range result.Sessions {
+		result.Sessions[i].Title = redact(result.Sessions[i].Title)
+		result.Sessions[i].Summary = redact(result.Sessions[i].Summary)
+		result.Sessions[i].ModelAlias = redact(result.Sessions[i].ModelAlias)
+	}
+	for i := range result.Workset {
+		result.Workset[i].Text = redact(result.Workset[i].Text)
+	}
+	if result.State != nil {
+		state := redactChatState(*result.State, redact)
+		result.State = &state
+	}
+	return result
+}
+
+func redactChatState(state chatpkg.State, redact func(string) string) chatpkg.State {
+	state.Title = redact(state.Title)
+	state.ModelAlias = redact(state.ModelAlias)
+	state.ModelError = redact(state.ModelError)
+	state.ProviderLabel = redact(state.ProviderLabel)
+	state.Profile = redact(state.Profile)
+	state.Workspace = redact(state.Workspace)
+	for i := range state.History {
+		state.History[i] = redactChatMessage(state.History[i], redact)
+	}
+	for i := range state.Models {
+		state.Models[i].Alias = redact(state.Models[i].Alias)
+		state.Models[i].Provider = redact(state.Models[i].Provider)
+		state.Models[i].Upstream = redact(state.Models[i].Upstream)
+	}
+	return state
+}
+
+func redactChatMessage(message llm.Message, redact func(string) string) llm.Message {
+	message.Blocks = append([]llm.Block(nil), message.Blocks...)
+	for i := range message.Blocks {
+		block := &message.Blocks[i]
+		block.Text = redact(block.Text)
+		block.Signature = redact(block.Signature)
+		block.Data = redact(block.Data)
+		if block.ToolUse != nil {
+			toolUse := *block.ToolUse
+			block.ToolUse = &toolUse
+			block.ToolUse.ID = redact(block.ToolUse.ID)
+			block.ToolUse.Name = redact(block.ToolUse.Name)
+			block.ToolUse.Input = redactChatJSON(block.ToolUse.Input, redact)
+		}
+		if block.ToolResult != nil {
+			toolResult := *block.ToolResult
+			block.ToolResult = &toolResult
+			block.ToolResult.ToolUseID = redact(block.ToolResult.ToolUseID)
+			block.ToolResult.Content = redact(block.ToolResult.Content)
+		}
+	}
+	return message
+}
+
+func redactChatJSON(raw json.RawMessage, redact func(string) string) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	var walk func(any) any
+	walk = func(current any) any {
+		switch typed := current.(type) {
+		case string:
+			return redact(typed)
+		case []any:
+			for i := range typed {
+				typed[i] = walk(typed[i])
+			}
+		case map[string]any:
+			for key, item := range typed {
+				typed[key] = walk(item)
+			}
+		}
+		return current
+	}
+	encoded, err := json.Marshal(walk(value))
+	if err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	return encoded
 }

@@ -167,8 +167,13 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if chatListener == nil {
 		chatDone <- nil
 	} else {
+		sessionOwners := newChatSessionOwners()
 		runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
-			return newChatRuntime(runtimeCtx, cfg, st)
+			runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
+			if runtimeErr == nil {
+				runtime.sessionOwners = sessionOwners
+			}
+			return runtime, runtimeErr
 		}
 		audit := newChatAudit(log, localsocket.PeerCredentials)
 		go func() {
