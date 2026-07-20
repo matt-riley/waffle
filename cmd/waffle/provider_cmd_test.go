@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/providerconfig"
@@ -147,6 +149,129 @@ func TestProviderCommandRejectsRawAPIKeyArgumentWithoutLeakingIt(t *testing.T) {
 	}
 	if fake.addRequest.ConnectionName != "" {
 		t.Fatal("manager called for rejected raw API key")
+	}
+}
+
+func TestProviderCommandActiveKeyPersistenceRejectionLeavesNoDurableOrRenderedTrace(t *testing.T) {
+	const apiKey = "active-key-must-not-persist"
+	for _, tt := range []struct {
+		name      string
+		args      []string
+		input     string
+		catalogue *fakeProviderCatalogue
+		hiddenKey bool
+	}{
+		{
+			name:      "guided discovery",
+			args:      []string{"add"},
+			input:     "openai\n\n1\n-\nn\n",
+			catalogue: &fakeProviderCatalogue{result: discoveredCatalogue(modelcatalog.Model{ID: "vendor/" + apiKey, DisplayName: "unsafe " + apiKey})},
+			hiddenKey: true,
+		},
+		{
+			name:      "guided manual fallback",
+			args:      []string{"add"},
+			input:     "anthropic\n\ny\nsafe=vendor/" + apiKey + "\nsafe\n-\n",
+			catalogue: &fakeProviderCatalogue{discoverErr: errors.New("catalogue unavailable")},
+			hiddenKey: true,
+		},
+		{
+			name: "explicit automation",
+			args: []string{
+				"add", "--name", "automated", "--type", "openai",
+				"--base-url", "https://example.invalid/" + apiKey,
+				"--model", "gpt=gpt-exact", "--api-key-stdin",
+			},
+			input:     apiKey + "\n",
+			catalogue: &fakeProviderCatalogue{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, dir, configBefore := installRealProviderManager(t)
+			installFakeProviderCatalogue(t, tt.catalogue)
+			if tt.hiddenKey {
+				installProviderSecretReader(t, apiKey, nil)
+			}
+			probes := 0
+			manager.Probe = func(context.Context, config.ResolvedModel, string) error {
+				probes++
+				return nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			err := providerCmd(t.Context(), tt.args, strings.NewReader(tt.input), &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), "durable provider configuration contains the active API key") {
+				t.Fatalf("providerCmd() error = %v, want active-key persistence rejection", err)
+			}
+			if strings.Contains(err.Error()+stdout.String()+stderr.String(), apiKey) {
+				t.Fatalf("active key reached command output: error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if probes != 0 || tt.catalogue.saveCalls != 0 {
+				t.Fatalf("probe calls=%d cache saves=%d, want zero", probes, tt.catalogue.saveCalls)
+			}
+			configAfter, readErr := os.ReadFile(manager.ConfigPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(configAfter, configBefore) || bytes.Contains(configAfter, []byte(apiKey)) {
+				t.Fatalf("config changed or contains active key:\n%s", configAfter)
+			}
+			if _, statErr := os.Stat(manager.SecretsPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("secret store was staged or created: %v", statErr)
+			}
+			stages, globErr := filepath.Glob(filepath.Join(dir, ".provider-stage-*"))
+			if globErr != nil || len(stages) != 0 {
+				t.Fatalf("provider staging files = %v, error = %v", stages, globErr)
+			}
+		})
+	}
+}
+
+func TestProviderModelAddCommandRejectsActiveKeyWithoutMutationOrOutput(t *testing.T) {
+	const apiKey = "existing-active-key"
+	manager, dir, _ := installRealProviderManager(t)
+	manager.Probe = func(context.Context, config.ResolvedModel, string) error { return nil }
+	if err := manager.Add(t.Context(), providerconfig.AddRequest{
+		ConnectionName: "openai",
+		Connection:     config.ProviderConnection{Type: "openai", BaseURL: "https://api.example.invalid/v1"},
+		Models:         map[string]config.ModelTarget{"existing": {Model: "safe-model"}},
+		APIKey:         apiKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	configBefore, err := os.ReadFile(manager.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsBefore, err := os.ReadFile(manager.SecretsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	err = providerCmd(t.Context(), []string{
+		"model", "add", "openai", "vendor/" + apiKey, "--alias", "favourite",
+	}, strings.NewReader(""), &stdout, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "durable provider configuration contains the active API key") {
+		t.Fatalf("provider model add error = %v, want active-key persistence rejection", err)
+	}
+	if strings.Contains(err.Error()+stdout.String(), apiKey) {
+		t.Fatalf("provider model add rendered active key: error=%v stdout=%q", err, stdout.String())
+	}
+	configAfter, err := os.ReadFile(manager.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsAfter, err := os.ReadFile(manager.SecretsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(configAfter, configBefore) || !bytes.Equal(secretsAfter, secretsBefore) {
+		t.Fatal("provider model add rejection changed config or secrets")
+	}
+	stages, err := filepath.Glob(filepath.Join(dir, ".provider-stage-*"))
+	if err != nil || len(stages) != 0 {
+		t.Fatalf("provider staging files = %v, error = %v", stages, err)
 	}
 }
 
@@ -1018,6 +1143,39 @@ func installFakeProviderManager(t *testing.T) *fakeProviderManager {
 	openProviderManager = func() (providerManager, error) { return fake, nil }
 	t.Cleanup(func() { openProviderManager = old })
 	return fake
+}
+
+func installRealProviderManager(t *testing.T) (*providerconfig.Manager, string, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	configBytes := []byte("# command persistence boundary\n[gateway]\nlisten = \"127.0.0.1:8420\"\n")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	active := false
+	manager := &providerconfig.Manager{
+		ConfigPath:    configPath,
+		SecretsPath:   filepath.Join(dir, "secrets.age"),
+		LockPath:      filepath.Join(dir, "provider-config.lock"),
+		Identity:      identity,
+		Restart:       func(context.Context) error { active = true; return nil },
+		Stop:          func(context.Context) error { active = false; return nil },
+		Health:        func(context.Context) error { return nil },
+		ServiceActive: func(context.Context) (bool, error) { return active, nil },
+		RestoreService: func(_ context.Context, wasActive bool) error {
+			active = wasActive
+			return nil
+		},
+	}
+	old := openProviderManager
+	openProviderManager = func() (providerManager, error) { return manager, nil }
+	t.Cleanup(func() { openProviderManager = old })
+	return manager, dir, configBytes
 }
 
 func installFakeProviderCatalogue(t *testing.T, fake providerCatalogue) {

@@ -1,6 +1,7 @@
 package anthropicp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -21,6 +23,7 @@ import (
 const (
 	maxAnthropicCatalogResponseBytes = 16 * 1024 * 1024
 	maxAnthropicCatalogPages         = 100
+	maxAnthropicCatalogErrorBytes    = 4096
 )
 
 var errAnthropicCatalogResponseTooLarge = fmt.Errorf("anthropic catalogue response exceeds %d bytes", maxAnthropicCatalogResponseBytes)
@@ -67,6 +70,9 @@ func (c *Catalog) ListModels(ctx context.Context) ([]modelcatalog.Model, error) 
 
 	models := make([]modelcatalog.Model, 0)
 	for pageNumber := 1; page != nil; pageNumber++ {
+		if err := validateAnthropicCatalogPage(page); err != nil {
+			return nil, err
+		}
 		if len(page.Data) > modelcatalog.MaxModels-len(models) {
 			return nil, fmt.Errorf("anthropic catalogue has more than %d entries; maximum is %d", modelcatalog.MaxModels, modelcatalog.MaxModels)
 		}
@@ -98,10 +104,37 @@ func (c *Catalog) ListModels(ctx context.Context) ([]modelcatalog.Model, error) 
 }
 
 func anthropicPageHasNext(page *pagination.Page[anthropic.ModelInfo]) bool {
-	if len(page.Data) == 0 || page.LastID == "" {
-		return false
+	return page.HasMore
+}
+
+func validateAnthropicCatalogPage(page *pagination.Page[anthropic.ModelInfo]) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(page.RawJSON()), &envelope); err != nil {
+		return fmt.Errorf("anthropic catalogue: decode pagination envelope: %w", err)
 	}
-	return !page.JSON.HasMore.Valid() || page.HasMore
+	data, ok := envelope["data"]
+	if !ok || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("anthropic catalogue: response data field is required and must be an array")
+	}
+	var descriptors []json.RawMessage
+	if err := json.Unmarshal(data, &descriptors); err != nil {
+		return fmt.Errorf("anthropic catalogue: decode response data array: %w", err)
+	}
+	hasMoreJSON, ok := envelope["has_more"]
+	if !ok || bytes.Equal(bytes.TrimSpace(hasMoreJSON), []byte("null")) {
+		return errors.New("anthropic catalogue: response has_more field is required and must be a boolean")
+	}
+	var hasMore bool
+	if err := json.Unmarshal(hasMoreJSON, &hasMore); err != nil {
+		return fmt.Errorf("anthropic catalogue: decode response has_more boolean: %w", err)
+	}
+	if hasMore != page.HasMore {
+		return errors.New("anthropic catalogue: response has_more field could not be decoded reliably")
+	}
+	if hasMore && (len(descriptors) == 0 || strings.TrimSpace(page.LastID) == "") {
+		return errors.New("anthropic catalogue: response has_more is true without a usable nonblank last_id cursor and data page")
+	}
+	return nil
 }
 
 func descriptorContainsAPIKey(descriptor anthropic.ModelInfo, apiKey string) bool {
@@ -194,10 +227,25 @@ func sanitizeAnthropicCatalogError(apiKey string, err error) error {
 	if apiKey != "" {
 		message = strings.ReplaceAll(message, apiKey, strings.Repeat("*", len(apiKey)))
 	}
+	message = "anthropic catalogue: " + modelcatalog.SafeText(message)
+	if len(message) > maxAnthropicCatalogErrorBytes {
+		message = truncateUTF8(message, maxAnthropicCatalogErrorBytes)
+	}
 	return &anthropicCatalogError{
-		message: "anthropic catalogue: " + modelcatalog.SafeText(message),
+		message: message,
 		match:   safeAnthropicCatalogMatch(err),
 	}
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func safeAnthropicCatalogMatch(err error) error {

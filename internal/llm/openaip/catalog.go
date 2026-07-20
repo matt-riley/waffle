@@ -1,8 +1,10 @@
 package openaip
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,9 +102,18 @@ func (c *Catalog) listModels(ctx context.Context, path string) ([]modelcatalog.M
 		return nil, resp.StatusCode, fmt.Errorf("openai catalogue response exceeds %d bytes", maxCatalogResponseBytes)
 	}
 
-	var wire catalogResponse
-	if err := json.Unmarshal(body, &wire); err != nil {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("openai catalogue: decode model catalogue: %w", err)
+	}
+	if len(envelope.Data) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
+		return nil, resp.StatusCode, errors.New("openai catalogue: response data field is required and must be an array")
+	}
+	var wire catalogResponse
+	if err := json.Unmarshal(envelope.Data, &wire.Data); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("openai catalogue: decode response data array: %w", err)
 	}
 	models := make([]modelcatalog.Model, 0, len(wire.Data))
 	for i, descriptor := range wire.Data {

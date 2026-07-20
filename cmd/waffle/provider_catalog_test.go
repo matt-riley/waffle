@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -81,6 +83,16 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		}
 		requireAll(path, string(body), documentationRequirements)
 	}
+	deployBody, err := os.ReadFile(filepath.Join("..", "..", "docs", "deploy.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAll("docs/deploy.md OpenRouter routing", string(deployBody), []string{
+		"exact openrouter.ai host and all of its subdomains",
+		"eu.openrouter.ai",
+		"account-filtered through /models/user",
+		"Only override hosts outside that domain use the generic /models endpoint",
+	})
 
 	var usage strings.Builder
 	providerUsage(&usage)
@@ -450,6 +462,59 @@ func TestProviderCatalogServiceUsesFreshExpiredAndForcedCache(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "scope ID") {
 			t.Fatalf("Models() scope %q error = %v, want scope ID error", scopeID, err)
 		}
+	}
+}
+
+func TestProviderCatalogServiceIncompleteSuccessReturnsStaleAndPreservesCacheBytes(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name         string
+		providerType string
+		body         string
+	}{
+		{name: "OpenAI missing data", providerType: "openai", body: `{}`},
+		{name: "Anthropic missing has_more", providerType: "anthropic", body: `{"data":[]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			store := modelcatalog.NewStore(t.TempDir())
+			store.Now = func() time.Time { return now }
+			connection := modelcatalog.Connection{
+				Name:    "primary",
+				Type:    tt.providerType,
+				BaseURL: server.URL,
+				ScopeID: "enrollment-scope",
+			}
+			if err := store.Save(connection, []modelcatalog.Model{{ID: "known-good"}}, now.Add(-25*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			cachePath := filepath.Join(store.Root, connection.Name+".json")
+			before, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := &providerCatalogueService{store: store, newSource: newCatalogueSource, now: func() time.Time { return now }}
+
+			result, err := service.Models(t.Context(), connection, "test-key", false)
+			if err != nil {
+				t.Fatalf("Models() error = %v, want stale fallback", err)
+			}
+			if !result.Stale || result.Warning == "" || !reflect.DeepEqual(catalogueModelIDs(result.Models), []string{"known-good"}) {
+				t.Fatalf("Models() result = %+v, want known-good stale cache with warning", result)
+			}
+			after, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("incomplete successful response replaced exact prior cache bytes")
+			}
+		})
 	}
 }
 

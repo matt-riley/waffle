@@ -30,8 +30,9 @@ Presets are openai, anthropic, openrouter, and openai-compatible. Only
 openai-compatible requires a base URL. OpenAI and Anthropic use their standard
 API base URLs, while openrouter uses its standard endpoint and account-filtered
 model catalogue. In explicit automation, `--base-url` can override any preset;
-a custom OpenRouter URL is treated as a generic OpenAI-compatible endpoint
-rather than the standard account-filtered OpenRouter catalogue.
+the exact `openrouter.ai` host and all of its subdomains, including regional
+hosts such as `eu.openrouter.ai`, remain account-filtered through `/models/user`.
+Only override hosts outside that domain use the generic `/models` endpoint.
 
 Bare guided add reads a hidden credential and uses it to authenticate model
 discovery. Auth-free compatible endpoints may leave it empty. The model picker

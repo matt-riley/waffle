@@ -40,6 +40,46 @@ func TestManagerAddProbeFailureLeavesFilesUnchanged(t *testing.T) {
 	}
 }
 
+func TestManagerAddRejectsActiveKeyInEveryDurableRequestString(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AddRequest)
+	}{
+		{name: "connection name", mutate: func(req *AddRequest) { req.ConnectionName = providerTestKey }},
+		{name: "connection type", mutate: func(req *AddRequest) { req.Connection.Type = "openai-" + providerTestKey }},
+		{name: "connection API key field", mutate: func(req *AddRequest) { req.Connection.APIKey = "secret://" + providerTestKey }},
+		{name: "base URL", mutate: func(req *AddRequest) { req.Connection.BaseURL = "https://example.invalid/" + providerTestKey }},
+		{name: "model alias", mutate: func(req *AddRequest) {
+			req.Models = map[string]config.ModelTarget{providerTestKey: {Model: "gpt-test"}}
+		}},
+		{name: "model provider", mutate: func(req *AddRequest) {
+			req.Models["gpt"] = config.ModelTarget{Provider: "prefix-" + providerTestKey, Model: "gpt-test"}
+		}},
+		{name: "upstream model", mutate: func(req *AddRequest) {
+			req.Models["gpt"] = config.ModelTarget{Model: "vendor/" + providerTestKey}
+		}},
+		{name: "default alias", mutate: func(req *AddRequest) { req.DefaultModel = providerTestKey }},
+		{name: "utility alias", mutate: func(req *AddRequest) { req.UtilityModel = providerTestKey }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager(t)
+			before := captureManagerState(t, m)
+			req := validAddRequest()
+			tt.mutate(&req)
+
+			err := m.Add(t.Context(), req)
+			if err == nil || !strings.Contains(err.Error(), "durable provider configuration contains the active API key") {
+				t.Fatalf("Add() error = %v, want active-key persistence rejection", err)
+			}
+			assertErrorTreeRedacted(t, err)
+			assertManagerState(t, m, before)
+			assertNoProviderStageFiles(t, filepath.Dir(m.ConfigPath))
+		})
+	}
+}
+
 func TestManagerAddCommitsSecretBeforeConfigAndClearsBackupsAfterReady(t *testing.T) {
 	m := newTestManager(t)
 	var events []string
@@ -710,6 +750,52 @@ func TestManagerAddModelProbeFailureRollsBack(t *testing.T) {
 	assertManagerState(t, m, before)
 }
 
+func TestManagerAddModelRejectsActiveKeyBeforeStaging(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		req  AddModelRequest
+	}{
+		{
+			name: "alias",
+			req: AddModelRequest{
+				ConnectionName: "openai",
+				Alias:          providerTestKey,
+				UpstreamModel:  "gpt-new",
+			},
+		},
+		{
+			name: "upstream model",
+			req: AddModelRequest{
+				ConnectionName: "openai",
+				Alias:          "favourite",
+				UpstreamModel:  "vendor/" + providerTestKey,
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager(t)
+			enrollConnectionWithoutRoles(t, m, false)
+			before := captureManagerState(t, m)
+			probes := 0
+			m.Probe = func(context.Context, config.ResolvedModel, string) error {
+				probes++
+				return nil
+			}
+
+			err := m.AddModel(t.Context(), tt.req)
+			if err == nil || !strings.Contains(err.Error(), "durable provider configuration contains the active API key") {
+				t.Fatalf("AddModel() error = %v, want active-key persistence rejection", err)
+			}
+			assertErrorTreeRedacted(t, err)
+			if probes != 0 {
+				t.Fatalf("probe calls = %d, want zero", probes)
+			}
+			assertManagerState(t, m, before)
+			assertNoProviderStageFiles(t, filepath.Dir(m.ConfigPath))
+		})
+	}
+}
+
 func TestManagerAddModelAuthFreeWithoutSecretsPreservesAbsence(t *testing.T) {
 	m := newTestManager(t)
 	if err := os.Remove(m.SecretsPath); err != nil {
@@ -889,6 +975,32 @@ func TestManagerCatalogSnapshotSupportsAuthFreeAndRejectsUnknownConnection(t *te
 	assertManagerState(t, m, before)
 }
 
+func TestManagerCatalogSnapshotRejectsDurableConnectionMetadataContainingActiveKey(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, false)
+
+	configBytes := readMaybe(t, m.ConfigPath)
+	configBytes = bytes.ReplaceAll(
+		configBytes,
+		[]byte("https://api.openai.example/v1"),
+		[]byte("https://api.openai.example/v1/"+providerTestKey),
+	)
+	if err := os.WriteFile(m.ConfigPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := secret.OpenFile(m.SecretsPath, m.Identity).Delete("provider/openai/catalog-scope"); err != nil {
+		t.Fatal(err)
+	}
+	before := captureManagerState(t, m)
+
+	_, err := m.CatalogSnapshot(t.Context(), "openai")
+	if err == nil || !strings.Contains(err.Error(), "durable provider configuration contains the active API key") {
+		t.Fatalf("CatalogSnapshot() error = %v, want active-key persistence rejection", err)
+	}
+	assertErrorTreeRedacted(t, err)
+	assertManagerState(t, m, before)
+}
+
 func TestManagerEnrollmentScopesDifferAcrossRemoveAndReAdd(t *testing.T) {
 	m := newTestManager(t)
 	m.Random = bytes.NewReader(append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...))
@@ -1023,6 +1135,17 @@ func assertManagerState(t *testing.T, m *Manager, want managerState) {
 	}
 	if active != want.serviceActive {
 		t.Fatalf("service active = %v, want %v", active, want.serviceActive)
+	}
+}
+
+func assertNoProviderStageFiles(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".provider-stage-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("provider staging files remain: %v", matches)
 	}
 }
 

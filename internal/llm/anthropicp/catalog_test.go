@@ -2,6 +2,7 @@ package anthropicp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -72,6 +73,47 @@ func TestCatalogListsAllAnthropicPages(t *testing.T) {
 	}
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want 2", got)
+	}
+}
+
+func TestCatalogRejectsIncompleteSuccessfulAnthropicEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{name: "missing data", body: `{"has_more":false}`},
+		{name: "null data", body: `{"data":null,"has_more":false}`},
+		{name: "whitespace null data", body: `{"data":  null ,"has_more":false}`},
+		{name: "wrong data type", body: `{"data":{},"has_more":false}`},
+		{name: "missing has more", body: `{"data":[]}`},
+		{name: "wrong has more type", body: `{"data":[],"has_more":"false"}`},
+		{name: "null has more", body: `{"data":[],"has_more":null}`},
+		{name: "more without last ID", body: `{"data":[],"has_more":true}`},
+		{name: "more with blank last ID", body: `{"data":[],"has_more":true,"last_id":"  "}`},
+		{name: "more with empty page", body: `{"data":[],"has_more":true,"last_id":"cursor"}`},
+		{name: "terminal explicit empty data", body: `{"data":[],"has_more":false}`, ok: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			models, err := NewCatalog("test-key", server.URL).ListModels(t.Context())
+			if tt.ok {
+				if err != nil || len(models) != 0 {
+					t.Fatalf("ListModels() = %#v, %v; want explicit empty terminal catalogue", models, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ListModels() error = nil, want incomplete envelope rejection")
+			}
+		})
 	}
 }
 
@@ -241,6 +283,39 @@ func TestCatalogSanitizesEntireProviderErrorChain(t *testing.T) {
 	if errors.As(err, &sdkAPIError) {
 		t.Fatalf("errors.As recovered unsafe SDK API error: request = %q response = %q", sdkAPIError.DumpRequest(false), sdkAPIError.RawJSON())
 	}
+}
+
+func TestCatalogBoundsControlHeavyAnthropicProviderError(t *testing.T) {
+	t.Parallel()
+
+	const apiKey = "secret-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		body, _ := json.Marshal(map[string]any{
+			"type": "error",
+			"error": map[string]string{
+				"type":    "invalid_request_error",
+				"message": strings.Repeat("\x1b\ncredential "+apiKey+" rejected ", 5000),
+			},
+		})
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := NewCatalog(apiKey, server.URL).ListModels(t.Context())
+	if err == nil {
+		t.Fatal("ListModels() error = nil, want provider error")
+	}
+	if got := len(err.Error()); got > 4096 {
+		t.Fatalf("ListModels() error length = %d, want at most 4096 bytes", got)
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("ListModels() error contains active API key: %q", err)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\r\n") {
+		t.Fatalf("ListModels() error contains raw control characters: %q", err)
+	}
+	assertErrorTreeOmits(t, err, apiKey)
 }
 
 func TestCatalogHonorsCancellation(t *testing.T) {

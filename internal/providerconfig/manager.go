@@ -373,6 +373,9 @@ func (m *Manager) CatalogSnapshot(ctx context.Context, name string) (snapshot Ca
 	if err != nil {
 		return CatalogSnapshot{}, err
 	}
+	if err := validateNoActiveKeyInDurableStrings(key, connection.Type, connection.APIKey, connection.BaseURL); err != nil {
+		return CatalogSnapshot{}, err
+	}
 	if m.Identity == nil {
 		return CatalogSnapshot{}, errors.New("catalogue access: secret-store identity is required")
 	}
@@ -402,8 +405,8 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 	if err := m.recoverLocked(ctx); err != nil {
 		return err
 	}
-	if err := validateAddModel(req); err != nil {
-		return err
+	if !config.ValidProviderConnectionName(req.ConnectionName) {
+		return fmt.Errorf("invalid connection name %q", req.ConnectionName)
 	}
 	before, err := m.capture(ctx)
 	if err != nil {
@@ -412,8 +415,19 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
 		return err
 	}
-	if _, ok := before.cfg.Providers[req.ConnectionName]; !ok {
+	connection, ok := before.cfg.Providers[req.ConnectionName]
+	if !ok {
 		return fmt.Errorf("provider connection %q does not exist", req.ConnectionName)
+	}
+	key, err := m.connectionKey(connection)
+	if err != nil {
+		return err
+	}
+	if err := validateNoActiveKeyInDurableStrings(key, req.ConnectionName, req.Alias, req.UpstreamModel); err != nil {
+		return err
+	}
+	if err := validateAddModel(req); err != nil {
+		return err
 	}
 	if _, ok := before.cfg.Models[req.Alias]; ok {
 		return fmt.Errorf("model alias %q already exists", req.Alias)
@@ -442,7 +456,7 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 	if before.secretExist {
 		secretStage, err = m.stageSecrets(before.secretBytes, func(secret.Store) error { return nil })
 		if err != nil {
-			return err
+			return redactError(err, key)
 		}
 	}
 	defer func() {
@@ -451,10 +465,6 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 		}
 	}()
 	resolved, err := candidate.ResolveModel(req.Alias)
-	if err != nil {
-		return err
-	}
-	key, err := m.connectionKey(resolved.Connection)
 	if err != nil {
 		return err
 	}
@@ -1017,6 +1027,20 @@ func (m *Manager) connectionKey(connection config.ProviderConnection) (string, e
 }
 
 func validateAdd(req AddRequest) error {
+	durable := []string{
+		req.ConnectionName,
+		req.Connection.Type,
+		req.Connection.APIKey,
+		req.Connection.BaseURL,
+		req.DefaultModel,
+		req.UtilityModel,
+	}
+	for alias, target := range req.Models {
+		durable = append(durable, alias, target.Provider, target.Model)
+	}
+	if err := validateNoActiveKeyInDurableStrings(req.APIKey, durable...); err != nil {
+		return err
+	}
 	if !config.ValidProviderConnectionName(req.ConnectionName) {
 		return fmt.Errorf("invalid connection name %q (want slug [a-z0-9-] max %d)", req.ConnectionName, config.ProviderConnectionNameMax)
 	}
@@ -1042,6 +1066,18 @@ func validateAdd(req AddRequest) error {
 			if _, ok := req.Models[alias]; !ok {
 				return fmt.Errorf("%s model alias %q is not part of this enrollment", label, alias)
 			}
+		}
+	}
+	return nil
+}
+
+func validateNoActiveKeyInDurableStrings(apiKey string, values ...string) error {
+	if apiKey == "" {
+		return nil
+	}
+	for _, value := range values {
+		if strings.Contains(value, apiKey) {
+			return errors.New("durable provider configuration contains the active API key")
 		}
 	}
 	return nil

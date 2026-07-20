@@ -68,6 +68,41 @@ func TestCatalogAllowsAuthFreeOpenAICompatibleEndpoint(t *testing.T) {
 	}
 }
 
+func TestCatalogRejectsIncompleteSuccessfulOpenAIEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{name: "missing data", body: `{}`},
+		{name: "null data", body: `{"data":null}`},
+		{name: "whitespace null data", body: `{"data":  null }`},
+		{name: "wrong data type", body: `{"data":{}}`},
+		{name: "explicit empty data", body: `{"data":[]}`, ok: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			models, err := NewCatalog("test-key", server.URL, false).ListModels(t.Context())
+			if tt.ok {
+				if err != nil || len(models) != 0 {
+					t.Fatalf("ListModels() = %#v, %v; want explicit empty catalogue", models, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "data") {
+				t.Fatalf("ListModels() error = %v, want required data envelope error", err)
+			}
+		})
+	}
+}
+
 func TestCatalogUsesOpenRouterUserModelsAndFallsBackOn404(t *testing.T) {
 	t.Parallel()
 
