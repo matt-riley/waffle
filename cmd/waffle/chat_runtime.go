@@ -27,7 +27,10 @@ import (
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
-const chatNewConfirmArg = "confirm"
+const (
+	chatNewConfirmArg       = "confirm"
+	chatRuntimeCloseTimeout = 10 * time.Second
+)
 
 // chatRuntime owns the presentation-neutral state and behavior for one chat
 // connection. Renderers are responsible only for displaying its state,
@@ -38,6 +41,7 @@ type chatRuntime struct {
 	agent           *agent.Agent
 	agentCancel     context.CancelFunc
 	commandCancel   context.CancelFunc
+	commandDone     chan struct{}
 	sessions        *session.Store
 	current         *session.Session
 	history         []llm.Message
@@ -62,7 +66,10 @@ type chatRuntime struct {
 	turnDone            chan struct{}
 	blockTurns          bool
 	pendingNewSessionID string
-	closeOnce           sync.Once
+	closeTimeout        time.Duration
+	cleanupStarted      bool
+	cleanupDone         chan struct{}
+	cleanupComplete     bool
 	closeErr            error
 	closed              bool
 	profileAgentBuilder func(context.Context, string) (*agent.Agent, func(), error)
@@ -204,22 +211,18 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 	}
 	r.commandMu.Lock()
 	defer r.commandMu.Unlock()
+	commandCtx, commandCancel := context.WithCancel(ctx)
+	commandDone := make(chan struct{})
 	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.closed {
+		r.mu.Unlock()
+		commandCancel()
 		return chatpkg.Result{}, errors.New("chat runtime is closed")
 	}
-	commandCtx, commandCancel := context.WithCancel(ctx)
-	r.mu.Lock()
 	r.commandCancel = commandCancel
+	r.commandDone = commandDone
 	r.mu.Unlock()
-	defer func() {
-		commandCancel()
-		r.mu.Lock()
-		r.commandCancel = nil
-		r.mu.Unlock()
-	}()
+	defer r.finishCommand(commandCancel, commandDone)
 	if err := commandCtx.Err(); err != nil {
 		return chatpkg.Result{}, err
 	}
@@ -1036,6 +1039,7 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 			close(turnDone)
 		}
 		r.mu.Unlock()
+		r.finishCloseIfIdle()
 	}()
 
 	var emitMu sync.Mutex
@@ -1219,54 +1223,134 @@ func (r *chatRuntime) Close(ctx context.Context) error {
 }
 
 func (r *chatRuntime) close(ctx context.Context) error {
-	r.Cancel()
-	r.commandMu.Lock()
-	defer r.commandMu.Unlock()
-	r.closeOnce.Do(func() {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.runtimeCloseTimeout())
+	defer cancel()
+
+	r.mu.Lock()
+	r.closed = true
+	r.pendingNewSessionID = ""
+	commandCancel := r.commandCancel
+	commandDone := r.commandDone
+	turnCancel := r.agentCancel
+	turnDone := r.turnDone
+	r.mu.Unlock()
+	if commandCancel != nil {
+		commandCancel()
+	}
+	if turnCancel != nil {
+		turnCancel()
+	}
+	if commandDone != nil {
+		select {
+		case <-commandDone:
+		case <-cleanupCtx.Done():
+			return fmt.Errorf("wait for active chat command: %w", cleanupCtx.Err())
+		}
+	}
+	if turnDone != nil {
+		select {
+		case <-turnDone:
+		case <-cleanupCtx.Done():
+			return fmt.Errorf("wait for active chat turn: %w", cleanupCtx.Err())
+		}
+	}
+	return r.finishClose(cleanupCtx)
+}
+
+func (r *chatRuntime) runtimeCloseTimeout() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closeTimeout > 0 {
+		return r.closeTimeout
+	}
+	return chatRuntimeCloseTimeout
+}
+
+func (r *chatRuntime) finishCommand(commandCancel context.CancelFunc, commandDone chan struct{}) {
+	commandCancel()
+	r.mu.Lock()
+	if r.commandDone == commandDone {
+		r.commandCancel = nil
+		r.commandDone = nil
+	}
+	close(commandDone)
+	r.mu.Unlock()
+	r.finishCloseIfIdle()
+}
+
+func (r *chatRuntime) finishCloseIfIdle() {
+	r.mu.Lock()
+	idle := r.closed && r.commandDone == nil && r.turnDone == nil
+	r.mu.Unlock()
+	if !idle {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.runtimeCloseTimeout())
+	defer cancel()
+	_ = r.finishClose(cleanupCtx)
+}
+
+func (r *chatRuntime) finishClose(ctx context.Context) error {
+	for {
 		r.mu.Lock()
-		r.closed = true
-		r.mu.Unlock()
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		r.Cancel()
-		r.mu.Lock()
-		turnDone := r.turnDone
-		r.mu.Unlock()
-		if turnDone != nil {
+		if r.cleanupComplete {
+			err := r.closeErr
+			r.mu.Unlock()
+			return err
+		}
+		if r.cleanupStarted {
+			done := r.cleanupDone
+			r.mu.Unlock()
 			select {
-			case <-turnDone:
-			case <-cleanupCtx.Done():
-				r.closeErr = fmt.Errorf("wait for active chat turn: %w", cleanupCtx.Err())
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return fmt.Errorf("wait for chat cleanup: %w", ctx.Err())
 			}
 		}
-		if err := r.reflectSession(cleanupCtx); err != nil {
-			r.closeErr = errors.Join(r.closeErr, err)
-		}
+		r.cleanupStarted = true
+		r.cleanupDone = make(chan struct{})
+		done := r.cleanupDone
+		r.mu.Unlock()
 
+		err := r.cleanup(ctx)
 		r.mu.Lock()
-		wsClient := r.wsClient
-		agentCleanup := r.agentCleanup
-		resourceCancel := r.resourceCancel
-		r.wsClient = nil
-		r.agentCleanup = nil
-		r.resourceCancel = nil
+		r.closeErr = err
+		r.cleanupComplete = true
+		r.cleanupStarted = false
+		close(done)
 		r.mu.Unlock()
-		if wsClient != nil {
-			r.closeErr = errors.Join(r.closeErr, wsClient.Close())
-		}
-		if resourceCancel != nil {
-			resourceCancel()
-		}
-		if agentCleanup != nil {
-			agentCleanup()
-		}
-		r.mu.Lock()
-		ownedSessionID := r.ownedSessionID
-		r.ownedSessionID = ""
-		r.mu.Unlock()
-		r.sessionOwners.release(r, ownedSessionID)
-	})
-	return r.closeErr
+		return err
+	}
+}
+
+func (r *chatRuntime) cleanup(ctx context.Context) error {
+	var closeErr error
+	if err := r.reflectSession(ctx); err != nil {
+		closeErr = errors.Join(closeErr, err)
+	}
+
+	r.mu.Lock()
+	wsClient := r.wsClient
+	agentCleanup := r.agentCleanup
+	resourceCancel := r.resourceCancel
+	r.wsClient = nil
+	r.agentCleanup = nil
+	r.resourceCancel = nil
+	ownedSessionID := r.ownedSessionID
+	r.ownedSessionID = ""
+	r.mu.Unlock()
+	if wsClient != nil {
+		closeErr = errors.Join(closeErr, wsClient.Close())
+	}
+	if resourceCancel != nil {
+		resourceCancel()
+	}
+	if agentCleanup != nil {
+		agentCleanup()
+	}
+	r.sessionOwners.release(r, ownedSessionID)
+	return closeErr
 }
 
 type redactedChatRuntimeError struct {
