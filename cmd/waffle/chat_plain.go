@@ -80,6 +80,7 @@ func scanPlainInput(ctx context.Context, backend chatpkg.Backend, state chatpkg.
 			continue
 		}
 		if ok {
+			pendingConfirmation = ""
 			result, commandErr := backend.Command(ctx, command, emit)
 			if commandErr != nil {
 				fmt.Fprintf(renderer.stderr, "waffle: %s\n", plainRow(commandErr.Error()))
@@ -89,8 +90,6 @@ func scanPlainInput(ctx context.Context, backend chatpkg.Backend, state chatpkg.
 			if result.Confirm {
 				pendingConfirmation = confirmationInstruction(command)
 				fmt.Fprintln(renderer.stdout, pendingConfirmation)
-			} else if command.Name == chatpkg.CommandNew && command.Args == chatNewConfirmArg {
-				pendingConfirmation = ""
 			}
 			if result.ShouldClose {
 				return nil
@@ -217,15 +216,15 @@ func (r *plainRenderer) result(result chatpkg.Result) {
 
 func (r *plainRenderer) resultText(text string) {
 	sanitized := plainText(text)
-	if warning := normalizePlainWarning(sanitized); warning != "" {
-		if _, alreadyRendered := r.warnings[warning]; alreadyRendered {
-			return
-		}
-	}
 	first, rest, found := strings.Cut(sanitized, "\n")
 	if !isPlainWarning(first) {
 		fmt.Fprintln(r.stdout, sanitized)
 		return
+	}
+	if warning := normalizePlainWarning(sanitized); warning != "" {
+		if _, alreadyRendered := r.warnings[warning]; alreadyRendered {
+			return
+		}
 	}
 	r.warning(first)
 	if found && rest != "" {

@@ -111,6 +111,107 @@ func TestPlainChatMakesNewConfirmationActionable(t *testing.T) {
 	}
 }
 
+func TestPlainChatClearsNewConfirmationAfterInvalidatingCommand(t *testing.T) {
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01INVALIDATE"}}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch command.Name {
+		case chatpkg.CommandNew:
+			return chatpkg.Result{Text: "Start a new session?", Confirm: true}, nil
+		case chatpkg.CommandModel:
+			return chatpkg.Result{Text: "model set to alpha"}, nil
+		case chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command: %+v", command)
+		}
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/new\n/model alpha\nyes\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantStdout := "waffle chat —  via  — session 01INVALIDATE. /help for commands.\n" +
+		"\nyou> Start a new session?\nconfirm with /new confirm\n" +
+		"\nyou> model set to alpha\n\nyou> \nyou> "
+	if stdout.String() != wantStdout || stderr.String() != "" {
+		t.Fatalf("stdout=%q stderr=%q, want stdout=%q and empty stderr", stdout.String(), stderr.String(), wantStdout)
+	}
+	if got, want := fmt.Sprint(backend.commands), fmt.Sprint([]chatpkg.ParsedCommand{
+		{Name: chatpkg.CommandNew}, {Name: chatpkg.CommandModel, Args: "alpha"}, {Name: chatpkg.CommandExit},
+	}); got != want {
+		t.Fatalf("commands = %s, want %s", got, want)
+	}
+	if got := fmt.Sprint(backend.turns); got != "[yes]" {
+		t.Fatalf("Turns = %s, want [yes]", got)
+	}
+}
+
+func TestPlainChatClearsNewConfirmationAfterFailedConfirmAttempt(t *testing.T) {
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01STALE"}}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch {
+		case command.Name == chatpkg.CommandNew && command.Args == "":
+			return chatpkg.Result{Text: "Start a new session?", Confirm: true}, nil
+		case command.Name == chatpkg.CommandNew && command.Args == "confirm":
+			return chatpkg.Result{}, errors.New("stale confirmation")
+		case command.Name == chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command: %+v", command)
+		}
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/new\n/new confirm\nyes\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantStdout := "waffle chat —  via  — session 01STALE. /help for commands.\n" +
+		"\nyou> Start a new session?\nconfirm with /new confirm\n" +
+		"\nyou> \nyou> \nyou> "
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), wantStdout)
+	}
+	if got, want := stderr.String(), "waffle: stale confirmation\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if got := fmt.Sprint(backend.turns); got != "[yes]" {
+		t.Fatalf("Turns = %s, want [yes]", got)
+	}
+}
+
+func TestPlainChatClearsGenericConfirmationAfterSuccessfulRetry(t *testing.T) {
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01GENERIC"}}
+	resumeCalls := 0
+	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch command.Name {
+		case chatpkg.CommandResume:
+			resumeCalls++
+			if resumeCalls == 1 {
+				return chatpkg.Result{Text: "wait for idle", Confirm: true}, nil
+			}
+			return chatpkg.Result{Text: "resumed 01A"}, nil
+		case chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command: %+v", command)
+		}
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/resume 01A\n/resume 01A\nyes\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantStdout := "waffle chat —  via  — session 01GENERIC. /help for commands.\n" +
+		"\nyou> wait for idle\nretry /resume 01A when idle\n" +
+		"\nyou> resumed 01A\n\nyou> \nyou> "
+	if stdout.String() != wantStdout || stderr.String() != "" {
+		t.Fatalf("stdout=%q stderr=%q, want stdout=%q and empty stderr", stdout.String(), stderr.String(), wantStdout)
+	}
+	if resumeCalls != 2 || len(backend.commands) != 3 {
+		t.Fatalf("resume calls=%d commands=%+v", resumeCalls, backend.commands)
+	}
+	if got := fmt.Sprint(backend.turns); got != "[yes]" {
+		t.Fatalf("Turns = %s, want [yes]", got)
+	}
+}
+
 func TestPlainChatRendersCompleteResultInExactStableOrder(t *testing.T) {
 	updated := time.Date(2026, time.July, 20, 12, 34, 56, 0, time.UTC)
 	allFields := chatpkg.Result{
@@ -249,6 +350,32 @@ func TestPlainChatDeduplicatesMixedResultWarningButKeepsSuccessText(t *testing.T
 	}
 	if strings.Contains(stdout.String(), "warning") || !strings.Contains(stdout.String(), "new session 02\n") {
 		t.Fatalf("mixed result stdout = %q", stdout.String())
+	}
+}
+
+func TestPlainChatRendersOrdinaryTextEqualToPriorWarning(t *testing.T) {
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01COLLISION"}}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch command.Name {
+		case chatpkg.CommandStatus:
+			emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: "warning: collision", IsError: true})
+			return chatpkg.Result{Text: "collision"}, nil
+		case chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command %s", command.Name)
+		}
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/status\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantStdout := "waffle chat —  via  — session 01COLLISION. /help for commands.\n\nyou> collision\n\nyou> "
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), wantStdout)
+	}
+	if got, want := stderr.String(), "waffle: warning: collision\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
