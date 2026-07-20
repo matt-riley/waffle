@@ -27,21 +27,23 @@ sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
 ```
 
 The guided command offers `openai`, `anthropic`, `openrouter`, and
-`openai-compatible` presets. OpenAI and Anthropic use their standard API base
-URLs, while openrouter uses its standard endpoint and account-filtered model
-catalogue. The `openai-compatible` preset prompts for a required custom base
-URL. In explicit automation, `--base-url` can override any preset; a custom
-OpenRouter URL is treated as a generic OpenAI-compatible endpoint rather than
-the standard account-filtered OpenRouter catalogue.
+`openai-compatible` presets. Only openai-compatible requires a base URL.
+OpenAI and Anthropic use their standard API base URLs, while openrouter uses
+its standard endpoint and account-filtered model catalogue. In explicit
+automation, `--base-url` can override any preset; a custom OpenRouter URL is
+treated as a generic OpenAI-compatible endpoint rather than the standard
+account-filtered OpenRouter catalogue.
 
 After the connection name and preset, guided enrollment prompts for the hidden
 API key and uses it for authenticated model discovery. Auth-free compatible
 endpoints may leave it empty. The model picker supports search, paging, exact
 upstream IDs, and selection of default, utility, and additional favourite
-aliases. Derived aliases are checked against existing aliases; collisions ask
-for an explicit replacement. If discovery fails or returns no models, Waffle
-prints a safe warning and offers manual comma-separated `ALIAS=UPSTREAM`
-entry. Declining that fallback leaves the connection unchanged.
+aliases. Known exact IDs work directly. Unknown numeric or navigation-like IDs
+use `id:<upstream-id>` to avoid row-number or navigation ambiguity. Derived
+aliases are checked against existing aliases; collisions ask for an explicit
+replacement. If discovery fails or returns no models, Waffle prints a safe
+warning and offers manual comma-separated `ALIAS=UPSTREAM` entry. Declining
+that fallback leaves the connection unchanged.
 
 Selecting a default alias probes the upstream, commits the configuration and
 encrypted credential, starts Waffle, verifies `/healthz`, and reports
@@ -49,15 +51,20 @@ encrypted credential, starts Waffle, verifies `/healthz`, and reports
 configuration, secret store, and service state. Cache-write failure after a
 successful commit is only a warning and does not undo the enrolled provider.
 
-For an enrolled connection, `provider models` reads an owner-only model
-catalogue cache under the Waffle home. Directories are mode `0700`, records
-are mode `0600`, and a fresh record is reused for 24 hours. `--search` filters
-the displayed IDs and names. `--refresh` requests a fresh upstream catalogue;
-if refresh fails and an older record exists, Waffle returns that stale record
-with a warning (and exposes `stale` and `warning` in `--json`). With no usable
-record, the upstream error is returned. The cache is disposable: removing it
-only forces discovery again, and provider removal invalidates its record. It
-does not contain the provider credential and is not provider configuration.
+For an enrolled connection, `provider models` reads an owner-only catalogue
+cache under the Waffle home. Directories are mode `0700`, records are mode
+`0600`, and a fresh record is reused for 24 hours. The cache is distinct from
+selected favourite aliases. `--search` filters the displayed IDs and names,
+`--refresh` requests a fresh upstream catalogue, and `--json` emits structured
+cache status and model descriptors. If refresh fails and an older valid record
+exists, Waffle returns that stale cache with a warning; with no usable record,
+the upstream error is returned.
+
+Cache records are derived, non-authoritative discovery data. Each contains the
+connection name, type, base URL, opaque scope, and model descriptors, but
+contains no API credential. The cache is disposable: removing it only forces
+discovery again, and provider removal invalidates its record. Selected
+favourite aliases remain authoritative provider configuration.
 
 `provider model add` registers one exact upstream ID as a favourite alias,
 deriving an alias when `--alias` is omitted. It probes the model before

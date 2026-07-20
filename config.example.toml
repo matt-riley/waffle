@@ -15,10 +15,10 @@
 #
 # Prefer the management command over hand-editing provider config because it
 # probes the upstream and commits the encrypted credential and config
-# transactionally. Guided add supports openai, anthropic, openrouter, and a
-# custom-URL openai-compatible preset. It performs authenticated discovery,
-# lets you select favourite aliases, and offers manual ALIAS=UPSTREAM entry if
-# discovery fails:
+# transactionally. Guided add supports openai, anthropic, openrouter, and the
+# openai-compatible preset. Only openai-compatible requires a base URL. It
+# performs authenticated discovery, lets you select favourite aliases, and
+# offers manual ALIAS=UPSTREAM entry if discovery fails:
 #   sudo waffle provider add
 #   sudo waffle provider models openrouter --search claude
 #   sudo waffle provider models openrouter --refresh
@@ -27,13 +27,20 @@
 #   sudo waffle provider model remove ALIAS [--replace-with ALIAS]
 #   sudo waffle provider remove CONNECTION
 #
-# `provider models` reuses an owner-only catalogue cache for 24 hours;
-# --refresh requests upstream data and warns when it must return stale data.
-# Cache records are disposable and contain neither provider credentials nor
-# provider configuration. Explicit automation must supply at least one
-# --model ALIAS=UPSTREAM and read credentials from stdin or a root-owned 0600
-# file, never from command-line values. This example deliberately configures
-# no provider, model alias, default_model, utility_model, or secret.
+# `provider models` filters with --search, refreshes upstream data with
+# --refresh, and emits structured output with --json. Its owner-only catalogue
+# cache is reused for 24 hours and is distinct from selected favourite aliases.
+# A failed refresh returns a stale cache with a warning when one exists.
+# Records are derived, non-authoritative discovery data: each contains the
+# connection name, type, base URL, opaque scope, and model descriptors, but
+# contains no API credential. They are disposable; selected favourite aliases
+# remain authoritative configuration. Known exact IDs work directly; unknown
+# numeric or navigation-like IDs use `id:<upstream-id>` to avoid row-number
+# ambiguity. `provider model add` validates one exact ID; --default and
+# --utility assign roles. Explicit automation must supply at least one --model
+# ALIAS=UPSTREAM and read credentials from stdin or a root-owned 0600 file,
+# never from command-line values. This example deliberately configures no
+# provider, model alias, default_model, utility_model, or secret.
 
 [agent]
 default_profile = "main"

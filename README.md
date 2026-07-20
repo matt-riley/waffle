@@ -179,16 +179,24 @@ sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
 ```
 
 Guided enrollment offers the `openai`, `anthropic`, `openrouter`, and
-`openai-compatible` presets. The last requires a custom base URL. Discovery is
-authenticated with the hidden credential, then lets the operator choose
-default, utility, and additional favourite aliases. If discovery fails, the
-same flow offers manual `ALIAS=UPSTREAM` entry.
+`openai-compatible` presets. Only openai-compatible requires a base URL.
+Discovery is authenticated with the hidden credential, then lets the operator
+choose default, utility, and additional favourite aliases. If discovery fails,
+the same flow offers manual `ALIAS=UPSTREAM` entry.
 
-After enrollment, `provider models` reuses an owner-only catalogue cache for
-24 hours. `--refresh` requests a new upstream list; if that refresh fails and
-a previous list exists, Waffle returns the stale list with a warning. These
-cache records are disposable discovery data, not provider configuration or
-credentials.
+After enrollment, `provider models` filters IDs and names with `--search`,
+requests upstream data with `--refresh`, and emits structured cache status and
+model descriptors with `--json`. The owner-only catalogue cache is reused for
+24 hours and is distinct from selected favourite aliases. If refresh fails, a
+stale cache with a warning is returned when a previous valid record exists.
+Cache records are derived, non-authoritative discovery data. Each contains the
+connection name, type, base URL, opaque scope, and model descriptors, but
+contains no API credential.
+
+Known exact IDs work directly in the guided picker. Unknown numeric or
+navigation-like IDs use `id:<upstream-id>` to avoid row-number or navigation
+ambiguity. `provider model add` validates one exact upstream ID; `--default`
+and `--utility` assign its roles transactionally.
 
 Explicit automation supplies every model mapping and reads the credential
 from standard input or a root-owned `0600` file. It does not perform the

@@ -29,13 +29,41 @@ var presetCases = []struct {
 }
 
 func TestProviderDocumentationAcceptance(t *testing.T) {
-	required := []string{
-		"openai-compatible",
-		"openrouter",
+	normalize := func(value string) string {
+		lines := strings.Split(value, "\n")
+		for i, line := range lines {
+			lines[i] = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+		}
+		return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, " ")), " "))
+	}
+	requireAll := func(label, body string, required []string) {
+		t.Helper()
+		body = normalize(body)
+		for _, text := range required {
+			if !strings.Contains(body, normalize(text)) {
+				t.Errorf("%s does not document %q", label, normalize(text))
+			}
+		}
+	}
+
+	documentationRequirements := []string{
+		"only openai-compatible requires a base URL",
 		"provider models",
+		"--search",
 		"--refresh",
-		"provider model add",
+		"--json",
+		"owner-only catalogue cache",
 		"24 hours",
+		"distinct from selected favourite aliases",
+		"stale cache with a warning",
+		"derived, non-authoritative",
+		"contains no API credential",
+		"connection name, type, base URL, opaque scope, and model descriptors",
+		"known exact IDs work directly",
+		"unknown numeric or navigation-like IDs use `id:<upstream-id>`",
+		"provider model add",
+		"--default",
+		"--utility",
 		"ALIAS=UPSTREAM",
 	}
 	for _, path := range []string{
@@ -47,24 +75,22 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, text := range required {
-			if !strings.Contains(string(body), text) {
-				t.Errorf("%s does not document %q", path, text)
-			}
-		}
+		requireAll(path, string(body), documentationRequirements)
 	}
 
 	var usage strings.Builder
 	providerUsage(&usage)
-	for _, text := range []string{
+	requireAll("provider usage", usage.String(), []string{
 		"waffle provider models <connection>",
 		"waffle provider model add <connection> <upstream-id>",
-		"API keys are never\naccepted as command-line values",
-	} {
-		if !strings.Contains(usage.String(), text) {
-			t.Errorf("provider usage does not document %q", text)
-		}
-	}
+		"only openai-compatible requires a base URL",
+		"provider models searches with --search, refreshes upstream data with --refresh, and emits structured output with --json",
+		"owner-only catalogue cache is reused for 24 hours and is distinct from selected favourite aliases",
+		"refresh fails, a stale cache is returned with a warning",
+		"known exact IDs work directly; unknown numeric or navigation-like IDs use id:<upstream-id>",
+		"provider model add validates one upstream ID; --default and --utility assign roles",
+		"API keys are never accepted as command-line values",
+	})
 }
 
 func TestProviderPresetDefaultsAndOverrides(t *testing.T) {
