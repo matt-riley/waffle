@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -79,32 +80,40 @@ type Model struct {
 	ctx     context.Context
 	state   chat.State
 
-	viewport       viewport.Model
-	composer       textarea.Model
-	overlayList    list.Model
-	messages       []messageCard
-	tools          []toolRow
-	palette        []chat.Command
-	overlay        overlayKind
-	overlayResult  chat.Result
-	pendingConfirm chat.ParsedCommand
+	viewport              viewport.Model
+	composer              textarea.Model
+	overlayList           list.Model
+	messages              []messageCard
+	tools                 []toolRow
+	palette               []chat.Command
+	overlay               overlayKind
+	overlayResult         chat.Result
+	pendingConfirm        chat.ParsedCommand
+	deferredCommand       *chat.ParsedCommand
+	confirmNeedsTurnDrain bool
 
-	paletteVisible bool
-	paletteIndex   int
-	turnActive     bool
-	quitting       bool
-	exitArmed      bool
-	connected      bool
-	awaitingAck    bool
-	opened         bool
-	width          int
-	height         int
-	err            error
-	inputTokens    int
-	outputTokens   int
-	theme          theme
-	events         chan tea.Msg
-	closed         *atomic.Bool
+	paletteVisible  bool
+	paletteIndex    int
+	turnActive      bool
+	quitting        bool
+	exitArmed       bool
+	connected       bool
+	awaitingAck     bool
+	opened          bool
+	openResolved    bool
+	width           int
+	height          int
+	err             error
+	inputTokens     int
+	outputTokens    int
+	theme           theme
+	events          chan tea.Msg
+	pumpStop        chan struct{}
+	pumpStopOnce    *sync.Once
+	closed          *atomic.Bool
+	nextOperationID uint64
+	activeTurnID    uint64
+	canceledTurnID  uint64
 }
 
 // New constructs a Focused Conversation model. Backend.Open remains asynchronous
@@ -150,6 +159,7 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 		viewport: vp, composer: composer, overlayList: overlayList,
 		width: width, height: height, theme: newTheme(true, noColor),
 		events: make(chan tea.Msg, 64), closed: &atomic.Bool{},
+		pumpStop: make(chan struct{}), pumpStopOnce: &sync.Once{},
 	}
 	m.resize(width, height)
 	return m
@@ -169,17 +179,17 @@ func newOverlayList(items []list.Item, width, height int, dark, noColor bool) li
 		model.Styles = list.DefaultStyles(dark)
 	}
 	model.SetShowTitle(false)
-	model.SetShowFilter(false)
+	model.SetShowFilter(true)
 	model.SetShowHelp(false)
 	model.SetShowStatusBar(false)
-	model.SetShowPagination(false)
-	model.SetFilteringEnabled(false)
+	model.SetShowPagination(true)
+	model.SetFilteringEnabled(true)
 	return model
 }
 
 // Init opens the backend and asks Bubble Tea for terminal background color.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.openCmd(), tea.RequestBackgroundColor)
+	return tea.Batch(m.openCmd(), tea.RequestBackgroundColor, m.waitEventCmd())
 }
 
 type openMsg struct {
@@ -187,14 +197,23 @@ type openMsg struct {
 	err   error
 }
 
-type eventMsg struct{ event chat.Event }
-type turnDoneMsg struct{ err error }
+type eventMsg struct {
+	operationID uint64
+	event       chat.Event
+}
+type turnDoneMsg struct {
+	operationID uint64
+	err         error
+}
 type commandResultMsg struct {
-	command chat.ParsedCommand
-	result  chat.Result
-	err     error
+	operationID       uint64
+	startedDuringTurn bool
+	command           chat.ParsedCommand
+	result            chat.Result
+	err               error
 }
 type closeDoneMsg struct{ err error }
+type pumpStoppedMsg struct{}
 
 func (m *Model) openCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -203,28 +222,55 @@ func (m *Model) openCmd() tea.Cmd {
 	}
 }
 
-func (m *Model) turnCmd(input string) tea.Cmd {
+func (m *Model) nextOperation() uint64 {
+	m.nextOperationID++
+	return m.nextOperationID
+}
+
+func (m *Model) turnCmd(operationID uint64, input string) tea.Cmd {
 	return func() tea.Msg {
-		err := m.backend.Turn(m.ctx, input, func(event chat.Event) { m.events <- eventMsg{event: event} })
-		m.events <- turnDoneMsg{err: err}
+		err := m.backend.Turn(m.ctx, input, func(event chat.Event) {
+			m.sendOperation(eventMsg{operationID: operationID, event: event})
+		})
+		m.sendOperation(turnDoneMsg{operationID: operationID, err: err})
 		return nil
 	}
 }
 
-func (m *Model) commandCmd(command chat.ParsedCommand) tea.Cmd {
+func (m *Model) commandCmd(operationID uint64, command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
 	return func() tea.Msg {
-		result, err := m.backend.Command(m.ctx, command, func(event chat.Event) { m.events <- eventMsg{event: event} })
-		m.events <- commandResultMsg{command: command, result: result, err: err}
+		result, err := m.backend.Command(m.ctx, command, func(event chat.Event) {
+			m.sendOperation(eventMsg{operationID: operationID, event: event})
+		})
+		m.sendOperation(commandResultMsg{operationID: operationID, startedDuringTurn: startedDuringTurn, command: command, result: result, err: err})
 		return nil
 	}
 }
 
 func (m *Model) waitEventCmd() tea.Cmd {
-	return func() tea.Msg { return <-m.events }
+	return func() tea.Msg {
+		select {
+		case message := <-m.events:
+			return message
+		case <-m.pumpStop:
+			return pumpStoppedMsg{}
+		case <-m.ctx.Done():
+			return pumpStoppedMsg{}
+		}
+	}
+}
+
+func (m *Model) sendOperation(message tea.Msg) {
+	select {
+	case m.events <- message:
+	case <-m.pumpStop:
+	case <-m.ctx.Done():
+	}
 }
 
 func (m *Model) closeCmd() tea.Cmd {
 	return func() tea.Msg {
+		m.pumpStopOnce.Do(func() { close(m.pumpStop) })
 		if !m.closed.CompareAndSwap(false, true) {
 			return closeDoneMsg{}
 		}

@@ -73,13 +73,18 @@ func snapshotModel(width, height int, noColor bool) *Model {
 	m := New(newFakeBackend(state), chat.OpenOptions{}, Options{Width: width, Height: height, NoColor: noColor})
 	m.state, m.connected = state, true
 	m.messages = cardsFromHistory(state.History)
+	blankRows := 8
+	if width < 72 {
+		blankRows = 4
+	}
 	m.messages = append(m.messages,
-		messageCard{role: roleAssistant, text: "## Finding\nThe service could not parse its **database URL**.\n\n- Check `DATABASE_URL`\n- Restart the unit"},
+		messageCard{role: roleAssistant, text: "## Finding\nThe service could not parse its **database URL**." + strings.Repeat("\n", blankRows)},
 		messageCard{role: roleError, text: "Deploy remains unhealthy."},
 	)
 	m.tools = append(m.tools, toolRow{name: "read logs", messageIndex: 1, done: true, byteCount: 2100})
-	m.overlay = overlayHelp
-	m.overlayResult = chat.Result{Title: "Help", Commands: chat.Commands()}
+	m.overlayResult = chat.Result{Text: "Switch to the selected session and preserve all stored history before continuing?", Confirm: true}
+	m.pendingConfirm = chat.ParsedCommand{Name: chat.CommandResume, Args: "01SNAPSHOT"}
+	m.setOverlay(overlayConfirm, nil)
 	m.syncViewport(false)
 	return m
 }

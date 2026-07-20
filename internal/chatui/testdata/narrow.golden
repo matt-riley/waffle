@@ -6,18 +6,18 @@ Explain the failed deploy.
 
 Waffle
 Finding
-The service could not parse its database URL.
-
-• Check DATABASE_URL
-• Restart the unit
-
+    ┌────────────────────────────────────────────┐
+    │ Confirm                                    │
+    │ Switch to the selected session and preser… │
+    │                                            │
+    │ Enter confirm · Esc cancel                 │
+    └────────────────────────────────────────────┘
   ✓ read logs   2.1 KB
 Error
 Deploy remains unhealthy.
-               ┌──────────────────────┐
-               │ Help                 │
-               │ …                    │
-               └──────────────────────┘
+
+
+
 ┌────────────────────────────────────────────────────┐
 │ Ask Waffle…                                        │
 └────────────────────────────────────────────────────┘

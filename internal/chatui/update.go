@@ -14,13 +14,17 @@ import (
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case openMsg:
+		if m.openResolved || m.awaitingAck || m.quitting {
+			return m, nil
+		}
+		m.openResolved = true
 		m.opened = msg.err == nil
 		m.connected = msg.err == nil
+		m.state = msg.state
 		if msg.err != nil {
 			m.disconnect(msg.err)
 			return m, nil
 		}
-		m.state = msg.state
 		m.messages = cardsFromHistory(msg.state.History)
 		m.syncViewport(true)
 		return m, nil
@@ -38,38 +42,81 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize(msg.Width, msg.Height)
 		return m, nil
 	case eventMsg:
-		m.applyEvent(msg.event)
+		m.applyEvent(msg.operationID, msg.event)
 		return m, m.waitEventCmd()
 	case turnDoneMsg:
-		m.turnActive = false
-		if msg.err != nil {
-			m.disconnect(msg.err)
+		matches := msg.operationID == 0 || msg.operationID == m.activeTurnID
+		requestedCancel := matches && m.canceledTurnID != 0 && msg.operationID == m.canceledTurnID
+		if matches {
+			m.turnActive = false
+			m.activeTurnID = 0
+			m.canceledTurnID = 0
+		}
+		if msg.err != nil && matches {
+			switch {
+			case requestedCancel:
+				m.messages = append(m.messages, messageCard{role: roleNotice, text: "Turn cancelled."})
+			case m.state.ConnectionMode == "unix" && isTransportLoss(msg.err):
+				m.disconnect(msg.err)
+			default:
+				m.messages = append(m.messages, messageCard{role: roleError, text: "Turn failed: " + msg.err.Error()})
+			}
 		}
 		m.syncViewport(true)
-		return m, nil
+		var next tea.Cmd
+		if matches && m.deferredCommand != nil && !m.awaitingAck {
+			command := *m.deferredCommand
+			m.deferredCommand = nil
+			next = m.startCommand(command, false)
+		}
+		return m, m.continuePump(next)
 	case commandResultMsg:
 		if msg.err != nil {
 			m.pendingConfirm = chat.ParsedCommand{}
-			m.messages = append(m.messages, messageCard{role: roleError, text: msg.err.Error()})
+			if m.state.ConnectionMode == "unix" && isTransportLoss(msg.err) {
+				m.disconnect(msg.err)
+			} else {
+				m.messages = append(m.messages, messageCard{role: roleError, text: msg.err.Error()})
+			}
 			m.syncViewport(true)
 			if m.quitting {
-				return m, m.closeCmd()
+				return m, m.continuePump(m.closeCmd())
 			}
-			return m, nil
+			return m, m.continuePump(nil)
 		}
-		m.applyResult(msg.command, msg.result)
+		m.applyResult(msg.command, msg.result, msg.startedDuringTurn)
 		if msg.result.ShouldClose || m.quitting {
 			m.quitting = true
-			return m, m.closeCmd()
+			return m, m.continuePump(m.closeCmd())
 		}
-		return m, nil
+		return m, m.continuePump(nil)
 	case closeDoneMsg:
 		if msg.err != nil && m.err == nil {
 			m.err = msg.err
 		}
 		return m, tea.Quit
+	case pumpStoppedMsg:
+		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		updated, cmd := m.viewport.Update(msg)
+		m.viewport = updated
+		if m.overlay == overlayNone {
+			_ = m.composer.Focus()
+		}
+		return m, cmd
+	case tea.PasteMsg:
+		if m.overlay != overlayNone {
+			updated, cmd := m.overlayList.Update(tea.PasteMsg{Content: sanitizeMultiline(msg.Content)})
+			m.overlayList = updated
+			return m, cmd
+		}
+		updated, cmd := m.composer.Update(tea.PasteMsg{Content: sanitizeMultiline(msg.Content)})
+		m.composer = updated
+		m.refreshPalette()
+		m.syncLayout()
+		return m, cmd
 	}
 
 	if m.overlay == overlayNone {
@@ -78,6 +125,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) continuePump(command tea.Cmd) tea.Cmd {
+	if m.quitting {
+		return command
+	}
+	return tea.Batch(command, m.waitEventCmd())
 }
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -95,8 +149,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	key := msg.Key()
+	if m.overlay == overlayNone && (key.Code == tea.KeyPgUp || key.Code == tea.KeyPgDown || key.Mod.Contains(tea.ModCtrl) && (key.Code == tea.KeyUp || key.Code == tea.KeyDown)) {
+		updated, cmd := m.viewport.Update(msg)
+		m.viewport = updated
+		_ = m.composer.Focus()
+		return m, cmd
+	}
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
 		if m.turnActive {
+			m.canceledTurnID = m.activeTurnID
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -118,12 +179,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Code == tea.KeyEscape {
 		if m.turnActive {
+			m.canceledTurnID = m.activeTurnID
 			m.backend.Cancel()
 			return m, nil
 		}
 		if m.overlay != overlayNone || m.paletteVisible {
 			m.overlay, m.paletteVisible = overlayNone, false
 			_ = m.composer.Focus()
+			m.syncLayout()
 			return m, nil
 		}
 	}
@@ -150,10 +213,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.composer.SetValue(name)
 			m.refreshPalette()
 		}
+		m.syncLayout()
 		return m, nil
 	}
 	if key.Mod.Contains(tea.ModAlt) && key.Code == tea.KeyEnter {
 		m.composer.InsertString("\n")
+		m.syncLayout()
 		return m, nil
 	}
 	if key.Code == tea.KeyEnter {
@@ -164,6 +229,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.composer.Update(msg)
 	m.composer = updated
 	m.refreshPalette()
+	m.syncLayout()
 	return m, cmd
 }
 
@@ -187,11 +253,17 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
+	if !m.openResolved || !m.opened || !m.connected {
+		return m, nil
+	}
 
 	command, ok, err := chat.ParseInput(input)
 	if err != nil {
 		m.messages = append(m.messages, messageCard{role: roleError, text: err.Error()})
 		m.syncViewport(true)
+		return m, nil
+	}
+	if m.deferredCommand != nil && (!ok || command.Name != chat.CommandExit) {
 		return m, nil
 	}
 	if m.turnActive && !ok {
@@ -204,25 +276,37 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		if command.Name == chat.CommandExit {
 			m.quitting = true
 		}
-		return m, tea.Batch(m.commandCmd(command), m.waitEventCmd())
+		return m, m.startCommand(command, m.turnActive)
 	}
 
 	m.messages = append(m.messages, messageCard{role: roleUser, text: input})
 	m.turnActive = true
+	operationID := m.nextOperation()
+	m.activeTurnID = operationID
 	m.syncViewport(true)
-	return m, tea.Batch(m.turnCmd(input), m.waitEventCmd())
+	return m, m.turnCmd(operationID, input)
+}
+
+func (m *Model) startCommand(command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
+	return m.commandCmd(m.nextOperation(), command, startedDuringTurn)
 }
 
 func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
-	switch key.Code {
-	case tea.KeyUp:
-		m.overlayList.CursorUp()
-		return m, nil
-	case tea.KeyDown:
-		m.overlayList.CursorDown()
-		return m, nil
-	case tea.KeyEnter:
+	if key.Code == tea.KeyEnter && m.overlayList.FilterState() != list.Filtering {
+		if m.overlay == overlayConfirm && m.confirmNeedsTurnDrain {
+			command := m.pendingConfirm
+			m.confirmNeedsTurnDrain = false
+			m.overlay = overlayNone
+			_ = m.composer.Focus()
+			if m.turnActive {
+				m.canceledTurnID = m.activeTurnID
+				m.backend.Cancel()
+				m.deferredCommand = &command
+				return m, nil
+			}
+			return m, m.startCommand(command, false)
+		}
 		command, ok := m.overlaySelection()
 		if !ok {
 			m.overlay = overlayNone
@@ -231,9 +315,24 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.overlay = overlayNone
 		_ = m.composer.Focus()
-		return m, tea.Batch(m.commandCmd(command), m.waitEventCmd())
+		return m, m.startCommand(command, m.turnActive)
 	}
-	return m, nil
+	updated, cmd := m.overlayList.Update(msg)
+	m.overlayList = updated
+	return m, cmd
+}
+
+func isTransportLoss(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"service disconnected", "connection reset", "broken pipe", "unexpected eof", "closed network connection", "malformed frame", "protocol version"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) overlaySelection() (chat.ParsedCommand, bool) {
@@ -258,7 +357,7 @@ func (m *Model) overlaySelection() (chat.ParsedCommand, bool) {
 	}
 }
 
-func (m *Model) applyEvent(event chat.Event) {
+func (m *Model) applyEvent(operationID uint64, event chat.Event) {
 	switch event.Kind {
 	case chat.EventTextDelta:
 		if len(m.messages) == 0 || m.messages[len(m.messages)-1].role != roleAssistant {
@@ -290,7 +389,6 @@ func (m *Model) applyEvent(event chat.Event) {
 			m.state = *event.State
 		}
 	case chat.EventTurnDone:
-		m.turnActive = false
 		m.inputTokens += event.Usage.InputTokens
 		m.outputTokens += event.Usage.OutputTokens
 	}
@@ -304,9 +402,20 @@ func (m *Model) currentAssistantIndex() int {
 	return len(m.messages)
 }
 
-func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result) {
+func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result, startedDuringTurn ...bool) {
+	wasDuringTurn := m.turnActive
+	if len(startedDuringTurn) > 0 {
+		wasDuringTurn = startedDuringTurn[0]
+	}
 	if result.State != nil {
 		m.state = *result.State
+		if command.Name == chat.CommandNew || command.Name == chat.CommandResume {
+			m.messages = cardsFromHistory(result.State.History)
+			m.tools = nil
+			m.inputTokens, m.outputTokens = 0, 0
+			m.turnActive, m.activeTurnID = false, 0
+			m.deferredCommand = nil
+		}
 	}
 	if result.Text != "" {
 		m.messages = append(m.messages, messageCard{role: roleNotice, text: result.Text})
@@ -316,9 +425,14 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result) {
 	switch {
 	case result.Confirm:
 		m.pendingConfirm = command
+		m.confirmNeedsTurnDrain = wasDuringTurn
 		m.setOverlay(overlayConfirm, nil)
 	case command.Name == chat.CommandHelp:
-		m.setOverlay(overlayHelp, commandItems(result.Commands))
+		commands := result.Commands
+		if len(commands) == 0 {
+			commands = chat.Commands()
+		}
+		m.setOverlay(overlayHelp, commandItems(commands))
 	case command.Name == chat.CommandModels || command.Name == chat.CommandModel && command.Args == "":
 		m.setOverlay(overlayModels, modelItems(result.Models))
 	case command.Name == chat.CommandSessions || command.Name == chat.CommandResume && command.Args == "":
@@ -334,6 +448,7 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result) {
 
 func (m *Model) setOverlay(kind overlayKind, items []list.Item) {
 	m.overlay = kind
+	m.overlayList.ResetFilter()
 	m.overlayList.SetItems(items)
 	m.overlayList.Select(0)
 	m.composer.Blur()
@@ -342,21 +457,36 @@ func (m *Model) setOverlay(kind overlayKind, items []list.Item) {
 func commandItems(commands []chat.Command) []list.Item {
 	items := make([]list.Item, 0, len(commands))
 	for _, command := range commands {
-		items = append(items, overlayItem{title: command.Usage, detail: command.Description})
+		items = append(items, overlayItem{title: sanitizeLine(command.Usage), detail: sanitizeLine(command.Description)})
 	}
 	return items
 }
 func modelItems(models []chat.Model) []list.Item {
 	items := make([]list.Item, 0, len(models))
 	for _, model := range models {
-		items = append(items, overlayItem{title: model.Alias, detail: model.Provider + " · " + model.Upstream, value: model.Alias})
+		title := sanitizeLine(model.Alias)
+		if model.Current {
+			title = "✓ " + title
+		}
+		items = append(items, overlayItem{title: title, detail: sanitizeLine(model.Provider) + " · " + sanitizeLine(model.Upstream), value: model.Alias})
 	}
 	return items
 }
 func sessionItems(sessions []chat.Session) []list.Item {
 	items := make([]list.Item, 0, len(sessions))
 	for _, session := range sessions {
-		items = append(items, overlayItem{title: session.Title, detail: session.ID + " · " + session.ModelAlias, value: session.ID})
+		title := sanitizeLine(session.Title)
+		if title == "" {
+			title = sanitizeLine(session.ID)
+		}
+		detail := sanitizeLine(session.ID) + " · " + sanitizeLine(session.ModelAlias)
+		if summary := sanitizeLine(session.Summary); summary != "" {
+			detail += " · " + summary
+		}
+		if !session.UpdatedAt.IsZero() {
+			detail += " · " + session.UpdatedAt.UTC().Format("2006-01-02 15:04Z")
+		}
+		items = append(items, overlayItem{title: title, detail: detail, value: session.ID})
 	}
 	return items
 }
@@ -381,9 +511,9 @@ func (m *Model) resize(width, height int) {
 	offset := m.viewport.YOffset()
 	contentWidth := max(20, m.width-4)
 	m.viewport.SetWidth(contentWidth)
-	m.viewport.SetHeight(max(3, m.height-7))
 	m.composer.SetWidth(max(12, contentWidth-4))
 	m.overlayList.SetSize(min(max(20, m.width-12), 76), min(max(5, m.height-10), 16))
+	m.syncLayout()
 	m.syncViewport(wasBottom)
 	if !wasBottom {
 		m.viewport.SetYOffset(offset)
@@ -393,7 +523,20 @@ func (m *Model) resize(width, height int) {
 	}
 }
 
+func (m *Model) syncLayout() {
+	headerHeight := strings.Count(m.renderHeader(max(20, m.width-4)), "\n") + 1
+	composerHeight := strings.Count(m.renderComposer(max(20, m.width-4)), "\n") + 1
+	paletteHeight := 0
+	if m.paletteVisible {
+		paletteHeight = 1
+	}
+	fixed := headerHeight + 1 + composerHeight + 1 + paletteHeight
+	m.viewport.SetHeight(max(1, m.height-fixed))
+	m.viewport.YPosition = headerHeight + 1
+}
+
 func (m *Model) syncViewport(follow bool) {
+	m.syncLayout()
 	m.viewport.SetContent(m.renderTranscript())
 	if follow {
 		m.viewport.GotoBottom()

@@ -7,7 +7,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/matt-riley/waffle/internal/chat"
 )
 
 // View returns a declarative Bubble Tea v2 alternate-screen view.
@@ -28,26 +27,30 @@ func (m *Model) View() tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "Waffle chat"
+	view.MouseMode = tea.MouseModeCellMotion
+	if !m.theme.noColor {
+		view.BackgroundColor = m.theme.surface
+	}
 	return view
 }
 
 func (m *Model) renderHeader(width int) string {
-	title := m.state.Title
+	title := sanitizeLine(m.state.Title)
 	if title == "" {
 		title = "Focused Conversation"
 	}
-	session := m.state.SessionID
+	session := sanitizeLine(m.state.SessionID)
 	if len(session) > 8 {
 		session = session[:8]
 	}
 	if session != "" {
 		title += " · " + session
 	}
-	model := m.state.ModelAlias
+	model := sanitizeLine(m.state.ModelAlias)
 	if model == "" {
 		model = "model pending"
 	}
-	profile := m.state.Profile
+	profile := sanitizeLine(m.state.Profile)
 	if profile == "" {
 		profile = "main"
 	}
@@ -87,10 +90,7 @@ func (m *Model) renderTranscript() string {
 		case roleError:
 			label = "Error"
 		}
-		styledLabel := m.theme.brandText(label)
-		if card.role == roleError {
-			styledLabel = m.theme.errorText(label)
-		}
+		styledLabel := m.theme.roleText(card.role, label)
 		out = append(out, styledLabel, renderMarkdown(card.text, m.theme, width), "")
 		if card.role == roleAssistant {
 			for toolIndex < len(m.tools) && m.tools[toolIndex].messageIndex == messageIndex {
@@ -114,7 +114,7 @@ func (m *Model) renderTool(tool toolRow) string {
 	if tool.failed {
 		status = "✗"
 	}
-	row := status + " " + tool.name
+	row := status + " " + sanitizeLine(tool.name)
 	if tool.byteCount > 0 {
 		row += "   " + compactBytes(tool.byteCount)
 	}
@@ -141,7 +141,9 @@ func (m *Model) renderComposer(width int) string {
 	for i, line := range lines {
 		lines[i] = "│ " + ansi.Truncate(line, inner, "…") + strings.Repeat(" ", max(0, inner-lipgloss.Width(ansi.Truncate(line, inner, "…")))) + " │"
 	}
-	return "┌" + strings.Repeat("─", inner+2) + "┐\n" + strings.Join(lines, "\n") + "\n└" + strings.Repeat("─", inner+2) + "┘"
+	top := m.theme.borderText("┌" + strings.Repeat("─", inner+2) + "┐")
+	bottom := m.theme.borderText("└" + strings.Repeat("─", inner+2) + "┘")
+	return top + "\n" + strings.Join(lines, "\n") + "\n" + bottom
 }
 
 func (m *Model) renderFooter(width int) string {
@@ -169,7 +171,7 @@ func (m *Model) renderPalette(width int) string {
 		if i == m.paletteIndex {
 			prefix = "› "
 		}
-		values = append(values, prefix+command.Usage)
+		values = append(values, prefix+sanitizeLine(command.Usage))
 	}
 	return m.theme.mutedText("Commands: " + ansi.Truncate(strings.Join(values, "  "), width-10, "…"))
 }
@@ -177,10 +179,7 @@ func (m *Model) renderPalette(width int) string {
 func (m *Model) renderOverlay(width int) string {
 	maxWidth := min(max(24, width-8), 72)
 	title, body := m.overlayContent()
-	maxBodyRows := 7
-	if m.width < 72 {
-		maxBodyRows = 1
-	}
+	maxBodyRows := min(12, max(4, m.viewport.Height()-4))
 	body = clipLines(body, maxBodyRows)
 	boxWidth := min(maxWidth, max(24, lipgloss.Width(title)+4))
 	for _, line := range strings.Split(body, "\n") {
@@ -201,22 +200,14 @@ func (m *Model) renderOverlay(width int) string {
 func (m *Model) overlayContent() (string, string) {
 	switch m.overlay {
 	case overlayHelp:
-		commands := m.overlayResult.Commands
-		if len(commands) == 0 {
-			commands = chat.Commands()
-		}
-		var rows []string
-		for _, command := range commands {
-			rows = append(rows, fmt.Sprintf("%-20s %s", command.Usage, command.Description))
-		}
-		return "Help", strings.Join(rows, "\n")
+		return "Help", m.overlayList.View()
 	case overlayModels:
 		return "Models", m.overlayList.View()
 	case overlaySessions:
 		return "Sessions", m.overlayList.View()
 	case overlayPermissions:
 		if p := m.overlayResult.Permissions; p != nil {
-			return "Permissions", fmt.Sprintf("Sandbox: %s\nAllow: %s\nDeny: %s\nDeny prefixes: %s", p.SandboxMode, strings.Join(p.Allow, ", "), strings.Join(p.Deny, ", "), strings.Join(p.DenyPrefixes, ", "))
+			return "Permissions", fmt.Sprintf("Sandbox: %s\nAllow: %s\nDeny: %s\nDeny prefixes: %s", sanitizeLine(p.SandboxMode), sanitizeLines(p.Allow), sanitizeLines(p.Deny), sanitizeLines(p.DenyPrefixes))
 		}
 		return "Permissions", "No permission details available."
 	case overlayConfirm:
@@ -224,10 +215,18 @@ func (m *Model) overlayContent() (string, string) {
 		if text == "" {
 			text = "Confirm this action?"
 		}
-		return "Confirm", text + "\n\nEnter confirm · Esc cancel"
+		return "Confirm", sanitizeMultiline(text) + "\n\nEnter confirm · Esc cancel"
 	default:
 		return "", ""
 	}
+}
+
+func sanitizeLines(values []string) string {
+	clean := make([]string, len(values))
+	for i, value := range values {
+		clean[i] = sanitizeLine(value)
+	}
+	return strings.Join(clean, ", ")
 }
 
 func padOverlay(value string, width int) string {
@@ -250,14 +249,15 @@ func overlayBody(body, overlay string, height int) string {
 	if len(overlayLines) > height {
 		overlayLines = overlayLines[:height]
 	}
-	keep := max(0, height-len(overlayLines))
-	if len(bodyLines) > keep {
-		bodyLines = bodyLines[:keep]
+	for len(bodyLines) < height {
+		bodyLines = append(bodyLines, "")
 	}
-	lines := append(bodyLines, overlayLines...)
-	for len(lines) < height {
-		lines = append(lines, "")
+	if len(bodyLines) > height {
+		bodyLines = bodyLines[:height]
 	}
+	start := max(0, (height-len(overlayLines))/2)
+	lines := bodyLines
+	copy(lines[start:start+len(overlayLines)], overlayLines)
 	return strings.Join(lines, "\n")
 }
 

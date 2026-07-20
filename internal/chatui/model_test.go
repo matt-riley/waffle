@@ -82,6 +82,7 @@ func modified(code rune, mod tea.KeyMod) tea.KeyPressMsg {
 func TestModelHandlesTurnCancelAndExit(t *testing.T) {
 	backend := newFakeBackend(chat.State{SessionID: "01TEST", ModelAlias: "gpt"})
 	m := New(backend, chat.OpenOptions{}, Options{Width: 100, Height: 30})
+	m.openResolved, m.opened, m.connected = true, true, true
 	m.composer.SetValue("hello")
 	m = updateForTest(t, m, key(tea.KeyEnter))
 	if !m.turnActive {
@@ -136,6 +137,7 @@ func TestModelSlashCompletionFiltersNavigatesAndCompletes(t *testing.T) {
 func TestModelExitKeysAndMultiline(t *testing.T) {
 	backend := newFakeBackend(chat.State{})
 	m := New(backend, chat.OpenOptions{}, Options{Width: 100, Height: 30})
+	m.openResolved, m.opened, m.connected = true, true, true
 	m.composer.SetValue("work")
 	m = updateForTest(t, m, key(tea.KeyEnter))
 	m = updateForTest(t, m, modified('c', tea.ModCtrl))
@@ -205,7 +207,8 @@ func TestModelResizeStreamsToolsAndDisconnect(t *testing.T) {
 	if len(m.tools) != 1 || !m.tools[0].done {
 		t.Fatalf("tools = %+v", m.tools)
 	}
-	m = updateForTest(t, m, turnDoneMsg{err: errors.New("socket lost")})
+	m.state.ConnectionMode = "unix"
+	m = updateForTest(t, m, turnDoneMsg{err: errors.New("chat service disconnected")})
 	if m.connected || !m.awaitingAck || m.err == nil {
 		t.Fatalf("disconnect state: connected=%v ack=%v err=%v", m.connected, m.awaitingAck, m.err)
 	}
@@ -219,8 +222,8 @@ func TestModelResizeStreamsToolsAndDisconnect(t *testing.T) {
 func TestModelAssociatesToolRowsWithCurrentAssistantCard(t *testing.T) {
 	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30})
 	m.messages = []messageCard{{role: roleAssistant, text: "old answer"}, {role: roleUser, text: "new question"}}
-	m.applyEvent(chat.Event{Kind: chat.EventTextDelta, Text: "new answer"})
-	m.applyEvent(chat.Event{Kind: chat.EventToolStarted, ToolName: "inspect unit"})
+	m.applyEvent(0, chat.Event{Kind: chat.EventTextDelta, Text: "new answer"})
+	m.applyEvent(0, chat.Event{Kind: chat.EventToolStarted, ToolName: "inspect unit"})
 	if got, want := m.tools[0].messageIndex, len(m.messages)-1; got != want {
 		t.Fatalf("tool message index = %d, want %d", got, want)
 	}
@@ -241,7 +244,7 @@ func TestModelHeaderConnectionAndFooterLifecycle(t *testing.T) {
 		t.Fatalf("busy footer = %q", footer)
 	}
 	m.turnActive = false
-	m.applyEvent(chat.Event{Kind: chat.EventTurnDone, Usage: llm.Usage{InputTokens: 12, OutputTokens: 7}})
+	m.applyEvent(0, chat.Event{Kind: chat.EventTurnDone, Usage: llm.Usage{InputTokens: 12, OutputTokens: 7}})
 	if footer := m.renderFooter(96); !strings.Contains(footer, "12 in · 7 out") {
 		t.Fatalf("usage footer = %q", footer)
 	}

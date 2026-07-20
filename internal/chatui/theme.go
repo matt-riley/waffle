@@ -7,9 +7,9 @@ import (
 )
 
 type theme struct {
-	noColor                                                        bool
-	dark                                                           bool
-	brand, muted, user, assistant, notice, danger, success, border color.Color
+	noColor                                                                 bool
+	dark                                                                    bool
+	brand, muted, user, assistant, notice, danger, success, border, surface color.Color
 }
 
 func newTheme(dark, noColor bool) theme {
@@ -26,6 +26,7 @@ func newTheme(dark, noColor bool) theme {
 		t.danger = lipgloss.Color("203")
 		t.success = lipgloss.Color("114")
 		t.border = lipgloss.Color("240")
+		t.surface = lipgloss.Color("#101827")
 	} else {
 		t.brand = lipgloss.Color("127")
 		t.muted = lipgloss.Color("243")
@@ -35,6 +36,7 @@ func newTheme(dark, noColor bool) theme {
 		t.danger = lipgloss.Color("160")
 		t.success = lipgloss.Color("28")
 		t.border = lipgloss.Color("248")
+		t.surface = lipgloss.Color("#fffaf0")
 	}
 	return t
 }
@@ -54,3 +56,18 @@ func (t theme) brandText(value string) string   { return t.style(value, t.brand,
 func (t theme) mutedText(value string) string   { return t.style(value, t.muted, false) }
 func (t theme) errorText(value string) string   { return t.style(value, t.danger, false) }
 func (t theme) successText(value string) string { return t.style(value, t.success, false) }
+func (t theme) roleText(role cardRole, value string) string {
+	switch role {
+	case roleUser:
+		return t.style(value, t.user, true)
+	case roleAssistant:
+		return t.style(value, t.assistant, true)
+	case roleNotice:
+		return t.style(value, t.notice, true)
+	case roleError:
+		return t.style(value, t.danger, true)
+	default:
+		return value
+	}
+}
+func (t theme) borderText(value string) string { return t.style(value, t.border, false) }

@@ -7,22 +7,23 @@ Waffle
 Finding
 The service could not parse its database URL.
 
-• Check DATABASE_URL
-• Restart the unit
 
+
+            ┌──────────────────────────────────────────────────────────────────────┐
+            │ Confirm                                                              │
+            │ Switch to the selected session and preserve all stored history befo… │
+            │                                                                      │
+            │ Enter confirm · Esc cancel                                           │
+            └──────────────────────────────────────────────────────────────────────┘
   ✓ read logs   2.1 KB
 Error
 Deploy remains unhealthy.
-                       ┌───────────────────────────────────────────────┐
-                       │ Help                                          │
-                       │ /help                show commands and keys   │
-                       │ /exit                finish and close chat    │
-                       │ /model [alias]       choose the session model │
-                       │ /models              list configured models   │
-                       │ /new                 start a new session      │
-                       │ /sessions            list recent sessions     │
-                       │ …                                             │
-                       └───────────────────────────────────────────────┘
+
+
+
+
+
+
 ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Ask Waffle…                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -18,7 +18,7 @@ func renderMarkdown(input string, palette theme, width int) string {
 	if width < 8 {
 		width = 8
 	}
-	lines := strings.Split(strings.ReplaceAll(input, "\r\n", "\n"), "\n")
+	lines := strings.Split(sanitizeMultiline(input), "\n")
 	inFence := false
 	var out []string
 	for _, raw := range lines {
