@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.0](https://github.com/matt-riley/waffle/compare/v0.2.0...v0.3.0) (2026-07-20)
+
+
+### Features
+
+* add provider catalogue presets ([04d33ca](https://github.com/matt-riley/waffle/commit/04d33cae4bd11a69cc0e3bf37a0ca709d1397678))
+* add provider model catalogue domain ([174ef45](https://github.com/matt-riley/waffle/commit/174ef45cb0db369aedd64d2d0e4304d19e2333c2))
+* add transactional provider model favourites ([53aeaa3](https://github.com/matt-riley/waffle/commit/53aeaa36db47c9c921a8b50aa9ede256a8de6bb7))
+* browse and favourite provider models ([8ba39a8](https://github.com/matt-riley/waffle/commit/8ba39a8247a5caf54b6e609c91707741f88f513b))
+* cache provider model catalogues ([f53613b](https://github.com/matt-riley/waffle/commit/f53613bf570bff3c2ce4a887702c0a4d1654f89a))
+* discover Anthropic model catalogues ([62a92b2](https://github.com/matt-riley/waffle/commit/62a92b2e709d77650f7b5d39b207f44ee4665ae7))
+* discover OpenAI-compatible model catalogues ([222698e](https://github.com/matt-riley/waffle/commit/222698e1951161be22e42d63243ecdd876ce9d2f))
+* guide provider enrollment with model discovery ([b5c7587](https://github.com/matt-riley/waffle/commit/b5c75876304c222ccc44a3e219d880b6604eb0a0))
+* simplify managed multi-provider deployment ([3232e6d](https://github.com/matt-riley/waffle/commit/3232e6d27fa4ca4c333ae02df160d17f46361daf))
+
+
+### Bug Fixes
+
+* allow headless gateway startup ([37457d8](https://github.com/matt-riley/waffle/commit/37457d898aa5ccc10b6dfe90f50d01befe9fe6dd))
+* allow headless identity generation ([8e8793b](https://github.com/matt-riley/waffle/commit/8e8793bf42f06351b58396491ef56e89e81ed923))
+* close model catalogue review findings ([5ef9939](https://github.com/matt-riley/waffle/commit/5ef9939b2fd834e114c44c3b7a3fa5b70c74f75a))
+* harden guided provider discovery ([218242e](https://github.com/matt-riley/waffle/commit/218242ec0d5de4eed3b0f85c4d210280fe726a25))
+* harden model catalogue cache ([fc9b201](https://github.com/matt-riley/waffle/commit/fc9b201f44e626b4aa92e3222306b1abf6d14238))
+* harden provider catalogue boundaries ([95f2a59](https://github.com/matt-riley/waffle/commit/95f2a59594e49fdd83ec24a318ca24caad76e3ed))
+* harden provider model favourite transactions ([838d9d5](https://github.com/matt-riley/waffle/commit/838d9d51f64af940afbeea816d08dee3bd593c3e))
+* honor empty provider registry in chat ([4e599b0](https://github.com/matt-riley/waffle/commit/4e599b007cbfefc50092c7215c8b9d6293c6398a))
+* initialize sandbox queue before Docker ([85c8b89](https://github.com/matt-riley/waffle/commit/85c8b8908ef9b07f57e9a6a0df7195124f78c4fd))
+* make infra handoff opt-in ([06b80eb](https://github.com/matt-riley/waffle/commit/06b80eb915d71476c0778b9ff26abcc86513c14f))
+* prevent Anthropic catalogue error leaks ([2c9d270](https://github.com/matt-riley/waffle/commit/2c9d2707ce88f83280affb17848390fe1c95b3ca))
+* redact credentials from catalogue errors ([bcbd8db](https://github.com/matt-riley/waffle/commit/bcbd8db0974d32fd2dfd73432312f3cad1e9e2be))
+* reject providerless chat explicitly ([edee19d](https://github.com/matt-riley/waffle/commit/edee19d57c595db9d70d1a7126dd5aaaadadc7f8))
+* satisfy provider catalogue lint checks ([562f0ce](https://github.com/matt-riley/waffle/commit/562f0ce77e853ad18c14215364d276f83370de19))
+
 ## [0.2.0](https://github.com/matt-riley/waffle/compare/v0.1.0...v0.2.0) (2026-07-18)
 
 
