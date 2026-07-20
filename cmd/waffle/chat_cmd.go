@@ -143,15 +143,14 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 	}()
 
-	// Task 7 replaces the interactive branch with the Focused Conversation
-	// renderer. Until then the deterministic renderer remains the only one;
-	// computing the mode here keeps all routing inputs side-effect free and
-	// gives the TUI wiring one tested decision point.
-	_ = shouldRunPlain(options, stdin, stdout, term.IsTerminal)
-	return runPlainChat(ctx, backend, chatpkg.OpenOptions{
+	open := chatpkg.OpenOptions{
 		Continue: options.Continue,
 		Profile:  options.Profile,
-	}, stdin, stdout, stderr)
+	}
+	if shouldRunPlain(options, stdin, stdout, term.IsTerminal) {
+		return runPlainChat(ctx, backend, open, stdin, stdout, stderr)
+	}
+	return runTUIChat(ctx, backend, open, stdin, stdout)
 }
 
 func openChatBackend(ctx context.Context, options chatOptions) (chatpkg.Backend, func() error, error) {

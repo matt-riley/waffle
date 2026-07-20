@@ -1,0 +1,24 @@
+ Waffle  Focused deploy · 01SNAPSH
+ gpt · main · direct
+──────────────────────────────────────────────────────
+You
+Explain the failed deploy.
+
+Waffle
+Finding
+The service could not parse its database URL.
+
+• Check DATABASE_URL
+• Restart the unit
+
+  ✓ read logs   2.1 KB
+Error
+Deploy remains unhealthy.
+               ┌──────────────────────┐
+               │ Help                 │
+               │ …                    │
+               └──────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Ask Waffle…                                        │
+└────────────────────────────────────────────────────┘
+/help  /model  /sessions
