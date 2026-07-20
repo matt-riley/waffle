@@ -3,6 +3,8 @@ package chatui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"image/color"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/llm"
 )
 
@@ -182,6 +185,169 @@ func TestModelSinglePumpPreservesConcurrentOperationOrderAndRejectsStaleDone(t *
 	}
 }
 
+func TestModelActiveExitKeepsPumpUntilShouldCloseAndQuitsOnce(t *testing.T) {
+	turnStarted, exitStarted := make(chan struct{}), make(chan struct{})
+	turnRelease, exitRelease := make(chan struct{}), make(chan struct{})
+	var turnReleaseOnce, exitReleaseOnce sync.Once
+	defer turnReleaseOnce.Do(func() { close(turnRelease) })
+	defer exitReleaseOnce.Do(func() { close(exitRelease) })
+	backend := &asyncBackend{}
+	backend.turn = func(_ string, emit func(chat.Event)) error {
+		close(turnStarted)
+		<-turnRelease
+		emit(chat.Event{Kind: chat.EventTurnDone, IsError: true})
+		return &chatwire.RemoteError{Code: "turn_failed", Message: "chat turn failed"}
+	}
+	backend.command = func(command chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+		if command.Name != chat.CommandExit {
+			return chat.Result{}, assertionError("unexpected command")
+		}
+		close(exitStarted)
+		<-exitRelease
+		emit(chat.Event{Kind: chat.EventNotice, Text: "Session summary saved."})
+		return chat.Result{ShouldClose: true}, nil
+	}
+	m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.state.ConnectionMode = "unix"
+	m.composer.SetValue("active turn")
+	updated, turnCmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	turnDone := runCommandAsync(turnCmd)
+	<-turnStarted
+	m.composer.SetValue("/exit")
+	updated, exitCmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	exitDone := runCommandAsync(exitCmd)
+	<-exitStarted
+	pump := m.waitEventCmd()
+	turnReleaseOnce.Do(func() { close(turnRelease) })
+	m, pump, _ = consumePump(t, m, pump)
+	m, pump, _ = consumePump(t, m, pump)
+	if pump == nil {
+		t.Fatal("active turn completion abandoned the sole pump before /exit returned")
+	}
+	exitReleaseOnce.Do(func() { close(exitRelease) })
+	m, pump, _ = consumePump(t, m, pump)
+	nextModel, closeCmd, _ := consumePump(t, m, pump)
+	m = nextModel
+	if closeCmd == nil {
+		t.Fatal("/exit ShouldClose did not start backend close")
+	}
+	if got := m.messages[len(m.messages)-1].text; got != "Session summary saved." {
+		t.Fatalf("exit notice was not delivered before close: %q", got)
+	}
+	closeMessage := closeCmd()
+	_, quitCmd := m.Update(closeMessage)
+	if quitCmd == nil {
+		t.Fatal("backend close did not return tea.Quit")
+	}
+	quitMessage := quitCmd()
+	if _, ok := quitMessage.(tea.QuitMsg); !ok {
+		t.Fatalf("quit command returned %T", quitMessage)
+	}
+	<-turnDone
+	<-exitDone
+	backend.mu.Lock()
+	closeCalls := backend.closeCalls
+	backend.mu.Unlock()
+	if closeCalls != 1 {
+		t.Fatalf("backend Close calls=%d want 1", closeCalls)
+	}
+}
+
+func TestModelUnixErrorsUseTypedConnectionSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		command    bool
+		err        error
+		wantUsable bool
+	}{
+		{name: "turn remote failure", mode: "unix", err: &chatwire.RemoteError{Code: "turn_failed", Message: "chat turn failed"}, wantUsable: true},
+		{name: "turn oversized frame", mode: "unix", err: chatwire.ErrFrameTooLarge},
+		{name: "turn malformed frame", mode: "unix", err: fmt.Errorf("decode: %w", chatwire.ErrMalformedFrame)},
+		{name: "turn invalid frame", mode: "unix", err: chatwire.ErrFrameType},
+		{name: "turn closed client", mode: "unix", err: errors.New("chat service disconnected")},
+		{name: "turn timeout", mode: "unix", err: context.DeadlineExceeded},
+		{name: "direct provider timeout", mode: "direct", err: context.DeadlineExceeded, wantUsable: true},
+		{name: "command remote failure", mode: "unix", command: true, err: &chatwire.RemoteError{Code: "command_failed", Message: "command failed"}, wantUsable: true},
+		{name: "command socket timeout", mode: "unix", command: true, err: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &asyncBackend{}
+			backend.turn = func(string, func(chat.Event)) error { return tt.err }
+			backend.command = func(chat.ParsedCommand, func(chat.Event)) (chat.Result, error) { return chat.Result{}, tt.err }
+			m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
+			m.openResolved, m.opened, m.connected = true, true, true
+			m.state.ConnectionMode = tt.mode
+			if tt.command {
+				m.composer.SetValue("/help")
+			} else {
+				m.composer.SetValue("turn")
+			}
+			updated, operation := m.Update(key(tea.KeyEnter))
+			m = updated.(*Model)
+			done := runCommandAsync(operation)
+			m, _, _ = consumePump(t, m, m.waitEventCmd())
+			<-done
+			if m.connected != tt.wantUsable || m.awaitingAck == tt.wantUsable {
+				t.Fatalf("connection usable=%v awaitingAck=%v want usable=%v err=%v", m.connected, m.awaitingAck, tt.wantUsable, m.err)
+			}
+			m.pumpStopOnce.Do(func() { close(m.pumpStop) })
+		})
+	}
+}
+
+func TestModelCancelAfterTerminalEventDoesNotMaskTurnFailure(t *testing.T) {
+	terminalSent, finishTurn := make(chan struct{}), make(chan struct{})
+	backend := &asyncBackend{}
+	backend.turn = func(_ string, emit func(chat.Event)) error {
+		emit(chat.Event{Kind: chat.EventTurnDone, IsError: true})
+		close(terminalSent)
+		<-finishTurn
+		return assertionError("provider exploded")
+	}
+	backend.command = func(chat.ParsedCommand, func(chat.Event)) (chat.Result, error) { return chat.Result{}, nil }
+	m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.composer.SetValue("turn")
+	updated, turnCmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	done := runCommandAsync(turnCmd)
+	<-terminalSent
+	m, pump, _ := consumePump(t, m, m.waitEventCmd())
+	m = updateForTest(t, m, key(tea.KeyEscape))
+	close(finishTurn)
+	m, _, _ = consumePump(t, m, pump)
+	<-done
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "Turn failed: provider exploded") {
+		t.Fatalf("late cancellation masked terminal failure: %q", got)
+	}
+	m.pumpStopOnce.Do(func() { close(m.pumpStop) })
+}
+
+func TestModelConfirmationAckAfterTerminalEventDoesNotMaskTurnFailure(t *testing.T) {
+	backend := newFakeBackend(chat.State{})
+	m := New(backend, chat.OpenOptions{}, Options{Width: 80, Height: 24})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.turnActive, m.activeTurnID = true, 17
+	command := chat.ParsedCommand{Name: chat.CommandNew}
+	m.applyResult(command, chat.Result{Text: "Start a new session?", Confirm: true}, true)
+	m = updateForTest(t, m, eventMsg{operationID: 17, event: chat.Event{Kind: chat.EventTurnDone, IsError: true}})
+	updated, ackCmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	if ackCmd != nil || m.deferredCommand == nil {
+		t.Fatalf("confirmation ack cmd=%v deferred=%+v", ackCmd != nil, m.deferredCommand)
+	}
+	m = updateForTest(t, m, turnDoneMsg{operationID: 17, err: &chatwire.RemoteError{Code: "turn_failed", Message: "provider exploded"}})
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "Turn failed: chat service turn_failed: provider exploded") {
+		t.Fatalf("late confirmation cancellation masked terminal failure: %q", got)
+	}
+	m.pumpStopOnce.Do(func() { close(m.pumpStop) })
+}
+
 func TestModelExecutedActiveNewAndResumeConfirmationsDrainTurn(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -330,6 +496,13 @@ func TestModelExecutedCancellationStaysConnectedAndTransportLossDisconnects(t *t
 	m = updateForTest(t, m, turnDoneMsg{operationID: 11, err: errors.New("provider connection reset by peer")})
 	if !m.connected || m.awaitingAck {
 		t.Fatal("direct provider error masqueraded as backend transport loss")
+	}
+	m = New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{})
+	m.openResolved, m.opened, m.connected, m.turnActive, m.activeTurnID, m.canceledTurnID = true, true, true, true, 12, 12
+	m.state.ConnectionMode = "unix"
+	m = updateForTest(t, m, turnDoneMsg{operationID: 12, err: chatwire.ErrFrameTooLarge})
+	if m.connected || !m.awaitingAck {
+		t.Fatal("requested cancel masked simultaneous Unix terminal failure")
 	}
 }
 
@@ -525,8 +698,8 @@ func TestOverlaySupportsSearchNavigationAndVerticalCentering(t *testing.T) {
 	}
 	m.applyResult(chat.ParsedCommand{Name: chat.CommandHelp}, chat.Result{Commands: chat.Commands()})
 	m = updateForTest(t, m, key(tea.KeyEnd))
-	if rendered := m.renderOverlay(54); !strings.Contains(rendered, "/workset") {
-		t.Fatalf("last help command is unreachable:\n%s", rendered)
+	if rendered := m.renderOverlay(54); !strings.Contains(rendered, "PageUp/PageDown") {
+		t.Fatalf("last help reference is unreachable:\n%s", rendered)
 	}
 	body := overlayBody(strings.Repeat("transcript\n", 20), m.renderOverlay(76), 18)
 	lines := strings.Split(body, "\n")
@@ -546,6 +719,62 @@ func TestOverlaySupportsSearchNavigationAndVerticalCentering(t *testing.T) {
 	wantStart := (18 - boxHeight) / 2
 	if firstBox != wantStart {
 		t.Fatalf("overlay is not vertically centered: first box row=%d\n%s", firstBox, body)
+	}
+}
+
+func TestHelpOverlayIncludesSearchablePaginatedKeyReference(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 58, Height: 24, NoColor: true})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.applyResult(chat.ParsedCommand{Name: chat.CommandHelp}, chat.Result{Commands: chat.Commands()})
+	var all strings.Builder
+	for _, raw := range m.overlayList.Items() {
+		item := raw.(overlayItem)
+		all.WriteString(item.title)
+		all.WriteByte(' ')
+		all.WriteString(item.detail)
+		all.WriteByte('\n')
+	}
+	for _, want := range []string{"Ctrl+C", "Ctrl+D", "Escape", "Alt+Enter", "Tab", "Up/Down", "PageUp/PageDown"} {
+		if !strings.Contains(all.String(), want) {
+			t.Errorf("help key reference missing %q:\n%s", want, all.String())
+		}
+	}
+	if m.overlayList.Paginator.TotalPages <= 1 {
+		t.Fatalf("help pages=%d want paginated key and command reference", m.overlayList.Paginator.TotalPages)
+	}
+	m.overlayList.SetFilterText("Ctrl+D")
+	if len(m.overlayList.VisibleItems()) != 1 {
+		t.Fatalf("Ctrl+D filtered items=%d", len(m.overlayList.VisibleItems()))
+	}
+}
+
+func TestThemeUsesWaffleGoldFocusCyanAssistantAndGreenSuccess(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		t.Run(map[bool]string{true: "dark", false: "light"}[dark], func(t *testing.T) {
+			palette := newTheme(dark, false)
+			brand := color.RGBAModel.Convert(palette.brand).(color.RGBA)
+			focus := color.RGBAModel.Convert(palette.border).(color.RGBA)
+			assistant := color.RGBAModel.Convert(palette.assistant).(color.RGBA)
+			success := color.RGBAModel.Convert(palette.success).(color.RGBA)
+			muted := color.RGBAModel.Convert(palette.muted).(color.RGBA)
+			if brand.R <= brand.G || brand.G <= brand.B {
+				t.Errorf("brand is not warm waffle gold: %#v", brand)
+			}
+			if focus != brand {
+				t.Errorf("focus=%#v want brand accent %#v", focus, brand)
+			}
+			if assistant.B <= assistant.R || assistant.G <= assistant.R {
+				t.Errorf("assistant is not cool cyan: %#v", assistant)
+			}
+			if success.G <= success.R || success.G <= success.B {
+				t.Errorf("success is not green: %#v", success)
+			}
+			maxChannel := max(int(muted.R), max(int(muted.G), int(muted.B)))
+			minChannel := min(int(muted.R), min(int(muted.G), int(muted.B)))
+			if maxChannel-minChannel > 40 {
+				t.Errorf("muted text is too chromatic: %#v", muted)
+			}
+		})
 	}
 }
 

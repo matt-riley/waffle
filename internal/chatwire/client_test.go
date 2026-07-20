@@ -16,6 +16,20 @@ import (
 	"github.com/matt-riley/waffle/internal/chat"
 )
 
+func TestRemoteErrorReportsStableConnectionSemantics(t *testing.T) {
+	err := &RemoteError{Code: "turn_failed", Message: "chat turn failed"}
+	semantic, ok := any(err).(interface {
+		ConnectionUsable() bool
+		ErrorCode() string
+	})
+	if !ok {
+		t.Fatal("RemoteError does not expose backend error semantics")
+	}
+	if !semantic.ConnectionUsable() || semantic.ErrorCode() != "turn_failed" {
+		t.Fatalf("RemoteError semantics usable=%v code=%q", semantic.ConnectionUsable(), semantic.ErrorCode())
+	}
+}
+
 func TestDialRequiresAbsoluteNULFreeUnixPath(t *testing.T) {
 	t.Parallel()
 

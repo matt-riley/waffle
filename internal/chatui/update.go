@@ -1,6 +1,8 @@
 package chatui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -51,13 +53,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnActive = false
 			m.activeTurnID = 0
 			m.canceledTurnID = 0
+			m.turnTerminalSeen = false
 		}
 		if msg.err != nil && matches {
 			switch {
-			case requestedCancel:
-				m.messages = append(m.messages, messageCard{role: roleNotice, text: "Turn cancelled."})
-			case m.state.ConnectionMode == "unix" && isTransportLoss(msg.err):
+			case m.state.ConnectionMode == "unix" && !connectionUsable(msg.err):
 				m.disconnect(msg.err)
+			case requestedCancel && isExpectedCancellation(msg.err):
+				m.messages = append(m.messages, messageCard{role: roleNotice, text: "Turn cancelled."})
 			default:
 				m.messages = append(m.messages, messageCard{role: roleError, text: "Turn failed: " + msg.err.Error()})
 			}
@@ -73,7 +76,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commandResultMsg:
 		if msg.err != nil {
 			m.pendingConfirm = chat.ParsedCommand{}
-			if m.state.ConnectionMode == "unix" && isTransportLoss(msg.err) {
+			if m.state.ConnectionMode == "unix" && !connectionUsable(msg.err) {
 				m.disconnect(msg.err)
 			} else {
 				m.messages = append(m.messages, messageCard{role: roleError, text: msg.err.Error()})
@@ -157,7 +160,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
 		if m.turnActive {
-			m.canceledTurnID = m.activeTurnID
+			m.markTurnCancelRequested()
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -179,7 +182,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Code == tea.KeyEscape {
 		if m.turnActive {
-			m.canceledTurnID = m.activeTurnID
+			m.markTurnCancelRequested()
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -273,8 +276,8 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 	m.paletteVisible = false
 	m.exitArmed = false
 	if ok {
-		if command.Name == chat.CommandExit {
-			m.quitting = true
+		if command.Name == chat.CommandExit && m.turnActive && !m.turnTerminalSeen {
+			m.canceledTurnID = m.activeTurnID
 		}
 		return m, m.startCommand(command, m.turnActive)
 	}
@@ -283,6 +286,7 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 	m.turnActive = true
 	operationID := m.nextOperation()
 	m.activeTurnID = operationID
+	m.turnTerminalSeen = false
 	m.syncViewport(true)
 	return m, m.turnCmd(operationID, input)
 }
@@ -300,7 +304,7 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.overlay = overlayNone
 			_ = m.composer.Focus()
 			if m.turnActive {
-				m.canceledTurnID = m.activeTurnID
+				m.markTurnCancelRequested()
 				m.backend.Cancel()
 				m.deferredCommand = &command
 				return m, nil
@@ -322,17 +326,43 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func isTransportLoss(err error) bool {
+func connectionUsable(err error) bool {
 	if err == nil {
-		return false
+		return true
 	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"service disconnected", "connection reset", "broken pipe", "unexpected eof", "closed network connection", "malformed frame", "protocol version"} {
-		if strings.Contains(message, marker) {
-			return true
+	if semantic, ok := err.(interface{ ConnectionUsable() bool }); ok {
+		return semantic.ConnectionUsable()
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
 		}
+		for _, cause := range causes {
+			if !connectionUsable(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return connectionUsable(wrapped.Unwrap())
 	}
 	return false
+}
+
+func isExpectedCancellation(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var coded interface{ ErrorCode() string }
+	return errors.As(err, &coded) && coded.ErrorCode() == "turn_failed"
+}
+
+func (m *Model) markTurnCancelRequested() {
+	if !m.turnTerminalSeen {
+		m.canceledTurnID = m.activeTurnID
+	}
 }
 
 func (m *Model) overlaySelection() (chat.ParsedCommand, bool) {
@@ -389,6 +419,9 @@ func (m *Model) applyEvent(operationID uint64, event chat.Event) {
 			m.state = *event.State
 		}
 	case chat.EventTurnDone:
+		if operationID == 0 || operationID == m.activeTurnID {
+			m.turnTerminalSeen = true
+		}
 		m.inputTokens += event.Usage.InputTokens
 		m.outputTokens += event.Usage.OutputTokens
 	}
@@ -414,6 +447,7 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result, star
 			m.tools = nil
 			m.inputTokens, m.outputTokens = 0, 0
 			m.turnActive, m.activeTurnID = false, 0
+			m.turnTerminalSeen = false
 			m.deferredCommand = nil
 		}
 	}
@@ -432,7 +466,7 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result, star
 		if len(commands) == 0 {
 			commands = chat.Commands()
 		}
-		m.setOverlay(overlayHelp, commandItems(commands))
+		m.setOverlay(overlayHelp, helpItems(commands))
 	case command.Name == chat.CommandModels || command.Name == chat.CommandModel && command.Args == "":
 		m.setOverlay(overlayModels, modelItems(result.Models))
 	case command.Name == chat.CommandSessions || command.Name == chat.CommandResume && command.Args == "":
@@ -458,6 +492,25 @@ func commandItems(commands []chat.Command) []list.Item {
 	items := make([]list.Item, 0, len(commands))
 	for _, command := range commands {
 		items = append(items, overlayItem{title: sanitizeLine(command.Usage), detail: sanitizeLine(command.Description)})
+	}
+	return items
+}
+
+func helpItems(commands []chat.Command) []list.Item {
+	items := commandItems(commands)
+	keys := []overlayItem{
+		{title: "Ctrl+C", detail: "cancel active turn; press twice when idle to exit"},
+		{title: "Ctrl+D", detail: "exit when the composer is empty"},
+		{title: "Escape", detail: "cancel active turn or close the current overlay"},
+		{title: "Alt+Enter", detail: "insert a composer newline"},
+		{title: "Tab", detail: "complete the selected slash command"},
+		{title: "Up/Down", detail: "navigate command choices and overlays"},
+		{title: "PageUp/PageDown", detail: "scroll the conversation or overlay"},
+	}
+	for _, key := range keys {
+		key.title = sanitizeLine(key.title)
+		key.detail = sanitizeLine(key.detail)
+		items = append(items, key)
 	}
 	return items
 }

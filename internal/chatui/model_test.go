@@ -93,9 +93,14 @@ func TestModelHandlesTurnCancelAndExit(t *testing.T) {
 		t.Fatalf("cancel calls = %d", backend.cancelCalls)
 	}
 	m.composer.SetValue("/exit")
-	m = updateForTest(t, m, key(tea.KeyEnter))
+	updated, command := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	if command == nil || m.quitting {
+		t.Fatalf("/exit command=%v quitting before result=%v", command != nil, m.quitting)
+	}
+	m = updateForTest(t, m, commandResultMsg{command: chat.ParsedCommand{Name: chat.CommandExit}, result: chat.Result{ShouldClose: true}})
 	if !m.quitting {
-		t.Fatal("/exit did not quit")
+		t.Fatal("/exit result did not quit")
 	}
 }
 

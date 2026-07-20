@@ -34,6 +34,18 @@ func (e *RemoteError) Error() string {
 	return fmt.Sprintf("chat service %s: %s", e.Code, e.Message)
 }
 
+// ConnectionUsable reports that the service returned a complete error frame
+// and the underlying chat connection remains available for later requests.
+func (e *RemoteError) ConnectionUsable() bool { return true }
+
+// ErrorCode returns the stable service error code.
+func (e *RemoteError) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // Client implements chat.Backend over a local Unix connection.
 type Client struct {
 	conn       net.Conn

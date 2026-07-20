@@ -92,28 +92,29 @@ type Model struct {
 	deferredCommand       *chat.ParsedCommand
 	confirmNeedsTurnDrain bool
 
-	paletteVisible  bool
-	paletteIndex    int
-	turnActive      bool
-	quitting        bool
-	exitArmed       bool
-	connected       bool
-	awaitingAck     bool
-	opened          bool
-	openResolved    bool
-	width           int
-	height          int
-	err             error
-	inputTokens     int
-	outputTokens    int
-	theme           theme
-	events          chan tea.Msg
-	pumpStop        chan struct{}
-	pumpStopOnce    *sync.Once
-	closed          *atomic.Bool
-	nextOperationID uint64
-	activeTurnID    uint64
-	canceledTurnID  uint64
+	paletteVisible   bool
+	paletteIndex     int
+	turnActive       bool
+	quitting         bool
+	exitArmed        bool
+	connected        bool
+	awaitingAck      bool
+	opened           bool
+	openResolved     bool
+	width            int
+	height           int
+	err              error
+	inputTokens      int
+	outputTokens     int
+	theme            theme
+	events           chan tea.Msg
+	pumpStop         chan struct{}
+	pumpStopOnce     *sync.Once
+	closed           *atomic.Bool
+	nextOperationID  uint64
+	activeTurnID     uint64
+	canceledTurnID   uint64
+	turnTerminalSeen bool
 }
 
 // New constructs a Focused Conversation model. Backend.Open remains asynchronous
@@ -167,16 +168,26 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 
 func newOverlayList(items []list.Item, width, height int, dark, noColor bool) list.Model {
 	delegate := list.NewDefaultDelegate()
+	palette := newTheme(dark, noColor)
 	if noColor {
 		delegate.Styles = list.DefaultItemStyles{}
 	} else {
 		delegate.Styles = list.NewDefaultItemStyles(dark)
+		delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(palette.muted)
+		delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(palette.brand).BorderForeground(palette.brand)
+		delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(palette.brand).BorderForeground(palette.brand)
+		delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(palette.brand)
 	}
 	model := list.New(items, delegate, width, height)
 	if noColor {
 		model.Styles = list.Styles{}
 	} else {
 		model.Styles = list.DefaultStyles(dark)
+		model.Styles.Filter.Cursor.Color = palette.brand
+		model.Styles.Filter.Focused.Prompt = model.Styles.Filter.Focused.Prompt.Foreground(palette.brand)
+		model.Styles.Filter.Blurred.Prompt = model.Styles.Filter.Blurred.Prompt.Foreground(palette.brand)
+		model.Styles.ActivePaginationDot = model.Styles.ActivePaginationDot.Foreground(palette.brand)
+		model.Styles.DefaultFilterCharacterMatch = model.Styles.DefaultFilterCharacterMatch.Foreground(palette.brand)
 	}
 	model.SetShowTitle(false)
 	model.SetShowFilter(true)
