@@ -134,9 +134,6 @@ func (g *Gateway) Run(ctx context.Context) error {
 		g.Log = slog.Default()
 	}
 	g.groups = make(map[string]*groupLock)
-	if len(g.Adapters) == 0 {
-		return errors.New("gateway: no channels configured (enable one in config.toml)")
-	}
 
 	inbound := make(chan channel.Message, 64)
 	var adapters sync.WaitGroup

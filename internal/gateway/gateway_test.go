@@ -61,6 +61,30 @@ func (f *fakeAdapter) Send(ctx context.Context, chatID, text string) error {
 	return nil
 }
 
+func TestGatewayRunsWithoutChannelsUntilCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Gateway{}).Run(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned before cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancellation = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
 func (f *fakeAdapter) waitForReply(t *testing.T, chatID string, n int) []string {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
