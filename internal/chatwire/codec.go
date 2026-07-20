@@ -41,7 +41,7 @@ func NewServerCodec(reader io.Reader, writer io.Writer) *Codec {
 func newCodec(reader io.Reader, writer io.Writer, inbound, outbound map[string]struct{}) *Codec {
 	codec := &Codec{inbound: inbound, outbound: outbound}
 	if reader != nil {
-		codec.reader = bufio.NewReaderSize(reader, MaxFrameBytes+2)
+		codec.reader = bufio.NewReaderSize(reader, MaxFrameBytes+1)
 	}
 	if writer != nil {
 		codec.writer = bufio.NewWriter(writer)

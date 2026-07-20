@@ -38,6 +38,7 @@ type Client struct {
 
 	pendingMu sync.Mutex
 	pending   map[string]chan Frame
+	routeDone map[string]chan struct{}
 	closed    chan struct{}
 	readErr   error
 	closeOnce sync.Once
@@ -50,20 +51,21 @@ type Client struct {
 
 var _ chat.Backend = (*Client)(nil)
 
-// Dial connects to an absolute, clean Unix socket path.
+// Dial connects to an absolute, NUL-free Unix socket path.
 func Dial(ctx context.Context, path string) (*Client, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.IndexByte(path, 0) >= 0 {
-		return nil, fmt.Errorf("chat socket path must be absolute and clean")
+	if !filepath.IsAbs(path) || strings.IndexByte(path, 0) >= 0 {
+		return nil, fmt.Errorf("chat socket path must be absolute and NUL-free")
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("dial chat socket %q: %w", path, err)
 	}
 	client := &Client{
-		conn:    conn,
-		codec:   NewClientCodec(conn, conn),
-		pending: make(map[string]chan Frame),
-		closed:  make(chan struct{}),
+		conn:      conn,
+		codec:     NewClientCodec(conn, conn),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
 	}
 	go client.readLoop()
 	return client, nil
@@ -116,6 +118,9 @@ func (c *Client) Turn(ctx context.Context, input string, emit func(chat.Event)) 
 			emit(event)
 		}
 		if frame.Type == TypeTurnDone {
+			if event.IsError {
+				return &RemoteError{Code: "turn_failed", Message: "chat turn failed"}
+			}
 			return nil
 		}
 	}
@@ -222,6 +227,7 @@ func (c *Client) startRequest(ctx context.Context, frameType string, payload any
 		return "", nil, err
 	}
 	responses := make(chan Frame, 16)
+	done := make(chan struct{})
 	c.pendingMu.Lock()
 	select {
 	case <-c.closed:
@@ -231,6 +237,10 @@ func (c *Client) startRequest(ctx context.Context, frameType string, payload any
 	default:
 	}
 	c.pending[id] = responses
+	if c.routeDone == nil {
+		c.routeDone = make(map[string]chan struct{})
+	}
+	c.routeDone[id] = done
 	c.pendingMu.Unlock()
 	if err := c.writeFrame(ctx, frame); err != nil {
 		c.finishRequest(id)
@@ -242,10 +252,20 @@ func (c *Client) startRequest(ctx context.Context, frameType string, payload any
 func (c *Client) finishRequest(id string) {
 	c.pendingMu.Lock()
 	delete(c.pending, id)
+	done, exists := c.routeDone[id]
+	delete(c.routeDone, id)
 	c.pendingMu.Unlock()
+	if exists {
+		close(done)
+	}
 }
 
 func (c *Client) nextResponse(ctx context.Context, responses <-chan Frame) (Frame, error) {
+	select {
+	case <-ctx.Done():
+		return Frame{}, ctx.Err()
+	default:
+	}
 	select {
 	case frame := <-responses:
 		return frame, nil
@@ -293,12 +313,14 @@ func (c *Client) readLoop() {
 		}
 		c.pendingMu.Lock()
 		responses := c.pending[frame.ID]
+		done := c.routeDone[frame.ID]
 		c.pendingMu.Unlock()
 		if responses == nil {
 			continue
 		}
 		select {
 		case responses <- frame:
+		case <-done:
 		case <-c.closed:
 			return
 		}

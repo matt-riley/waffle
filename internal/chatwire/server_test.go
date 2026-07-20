@@ -1,8 +1,10 @@
 package chatwire
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/llm"
 )
 
 var canaries = []string{
@@ -80,7 +83,7 @@ func TestServerRedactsStateEventsResultsAndErrors(t *testing.T) {
 
 	var events []chat.Event
 	err = client.Turn(ctx, "secret test", func(event chat.Event) { events = append(events, event) })
-	if err == nil || len(events) != 1 {
+	if err == nil || len(events) != 2 || events[1].Kind != chat.EventTurnDone || !events[1].IsError {
 		t.Fatalf("Turn events=%+v err=%v", events, err)
 	}
 	assertNoCanaries(t, err.Error())
@@ -131,6 +134,67 @@ func TestServerEncodedRedactionPreservesIntegerFields(t *testing.T) {
 	}
 }
 
+func TestServerEncodedFrameRedactsIDsAndNestedMapKeys(t *testing.T) {
+	t.Parallel()
+
+	identifier := strings.Join(canaries, "-")
+	payload := map[string]any{
+		canaries[0]: map[string]any{
+			canaries[1]: map[string]any{
+				canaries[2]: canaries[3],
+			},
+		},
+	}
+	var wire bytes.Buffer
+	writer := &serverWriter{codec: NewServerCodec(nil, &wire)}
+	if err := writer.send(TypeNotice, identifier, payload); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCanaries(t, wire.String())
+
+	frame, err := NewClientCodec(&wire, nil).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoCanaries(t, frame.ID)
+	assertNoCanaries(t, string(frame.Payload))
+}
+
+func TestServerRawClientFrameRedactsCanaryIDAndPayloadKeys(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("raw-redaction")
+	nested, err := json.Marshal(map[string]any{
+		canaries[0]: map[string]any{canaries[1]: map[string]any{canaries[2]: canaries[3]}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.state.History = []llm.Message{{
+		Role: llm.RoleAssistant,
+		Blocks: []llm.Block{{
+			Type:    llm.BlockToolUse,
+			ToolUse: &llm.ToolUse{ID: "tool", Name: "read", Input: nested},
+		}},
+	}}
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	codec := NewClientCodec(conn, conn)
+	if err := encodeTestFrame(codec, TypeOpen, strings.Join(canaries, "-"), chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoCanaries(t, string(line))
+}
+
 func TestServerRejectsSecondTurnAndCancelRemainsResponsive(t *testing.T) {
 	t.Parallel()
 
@@ -168,6 +232,97 @@ func TestServerRejectsSecondTurnAndCancelRemainsResponsive(t *testing.T) {
 	}
 	if err := client.Close(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServerFailedTurnPreservesFinalEventAndReturnsStableError(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("failed")
+	backend.turnEvent = chat.Event{
+		Kind:    chat.EventTurnDone,
+		Text:    "partial output persisted",
+		IsError: true,
+		Usage:   llm.Usage{InputTokens: 7, OutputTokens: 11},
+		State:   &chat.State{SessionID: "failed", ModelAlias: "gpt"},
+	}
+	backend.turnErr = errors.New(strings.Join(canaries, " "))
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) {
+		return backend, nil
+	}, nil)
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var events []chat.Event
+	err = client.Turn(ctx, "fail", func(event chat.Event) { events = append(events, event) })
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code != "turn_failed" || remote.Message != "chat turn failed" {
+		t.Fatalf("Turn error = %#v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v", events)
+	}
+	done := events[0]
+	if done.Kind != chat.EventTurnDone || !done.IsError || done.Text != "partial output persisted" ||
+		done.Usage.InputTokens != 7 || done.Usage.OutputTokens != 11 || done.State == nil || done.State.SessionID != "failed" {
+		t.Fatalf("turn_done fidelity = %+v", done)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerOversizedTurnEventReturnsStableError(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("oversized-turn")
+	backend.turnEvent = chat.Event{Kind: chat.EventTextDelta, Text: strings.Repeat("x", MaxFrameBytes)}
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err = client.Turn(ctx, "large", nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code != "turn_failed" {
+		t.Fatalf("Turn error = %#v", err)
+	}
+}
+
+func TestServerOversizedCommandEventReturnsStableError(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("oversized-command")
+	backend.commandEvent = chat.Event{Kind: chat.EventNotice, Text: strings.Repeat("x", MaxFrameBytes)}
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus}, nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Code != "command_failed" {
+		t.Fatalf("Command error = %#v", err)
 	}
 }
 
@@ -279,6 +434,176 @@ func TestServerCloseCancelsActiveTurnBeforeGoodbye(t *testing.T) {
 	}
 }
 
+func TestServerCloseCancelsConnectionContextWhenBackendCancelIsStubborn(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("stubborn")
+	backend.blockTurn = true
+	backend.ignoreCancel = true
+	audits := make(chan string, 2)
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) {
+		return backend, nil
+	}, func(_ context.Context, _ net.Conn, event string) { audits <- event })
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	turnDone := make(chan error, 1)
+	go func() { turnDone <- client.Turn(ctx, "wait for context", nil) }()
+	backend.waitStarted(t)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer closeCancel()
+	if err := client.Close(closeCtx); err != nil {
+		t.Fatalf("Close with stubborn backend: %v", err)
+	}
+	backend.waitClosed(t)
+	if backend.cancelCount() != 1 || backend.closeCount() != 1 {
+		t.Fatalf("lifecycle cancel=%d close=%d", backend.cancelCount(), backend.closeCount())
+	}
+	select {
+	case <-turnDone:
+	case <-ctx.Done():
+		t.Fatal("context-aware turn did not exit")
+	}
+	if got := <-audits; got != "connected" {
+		t.Fatalf("first audit = %q", got)
+	}
+	if got := <-audits; got != "disconnected" {
+		t.Fatalf("second audit = %q", got)
+	}
+}
+
+func TestServerEventWriteFailureTerminatesConnectionAndCleansBackend(t *testing.T) {
+	t.Parallel()
+
+	serverSide, clientSide := net.Pipe()
+	failing := &toggleWriteConn{Conn: serverSide}
+	backend := newWireFake("write-failure")
+	backend.turnEvent = chat.Event{Kind: chat.EventTextDelta, Text: "cannot write"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		serveConn(ctx, failing, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+	codec := NewClientCodec(clientSide, clientSide)
+	if err := encodeTestFrame(codec, TypeOpen, "open", chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codec.Decode(); err != nil {
+		t.Fatal(err)
+	}
+	failing.fail.Store(true)
+	if err := encodeTestFrame(codec, TypeTurn, "turn", TurnPayload{Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("event write failure did not terminate the connection")
+	}
+	backend.waitClosed(t)
+}
+
+func TestServerImmediateSequentialTurnsNeverSeeTurnActive(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("sequential")
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 500 {
+		if err := client.Turn(ctx, fmt.Sprintf("turn-%d", i), nil); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerClearsTurnActiveBeforeTerminalFrameIsObservable(t *testing.T) {
+	t.Parallel()
+
+	serverSide, clientSide := net.Pipe()
+	blocking := &blockingReturnConn{
+		Conn:     serverSide,
+		observed: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	backend := newWireFake("terminal-order")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan struct{})
+	go func() {
+		serveConn(ctx, blocking, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+		close(serverDone)
+	}()
+	client := &Client{
+		conn:      clientSide,
+		codec:     NewClientCodec(clientSide, clientSide),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
+	}
+	go client.readLoop()
+	t.Cleanup(func() {
+		cancel()
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	blocking.armed.Store(true)
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- client.Turn(ctx, "first", nil) }()
+	select {
+	case <-blocking.observed:
+	case <-ctx.Done():
+		t.Fatal("first terminal frame was not observed")
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Turn: %v", err)
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- client.Turn(ctx, "second", nil) }()
+	time.Sleep(20 * time.Millisecond)
+	close(blocking.release)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Turn: %v", err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-serverDone:
+	case <-ctx.Done():
+		t.Fatal("server connection did not close")
+	}
+}
+
 func TestServerAuditsConnectionLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -329,8 +654,10 @@ type wireFakeBackend struct {
 	releasedOnce  sync.Once
 	closedOnce    sync.Once
 	blockTurn     bool
+	ignoreCancel  bool
 	turnEvent     chat.Event
 	turnErr       error
+	commandEvent  chat.Event
 	commandResult chat.Result
 	cancels       int
 	closes        int
@@ -341,6 +668,35 @@ type errorListener struct{ err error }
 func (l errorListener) Accept() (net.Conn, error) { return nil, l.err }
 func (errorListener) Close() error                { return nil }
 func (errorListener) Addr() net.Addr              { return &net.UnixAddr{Name: "test", Net: "unix"} }
+
+type toggleWriteConn struct {
+	net.Conn
+	fail atomic.Bool
+}
+
+func (c *toggleWriteConn) Write(payload []byte) (int, error) {
+	if c.fail.Load() {
+		return 0, errors.New("injected write failure")
+	}
+	return c.Conn.Write(payload)
+}
+
+type blockingReturnConn struct {
+	net.Conn
+	armed    atomic.Bool
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (c *blockingReturnConn) Write(payload []byte) (int, error) {
+	written, err := c.Conn.Write(payload)
+	if err == nil && bytes.Contains(payload, []byte(`"type":"turn_done"`)) && c.armed.CompareAndSwap(true, false) {
+		c.once.Do(func() { close(c.observed) })
+		<-c.release
+	}
+	return written, err
+}
 
 func newWireFake(id string) *wireFakeBackend {
 	return &wireFakeBackend{
@@ -377,13 +733,20 @@ func (b *wireFakeBackend) Turn(ctx context.Context, _ string, emit func(chat.Eve
 }
 
 func (b *wireFakeBackend) Command(_ context.Context, _ chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+	if b.commandEvent.Kind != "" && emit != nil {
+		emit(b.commandEvent)
+	}
 	return b.commandResult, nil
 }
 
 func (b *wireFakeBackend) Cancel() {
 	b.mu.Lock()
 	b.cancels++
+	ignore := b.ignoreCancel
 	b.mu.Unlock()
+	if ignore {
+		return
+	}
 	b.releasedOnce.Do(func() { close(b.turnReleased) })
 }
 

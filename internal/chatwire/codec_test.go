@@ -165,6 +165,32 @@ func TestCodecRejectsStreamingOverlongLineWithoutWaitingForNewline(t *testing.T)
 	}
 }
 
+func TestCodecRejectsExactFirstInvalidLengthWithoutWaitingForAnotherByte(t *testing.T) {
+	t.Parallel()
+
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	go func() {
+		_, _ = writer.Write(bytes.Repeat([]byte{'x'}, MaxFrameBytes+1))
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewServerCodec(reader, nil).Decode()
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("Decode error = %v, want %v", err, ErrFrameTooLarge)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Decode waited after receiving MaxFrameBytes+1 bytes")
+	}
+}
+
 func TestCodecRejectsOversizeEncodedFrame(t *testing.T) {
 	t.Parallel()
 

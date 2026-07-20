@@ -15,13 +15,44 @@ import (
 	"github.com/matt-riley/waffle/internal/chat"
 )
 
-func TestDialRequiresAbsoluteCleanUnixPath(t *testing.T) {
+func TestDialRequiresAbsoluteNULFreeUnixPath(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"relative.sock", "/tmp/../tmp/waffle.sock"} {
+	for _, path := range []string{"relative.sock", "/tmp/waffle\x00.sock"} {
 		if _, err := Dial(context.Background(), path); err == nil {
 			t.Fatalf("Dial(%q) succeeded", path)
 		}
+	}
+}
+
+func TestDialAllowsAbsoluteNonCleanUnixPath(t *testing.T) {
+	t.Parallel()
+
+	listener, path := unixListener(t)
+	subdir := filepath.Join(filepath.Dir(path), "sub")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nonCleanPath := filepath.Join(subdir, "..", filepath.Base(path))
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			close(accepted)
+			_ = conn.Close()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, nonCleanPath)
+	if err != nil {
+		t.Fatalf("Dial(%q): %v", nonCleanPath, err)
+	}
+	_ = client.conn.Close()
+	select {
+	case <-accepted:
+	case <-ctx.Done():
+		t.Fatal("listener did not accept non-clean absolute path")
 	}
 }
 
@@ -249,6 +280,105 @@ func TestClientDeliversBufferedResponseBeforeDisconnect(t *testing.T) {
 		if err != nil || frame.Type != TypeGoodbye {
 			t.Fatalf("nextResponse = %+v, %v", frame, err)
 		}
+	}
+}
+
+func TestClientCanceledRequestDoesNotDrainHighVolumeBufferedRoute(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{closed: make(chan struct{})}
+	responses := make(chan Frame, 16)
+	for range cap(responses) {
+		responses <- Frame{Version: ProtocolVersion, Type: TypeNotice, ID: "abandoned"}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	frame, err := client.nextResponse(ctx, responses)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("nextResponse = %+v, %v; want context cancellation", frame, err)
+	}
+}
+
+func TestClientAbandonedFullRouteDoesNotBlockLaterResponses(t *testing.T) {
+	t.Parallel()
+
+	serverConn, clientConn := net.Pipe()
+	client := &Client{
+		conn:      clientConn,
+		codec:     NewClientCodec(clientConn, clientConn),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
+	}
+	abandoned := make(chan Frame, 16)
+	for range cap(abandoned) {
+		abandoned <- Frame{Version: ProtocolVersion, Type: TypeNotice, ID: "abandoned"}
+	}
+	later := make(chan Frame, 1)
+	client.pending["abandoned"] = abandoned
+	client.routeDone["abandoned"] = make(chan struct{})
+	client.pending["later"] = later
+	client.routeDone["later"] = make(chan struct{})
+	go client.readLoop()
+	t.Cleanup(func() {
+		client.finishRead(net.ErrClosed)
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	serverCodec := NewServerCodec(serverConn, serverConn)
+	firstWrite := make(chan error, 1)
+	go func() {
+		firstWrite <- encodeTestFrame(serverCodec, TypeNotice, "abandoned", chat.Event{Kind: chat.EventNotice})
+	}()
+	select {
+	case err := <-firstWrite:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server could not write abandoned response")
+	}
+	time.Sleep(20 * time.Millisecond)
+	client.finishRequest("abandoned")
+
+	secondWrite := make(chan error, 1)
+	go func() {
+		secondWrite <- encodeTestFrame(serverCodec, TypeNotice, "later", chat.Event{Kind: chat.EventNotice})
+	}()
+	select {
+	case frame := <-later:
+		if frame.ID != "later" {
+			t.Fatalf("later frame = %+v", frame)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("abandoned full route blocked the client read loop")
+	}
+	if err := <-secondWrite; err != nil {
+		t.Fatal(err)
+	}
+	client.finishRequest("later")
+
+	serverCloseDone := make(chan error, 1)
+	go func() {
+		closeFrame, err := serverCodec.Decode()
+		if err == nil {
+			err = encodeTestFrame(serverCodec, TypeGoodbye, closeFrame.ID, nil)
+		}
+		serverCloseDone <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Close(ctx); err != nil {
+		t.Fatalf("Close after abandoned route: %v", err)
+	}
+	if err := <-serverCloseDone; err != nil {
+		t.Fatalf("server close exchange: %v", err)
+	}
+	select {
+	case <-client.closed:
+	case <-ctx.Done():
+		t.Fatal("client read loop did not exit after close")
 	}
 }
 
