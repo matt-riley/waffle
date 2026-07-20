@@ -305,11 +305,11 @@ func TestSplitCommandDoesNotMisrouteNearMisses(t *testing.T) {
 
 func TestBareSkillAndRepoStillGiveUsage(t *testing.T) {
 	c := &chat{}
-	if _, err := c.skillMessage(""); err == nil || !strings.Contains(err.Error(), "usage: /skill") {
-		t.Errorf("skillMessage(\"\") err = %v, want usage error", err)
+	if _, err := c.skillMessage(""); err == nil || err.Error() != "usage: /skill <name> [args]" {
+		t.Errorf("skillMessage(\"\") err = %v, want exact usage error", err)
 	}
-	if err := c.repoCommand(context.Background(), "", io.Discard); err == nil || !strings.Contains(err.Error(), "usage: /repo") {
-		t.Errorf("repoCommand(\"\") err = %v, want usage error", err)
+	if err := c.repoCommand(context.Background(), "", io.Discard); err == nil || err.Error() != "usage: /repo <owner/repo>" {
+		t.Errorf("repoCommand(\"\") err = %v, want exact usage error", err)
 	}
 }
 

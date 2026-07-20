@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
-	"github.com/matt-riley/waffle/internal/broker"
+	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
@@ -42,29 +42,9 @@ const (
 	reset = "\x1b[0m"
 )
 
-// chat is the REPL's assembled state.
-type chat struct {
-	agent    *agent.Agent
-	sessions *session.Store
-	skills   []skill.Skill
-
-	current   *session.Session
-	history   []llm.Message
-	persisted int // history[:persisted] is already in the database
-
-	// profileName is the named agent profile for this chat (#71); empty = main.
-	profileName string
-	// agentCleanup releases sandbox/MCP resources from the current agent.
-	agentCleanup func()
-
-	// workspace wiring, set up lazily by /repo.
-	cfg      config.Config
-	st       *store.Store
-	stderrW  io.Writer
-	wsBroker *broker.Broker
-	wsURL    string
-	wsClient io.Closer
-}
+// chat remains an alias for focused legacy tests. All behavior is owned by
+// chatRuntime; no renderer-specific state lives here.
+type chat = chatRuntime
 
 func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	continueLast := false
@@ -108,29 +88,26 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 	}
 
-	c, cleanup, err := newChat(ctx, cfg, st, continueLast, profileName)
+	backend, err := newChatRuntime(ctx, cfg, st)
 	if err != nil {
-		cleanup()
 		return err
 	}
-	defer cleanup()
-	c.stderrW = stderr
 	defer func() {
-		if c.wsClient != nil {
-			_ = c.wsClient.Close()
+		if closeErr := backend.Close(ctx); closeErr != nil && err == nil {
+			fmt.Fprintf(stderr, "waffle: %v\n", closeErr)
 		}
 	}()
-
-	providerLabel := cfg.Provider.Name
-	if runtime, ok := c.agent.Provider.(*modelRuntimeResolver); ok {
-		if target, resolveErr := runtime.resolveTarget(c.agent.Model); resolveErr == nil {
-			providerLabel = fmt.Sprintf("%s (%s)", target.ConnectionName, target.Connection.Type)
-		}
+	state, err := backend.Open(ctx, chatpkg.OpenOptions{Continue: continueLast, Profile: profileName})
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
-		c.agent.Model, providerLabel, c.current.ID)
-	if len(c.history) > 0 {
-		fmt.Fprintf(stdout, "(continuing with %d earlier turns)\n", len(c.history))
+		state.ModelAlias, state.ProviderLabel, state.SessionID)
+	if len(state.History) > 0 {
+		fmt.Fprintf(stdout, "(continuing with %d earlier turns)\n", len(state.History))
+	}
+	if state.ModelError != "" {
+		fmt.Fprintf(stderr, "waffle: %s\n", state.ModelError)
 	}
 
 	scanner := bufio.NewScanner(stdin)
@@ -139,129 +116,83 @@ func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprint(stdout, "\nyou> ")
 		if !scanner.Scan() {
 			fmt.Fprintln(stdout)
-			c.finish(ctx, stdout)
 			return scanner.Err()
 		}
 		line := strings.TrimSpace(scanner.Text())
-		cmd, args := splitCommand(line)
-		var message string
-		switch {
-		case line == "":
+		if line == "" {
 			continue
-		case line == "/quit", line == "/exit":
-			c.finish(ctx, stdout)
-			return nil
-		case line == "/reset":
-			c.finish(ctx, stdout)
-			dropped, resetErr := c.resetSession(ctx)
-			if resetErr != nil {
-				return resetErr
-			}
-			if dropped > 0 {
-				fmt.Fprintf(stdout, "%s(dropped %d unpinned model assumptions)%s\n", dim, dropped, reset)
-			}
-			fmt.Fprintf(stdout, "(new session %s)\n", c.current.ID)
+		}
+		emit := func(event chatpkg.Event) { renderChatEvent(event, stdout, stderr) }
+		command, ok, parseErr := chatpkg.ParseInput(line)
+		if parseErr != nil {
+			fmt.Fprintf(stderr, "waffle: %v\n", parseErr)
 			continue
-		case line == "/help":
-			fmt.Fprintln(stdout, "/skill <name> [args]  invoke a skill\n/repo <owner/repo>    work on a repo in a container workspace\n/workset [list|replace <id> <text>|drop <id>|clear]  inspect/correct active task state\n/reset                start a new session\n/quit                 summarize and exit\nAnything else is sent to the agent.")
-			continue
-		case cmd == "/workset":
-			out, workErr := c.worksetCommand(ctx, args)
-			if workErr != nil {
-				fmt.Fprintf(stderr, "waffle: %v\n", workErr)
-			} else {
-				fmt.Fprintln(stdout, out)
-			}
-			continue
-		case cmd == "/skill":
-			message, err = c.skillMessage(args)
-			if err != nil {
-				fmt.Fprintf(stderr, "waffle: %v\n", err)
+		}
+		if ok {
+			result, commandErr := backend.Command(ctx, command, emit)
+			if commandErr != nil {
+				fmt.Fprintf(stderr, "waffle: %v\n", commandErr)
 				continue
 			}
-		case cmd == "/repo":
-			if err := c.repoCommand(ctx, args, stdout); err != nil {
-				fmt.Fprintf(stderr, "waffle: %v\n", err)
+			renderChatResult(result, stdout)
+			if result.ShouldClose {
+				return nil
 			}
 			continue
-		default:
-			message = line
 		}
-
-		if err := c.turn(ctx, message, stdout, stderr); err != nil {
-			if c.agent != nil && c.agent.Redact != nil {
-				err = fmt.Errorf("%s", c.agent.Redact(err.Error()))
+		if turnErr := backend.Turn(ctx, line, emit); turnErr != nil {
+			if backend.agent != nil && backend.agent.Redact != nil {
+				turnErr = fmt.Errorf("%s", backend.agent.Redact(turnErr.Error()))
 			}
-			fmt.Fprintf(stderr, "\nwaffle: %v\n", err)
+			fmt.Fprintf(stderr, "\nwaffle: %v\n", turnErr)
 		}
 	}
 }
 
-// resetSession implements /reset working-set ownership: stale unpinned model
-// assumptions are removed from the old session, other old entries remain
-// stored there, and the new session starts with an empty set.
-func (c *chat) resetSession(ctx context.Context) (int, error) {
-	dropped := 0
-	if c.st != nil && c.current != nil {
-		wsStore := &workset.Store{DB: c.st.DB}
-		if n, err := wsStore.DropUnpinnedModelAssumptions(ctx, c.current.ID); err == nil {
-			dropped = n
+func renderChatEvent(event chatpkg.Event, stdout, stderr io.Writer) {
+	switch event.Kind {
+	case chatpkg.EventTextDelta:
+		fmt.Fprint(stdout, event.Text)
+	case chatpkg.EventToolStarted:
+		fmt.Fprintf(stdout, "\n%s[%s]%s\n", dim, event.ToolName, reset)
+	case chatpkg.EventToolFinished:
+		status := "ok"
+		if event.IsError {
+			status = "error"
 		}
+		fmt.Fprintf(stdout, "%s[%s → %s, %d bytes]%s\n", dim, event.ToolName, status, event.ByteCount, reset)
+	case chatpkg.EventNotice:
+		writer := stdout
+		if event.IsError {
+			writer = stderr
+		}
+		fmt.Fprintln(writer, event.Text)
+	case chatpkg.EventTurnDone:
+		fmt.Fprintln(stdout)
 	}
-	current, err := c.sessions.Create(ctx, "")
-	if err != nil {
-		return 0, err
-	}
-	c.current = current
-	c.history, c.persisted = nil, 0
-	return dropped, nil
 }
 
-func (c *chat) worksetCommand(ctx context.Context, args string) (string, error) {
-	if c.st == nil || c.current == nil {
-		return "", fmt.Errorf("no active session working set")
+func renderChatResult(result chatpkg.Result, stdout io.Writer) {
+	if result.Text != "" {
+		fmt.Fprintln(stdout, result.Text)
 	}
-	ws := &workset.Store{DB: c.st.DB}
-	fields := strings.Fields(args)
-	if len(fields) == 0 || fields[0] == "list" {
-		entries, err := ws.List(ctx, c.current.ID)
-		if err != nil {
-			return "", err
-		}
-		if len(entries) == 0 {
-			return "working set is empty", nil
-		}
-		return strings.TrimSpace(workset.Render(entries)), nil
+	for _, command := range result.Commands {
+		fmt.Fprintf(stdout, "%-58s %s\n", command.Usage, command.Description)
 	}
-	switch fields[0] {
-	case "replace":
-		if len(fields) < 3 {
-			return "", fmt.Errorf("usage: /workset replace <id> <text>")
+	for _, model := range result.Models {
+		marker := " "
+		if model.Current {
+			marker = "*"
 		}
-		body := strings.TrimSpace(strings.TrimPrefix(args, "replace "+fields[1]))
-		e, err := ws.Replace(ctx, c.current.ID, fields[1], body, workset.SourceUser)
-		if err != nil {
-			return "", err
-		}
-		return "replaced " + e.ID, nil
-	case "drop":
-		if len(fields) != 2 {
-			return "", fmt.Errorf("usage: /workset drop <id>")
-		}
-		if err := ws.Drop(ctx, c.current.ID, fields[1]); err != nil {
-			return "", err
-		}
-		return "dropped " + fields[1], nil
-	case "clear":
-		if len(fields) != 1 {
-			return "", fmt.Errorf("usage: /workset clear")
-		}
-		if err := ws.Clear(ctx, c.current.ID); err != nil {
-			return "", err
-		}
-		return "working set cleared", nil
-	default:
-		return "", fmt.Errorf("usage: /workset [list|replace <id> <text>|drop <id>|clear]")
+		fmt.Fprintf(stdout, "%s %s via %s (%s)\n", marker, model.Alias, model.Provider, model.Upstream)
+	}
+	for _, value := range result.Sessions {
+		fmt.Fprintf(stdout, "%s  %s  model=%s\n", value.ID, value.Title, value.ModelAlias)
+	}
+	if result.Permissions != nil {
+		fmt.Fprintf(stdout, "sandbox=%s allow=%s deny=%s deny-prefixes=%s\n",
+			result.Permissions.SandboxMode, strings.Join(result.Permissions.Allow, ","),
+			strings.Join(result.Permissions.Deny, ","), strings.Join(result.Permissions.DenyPrefixes, ","))
 	}
 }
 
@@ -271,226 +202,6 @@ func (c *chat) worksetCommand(ctx context.Context, args string) (string, error) 
 func splitCommand(line string) (cmd, args string) {
 	cmd, args, _ = strings.Cut(line, " ")
 	return cmd, strings.TrimSpace(args)
-}
-
-// turn sends one user message through the agent and persists everything.
-func (c *chat) turn(ctx context.Context, message string, stdout, stderr io.Writer) error {
-	ctx = agent.WithSession(ctx, c.current.ID)
-	if len(c.history) == 0 && c.current.Title == "" {
-		title := message
-		if len(title) > 60 {
-			title = title[:60] + "…"
-		}
-		if err := c.sessions.SetTitle(ctx, c.current.ID, title); err == nil {
-			c.current.Title = title
-		}
-	}
-
-	c.history = append(c.history, llm.UserText(message))
-	fmt.Fprint(stdout, "\n")
-	newHistory, runErr := c.agent.Run(ctx, c.history, agent.Hooks{
-		OnText: func(delta string) { fmt.Fprint(stdout, delta) },
-		OnToolStart: func(use llm.ToolUse) {
-			fmt.Fprintf(stdout, "\n%s[%s] %s%s\n", dim, use.Name, compact(use.Input, 160), reset)
-		},
-		OnToolDone: func(use llm.ToolUse, res llm.ToolResult) {
-			status := "ok"
-			if res.IsError {
-				status = "error"
-			}
-			fmt.Fprintf(stdout, "%s[%s → %s, %d bytes]%s\n", dim, use.Name, status, len(res.Content), reset)
-		},
-	})
-	c.history = newHistory
-	fmt.Fprintln(stdout)
-
-	// Persist whatever the run produced, even on error — partial progress
-	// is still history.
-	for ; c.persisted < len(c.history); c.persisted++ {
-		if err := c.sessions.AppendTurn(ctx, c.current.ID, c.history[c.persisted]); err != nil {
-			fmt.Fprintf(stderr, "waffle: persist turn: %v\n", err)
-			break
-		}
-	}
-	return runErr
-}
-
-// finish runs the reflection pass: summarize the session for future recall.
-func (c *chat) finish(ctx context.Context, stdout io.Writer) {
-	if c.persisted < 2 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	model := c.agent.Model
-	if c.agent.UtilityModel != "" {
-		model = c.agent.UtilityModel
-	}
-	summary, err := session.Reflect(ctx, c.agent.Provider, c.history, session.ReflectOptions{Model: model})
-	if err != nil {
-		fmt.Fprintf(stdout, "%s(session %s saved; summary skipped: %v)%s\n", dim, c.current.ID, err, reset)
-		return
-	}
-	if summary == "" {
-		return
-	}
-	if err := c.sessions.SetSummary(ctx, c.current.ID, summary); err == nil {
-		fmt.Fprintf(stdout, "%s(session %s saved: %s)%s\n", dim, c.current.ID, summary, reset)
-	}
-}
-
-// repoCommand opens (or resumes) a repo workspace and points the agent's
-// tools at its container. The chat switches to the workspace's session so
-// the conversation and the repo work live together.
-// Workspace profile (set via `ws open --profile`) overrides chat --profile
-// for this session; repo WAFFLE.md may only tighten the selected profile (#71/#53).
-func (c *chat) repoCommand(ctx context.Context, repoArg string, stdout io.Writer) error {
-	if repoArg == "" {
-		return errors.New("usage: /repo <owner/repo>")
-	}
-	if c.wsBroker == nil {
-		b, url, err := startWorkspaceBroker(ctx, c.cfg, c.st, c.stderrW)
-		if err != nil {
-			return err
-		}
-		c.wsBroker, c.wsURL = b, url
-	}
-
-	mgr := newWorkspaceManager(c.cfg, c.st, c.wsBroker)
-	mgr.BrokerURL = c.wsURL
-	// Prefer chat profile when opening a new workspace so association is
-	// durable; resume paths keep the stored workspace profile.
-	ws, client, err := mgr.OpenWithProfile(ctx, repoArg, c.profileName)
-	if err != nil {
-		return err
-	}
-	if c.wsClient != nil {
-		_ = c.wsClient.Close()
-	}
-	c.wsClient = client
-
-	// Profile for this workspace run: workspace bind wins, else chat flag.
-	profileName := c.profileName
-	if ws.Profile != "" {
-		profileName = ws.Profile
-	}
-	// Rebuild from profile so toolbox/system match; then tighten with repo policy.
-	if profileName != "" && profileName != c.agent.Profile {
-		memWS, skills, loadErr := loadWorkspaceWithStore(c.st)
-		if loadErr != nil {
-			return loadErr
-		}
-		built, builtCleanup, buildErr := buildAgentWithProfile(ctx, c.cfg, memWS, skills, c.sessions, config.GroupMain, profileName)
-		if buildErr != nil {
-			return buildErr
-		}
-		if c.agentCleanup != nil {
-			c.agentCleanup()
-		}
-		c.agentCleanup = builtCleanup
-		c.agent = built
-		c.profileName = profileName
-	}
-
-	// Host (profile) tool policy is the ceiling; repo policy can only tighten.
-	hostPol := c.cfg.AgentPolicy(config.GroupMain)
-	if profileName != "" {
-		if p, ok := c.cfg.Profile(profileName); ok {
-			if len(p.Tools.Allow) > 0 {
-				hostPol.Allow = p.Tools.Allow
-			}
-			if len(p.Tools.Deny) > 0 {
-				hostPol.Deny = appendUniqueStrings(hostPol.Deny, p.Tools.Deny...)
-			}
-		}
-	}
-	toolPol := tool.Policy{
-		Allow:   hostPol.Allow,
-		Deny:    hostPol.Deny,
-		Profile: c.agent.Profile,
-	}
-	if toolPol.Profile == "" {
-		toolPol.Profile = "main"
-	}
-	sysExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo)
-	if p, perr := mgr.LoadRepoPolicy(ctx, client); perr != nil {
-		return perr
-	} else if p != nil {
-		toolPol = repopolicy.TightenTools(toolPol, p.Tools)
-		// Repo may only select host-approved codeintel capability IDs (#79).
-		toolPol = applyCodeIntelCaps(toolPol, p.CodeIntelCaps)
-		if block := p.PromptBlock(); block != "" {
-			sysExtra += "\n\n" + block
-		}
-	}
-
-	// Same provider and memory tools; builtins now execute in the
-	// workspace container, under tighten-only repo tool policy.
-	hostTools := tool.Restrict(c.agent.Tools, toolPol)
-	boxed := tool.Restrict(tool.Combine(sandbox.NewQueueToolbox(client), hostTools), toolPol)
-	c.agent = &agent.Agent{
-		Provider:      c.agent.Provider,
-		Tools:         boxed,
-		System:        c.agent.System + sysExtra,
-		Model:         c.agent.Model,
-		UtilityModel:  c.agent.UtilityModel,
-		Profile:       c.agent.Profile,
-		MaxTokens:     c.agent.MaxTokens,
-		MaxIterations: c.agent.MaxIterations,
-		Redact:        c.agent.Redact,
-		Spill:         c.agent.Spill,
-		Usage:         c.agent.Usage,
-		Limits:        c.agent.Limits,
-	}
-
-	// Continue the workspace's own session.
-	c.finish(ctx, stdout)
-	if err := c.switchToWorkspaceSession(ctx, ws.SessionID); err != nil {
-		return err
-	}
-	profNote := ""
-	if c.agent.Profile != "" && c.agent.Profile != "main" {
-		profNote = fmt.Sprintf(" profile=%s", c.agent.Profile)
-	}
-	fmt.Fprintf(stdout, "(workspace %s: %s at /work/repo, image %s — session %s%s)\n", ws.ID, ws.Repo, ws.Image, ws.SessionID, profNote)
-	return nil
-}
-
-// switchToWorkspaceSession swaps the chat onto the workspace's session.
-// State is mutated only after the history loads: if Turns fails, the
-// current session, history, and persisted index all stay as they were, so
-// the next turn keeps feeding and persisting the same session instead of
-// writing orphaned turns keyed off another session's history.
-func (c *chat) switchToWorkspaceSession(ctx context.Context, sessionID string) error {
-	turns, err := c.sessions.Turns(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("load workspace session %s (staying on session %s): %w", sessionID, c.current.ID, err)
-	}
-	c.history = session.Repair(turns)
-	c.persisted = len(c.history)
-	c.current = &session.Session{ID: sessionID}
-	return nil
-}
-
-func (c *chat) skillMessage(rest string) (string, error) {
-	name, args, _ := strings.Cut(rest, " ")
-	if name == "" {
-		return "", errors.New("usage: /skill <name> [arguments]")
-	}
-	s, ok := skill.Find(c.skills, name)
-	if !ok {
-		return "", fmt.Errorf("unknown skill %q (have: %s)", name, skillNames(c.skills))
-	}
-	body, err := s.Body()
-	if err != nil {
-		return "", err
-	}
-	msg := fmt.Sprintf("The user invoked the skill %q. Follow its instructions:\n\n%s", s.Name, body)
-	if strings.TrimSpace(args) != "" {
-		msg += "\n\nUser arguments: " + strings.TrimSpace(args)
-	}
-	return msg, nil
 }
 
 func skillNames(skills []skill.Skill) string {
@@ -522,40 +233,6 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 		return config.Config{}, nil, err
 	}
 	return cfg, st, nil
-}
-
-func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLast bool, profileName string) (*chat, func(), error) {
-	cleanup := func() {}
-	ws, skills, err := loadWorkspaceWithStore(st)
-	if err != nil {
-		return nil, cleanup, err
-	}
-	sessions := session.New(st)
-
-	a, agentCleanup, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupMain, profileName)
-	if err != nil {
-		return nil, cleanup, err
-	}
-	cleanup = agentCleanup
-
-	c := &chat{agent: a, sessions: sessions, skills: skills, cfg: cfg, st: st, profileName: profileName, agentCleanup: agentCleanup}
-	if continueLast {
-		if c.current, err = sessions.Latest(ctx); err != nil && !errors.Is(err, session.ErrNotFound) {
-			return nil, cleanup, err
-		}
-	}
-	if c.current == nil {
-		if c.current, err = sessions.Create(ctx, ""); err != nil {
-			return nil, cleanup, err
-		}
-	} else {
-		if c.history, err = sessions.Turns(ctx, c.current.ID); err != nil {
-			return nil, cleanup, err
-		}
-		c.history = session.Repair(c.history)
-		c.persisted = len(c.history)
-	}
-	return c, cleanup, nil
 }
 
 // buildAgent assembles the agent for an agent group (docs/plan.md trust
@@ -1201,13 +878,4 @@ Environment:
 		return "", err
 	}
 	return base + wsContext + skill.Index(skills), nil
-}
-
-// compact renders tool input JSON on one line, capped for display.
-func compact(raw []byte, limit int) string {
-	s := strings.Join(strings.Fields(string(raw)), " ")
-	if len(s) > limit {
-		s = s[:limit] + "…"
-	}
-	return s
 }

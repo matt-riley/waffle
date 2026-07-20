@@ -1,0 +1,778 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	chatpkg "github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
+	usagepkg "github.com/matt-riley/waffle/internal/usage"
+	"github.com/matt-riley/waffle/internal/workset"
+)
+
+func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ModelAlias != "gpt" {
+		t.Fatalf("saved = %+v", saved)
+	}
+
+	second := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	resumed, err := second.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID})
+	if err != nil || resumed.ModelAlias != "gpt" {
+		t.Fatalf("resumed = %+v, %v", resumed, err)
+	}
+}
+
+func TestChatRuntimeInvalidModelIsAtomic(t *testing.T) {
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "missing"}, nil)
+	if err == nil || runtime.agent.Model != state.ModelAlias {
+		t.Fatalf("model=%q err=%v", runtime.agent.Model, err)
+	}
+	saved, getErr := sessions.Get(context.Background(), state.SessionID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if saved.ModelAlias != "" {
+		t.Fatalf("invalid model persisted %q", saved.ModelAlias)
+	}
+}
+
+func TestChatRuntimeModelDatabaseFailureIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.DB().ExecContext(ctx, `
+		CREATE TRIGGER reject_model_alias_update
+		BEFORE UPDATE OF model_alias ON sessions
+		BEGIN SELECT RAISE(ABORT, 'model write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil)
+	if err == nil || runtime.agent.Model != state.ModelAlias {
+		t.Fatalf("model=%q err=%v", runtime.agent.Model, err)
+	}
+	saved, getErr := sessions.Get(ctx, state.SessionID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if saved.ModelAlias != "" {
+		t.Fatalf("failed model write persisted %q", saved.ModelAlias)
+	}
+}
+
+func TestChatRuntimeRemovedPersistedModelRequiresReplacement(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	reduced := configuredChatModels()
+	delete(reduced.Models, "gpt")
+	second := newRuntimeAgainstSameStore(t, reduced, sessions)
+	resumed, err := second.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ModelAlias != "gpt" || resumed.ModelError == "" {
+		t.Fatalf("resumed = %+v, want unavailable gpt with model error", resumed)
+	}
+	if second.agent.Model != "claude" {
+		t.Fatalf("agent silently selected %q, want configured default unchanged", second.agent.Model)
+	}
+	if len(resumed.Models) != 1 || resumed.Models[0].Alias != "claude" {
+		t.Fatalf("picker models = %+v", resumed.Models)
+	}
+	if err := second.Turn(ctx, "must not run", nil); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("Turn while model unavailable err = %v", err)
+	}
+	result, err := second.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "claude"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || result.State.ModelError != "" || result.State.ModelAlias != "claude" {
+		t.Fatalf("replacement result = %+v", result)
+	}
+}
+
+func TestChatRuntimeTurnEmitsHooksAndPersistsHistory(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopToolUse,
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+				Type:    llm.BlockToolUse,
+				ToolUse: &llm.ToolUse{ID: "call-1", Name: "runtime_test", Input: json.RawMessage(`{"ok":true}`)},
+			}}},
+			Usage: llm.Usage{InputTokens: 3, OutputTokens: 5},
+		}},
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}},
+			Usage:      llm.Usage{InputTokens: 2, OutputTokens: 7},
+		}, stream: "done"},
+	}}
+	runtime.agent.Tools = tool.NewRegistry(runtimeTestTool{})
+
+	var events []chatpkg.Event
+	if err := runtime.Turn(ctx, "run the tool", func(event chatpkg.Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	wantKinds := []chatpkg.EventKind{
+		chatpkg.EventToolStarted, chatpkg.EventToolFinished,
+		chatpkg.EventTextDelta, chatpkg.EventTurnDone,
+	}
+	for _, want := range wantKinds {
+		if !eventKinds(events)[want] {
+			t.Fatalf("events = %+v, missing %s", events, want)
+		}
+	}
+	done := events[len(events)-1]
+	if done.Kind != chatpkg.EventTurnDone || done.Usage != (llm.Usage{InputTokens: 5, OutputTokens: 12}) {
+		t.Fatalf("turn_done = %+v", done)
+	}
+	turns, err := sessions.Turns(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != len(runtime.history) || len(turns) != 4 || runtime.persisted != 4 {
+		t.Fatalf("persisted turns=%d history=%d index=%d", len(turns), len(runtime.history), runtime.persisted)
+	}
+	saved, err := sessions.Get(ctx, state.SessionID)
+	if err != nil || saved.Title != "run the tool" {
+		t.Fatalf("title=%q err=%v", saved.Title, err)
+	}
+}
+
+func TestChatRuntimeTurnPersistsUserMessageAndDoneEventOnRunError(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: errors.New("provider failed")}}}
+	var events []chatpkg.Event
+	err = runtime.Turn(ctx, "keep this", func(event chatpkg.Event) { events = append(events, event) })
+	if err == nil || err.Error() != "provider failed" {
+		t.Fatalf("Turn err = %v", err)
+	}
+	turns, loadErr := sessions.Turns(ctx, state.SessionID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(turns) != 1 || turns[0].Text() != "keep this" {
+		t.Fatalf("persisted turns = %+v", turns)
+	}
+	if len(events) == 0 || events[len(events)-1].Kind != chatpkg.EventTurnDone || !events[len(events)-1].IsError {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestChatRuntimeCancelOnlyCancelsActiveTurn(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &runtimeBlockingProvider{started: make(chan struct{})}
+	runtime.agent.Provider = provider
+	errCh := make(chan error, 1)
+	go func() { errCh <- runtime.Turn(ctx, "wait", nil) }()
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	if err := runtime.Turn(ctx, "overlap", nil); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("overlapping Turn err = %v", err)
+	}
+	runtime.Cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled Turn err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active turn was not canceled")
+	}
+	runtime.Cancel()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.agentCancel != nil {
+		t.Fatal("active cancellation was not cleared")
+	}
+}
+
+func TestChatRuntimeCommandResults(t *testing.T) {
+	tests := []struct {
+		name    string
+		command chatpkg.ParsedCommand
+		prepare func(*testing.T, *chatRuntime, *session.Store)
+		check   func(*testing.T, chatpkg.Result, *chatRuntime)
+	}{
+		{
+			name: "help", command: chatpkg.ParsedCommand{Name: chatpkg.CommandHelp},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Chat commands" || !reflect.DeepEqual(got.Commands, chatpkg.Commands()) {
+					t.Fatalf("help result = %+v", got)
+				}
+			},
+		},
+		{
+			name: "model picker", command: chatpkg.ParsedCommand{Name: chatpkg.CommandModel},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Choose a model" || aliases(got.Models) != "claude,gpt" {
+					t.Fatalf("model picker = %+v", got)
+				}
+			},
+		},
+		{
+			name: "models", command: chatpkg.ParsedCommand{Name: chatpkg.CommandModels},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Configured models" || aliases(got.Models) != "claude,gpt" || got.Models[0].Provider != "local" || got.Models[0].Upstream != "upstream-claude" {
+					t.Fatalf("models result = %+v", got)
+				}
+			},
+		},
+		{
+			name: "new", command: chatpkg.ParsedCommand{Name: chatpkg.CommandNew},
+			prepare: func(t *testing.T, runtime *chatRuntime, _ *session.Store) {
+				t.Helper()
+				runtime.history = []llm.Message{llm.UserText("old history")}
+			},
+			check: func(t *testing.T, got chatpkg.Result, runtime *chatRuntime) {
+				t.Helper()
+				if !got.Confirm || got.State != nil || len(runtime.history) != 1 {
+					t.Fatalf("new result = %+v history=%d", got, len(runtime.history))
+				}
+			},
+		},
+		{
+			name: "new confirmed", command: chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"},
+			prepare: func(t *testing.T, runtime *chatRuntime, _ *session.Store) {
+				t.Helper()
+				runtime.history = []llm.Message{llm.UserText("old history")}
+				result, err := runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil)
+				if err != nil || !result.Confirm {
+					t.Fatalf("request confirmation result=%+v err=%v", result, err)
+				}
+			},
+			check: func(t *testing.T, got chatpkg.Result, runtime *chatRuntime) {
+				t.Helper()
+				if got.Confirm || got.State == nil || got.State.SessionID == "" || len(runtime.history) != 0 {
+					t.Fatalf("confirmed new result = %+v history=%d", got, len(runtime.history))
+				}
+			},
+		},
+		{
+			name: "sessions", command: chatpkg.ParsedCommand{Name: chatpkg.CommandSessions},
+			prepare: func(t *testing.T, _ *chatRuntime, sessions *session.Store) {
+				t.Helper()
+				if _, err := sessions.Create(context.Background(), "second"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Recent sessions" || len(got.Sessions) != 2 {
+					t.Fatalf("sessions result = %+v", got)
+				}
+			},
+		},
+		{
+			name: "resume picker", command: chatpkg.ParsedCommand{Name: chatpkg.CommandResume},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Resume a session" || len(got.Sessions) != 1 {
+					t.Fatalf("resume picker = %+v", got)
+				}
+			},
+		},
+		{
+			name: "status", command: chatpkg.ParsedCommand{Name: chatpkg.CommandStatus},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Chat status" || got.State == nil || got.State.ConnectionMode != "direct" || got.State.Profile != "main" || got.State.ProviderLabel != "local (openai)" {
+					t.Fatalf("status result = %+v", got)
+				}
+			},
+		},
+		{
+			name: "usage", command: chatpkg.ParsedCommand{Name: chatpkg.CommandUsage},
+			prepare: func(t *testing.T, runtime *chatRuntime, sessions *session.Store) {
+				t.Helper()
+				ctx := context.Background()
+				usageStore := usagepkg.New(runtime.st)
+				if err := usageStore.AddRequestAt(ctx, runtime.current.ID, llm.Usage{InputTokens: 2, OutputTokens: 3}, time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)); err != nil {
+					t.Fatal(err)
+				}
+				other, err := sessions.Create(ctx, "other")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := usageStore.AddRequestAt(ctx, other.ID, llm.Usage{InputTokens: 4, OutputTokens: 5}, time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				want := "Current session totals: requests=2 input=4 output=6 reserved=0\nPersisted aggregate totals: requests=4 input=12 output=16 reserved=0"
+				if got.Title != "Usage" || len(got.Usage) != 6 || got.Text != want {
+					t.Fatalf("usage result = %+v\ntext=%q", got, got.Text)
+				}
+			},
+		},
+		{
+			name: "permissions", command: chatpkg.ParsedCommand{Name: chatpkg.CommandPermissions},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Effective permissions" || got.Permissions == nil || got.Permissions.SandboxMode != "host" {
+					t.Fatalf("permissions result = %+v", got)
+				}
+			},
+		},
+		{
+			name: "skill", command: chatpkg.ParsedCommand{Name: chatpkg.CommandSkill, Args: "audit fast"},
+			prepare: func(t *testing.T, runtime *chatRuntime, _ *session.Store) {
+				t.Helper()
+				path := filepath.Join(t.TempDir(), "SKILL.md")
+				if err := os.WriteFile(path, []byte("---\nname: audit\n---\nInspect carefully."), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runtime.skills = []skill.Skill{{Name: "audit", Path: path}}
+				runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{response: llm.Response{
+					StopReason: llm.StopEndTurn,
+					Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "audited"}}},
+				}}}}
+			},
+			check: func(t *testing.T, got chatpkg.Result, runtime *chatRuntime) {
+				t.Helper()
+				if got.Text != "skill audit completed" || len(runtime.history) != 2 || !strings.Contains(runtime.history[0].Text(), "User arguments: fast") {
+					t.Fatalf("skill result = %+v history=%+v", got, runtime.history)
+				}
+			},
+		},
+		{
+			name: "workset", command: chatpkg.ParsedCommand{Name: chatpkg.CommandWorkset},
+			prepare: func(t *testing.T, runtime *chatRuntime, _ *session.Store) {
+				t.Helper()
+				ws := &workset.Store{DB: runtime.st.DB}
+				if _, err := ws.Add(context.Background(), runtime.current.ID, workset.KindGoal, "finish task", workset.SourceUser, true); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
+				t.Helper()
+				if got.Title != "Working set" || len(got.Workset) != 1 || got.Workset[0].Text != "finish task" {
+					t.Fatalf("workset result = %+v", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+			if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.prepare != nil {
+				tt.prepare(t, runtime, sessions)
+			}
+			got, err := runtime.Command(context.Background(), tt.command, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.check(t, got, runtime)
+		})
+	}
+}
+
+func TestChatRuntimeCommandUsageErrors(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		command chatpkg.ParsedCommand
+		want    string
+	}{
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandSkill}, "usage: /skill <name> [args]"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandRepo}, "usage: /repo <owner/repo>"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandWorkset, Args: "replace only"}, "usage: /workset replace <id> <text>"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandWorkset, Args: "drop"}, "usage: /workset drop <id>"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandWorkset, Args: "clear extra"}, "usage: /workset clear"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandWorkset, Args: "wat"}, "usage: /workset [list|replace <id> <text>|drop <id>|clear]"},
+		{chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "now"}, "usage: /new"},
+	} {
+		_, err := runtime.Command(context.Background(), tt.command, nil)
+		if err == nil || err.Error() != tt.want {
+			t.Errorf("Command(%+v) err = %v, want %q", tt.command, err, tt.want)
+		}
+	}
+}
+
+func TestChatRuntimeNewConfirmationRejectsDirectAndStaleConfirmation(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"}, nil)
+	if err == nil || err.Error() != "no pending /new confirmation" {
+		t.Fatalf("direct confirmation err = %v", err)
+	}
+	if runtime.current.ID != state.SessionID {
+		t.Fatal("direct confirmation changed the session")
+	}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request confirmation result=%+v err=%v", result, err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"}, nil)
+	if err == nil || err.Error() != "no pending /new confirmation" {
+		t.Fatalf("stale confirmation after model change err = %v", err)
+	}
+	if runtime.current.ID != state.SessionID {
+		t.Fatal("stale confirmation changed the session")
+	}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("second confirmation result=%+v err=%v", result, err)
+	}
+	runtime.Cancel()
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"}, nil)
+	if err == nil || err.Error() != "no pending /new confirmation" {
+		t.Fatalf("stale confirmation after Cancel err = %v", err)
+	}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("third confirmation result=%+v err=%v", result, err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{response: llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "changed"}}},
+	}}}}
+	if err := runtime.Turn(ctx, "intervening turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"}, nil)
+	if err == nil || err.Error() != "no pending /new confirmation" {
+		t.Fatalf("stale confirmation after Turn err = %v", err)
+	}
+}
+
+func TestChatRuntimeResumeLoadsBeforeMutatingStateAndRestoresModel(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	initial, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := sessions.Create(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, target.ID, "gpt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendTurn(ctx, target.ID, llm.UserText("earlier")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || result.State.SessionID != target.ID || result.State.ModelAlias != "gpt" || runtime.agent.Model != "gpt" || len(runtime.history) != 1 {
+		t.Fatalf("resume result = %+v agent=%q history=%d", result, runtime.agent.Model, len(runtime.history))
+	}
+
+	corrupt, err := sessions.Create(ctx, "corrupt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.DB().ExecContext(ctx, `
+		INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		VALUES (?, 1, 'user', 'not json', '', ?)`, corrupt.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: corrupt.ID}, nil)
+	if err == nil {
+		t.Fatal("resume corrupt session succeeded")
+	}
+	if runtime.current.ID != target.ID || runtime.agent.Model != "gpt" || len(runtime.history) != 1 {
+		t.Fatalf("failed resume mutated current=%s model=%s history=%d (initial=%s)", runtime.current.ID, runtime.agent.Model, len(runtime.history), initial.SessionID)
+	}
+}
+
+func TestChatRuntimeExitWarnsOnReflectionFailureAndCleansUpOnce(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.history = []llm.Message{llm.UserText("question"), {Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}}}
+	runtime.persisted = 2
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{err: errors.New("reflection failed")}}}
+	closed := 0
+	runtime.wsClient = closeFunc(func() error { closed++; return nil })
+	cleaned := 0
+	runtime.agentCleanup = func() { cleaned++ }
+	var events []chatpkg.Event
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandExit}, func(event chatpkg.Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ShouldClose || !strings.Contains(result.Text, "warning") || len(events) != 1 || events[0].Kind != chatpkg.EventNotice || !events[0].IsError {
+		t.Fatalf("exit result=%+v events=%+v", result, events)
+	}
+	if closed != 1 || cleaned != 1 {
+		t.Fatalf("cleanup counts client=%d agent=%d", closed, cleaned)
+	}
+	if err := runtime.Close(ctx); err == nil || !strings.Contains(err.Error(), "reflection failed") {
+		t.Fatalf("Close after exit err = %v", err)
+	}
+	if closed != 1 || cleaned != 1 {
+		t.Fatalf("cleanup repeated client=%d agent=%d", closed, cleaned)
+	}
+}
+
+func TestChatRuntimeNewReflectsOldSessionAndRestoresProfileModel(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	runtime.history = []llm.Message{
+		llm.UserText("question"),
+		{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answer"}}},
+	}
+	for _, message := range runtime.history {
+		if err := sessions.AppendTurn(ctx, state.SessionID, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.persisted = 2
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{response: llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "old session summary"}}},
+	}}}}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request confirmation result=%+v err=%v", result, err)
+	}
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: "confirm"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Summary != "old session summary" {
+		t.Fatalf("old summary = %q", old.Summary)
+	}
+	if result.State == nil || result.State.SessionID == state.SessionID || result.State.ModelAlias != "claude" || runtime.agent.Model != "claude" {
+		t.Fatalf("new result=%+v agent=%q", result, runtime.agent.Model)
+	}
+}
+
+func TestChatRuntimeStatusUsesProfileSandboxOverride(t *testing.T) {
+	cfg := configuredChatModels()
+	cfg.Sandbox.Mode = "docker"
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"safe": {Sandbox: "host"},
+	}
+	runtime, _ := newRuntimeFixture(t, cfg)
+	state, err := runtime.Open(context.Background(), chatpkg.OpenOptions{Profile: "safe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SandboxMode != "host" || state.Profile != "safe" {
+		t.Fatalf("profile state = %+v", state)
+	}
+}
+
+func TestChatRuntimeClosedStateRejectsFurtherUse(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	ctx := context.Background()
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Turn(ctx, "after close", nil); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Turn after Close err = %v", err)
+	}
+	second, err := newChatRuntime(ctx, runtime.cfg, runtime.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Open(ctx, chatpkg.OpenOptions{}); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Open after Close err = %v", err)
+	}
+}
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error { return f() }
+
+func aliases(models []chatpkg.Model) string {
+	values := make([]string, len(models))
+	for i, model := range models {
+		values[i] = model.Alias
+	}
+	return strings.Join(values, ",")
+}
+
+type runtimeProviderStep struct {
+	response llm.Response
+	stream   string
+	err      error
+}
+
+type runtimeScriptedProvider struct {
+	mu        sync.Mutex
+	responses []runtimeProviderStep
+}
+
+func (p *runtimeScriptedProvider) Complete(_ context.Context, _ llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.responses) == 0 {
+		return nil, errors.New("no scripted response")
+	}
+	step := p.responses[0]
+	p.responses = p.responses[1:]
+	if step.stream != "" && onEvent != nil {
+		onEvent(llm.Event{Type: llm.EventTextDelta, Text: step.stream})
+	}
+	if step.err != nil {
+		return nil, step.err
+	}
+	response := step.response
+	return &response, nil
+}
+
+type runtimeBlockingProvider struct{ started chan struct{} }
+
+func (p *runtimeBlockingProvider) Complete(ctx context.Context, _ llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type runtimeTestTool struct{}
+
+func (runtimeTestTool) Def() llm.Tool {
+	return llm.Tool{Name: "runtime_test", Description: "runtime test", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (runtimeTestTool) Run(context.Context, json.RawMessage) (string, error) {
+	return "tool output", nil
+}
+
+func eventKinds(events []chatpkg.Event) map[chatpkg.EventKind]bool {
+	kinds := make(map[chatpkg.EventKind]bool, len(events))
+	for _, event := range events {
+		kinds[event.Kind] = true
+	}
+	return kinds
+}
+
+func configuredChatModels() config.Config {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderConnection{
+		"local": {Type: "openai", BaseURL: "https://models.invalid/v1"},
+	}
+	cfg.Models = map[string]config.ModelTarget{
+		"claude": {Provider: "local", Model: "upstream-claude"},
+		"gpt":    {Provider: "local", Model: "upstream-gpt"},
+	}
+	cfg.Agent.DefaultModel = "claude"
+	cfg.Agent.UtilityModel = ""
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	return cfg
+}
+
+func newRuntimeFixture(t *testing.T, cfg config.Config) (*chatRuntime, *session.Store) {
+	t.Helper()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	runtime, err := newChatRuntime(context.Background(), cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	return runtime, session.New(st)
+}
+
+func newRuntimeAgainstSameStore(t *testing.T, cfg config.Config, sessions *session.Store) *chatRuntime {
+	t.Helper()
+	runtime, err := newChatRuntime(context.Background(), cfg, &store.Store{DB: sessions.DB()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	return runtime
+}
