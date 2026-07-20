@@ -830,7 +830,7 @@ git commit -m "feat: add focused conversation chat TUI"
 - Produces: regression coverage for managed no-sudo behavior, terminal interaction, cancellation, persistence, and data isolation
 - Uses: github.com/creack/pty v1.1.24
 
-- [ ] **Step 1: Pin PTY support and write the failing socket integration test**
+- [ ] **Step 1: Pin PTY support and write the socket integration test**
 
 ~~~sh
 go get github.com/creack/pty@v1.1.24
@@ -848,7 +848,7 @@ hello socket
 
 Assert the model changes, one streamed answer arrives, status says connection=unix, exit is clean, the server database contains model_alias=gpt, and client output never includes credential/config/database canaries.
 
-- [ ] **Step 2: Write failing PTY tests**
+- [ ] **Step 2: Write PTY tests**
 
 Start a deterministic temporary chatwire server, then launch the real Waffle chat process against its socket under pty.StartWithSize at 100x30. Assert the Focused Conversation header/composer appears, type /help and /model, select an alias, submit a synthetic turn, resize to 58x24, cancel a delayed turn with Escape, and quit with /exit. Add backend-disconnect and SIGINT cases that assert the alternate-screen restore sequence is emitted and the process exits without a terminal hang. Bound every expect operation to five seconds and dump the sanitized screen buffer on failure.
 
