@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -63,9 +64,8 @@ func TestChatSocketEndToEnd(t *testing.T) {
 	t.Cleanup(provider.Close)
 
 	socketPath := filepath.Join(serviceHome, "chat.sock")
-	statusAddr := unusedTCPAddress(t)
 	configBody := fmt.Sprintf(`[gateway]
-status_listen = %q
+status_listen = "127.0.0.1:0"
 
 [chat]
 socket = %q
@@ -88,7 +88,7 @@ model = "gpt-upstream"
 default_model = "writer"
 subagents = false
 learn = false
-`, statusAddr, socketPath, provider.URL+"/v1")
+`, socketPath, provider.URL+"/v1")
 	if err := os.WriteFile(filepath.Join(serviceHome, "config.toml"), []byte(configBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -213,10 +213,16 @@ func waitForUnixSocket(t *testing.T, path string, processDone *processWait, logs
 
 func stopProcess(t *testing.T, cmd *exec.Cmd, wait *processWait, cancel context.CancelFunc, logs fmt.Stringer) {
 	t.Helper()
+	if err := stopProcessWithin(cmd, wait, cancel, 5*time.Second); err != nil {
+		t.Errorf("%v\n%s", err, logs.String())
+	}
+}
+
+func stopProcessWithin(cmd *exec.Cmd, wait *processWait, cancel context.CancelFunc, timeout time.Duration) error {
 	select {
 	case <-wait.done:
 		cancel()
-		return
+		return nil
 	default:
 	}
 	if cmd.Process != nil {
@@ -226,14 +232,62 @@ func stopProcess(t *testing.T, cmd *exec.Cmd, wait *processWait, cancel context.
 	case <-wait.done:
 		cancel()
 		if wait.err != nil && !strings.Contains(wait.err.Error(), "signal: interrupt") {
-			t.Errorf("process shutdown: %v\n%s", wait.err, logs.String())
+			return fmt.Errorf("process shutdown: %w", wait.err)
 		}
-	case <-time.After(5 * time.Second):
-		cancel()
+		return nil
+	case <-time.After(timeout):
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		t.Errorf("process did not stop within five seconds\n%s", logs.String())
+		cancel()
+		select {
+		case <-wait.done:
+			return fmt.Errorf("process did not stop within %s; killed and reaped", timeout)
+		case <-time.After(timeout):
+			return fmt.Errorf("process did not stop within %s; kill issued but process was not reaped within %s", timeout, timeout)
+		}
+	}
+}
+
+func TestStopProcessTimeoutKillsAndReaps(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer func() { _ = readyReader.Close() }()
+	cmd := exec.CommandContext(ctx, "sh", "-c", `trap '' INT; printf x >&3; while :; do :; done`)
+	cmd.ExtraFiles = []*os.File{readyWriter}
+	if err := cmd.Start(); err != nil {
+		_ = readyWriter.Close()
+		cancel()
+		t.Fatal(err)
+	}
+	_ = readyWriter.Close()
+	wait := waitForProcess(cmd)
+	ready := make(chan error, 1)
+	go func() {
+		var marker [1]byte
+		_, readErr := io.ReadFull(readyReader, marker[:])
+		ready <- readErr
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stubborn process did not install interrupt trap")
+	}
+	err = stopProcessWithin(cmd, wait, cancel, 25*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "killed and reaped") {
+		t.Fatalf("stopProcessWithin error = %v, want killed-and-reaped timeout", err)
+	}
+	select {
+	case <-wait.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("killed process was not reaped")
 	}
 }
 

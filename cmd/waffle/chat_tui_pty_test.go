@@ -82,7 +82,7 @@ func TestChatTUIPTYConversationResizeCancelAndExit(t *testing.T) {
 	terminal.expectText(t, "Turn cancelled.")
 
 	terminal.write(t, "/exit\r")
-	terminal.wait(t, false)
+	terminal.wait(t, expectExitZero)
 	terminal.expectAlternateScreenRestored(t)
 	terminal.assertNoCanaries(t)
 }
@@ -96,7 +96,7 @@ func TestChatTUIPTYBackendDisconnectRestoresTerminal(t *testing.T) {
 	terminal.expectText(t, "Connection lost:")
 	terminal.expectText(t, "Press Enter to close.")
 	terminal.write(t, "\r")
-	terminal.wait(t, true)
+	terminal.wait(t, expectDisconnectNonzero)
 	terminal.expectAlternateScreenRestored(t)
 	terminal.assertNoCanaries(t)
 }
@@ -108,7 +108,7 @@ func TestChatTUIPTYSIGINTRestoresTerminal(t *testing.T) {
 	if err := terminal.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	terminal.wait(t, true)
+	terminal.wait(t, expectSIGINTNonzero)
 	terminal.expectAlternateScreenRestored(t)
 	terminal.assertNoCanaries(t)
 }
@@ -414,12 +414,30 @@ func (p *ptyProcess) expect(t *testing.T, offset int, predicate func([]byte) boo
 	t.Fatalf("timed out after five seconds waiting for %s\n%s", description, p.failureBuffer())
 }
 
-func (p *ptyProcess) wait(t *testing.T, allowSignal bool) {
+type ptyExitExpectation uint8
+
+const (
+	expectExitZero ptyExitExpectation = iota
+	expectDisconnectNonzero
+	expectSIGINTNonzero
+)
+
+func (p *ptyProcess) wait(t *testing.T, expectation ptyExitExpectation) {
 	t.Helper()
 	select {
 	case <-p.waiter.done:
-		if p.waiter.err != nil && !allowSignal {
-			t.Fatalf("PTY process exit: %v\n%s", p.waiter.err, p.failureBuffer())
+		switch expectation {
+		case expectExitZero:
+			if p.waiter.err != nil {
+				t.Fatalf("PTY process exit = %v, want zero\n%s", p.waiter.err, p.failureBuffer())
+			}
+		case expectDisconnectNonzero, expectSIGINTNonzero:
+			var exitErr *exec.ExitError
+			if !errors.As(p.waiter.err, &exitErr) || exitErr.ExitCode() == 0 {
+				t.Fatalf("PTY process exit = %v, want documented nonzero status for %v\n%s", p.waiter.err, expectation, p.failureBuffer())
+			}
+		default:
+			t.Fatalf("unknown PTY exit expectation %d", expectation)
 		}
 	case <-time.After(ptyExpectTimeout):
 		t.Fatalf("PTY process did not exit within five seconds\n%s", p.failureBuffer())
