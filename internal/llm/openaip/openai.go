@@ -1,8 +1,7 @@
 // Package openaip translates waffle's canonical LLM types to the OpenAI
 // Chat Completions dialect. This one provider covers OpenAI itself plus the
-// long tail of compatible endpoints — OpenRouter, Ollama, vLLM, and a
-// running workweave/router — which is what makes waffle's no-lock-in
-// principle real (docs/plan.md).
+// long tail of compatible endpoints — OpenRouter, Ollama, Gemini, and vLLM —
+// which is what makes waffle's no-lock-in principle real (docs/plan.md).
 package openaip
 
 import (
@@ -19,6 +18,9 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 )
+
+// DefaultBaseURL is the OpenAI API's default versioned endpoint.
+const DefaultBaseURL = "https://api.openai.com/v1"
 
 // maxAccumulatedBytes caps text and tool call argument accumulation in
 // readStream to prevent unbounded memory growth from verbose or malicious

@@ -146,6 +146,11 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	}
 	name := "waffle-sb-" + suffix
 
+	client, err := NewClient(opts.QueueDir)
+	if err != nil {
+		return nil, err
+	}
+
 	args := dockerRunArgs(name, opts)
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
@@ -154,15 +159,12 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 			out, err = exec.CommandContext(ctx, "docker", dockerRunArgs(name, opts)...).CombinedOutput()
 		}
 		if err != nil {
+			_ = client.Close()
 			return nil, fmt.Errorf("sandbox: docker run: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
 	}
+	client.startedAt = time.Now()
 
-	client, err := NewClient(opts.QueueDir)
-	if err != nil {
-		_ = exec.Command("docker", "rm", "-f", name).Run()
-		return nil, err
-	}
 	return &DockerExecutor{
 		client:    client,
 		container: name,

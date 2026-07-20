@@ -36,7 +36,7 @@ The workflow succeeds in the **Installed** state. It reports the installed Waffl
 sudo waffle provider add
 ```
 
-The deployed host exposes a correctly configured `waffle` management command on `PATH`; the operator does not need to know the release directory, source the service identity, or set `WAFFLE_HOME` manually. System-install mutations require `sudo`, while read-only provider commands remain available without unnecessary privilege where filesystem permissions allow it.
+The deployed host exposes a correctly configured `waffle` management command on `PATH`; the operator does not need to know the release directory, source the service identity, or set `WAFFLE_HOME` manually. The production host keeps its managed state and identity behind a root-only wrapper, so both mutation and inspection use `sudo waffle ...`; standalone installs may run read-only provider commands without privilege when their filesystem permissions allow it.
 
 ### Provider enrollment
 
@@ -113,7 +113,7 @@ After all release gates pass, Waffle may invoke the released shared deployment-r
 
 ### `matt-riley-ci`
 
-Shared CI owns only the generic authenticated handoff. It validates the all-or-none artifact tuple, creates a short-lived GitHub App token, and dispatches source and artifact provenance to Infra. It does not receive provider credentials, understand provider connections, select models, provision Hetzner, join Tailscale, mutate the host, or decide Waffle health.
+Shared CI owns only the optional generic authenticated handoff. When the Waffle repository explicitly opts into immediate push dispatch with a GitHub App variable and secret, it validates the all-or-none artifact tuple, creates a short-lived token, and dispatches source and artifact provenance to Infra. The default zero-input path lets Infra discover the published artifact using credentials already held by Infra, so Waffle artifact publication does not require cross-repository credentials. Shared CI does not receive provider credentials, understand provider connections, select models, provision Hetzner, join Tailscale, mutate the host, or decide Waffle health.
 
 The artifact-aware deployment-request contract must be covered by an executed contract test and released on the repository's current major line before Waffle depends on that major tag.
 

@@ -3,6 +3,7 @@ package selfdev
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llmtest"
+	"github.com/matt-riley/waffle/internal/secret"
 )
 
 func writeUpgradeFixture(t *testing.T, brokenTest, brokenEval bool) string {
@@ -314,6 +317,213 @@ func TestProviderCheck(t *testing.T) {
 			t.Fatalf("providerCheck error = %v, want deadline exceeded", err)
 		}
 	})
+}
+
+func TestProviderCheckConfigUsesExplicitDefaultAlias(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAFFLE_AGE_IDENTITY", id.String())
+	store := secret.OpenFile(filepath.Join(home, "secrets.age"), id)
+	if err := store.Set("provider/anthropic/api-key", "anthropic-test-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var requestedModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "anthropic-test-key" {
+			t.Errorf("x-api-key = %q", got)
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"anthropic": {Type: "anthropic", APIKey: "secret://provider/anthropic/api-key", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "anthropic", Model: "claude-test"},
+		},
+	}
+	cfg.Agent.DefaultModel = "primary"
+
+	info, err := providerCheckConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("providerCheckConfig: %v", err)
+	}
+	if info != "authenticated completion" || requestedModel != "claude-test" {
+		t.Fatalf("info/model = %q/%q", info, requestedModel)
+	}
+}
+
+func TestConfiguredReviewerUsesExplicitUtilityAlias(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAFFLE_AGE_IDENTITY", id.String())
+	store := secret.OpenFile(filepath.Join(home, "secrets.age"), id)
+	if err := store.Set("provider/openai/api-key", "openai-test-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var requestedModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer openai-test-key" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"[]\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"openai": {Type: "openai", APIKey: "secret://provider/openai/api-key", BaseURL: srv.URL + "/v1"},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "openai", Model: "generation-model"},
+			"review":  {Provider: "openai", Model: "utility-review"},
+		},
+	}
+	cfg.Agent.DefaultModel = "primary"
+	cfg.Agent.UtilityModel = "review"
+
+	reviewer, err := configuredReviewer(cfg)
+	if err != nil {
+		t.Fatalf("configuredReviewer: %v", err)
+	}
+	if _, err := reviewer.Review(context.Background(), "diff", "task"); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if reviewer.Model != "utility-review" || requestedModel != "utility-review" {
+		t.Fatalf("reviewer/request model = %q/%q", reviewer.Model, requestedModel)
+	}
+}
+
+func TestExplicitKeylessEndpointIsProbedAndCanReview(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		requests = append(requests, body.Model)
+		w.Header().Set("Content-Type", "text/event-stream")
+		text := "ok"
+		if body.Model == "local-review" {
+			text = "[]"
+		}
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", text)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"local": {Type: "openai", BaseURL: srv.URL + "/v1"},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "local", Model: "local-main"},
+			"review":  {Provider: "local", Model: "local-review"},
+		},
+	}
+	cfg.Agent.DefaultModel = "primary"
+	cfg.Agent.UtilityModel = "review"
+
+	if _, err := providerCheckConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("providerCheckConfig: %v", err)
+	}
+	if got := strings.Join(requests, ","); got != "local-main" {
+		t.Fatalf("Doctor requested models = %q", got)
+	}
+	reviewer, err := configuredReviewer(cfg)
+	if err != nil {
+		t.Fatalf("configuredReviewer: %v", err)
+	}
+	if _, err := reviewer.Review(context.Background(), "diff", "task"); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if got := strings.Join(requests, ","); got != "local-main,local-review" {
+		t.Fatalf("requested models = %q", got)
+	}
+}
+
+func TestExplicitNamedSecretDoesNotFallBackToProviderEnvironment(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "must-not-be-used")
+	cfg := config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"named": {Type: "openai", APIKey: "secret://provider/named/api-key", BaseURL: "http://127.0.0.1:1/v1"},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "named", Model: "model"},
+		},
+	}
+	cfg.Agent.DefaultModel = "primary"
+
+	_, err := providerCheckConfig(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "resolve credentials") {
+		t.Fatalf("providerCheckConfig error = %v", err)
+	}
+	if strings.Contains(err.Error(), "must-not-be-used") {
+		t.Fatalf("providerCheckConfig leaked environment credential: %v", err)
+	}
+}
+
+func TestConfiguredReviewerFallsBackToExplicitDefaultAndKeepsLegacy(t *testing.T) {
+	explicit := config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"local": {Type: "openai", BaseURL: "http://127.0.0.1:1/v1"},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "local", Model: "local-main"},
+		},
+	}
+	explicit.Agent.DefaultModel = "primary"
+	reviewer, err := configuredReviewer(explicit)
+	if err != nil || reviewer.Model != "local-main" || reviewer.Provider == nil {
+		t.Fatalf("explicit default reviewer = %#v, %v", reviewer, err)
+	}
+
+	legacy := config.Config{Provider: config.Provider{
+		Name:         "openai",
+		Model:        "legacy-main",
+		UtilityModel: "legacy-review",
+		APIKey:       "legacy-test-key",
+		BaseURL:      "http://127.0.0.1:1/v1",
+	}}
+	reviewer, err = configuredReviewer(legacy)
+	if err != nil || reviewer.Model != "legacy-review" || reviewer.Provider == nil {
+		t.Fatalf("legacy reviewer = %#v, %v", reviewer, err)
+	}
 }
 
 func TestDoctorPasses(t *testing.T) {

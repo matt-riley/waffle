@@ -103,6 +103,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return nil
 	case "secret":
 		return secretCmd(args[1:], stdin, stdout, stderr)
+	case "provider":
+		return providerCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "backup":
 		if len(args) < 2 || len(args) > 3 {
 			return errors.New("usage: waffle backup <absolute-dir> [--with-identity]")
@@ -201,6 +203,7 @@ Commands:
   pause     pause new agent runs
   resume    resume agent runs
   secret    manage the encrypted secret store
+  provider  add, list, test, or remove model-provider connections
   backup    create a local state backup
   restore   validate and restore a local state backup
   doctor    run self-checks

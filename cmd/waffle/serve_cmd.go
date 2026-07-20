@@ -413,6 +413,16 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	cleanup func(),
 	err error,
 ) {
+	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg))
+}
+
+func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver) (
+	agents map[string]*agent.Agent,
+	cronAgent *agent.Agent,
+	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
+	cleanup func(),
+	err error,
+) {
 	agents = make(map[string]*agent.Agent)
 	profilesMain = make(map[string]*agent.Agent)
 	profilesGroup = make(map[string]*agent.Agent)
@@ -425,7 +435,7 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	}
 
 	build := func(group string) (*agent.Agent, error) {
-		a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, group)
+		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime)
 		cleanups = append(cleanups, closer)
 		if err != nil {
 			return nil, err
@@ -479,21 +489,21 @@ func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Worksp
 	}
 	sort.Strings(profileNames)
 	for _, name := range profileNames {
-		mainA, mainCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupMain, name)
+		mainA, mainCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupMain, name, runtime)
 		cleanups = append(cleanups, mainCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (main): %w", name, err)
 		}
 		profilesMain[name] = mainA
 
-		groupA, groupCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupGroup, name)
+		groupA, groupCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupGroup, name, runtime)
 		cleanups = append(cleanups, groupCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (group): %w", name, err)
 		}
 		profilesGroup[name] = groupA
 
-		cronA, cronCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name)
+		cronA, cronCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupCron, name, runtime)
 		cleanups = append(cleanups, cronCloser)
 		if err != nil {
 			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)
@@ -524,20 +534,60 @@ func (ads adapterDeliverer) Deliver(ctx context.Context, target, text string) er
 // brokerUpstreams assembles the LLM upstreams the broker can front, using
 // the same key resolution as the agent itself.
 func brokerUpstreams(cfg config.Config) []broker.Upstream {
-	var ups []broker.Upstream
-	if key, _, err := resolveAPIKey(config.Provider{Name: "anthropic", APIKey: "secret://anthropic/api-key"}); err == nil && key != "" {
-		base := "https://api.anthropic.com"
-		if cfg.Provider.Name == "anthropic" && cfg.Provider.BaseURL != "" {
-			base = cfg.Provider.BaseURL
+	return brokerUpstreamsWithSecretResolver(cfg, resolveProviderConnectionSecret)
+}
+
+func brokerUpstreamsWithSecretResolver(cfg config.Config, secrets secretResolver) []broker.Upstream {
+	source := cfg.ProviderRegistrySource()
+	connections := cfg.Providers
+	legacyFallback := source == config.ProviderRegistryLegacy
+	if source == config.ProviderRegistryNone && cfg.Provider.Name != "" {
+		legacyFallback = true
+		connections = map[string]config.ProviderConnection{
+			"default": {
+				Type:      cfg.Provider.Name,
+				APIKey:    cfg.Provider.APIKey,
+				BaseURL:   cfg.Provider.BaseURL,
+				MaxTokens: cfg.Provider.MaxTokens,
+			},
 		}
-		ups = append(ups, broker.Upstream{Name: "anthropic", BaseURL: base, Header: "x-api-key", Value: key})
 	}
-	if key, _, err := resolveAPIKey(config.Provider{Name: "openai", APIKey: "secret://openai/api-key"}); err == nil && key != "" {
-		base := "https://api.openai.com"
-		if cfg.Provider.Name == "openai" && cfg.Provider.BaseURL != "" {
-			base = cfg.Provider.BaseURL
+	names := make([]string, 0, len(connections))
+	for name := range connections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	ups := make([]broker.Upstream, 0, len(names))
+	for _, name := range names {
+		connection := connections[name]
+		if legacyFallback && connection.APIKey == "" {
+			connection.APIKey = envKey(connection.Type)
 		}
-		ups = append(ups, broker.Upstream{Name: "openai", BaseURL: base, Header: "Authorization", Value: "Bearer " + key})
+		key, _, err := secrets(connection)
+		if err != nil {
+			continue
+		}
+		base := connection.BaseURL
+		header, value := "", ""
+		switch connection.Type {
+		case "anthropic":
+			if base == "" {
+				base = "https://api.anthropic.com"
+			}
+			if key != "" {
+				header, value = "x-api-key", key
+			}
+		case "openai":
+			if base == "" {
+				base = "https://api.openai.com"
+			}
+			if key != "" {
+				header, value = "Authorization", "Bearer "+key
+			}
+		default:
+			continue
+		}
+		ups = append(ups, broker.Upstream{Name: name, BaseURL: base, Header: header, Value: value})
 	}
 	return ups
 }

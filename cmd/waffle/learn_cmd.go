@@ -8,8 +8,6 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
-	"github.com/matt-riley/waffle/internal/llm/anthropicp"
-	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
@@ -49,24 +47,11 @@ func runLearn(ctx context.Context, cfg config.Config, st *store.Store, stdout io
 	sessions := session.New(st)
 	l := skill.NewLearnerFromStore(st, sessions, ws)
 
-	// Attribution uses utility model when configured (#65).
-	if cfg.Provider.UtilityModel != "" {
-		apiKey, _, err := resolveAPIKey(cfg.Provider)
-		if err == nil && apiKey != "" {
-			var provider llm.Provider
-			switch cfg.Provider.Name {
-			case "openai":
-				base := cfg.Provider.BaseURL
-				if base == "" {
-					base = "https://api.openai.com/v1"
-				}
-				provider = openaip.New(apiKey, base)
-			default:
-				provider = anthropicp.New(apiKey, cfg.Provider.BaseURL)
-			}
-			l.Provider = provider
-			l.Model = cfg.Provider.UtilityModel
-		}
+	// Attribution uses the configured utility model alias (#65).
+	model, provider, runtimeErr := learnRuntime(cfg, newModelRuntimeResolver(cfg))
+	if runtimeErr == nil && provider != nil {
+		l.Provider = provider
+		l.Model = model
 	}
 
 	res, err := l.Run(ctx)
@@ -98,6 +83,20 @@ func runLearn(ctx context.Context, cfg config.Config, st *store.Store, stdout io
 		fmt.Fprintln(stdout, "no recurring failure patterns since last run")
 	}
 	return nil
+}
+
+func learnRuntime(cfg config.Config, runtime *modelRuntimeResolver) (string, llm.Provider, error) {
+	model := runtimeUtilityModel(cfg)
+	if model == "" {
+		return "", nil, nil
+	}
+	if runtime == nil {
+		runtime = newModelRuntimeResolver(cfg)
+	}
+	if _, _, _, err := runtime.resolve(model); err != nil {
+		return "", nil, err
+	}
+	return model, runtime, nil
 }
 
 func learnDigest(ctx context.Context, cfg config.Config, st *store.Store) (string, error) {

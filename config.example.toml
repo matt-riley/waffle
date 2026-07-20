@@ -1,21 +1,52 @@
-# Example waffle config showing named agent profiles (#71).
-# Copy to $WAFFLE_HOME/config.toml and adjust. Profiles are a *trust boundary*
-# (system, model, tools, sandbox) — not personality presets alone.
+# Provider-free waffle config with named agent profiles. Copy to
+# $WAFFLE_HOME/config.toml and adjust. Profiles are a *trust boundary* (system,
+# model, tools, sandbox) — not personality presets alone.
 #
 # Migration: existing installs with no [agent.profile] section keep today's
-# default agent construction as the effective "main" profile. No change required.
+# default agent construction as the effective "main" profile. The legacy
+# singular [provider] table also remains supported and is normalized in memory.
+# No change required for either existing configuration form.
+#
+# Providers are optional. A newly deployed system may omit [providers],
+# [models], default_model, and utility_model until `waffle provider add`
+# validates the first connection on the host. Waffle connects to these named
+# connections directly and uses embedded SQLite; no external router or
+# application database is required.
+#
+# Prefer the management command over hand-editing provider config because it
+# probes the upstream and commits the encrypted credential and config
+# transactionally. Presets are openai, anthropic, openrouter, and
+# openai-compatible. Only openai-compatible requires a base URL. Bare guided
+# add reads a hidden credential and uses it to authenticate model discovery.
+# If discovery fails, guided add offers manual ALIAS=UPSTREAM entry; successful
+# discovery lets you select favourite aliases:
+#   sudo waffle provider add
+#   sudo waffle provider models openrouter --search claude
+#   sudo waffle provider models openrouter --refresh
+#   sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
+#   sudo waffle provider model activate ALIAS
+#   sudo waffle provider model remove ALIAS [--replace-with ALIAS]
+#   sudo waffle provider remove CONNECTION
+#
+# `provider models` filters with --search, refreshes upstream data with
+# --refresh, and emits structured output with --json. Its owner-only catalogue
+# cache is reused for 24 hours and is distinct from selected favourite aliases.
+# A failed refresh returns a stale cache with a warning when one exists.
+# Records are derived, non-authoritative discovery data: each contains the
+# connection name, type, base URL, opaque scope, and model descriptors, but
+# contains no API credential. They are disposable; selected favourite aliases
+# remain authoritative configuration. In the guided picker, known exact IDs
+# work directly; unknown numeric or navigation-like IDs use `id:<upstream-id>`
+# to avoid row-number ambiguity. `provider model add` takes the upstream ID
+# literally and must not receive the `id:` prefix. It validates one exact ID;
+# --default and --utility assign roles. Explicit automation must supply at
+# least one --model ALIAS=UPSTREAM and read credentials from stdin or a
+# root-owned 0600 file, never from command-line values. This example
+# deliberately configures no provider, model alias, default_model,
+# utility_model, or secret.
 
-[provider]
-name = "anthropic"
-# api_key is usually supplied via the secret store / env; shown for clarity.
-# api_key = "sk-..."
-model = "claude-sonnet-4-20250514"
-utility_model = "claude-haiku-4-20250414"
-max_tokens = 8192
-
-# Optional: default when a run does not name a profile.
-# [agent]
-# default_profile = "main"
+[agent]
+default_profile = "main"
 
 # --- main: owner interactive default (explicit for documentation) ----------
 [agent.profile.main]
@@ -30,7 +61,7 @@ deny = []
 # --- researcher: read/fetch heavy, no mutation -----------------------------
 [agent.profile.researcher]
 system = "You research thoroughly using read/fetch/search tools. Never mutate files or run shell."
-model = "utility"
+model = "default"
 sandbox = "docker"
 [agent.profile.researcher.tools]
 allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]

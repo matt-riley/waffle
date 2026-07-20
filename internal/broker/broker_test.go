@@ -86,6 +86,104 @@ func TestProxyAccountsReturnedProviderUsageAndEnforcesBothCaps(t *testing.T) {
 	}
 }
 
+func TestKeylessUpstreamDoesNotInjectEmptyAuthHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("X-Api-Key = %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	b := New(nil, []Upstream{{Name: "local", BaseURL: upstream.URL}})
+	token, err := b.Mint(context.Background(), "keyless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/local/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestNamedUpstreamRoutesStripLocalPrefixAndJoinProviderPath(t *testing.T) {
+	type observedRequest struct {
+		path, escapedPath, query, authorization, apiKey string
+	}
+	observed := make(chan observedRequest, 4)
+	newUpstream := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			observed <- observedRequest{
+				path:          r.URL.Path,
+				escapedPath:   r.URL.EscapedPath(),
+				query:         r.URL.RawQuery,
+				authorization: r.Header.Get("Authorization"),
+				apiKey:        r.Header.Get("X-Api-Key"),
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	}
+	anthropic := newUpstream()
+	defer anthropic.Close()
+	openrouter := newUpstream()
+	defer openrouter.Close()
+	local := newUpstream()
+	defer local.Close()
+
+	b := New(nil, []Upstream{
+		{Name: "claude-cloud", BaseURL: anthropic.URL, Header: "x-api-key", Value: "anthropic-real"},
+		{Name: "openrouter", BaseURL: openrouter.URL + "/v1", Header: "Authorization", Value: "Bearer openrouter-real"},
+		{Name: "local", BaseURL: local.URL + "/v1"},
+	})
+	token, err := b.Mint(context.Background(), "named-routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	tests := []struct {
+		requestPath     string
+		wantPath        string
+		wantEscapedPath string
+		wantQuery       string
+		wantAuth        string
+		wantAPIKey      string
+	}{
+		{requestPath: "/claude-cloud/v1/messages?beta=tools", wantPath: "/v1/messages", wantEscapedPath: "/v1/messages", wantQuery: "beta=tools", wantAPIKey: "anthropic-real"},
+		{requestPath: "/openrouter/chat/completions?stream=true", wantPath: "/v1/chat/completions", wantEscapedPath: "/v1/chat/completions", wantQuery: "stream=true", wantAuth: "Bearer openrouter-real"},
+		{requestPath: "/openrouter/v1/responses?legacy=1", wantPath: "/v1/responses", wantEscapedPath: "/v1/responses", wantQuery: "legacy=1", wantAuth: "Bearer openrouter-real"},
+		{requestPath: "/local/models%2Flist?raw=1", wantPath: "/v1/models/list", wantEscapedPath: "/v1/models%2Flist", wantQuery: "raw=1"},
+	}
+	for _, tc := range tests {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+tc.requestPath, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("%s status = %d", tc.requestPath, resp.StatusCode)
+		}
+		got := <-observed
+		if got.path != tc.wantPath || got.escapedPath != tc.wantEscapedPath || got.query != tc.wantQuery || got.authorization != tc.wantAuth || got.apiKey != tc.wantAPIKey {
+			t.Fatalf("%s upstream = %#v, want path=%q escaped=%q query=%q auth=%q apiKey=%q", tc.requestPath, got, tc.wantPath, tc.wantEscapedPath, tc.wantQuery, tc.wantAuth, tc.wantAPIKey)
+		}
+	}
+}
+
 func TestConcurrentDeclaredTokenReservationsCannotOvershoot(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0

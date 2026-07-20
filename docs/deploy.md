@@ -1,4 +1,144 @@
-# Running waffle continuously
+# Deploying and running Waffle
+
+## Managed host installation
+
+The protected **Deploy Waffle** operation has no provider, model, database,
+or application-secret inputs. It installs a verified Waffle binary, systemd
+unit, state directories, management command on `PATH`, age identity, and the
+embedded SQLite store location. A successful first deployment reports
+**Installed** and the next command:
+
+```sh
+sudo waffle provider add
+```
+
+Installed is a complete, manageable installation. It does not require an API
+key, and `waffle.service` may remain inactive. Waffle has no Workweave Router,
+Postgres, or Pub/Sub emulator runtime; it connects directly to the provider
+connections enrolled on the host.
+
+Run the bare command for guided enrollment. The complete operator path is:
+
+```sh
+sudo waffle provider add
+sudo waffle provider models openrouter --search claude
+sudo waffle provider models openrouter --refresh
+sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
+```
+
+Presets are openai, anthropic, openrouter, and openai-compatible. Only
+openai-compatible requires a base URL. OpenAI and Anthropic use their standard
+API base URLs, while openrouter uses its standard endpoint and account-filtered
+model catalogue. In explicit automation, `--base-url` can override any preset;
+the exact `openrouter.ai` host and all of its subdomains, including regional
+hosts such as `eu.openrouter.ai`, remain account-filtered through `/models/user`.
+Only override hosts outside that domain use the generic `/models` endpoint.
+
+Bare guided add reads a hidden credential and uses it to authenticate model
+discovery. Auth-free compatible endpoints may leave it empty. The model picker
+supports search, paging, exact upstream IDs, and selection of default, utility,
+and additional favourite aliases. In the guided picker, known exact IDs work
+directly; unknown numeric or navigation-like IDs use `id:<upstream-id>` to avoid
+row-number or navigation ambiguity. Derived aliases are checked against
+existing aliases; collisions ask for an explicit replacement. If discovery
+fails, guided add offers manual `ALIAS=UPSTREAM` entry. It does the same when
+discovery returns no models, while declining that fallback leaves the
+connection unchanged.
+
+Selecting a default alias probes the upstream, commits the configuration and
+encrypted credential, starts Waffle, verifies `/healthz`, and reports
+**Ready**. A failed probe, restart, or health check restores the previous
+configuration, secret store, and service state. Cache-write failure after a
+successful commit is only a warning and does not undo the enrolled provider.
+
+For an enrolled connection, `provider models` reads an owner-only catalogue
+cache under the Waffle home. Directories are mode `0700`, records are mode
+`0600`, and a fresh record is reused for 24 hours. The cache is distinct from
+selected favourite aliases. `--search` filters the displayed IDs and names,
+`--refresh` requests a fresh upstream catalogue, and `--json` emits structured
+cache status and model descriptors. If refresh fails and an older valid record
+exists, Waffle returns that stale cache with a warning; with no usable record,
+the upstream error is returned.
+
+Cache records are derived, non-authoritative discovery data. Each contains the
+connection name, type, base URL, opaque scope, and model descriptors, but
+contains no API credential. The cache is disposable: removing it only forces
+discovery again, and provider removal invalidates its record. Selected
+favourite aliases remain authoritative provider configuration.
+
+`provider model add` takes the upstream ID literally and must not receive the
+`id:` prefix. It derives an alias when `--alias` is omitted, probes the exact
+model before committing, and lets `--default` and `--utility` assign its roles
+in the same transaction.
+
+For explicit automation, supply the connection name, preset, and at least one
+`--model ALIAS=UPSTREAM`; no catalogue selection is inferred. Pipe the key on
+standard input without placing it in the process arguments:
+
+```sh
+credential-command | sudo waffle provider add \
+  --name anthropic \
+  --type anthropic \
+  --model claude=claude-model-id \
+  --default claude \
+  --api-key-stdin
+```
+
+Alternatively, point at a root-owned regular file whose exact mode is `0600`:
+
+```sh
+sudo waffle provider add \
+  --name openai \
+  --type openai \
+  --model gpt=gpt-model-id \
+  --api-key-file /root/provider-api-key
+```
+
+The file option rejects symlinks, non-regular files, wider permissions, and
+oversized values. There is deliberately no `--api-key VALUE` option. Auth-free
+local OpenAI-compatible endpoints can leave the hidden API-key prompt empty.
+
+Connections and aliases are independent, so one installation can use models
+from several providers:
+
+```sh
+sudo waffle provider add \
+  --name local \
+  --type openai \
+  --base-url http://127.0.0.1:11434/v1 \
+  --model local=qwen3:32b
+
+sudo waffle provider list
+sudo waffle provider test local
+```
+
+`provider list --json` exposes the stable `installed` or `ready` lifecycle
+state without credentials. On an Installed system, adding a provider without
+selecting a default keeps it Installed; activate a validated alias later with:
+
+```sh
+sudo waffle provider model activate local
+```
+
+Model and connection removal are explicit:
+
+```sh
+sudo waffle provider model remove old-alias --replace-with local
+sudo waffle provider remove unused-connection
+```
+
+For model removal, `--replace-with` reassigns default, utility, and
+agent-profile references before deleting the old alias. Without it, default
+and utility references are cleared when no agent profile blocks the operation;
+removing the active default can move a Ready installation back to Installed.
+Agent-profile references remain blocking without a replacement. Provider
+removal remains blocked while any model alias references the connection, so
+remove or reassign those aliases first.
+
+Waffle does not automatically fail over, load balance, or choose a provider by
+cost: every alias maps to one named connection and one upstream model.
+
+## Running Waffle continuously
 
 `waffle serve` is a host process. Run it as the owner account so its state
 directory and secret store are available, and keep the unauthenticated admin
@@ -93,10 +233,17 @@ from the same commit produce the same payload shape.
 ## Existing-server rollout ownership
 
 Application pushes do not create or replace Hetzner infrastructure directly.
-After the artifact upload completes, Waffle sends an infra deploy request with
-the GitHub Actions run id, artifact name, and uploaded artifact digest. The
-infra side downloads that already-built artifact and rolls it out onto the
-existing server.
+After the artifact upload completes, Infra's zero-input **Operate Waffle**
+workflow (and its scheduled discovery job) can resolve the latest successful
+run, artifact name, and uploaded digest, then roll that already-built artifact
+out to the existing server. This default path keeps cross-repository GitHub App
+credentials in Infra.
+
+Immediate push-triggered handoff is optional. If the Waffle repository has an
+`APP_ID` variable and matching `PRIVATE_KEY` Actions secret, CI sends the same
+immutable provenance through the released shared workflow. Without that
+explicit opt-in, the handoff job is skipped and artifact publication remains
+successful; no setup credential is required in Waffle.
 
 This split is intentional:
 
@@ -104,6 +251,13 @@ This split is intentional:
 - Infra owns the server update procedure and any host-specific rollout logic.
 - Release Please stays independent from binary deployment, so version-tag
   publication is not the trigger for shipping the Linux binary.
+
+The handoff contains only immutable artifact provenance: artifact name,
+Actions run ID, and digest. Provider credentials, model choices, database
+credentials, and host topology never pass through the application workflow.
+Routine artifact rollout preserves the lifecycle state: an Installed system
+receives the verified binary without forced activation, while a Ready system
+restarts and must return to health or rolls back to the previous binary.
 
 ## No Terraform per push
 
