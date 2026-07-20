@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,6 +252,72 @@ func TestServeChatwireFailureFailsServe(t *testing.T) {
 	}
 }
 
+func TestServeChatListenerCloseErrorFailsOtherwiseSuccessfulShutdown(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	writeServeTestConfig(t, home, unusedTCPAddress(t), filepath.Join(home, "chat.sock"))
+
+	want := errors.New("forced listener close failure")
+	listener := newCloseErrorListener(want)
+	original := openChatListener
+	openChatListener = func(string) (net.Listener, bool, error) { return listener, false, nil }
+	defer func() { openChatListener = original }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+	select {
+	case <-listener.acceptStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("chat server did not start accepting")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, want) || !strings.Contains(err.Error(), "chat listener cleanup") {
+			t.Fatalf("serve listener cleanup = %v, want wrapped %v", err, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not return after listener close failure")
+	}
+}
+
+func TestServeChatListenerCloseErrorDoesNotMaskChatServerError(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	writeServeTestConfig(t, home, unusedTCPAddress(t), filepath.Join(home, "chat.sock"))
+
+	closeWant := errors.New("forced listener close failure")
+	listener := newCloseErrorListener(closeWant)
+	originalListener := openChatListener
+	openChatListener = func(string) (net.Listener, bool, error) { return listener, false, nil }
+	defer func() { openChatListener = originalListener }()
+	serveWant := errors.New("forced chat server failure")
+	originalServe := serveChat
+	serveChat = func(_ context.Context, listener net.Listener, _ chatwire.Factory, _ chatwire.AuditFunc) error {
+		_ = listener.Close()
+		return serveWant
+	}
+	defer func() { serveChat = originalServe }()
+
+	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		return []channel.Adapter{blockingAdapter{}}, nil
+	})
+	if !errors.Is(err, serveWant) {
+		t.Fatalf("serve error = %v, want chat server error %v", err, serveWant)
+	}
+	if errors.Is(err, closeWant) {
+		t.Fatalf("listener cleanup error masked/joined earlier serve error: %v", err)
+	}
+}
+
 func TestServeChatAuditCredentialFailureDoesNotRejectOrLeakDetails(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
@@ -423,6 +490,36 @@ func clearServeActivationEnvironment(t *testing.T) {
 }
 
 type blockingAdapter struct{}
+
+type closeErrorListener struct {
+	closeErr      error
+	acceptStarted chan struct{}
+	closed        chan struct{}
+	acceptOnce    sync.Once
+	closeOnce     sync.Once
+}
+
+func newCloseErrorListener(closeErr error) *closeErrorListener {
+	return &closeErrorListener{closeErr: closeErr, acceptStarted: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (l *closeErrorListener) Accept() (net.Conn, error) {
+	l.acceptOnce.Do(func() { close(l.acceptStarted) })
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *closeErrorListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return l.closeErr
+}
+
+func (l *closeErrorListener) Addr() net.Addr { return testListenerAddr("local") }
+
+type testListenerAddr string
+
+func (a testListenerAddr) Network() string { return "unix" }
+func (a testListenerAddr) String() string  { return string(a) }
 
 func (blockingAdapter) Name() string { return "test" }
 

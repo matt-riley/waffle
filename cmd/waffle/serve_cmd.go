@@ -46,6 +46,7 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 type adapterFactory func(config.Config) ([]channel.Adapter, error)
 
 var serveChat = chatwire.Serve
+var openChatListener = localsocket.Listener
 
 // serveCmdWithAdapterFactory runs the serve command with an explicit adapter
 // factory so command lifecycle tests can use an in-memory channel.
@@ -116,12 +117,18 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if err != nil {
 		return err
 	}
-	chatListener, _, err := localsocket.Listener(cfg.Chat.Socket)
+	chatListener, _, err := openChatListener(cfg.Chat.Socket)
 	if err != nil {
 		return fmt.Errorf("chat listener: %w", err)
 	}
 	if chatListener != nil {
-		defer func() { _ = chatListener.Close() }()
+		chatListener = &cachedCloseListener{Listener: chatListener}
+		defer func() {
+			closeErr := chatListener.Close()
+			if err == nil && closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				err = fmt.Errorf("chat listener cleanup: %w", closeErr)
+			}
+		}()
 	}
 	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
 	if err != nil {
@@ -345,6 +352,17 @@ func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-c
 }
 
 type peerCredentialLookup func(net.Conn) (localsocket.Peer, error)
+
+type cachedCloseListener struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *cachedCloseListener) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
+}
 
 // newChatAudit intentionally records only lifecycle and numeric kernel
 // identity. Credential lookup failures are useful operational signals, but
