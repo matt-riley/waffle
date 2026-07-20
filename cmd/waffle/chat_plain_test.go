@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,13 +20,23 @@ type plainBackend struct {
 	events        []chatpkg.Event
 	commandEvents []chatpkg.Event
 	results       map[chatpkg.Name]chatpkg.Result
+	commandFunc   func(chatpkg.ParsedCommand, func(chatpkg.Event)) (chatpkg.Result, error)
+	openErr       error
 	turnErr       error
+	closeErr      error
+	closeCtxErr   error
+	closeDeadline time.Time
+	closeBounded  bool
 	closeCalls    int
 }
 
+type plainErrorReader struct{ err error }
+
+func (r plainErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
 func (b *plainBackend) Open(_ context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
 	b.openOptions = options
-	return b.state, nil
+	return b.state, b.openErr
 }
 
 func (b *plainBackend) Turn(_ context.Context, input string, emit func(chatpkg.Event)) error {
@@ -38,6 +49,9 @@ func (b *plainBackend) Turn(_ context.Context, input string, emit func(chatpkg.E
 
 func (b *plainBackend) Command(_ context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	b.commands = append(b.commands, command)
+	if b.commandFunc != nil {
+		return b.commandFunc(command, emit)
+	}
 	for _, event := range b.commandEvents {
 		emit(event)
 	}
@@ -46,9 +60,246 @@ func (b *plainBackend) Command(_ context.Context, command chatpkg.ParsedCommand,
 
 func (*plainBackend) Cancel() {}
 
-func (b *plainBackend) Close(context.Context) error {
+func (b *plainBackend) Close(ctx context.Context) error {
 	b.closeCalls++
-	return nil
+	b.closeCtxErr = ctx.Err()
+	b.closeDeadline, b.closeBounded = ctx.Deadline()
+	return b.closeErr
+}
+
+func TestPlainChatMakesNewConfirmationActionable(t *testing.T) {
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01CONFIRM"}}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch {
+		case command.Name == chatpkg.CommandNew && command.Args == "":
+			return chatpkg.Result{Text: "Start a new session?", Confirm: true}, nil
+		case command.Name == chatpkg.CommandNew && command.Args == "confirm":
+			return chatpkg.Result{Text: "new session 02"}, nil
+		case command.Name == chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command: %+v", command)
+		}
+	}
+
+	var stdout, stderr strings.Builder
+	input := "/new\nyes\n/new confirm\n/exit\n"
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader(input), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantStdout := "waffle chat —  via  — session 01CONFIRM. /help for commands.\n" +
+		"\nyou> Start a new session?\n" +
+		"confirm with /new confirm\n" +
+		"\nyou> \nyou> new session 02\n" +
+		"\nyou> "
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout:\n%q\nwant:\n%q", stdout.String(), wantStdout)
+	}
+	if got, want := stderr.String(), "waffle: confirmation requires /new confirm\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if len(backend.turns) != 0 {
+		t.Fatalf("bare yes became model turns: %q", backend.turns)
+	}
+	wantCommands := []chatpkg.ParsedCommand{
+		{Name: chatpkg.CommandNew},
+		{Name: chatpkg.CommandNew, Args: "confirm"},
+		{Name: chatpkg.CommandExit},
+	}
+	if fmt.Sprint(backend.commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("commands = %+v, want %+v", backend.commands, wantCommands)
+	}
+}
+
+func TestPlainChatRendersCompleteResultInExactStableOrder(t *testing.T) {
+	updated := time.Date(2026, time.July, 20, 12, 34, 56, 0, time.UTC)
+	allFields := chatpkg.Result{
+		Title: "All fields", Text: "body", Confirm: true,
+		Commands:    []chatpkg.Command{{Name: chatpkg.CommandHelp, Usage: "/help", Description: "show commands"}},
+		Models:      []chatpkg.Model{{Alias: "alpha", Provider: "local", Upstream: "a", Current: true}, {Alias: "beta", Provider: "cloud", Upstream: "b"}},
+		Sessions:    []chatpkg.Session{{ID: "01A", Title: "First", Summary: "summary", ModelAlias: "alpha", UpdatedAt: updated}},
+		Usage:       []chatpkg.UsageRow{{SessionID: "01A", Period: "day", PeriodStart: "2026-07-20", Requests: 2, InputTokens: 3, OutputTokens: 4, ReservedTokens: 5}},
+		Permissions: &chatpkg.PermissionView{SandboxMode: "docker", Allow: []string{"read", "write"}, Deny: []string{"shell"}, DenyPrefixes: []string{"secret_"}},
+		Workset:     []chatpkg.WorkItem{{ID: "W1", Text: "first item"}, {ID: "W2", Text: "second item"}},
+		State: &chatpkg.State{SessionID: "01SESSION", ModelAlias: "alpha", ProviderLabel: "local", Profile: "main",
+			ConnectionMode: "unix", SandboxMode: "docker", Workspace: "owner/repo"},
+	}
+	backend := &plainBackend{state: chatpkg.State{SessionID: "01RESULT"}}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
+		if command.Name == chatpkg.CommandExit {
+			return chatpkg.Result{ShouldClose: true}, nil
+		}
+		return allFields, nil
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/resume 01A\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := "waffle chat —  via  — session 01RESULT. /help for commands.\n\n" +
+		"you> All fields\n" +
+		"body\n" +
+		fmt.Sprintf("%-58s %s\n", "/help", "show commands") +
+		"* alpha via local (a)\n" +
+		"  beta via cloud (b)\n" +
+		"01A  First  model=alpha  summary=summary  updated=2026-07-20T12:34:56Z\n" +
+		"session=01A period=day start=2026-07-20 requests=2 input=3 output=4 reserved=5\n" +
+		"sandbox=docker allow=read,write deny=shell deny-prefixes=secret_\n" +
+		"W1  first item\n" +
+		"W2  second item\n" +
+		"session=01SESSION model=alpha provider=local profile=main connection=unix sandbox=docker workspace=owner/repo\n" +
+		"retry /resume 01A when idle\n" +
+		"\nyou> "
+	if stdout.String() != want {
+		t.Fatalf("stdout:\n%q\nwant:\n%q", stdout.String(), want)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestPlainChatClosesOnceWhenOpenFailsAndPreservesOpenError(t *testing.T) {
+	openErr := errors.New("open failed")
+	backend := &plainBackend{openErr: openErr, closeErr: errors.New("close failed")}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stderr strings.Builder
+	err := runPlainChat(ctx, backend, chatpkg.OpenOptions{}, strings.NewReader(""), &strings.Builder{}, &stderr)
+	if !errors.Is(err, openErr) {
+		t.Fatalf("runPlainChat error = %v, want open error", err)
+	}
+	if backend.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want 1", backend.closeCalls)
+	}
+	assertBoundedCloseContext(t, backend)
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q, want no close warning after failed Open", stderr.String())
+	}
+}
+
+func TestPlainChatReportsEOFCloseErrorOnceAndReturnsSuccess(t *testing.T) {
+	backend := &plainBackend{
+		state:    chatpkg.State{SessionID: "01EOF"},
+		closeErr: errors.New("summary\x1b[31m\r\nfailed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(ctx, backend, chatpkg.OpenOptions{}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("runPlainChat = %v, want graceful EOF success", err)
+	}
+	if backend.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want 1", backend.closeCalls)
+	}
+	assertBoundedCloseContext(t, backend)
+	if got, want := stderr.String(), "waffle: warning: summary failed\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestPlainChatExitWarningIsSanitizedAndRenderedExactlyOnce(t *testing.T) {
+	warning := "warning: summary\x1b[31m\r\nfailed"
+	backend := &plainBackend{
+		state:    chatpkg.State{SessionID: "01EXIT"},
+		closeErr: errors.New("summary failed"),
+	}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+		if command.Name != chatpkg.CommandExit {
+			return chatpkg.Result{}, fmt.Errorf("unexpected command %s", command.Name)
+		}
+		emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: warning, IsError: true})
+		return chatpkg.Result{Text: warning, ShouldClose: true}, nil
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stderr.String(), "waffle: warning: summary failed\n"; got != want {
+		t.Fatalf("stderr = %q, want one warning %q", got, want)
+	}
+	if strings.Contains(stdout.String(), "warning") || strings.Contains(stdout.String(), "summary failed") {
+		t.Fatalf("warning leaked to stdout: %q", stdout.String())
+	}
+	if backend.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want 1", backend.closeCalls)
+	}
+}
+
+func TestPlainChatDeduplicatesMixedResultWarningButKeepsSuccessText(t *testing.T) {
+	backend := &plainBackend{
+		state:    chatpkg.State{SessionID: "01MIXED"},
+		closeErr: errors.New("summary failed"),
+	}
+	backend.commandFunc = func(command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+		switch command.Name {
+		case chatpkg.CommandNew:
+			emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: "warning: summary failed", IsError: true})
+			return chatpkg.Result{Text: "warning: summary failed\nnew session 02"}, nil
+		case chatpkg.CommandExit:
+			return chatpkg.Result{ShouldClose: true}, nil
+		default:
+			return chatpkg.Result{}, fmt.Errorf("unexpected command %s", command.Name)
+		}
+	}
+	var stdout, stderr strings.Builder
+	if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("/new confirm\n/exit\n"), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stderr.String(), "waffle: warning: summary failed\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if strings.Contains(stdout.String(), "warning") || !strings.Contains(stdout.String(), "new session 02\n") {
+		t.Fatalf("mixed result stdout = %q", stdout.String())
+	}
+}
+
+func TestPlainChatPreservesPrimaryScanAndTurnErrorsOverCloseError(t *testing.T) {
+	t.Run("scan error is returned", func(t *testing.T) {
+		scanErr := errors.New("scan failed")
+		backend := &plainBackend{
+			state:    chatpkg.State{SessionID: "01SCAN"},
+			closeErr: errors.New("close failed"),
+		}
+		var stderr strings.Builder
+		err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, plainErrorReader{err: scanErr}, &strings.Builder{}, &stderr)
+		if !errors.Is(err, scanErr) {
+			t.Fatalf("runPlainChat error = %v, want scan error", err)
+		}
+		if got, want := stderr.String(), "waffle: warning: close failed\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+		if backend.closeCalls != 1 {
+			t.Fatalf("Close calls = %d, want 1", backend.closeCalls)
+		}
+	})
+
+	t.Run("turn error remains before close warning", func(t *testing.T) {
+		backend := &plainBackend{
+			state:    chatpkg.State{SessionID: "01TURN"},
+			turnErr:  errors.New("turn failed"),
+			closeErr: errors.New("close failed"),
+		}
+		var stderr strings.Builder
+		if err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader("hello\n"), &strings.Builder{}, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := stderr.String(), "\nwaffle: turn failed\nwaffle: warning: close failed\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	})
+}
+
+func assertBoundedCloseContext(t *testing.T, backend *plainBackend) {
+	t.Helper()
+	if backend.closeCtxErr != nil {
+		t.Fatalf("Close context inherited cancellation: %v", backend.closeCtxErr)
+	}
+	if !backend.closeBounded {
+		t.Fatal("Close context has no deadline")
+	}
+	remaining := time.Until(backend.closeDeadline)
+	if remaining <= 0 || remaining > 11*time.Second {
+		t.Fatalf("Close context deadline remaining = %v", remaining)
+	}
 }
 
 func TestPlainChatOpensScansExactCommandsAndClosesOnShouldClose(t *testing.T) {
@@ -192,13 +443,47 @@ func TestPlainChatWritesTextDeltasVerbatim(t *testing.T) {
 	}
 }
 
-func TestPlainChatScannerIsBoundedToOneMiB(t *testing.T) {
-	backend := &plainBackend{state: chatpkg.State{SessionID: "01BOUND"}, results: make(map[chatpkg.Name]chatpkg.Result)}
-	err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader(strings.Repeat("x", (1<<20)+1)), &strings.Builder{}, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "token too long") {
-		t.Fatalf("oversized input error = %v, want scanner bound failure", err)
+func TestPlainChatScannerHasInclusiveOneMiBBound(t *testing.T) {
+	content := strings.Repeat("x", 1<<20)
+	tests := []struct {
+		name      string
+		input     string
+		wantError bool
+	}{
+		{name: "exact limit at EOF", input: content},
+		{name: "exact limit newline terminated", input: content + "\n"},
+		{name: "one over limit at EOF", input: content + "x", wantError: true},
+		{name: "one over limit newline terminated", input: content + "x\n", wantError: true},
 	}
-	if len(backend.turns) != 0 || backend.closeCalls != 1 {
-		t.Fatalf("oversized input turns=%d close=%d", len(backend.turns), backend.closeCalls)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &plainBackend{state: chatpkg.State{SessionID: "01BOUND"}, results: make(map[chatpkg.Name]chatpkg.Result)}
+			err := runPlainChat(context.Background(), backend, chatpkg.OpenOptions{}, strings.NewReader(tt.input), &strings.Builder{}, &strings.Builder{})
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), "token too long") {
+					t.Fatalf("oversized input error = %v, want scanner bound failure", err)
+				}
+				if len(backend.turns) != 0 {
+					t.Fatalf("oversized input reached Turn: %d calls", len(backend.turns))
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("exact-limit input error = %v", err)
+				}
+				if len(backend.turns) != 1 || len(backend.turns[0]) != 1<<20 {
+					t.Fatalf("exact-limit turns=%d length=%d", len(backend.turns), firstTurnLength(backend.turns))
+				}
+			}
+			if backend.closeCalls != 1 {
+				t.Fatalf("Close calls = %d, want 1", backend.closeCalls)
+			}
+		})
 	}
+}
+
+func firstTurnLength(turns []string) int {
+	if len(turns) == 0 {
+		return 0
+	}
+	return len(turns[0])
 }

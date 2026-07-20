@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -171,16 +172,21 @@ func TestChatSocketDoesNotFallbackToWaffleHome(t *testing.T) {
 	}
 }
 
-func TestChatSocketBackendReportsUnixConnectionMode(t *testing.T) {
+func TestChatSocketBackendCopiesUnixConnectionModeAcrossOperations(t *testing.T) {
 	direct := "direct"
+	turnState := &chatpkg.State{SessionID: "turn", ConnectionMode: direct}
+	commandEventState := &chatpkg.State{SessionID: "event", ConnectionMode: direct}
+	commandResultState := &chatpkg.State{SessionID: "result", ConnectionMode: direct}
+	turnErr := errors.New("turn failed")
 	backend := &plainBackend{
-		state: chatpkg.State{ConnectionMode: direct},
+		state:   chatpkg.State{SessionID: "open", ConnectionMode: direct},
+		turnErr: turnErr,
+		events:  []chatpkg.Event{{Kind: chatpkg.EventState, State: turnState}},
 		commandEvents: []chatpkg.Event{{
-			Kind:  chatpkg.EventState,
-			State: &chatpkg.State{ConnectionMode: direct},
+			Kind: chatpkg.EventState, State: commandEventState,
 		}},
 		results: map[chatpkg.Name]chatpkg.Result{
-			chatpkg.CommandStatus: {State: &chatpkg.State{ConnectionMode: direct}},
+			chatpkg.CommandStatus: {State: commandResultState},
 		},
 	}
 	remote := withConnectionMode(backend, "unix")
@@ -188,19 +194,53 @@ func TestChatSocketBackendReportsUnixConnectionMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ConnectionMode != "unix" {
-		t.Fatalf("Open connection mode = %q", state.ConnectionMode)
+	if state.ConnectionMode != "unix" || backend.state.ConnectionMode != direct {
+		t.Fatalf("Open state=%+v underlying=%+v", state, backend.state)
 	}
-	var event chatpkg.Event
-	result, err := remote.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, func(got chatpkg.Event) { event = got })
+
+	var turnEvent chatpkg.Event
+	err = remote.Turn(context.Background(), "hello", func(got chatpkg.Event) { turnEvent = got })
+	if !errors.Is(err, turnErr) {
+		t.Fatalf("Turn error = %v, want %v", err, turnErr)
+	}
+	if turnEvent.State == nil || turnEvent.State.ConnectionMode != "unix" || turnEvent.State == turnState {
+		t.Fatalf("Turn event state = %+v, original=%+v", turnEvent.State, turnState)
+	}
+	if turnState.ConnectionMode != direct {
+		t.Fatalf("Turn mutated original state: %+v", turnState)
+	}
+
+	var commandEvent chatpkg.Event
+	result, err := remote.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, func(got chatpkg.Event) { commandEvent = got })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if event.State == nil || event.State.ConnectionMode != "unix" {
-		t.Fatalf("event state = %+v", event.State)
+	if commandEvent.State == nil || commandEvent.State.ConnectionMode != "unix" || commandEvent.State == commandEventState {
+		t.Fatalf("Command event state = %+v, original=%+v", commandEvent.State, commandEventState)
 	}
-	if result.State == nil || result.State.ConnectionMode != "unix" {
-		t.Fatalf("result state = %+v", result.State)
+	if result.State == nil || result.State.ConnectionMode != "unix" || result.State == commandResultState {
+		t.Fatalf("Command result state = %+v, original=%+v", result.State, commandResultState)
+	}
+	if commandEventState.ConnectionMode != direct || commandResultState.ConnectionMode != direct {
+		t.Fatalf("Command mutated originals: event=%+v result=%+v", commandEventState, commandResultState)
+	}
+}
+
+func TestChatSocketBackendOpenPreservesErrorAndCopiesReturnedState(t *testing.T) {
+	openErr := errors.New("open failed")
+	backend := &plainBackend{
+		state:   chatpkg.State{SessionID: "partial", ConnectionMode: "direct"},
+		openErr: openErr,
+	}
+	state, err := withConnectionMode(backend, "unix").Open(context.Background(), chatpkg.OpenOptions{})
+	if !errors.Is(err, openErr) {
+		t.Fatalf("Open error = %v, want %v", err, openErr)
+	}
+	if state.SessionID != "partial" || state.ConnectionMode != "unix" {
+		t.Fatalf("Open state = %+v", state)
+	}
+	if backend.state.ConnectionMode != "direct" {
+		t.Fatalf("Open mutated underlying state: %+v", backend.state)
 	}
 }
 
