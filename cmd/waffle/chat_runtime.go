@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workset"
+	"github.com/matt-riley/waffle/internal/workspace"
 )
 
 const chatNewConfirmArg = "confirm"
@@ -61,6 +62,14 @@ type chatRuntime struct {
 	closeOnce           sync.Once
 	closeErr            error
 	closed              bool
+	profileAgentBuilder func(context.Context, string) (*agent.Agent, func(), error)
+}
+
+type repoInstall struct {
+	workspace *workspace.Workspace
+	policy    *repopolicy.Policy
+	tools     tool.Toolbox
+	client    io.Closer
 }
 
 // newChatRuntime records dependencies without constructing provider, sandbox,
@@ -561,32 +570,64 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	if err != nil {
 		return chatpkg.Result{}, err
 	}
-	keepClient := false
+	policy, err := mgr.LoadRepoPolicy(ctx, client)
+	if err != nil {
+		_ = client.Close()
+		return chatpkg.Result{}, err
+	}
+	return r.installRepo(ctx, repoInstall{
+		workspace: ws,
+		policy:    policy,
+		tools:     sandbox.NewQueueToolbox(client),
+		client:    client,
+	}, emit)
+}
+
+func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, func(), error) {
+	if r.profileAgentBuilder != nil {
+		return r.profileAgentBuilder(ctx, profileName)
+	}
+	memWS, skills, err := loadWorkspaceWithStore(r.st)
+	if err != nil {
+		return nil, nil, err
+	}
+	return buildAgentWithProfile(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
+}
+
+func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	if install.workspace == nil || install.tools == nil || install.client == nil {
+		return chatpkg.Result{}, errors.New("incomplete repository workspace install")
+	}
+	adopted := false
 	defer func() {
-		if !keepClient {
-			_ = client.Close()
+		if !adopted {
+			_ = install.client.Close()
 		}
 	}()
 
-	if ws.Profile != "" {
-		profileName = ws.Profile
-	}
 	r.mu.Lock()
-	currentAgent := r.agent
+	profileName := r.profileName
+	resourceCtx := r.resourceCtx
 	r.mu.Unlock()
-	var replacement *agent.Agent
-	var replacementCleanup func()
-	if profileName != "" && profileName != currentAgent.Profile {
-		memWS, skills, loadErr := loadWorkspaceWithStore(r.st)
-		if loadErr != nil {
-			return chatpkg.Result{}, loadErr
-		}
-		replacement, replacementCleanup, err = buildAgentWithProfile(resourceCtx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
-		if err != nil {
-			return chatpkg.Result{}, err
-		}
-		currentAgent = replacement
+	if install.workspace.Profile != "" {
+		profileName = install.workspace.Profile
 	}
+	if resourceCtx == nil {
+		resourceCtx = context.WithoutCancel(ctx)
+	}
+	currentAgent, replacementCleanup, err := r.buildCleanProfileAgent(resourceCtx, profileName)
+	if err != nil {
+		if replacementCleanup != nil {
+			replacementCleanup()
+		}
+		return chatpkg.Result{}, err
+	}
+	cleanupAdopted := false
+	defer func() {
+		if !cleanupAdopted && replacementCleanup != nil {
+			replacementCleanup()
+		}
+	}()
 
 	hostPolicy := r.cfg.AgentPolicy(config.GroupMain)
 	if profileName != "" {
@@ -603,21 +644,16 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	if toolPolicy.Profile == "" {
 		toolPolicy.Profile = "main"
 	}
-	systemExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", ws.Repo)
-	if policy, policyErr := mgr.LoadRepoPolicy(ctx, client); policyErr != nil {
-		if replacementCleanup != nil {
-			replacementCleanup()
-		}
-		return chatpkg.Result{}, policyErr
-	} else if policy != nil {
-		toolPolicy = repopolicy.TightenTools(toolPolicy, policy.Tools)
-		toolPolicy = applyCodeIntelCaps(toolPolicy, policy.CodeIntelCaps)
-		if block := policy.PromptBlock(); block != "" {
+	systemExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", install.workspace.Repo)
+	if install.policy != nil {
+		toolPolicy = repopolicy.TightenTools(toolPolicy, install.policy.Tools)
+		toolPolicy = applyCodeIntelCaps(toolPolicy, install.policy.CodeIntelCaps)
+		if block := install.policy.PromptBlock(); block != "" {
 			systemExtra += "\n\n" + block
 		}
 	}
 	hostTools := tool.Restrict(currentAgent.Tools, toolPolicy)
-	boxed := tool.Restrict(tool.Combine(sandbox.NewQueueToolbox(client), hostTools), toolPolicy)
+	boxed := tool.Restrict(tool.Combine(install.tools, hostTools), toolPolicy)
 	workspaceAgent := &agent.Agent{
 		Provider: currentAgent.Provider, Tools: boxed, System: currentAgent.System + systemExtra,
 		Model: currentAgent.Model, UtilityModel: currentAgent.UtilityModel, Profile: currentAgent.Profile,
@@ -629,18 +665,12 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	if reflectErr := r.reflectSession(ctx); reflectErr != nil && emit != nil {
 		emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: "warning: " + reflectErr.Error(), IsError: true})
 	}
-	target, err := r.sessions.Get(ctx, ws.SessionID)
+	target, err := r.sessions.Get(ctx, install.workspace.SessionID)
 	if err != nil {
-		if replacementCleanup != nil {
-			replacementCleanup()
-		}
 		return chatpkg.Result{}, err
 	}
 	history, err := r.sessions.Turns(ctx, target.ID)
 	if err != nil {
-		if replacementCleanup != nil {
-			replacementCleanup()
-		}
 		return chatpkg.Result{}, fmt.Errorf("load workspace session %s: %w", target.ID, err)
 	}
 	history = session.Repair(history)
@@ -656,37 +686,33 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	r.mu.Lock()
 	if r.agentCancel != nil {
 		r.mu.Unlock()
-		if replacementCleanup != nil {
-			replacementCleanup()
-		}
 		return chatpkg.Result{Confirm: true, Text: "A turn started while the workspace was opening; confirm before switching sessions."}, nil
 	}
 	oldClient := r.wsClient
 	oldCleanup := r.agentCleanup
-	r.wsClient = client
-	keepClient = true
+	r.wsClient = install.client
+	adopted = true
 	r.agent = workspaceAgent
-	if replacementCleanup != nil {
-		r.agentCleanup = replacementCleanup
-		r.profileName = profileName
-	}
+	r.agentCleanup = replacementCleanup
+	cleanupAdopted = true
+	r.profileName = profileName
 	r.current = target
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = modelError
-	r.workspace = fmt.Sprintf("%s at /work/repo", ws.Repo)
+	r.workspace = fmt.Sprintf("%s at /work/repo", install.workspace.Repo)
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
 	if oldClient != nil {
 		_ = oldClient.Close()
 	}
-	if replacementCleanup != nil && oldCleanup != nil {
+	if oldCleanup != nil {
 		oldCleanup()
 	}
 	if emit != nil {
 		emit(chatpkg.Event{Kind: chatpkg.EventState, State: &state})
 	}
-	return chatpkg.Result{Text: fmt.Sprintf("workspace %s: %s at /work/repo, image %s", ws.ID, ws.Repo, ws.Image), State: &state}, nil
+	return chatpkg.Result{Text: fmt.Sprintf("workspace %s: %s at /work/repo, image %s", install.workspace.ID, install.workspace.Repo, install.workspace.Image), State: &state}, nil
 }
 
 func (r *chatRuntime) commandWorkset(ctx context.Context, args string) (chatpkg.Result, error) {
@@ -771,7 +797,7 @@ func (r *chatRuntime) commandModel(ctx context.Context, alias string) (chatpkg.R
 	r.current.ModelAlias = alias
 	r.agent.Model = alias
 	r.modelError = ""
-	state := r.stateLocked(nil)
+	state := r.stateLocked(r.capabilities)
 	return chatpkg.Result{Text: fmt.Sprintf("model set to %s", alias), State: &state}, nil
 }
 

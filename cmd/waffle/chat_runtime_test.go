@@ -12,15 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/agent"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workset"
+	"github.com/matt-riley/waffle/internal/workspace"
 )
 
 func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
@@ -64,6 +67,155 @@ func TestChatRuntimeInvalidModelIsAtomic(t *testing.T) {
 	}
 	if saved.ModelAlias != "" {
 		t.Fatalf("invalid model persisted %q", saved.ModelAlias)
+	}
+}
+
+func TestChatRuntimeModelSelectionPreservesCapabilities(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.capabilities = []string{"model-picker", "repo-workspaces"}
+
+	result, err := runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || !reflect.DeepEqual(result.State.Capabilities, runtime.capabilities) {
+		t.Fatalf("model result capabilities = %+v, want %v", result.State, runtime.capabilities)
+	}
+}
+
+func TestChatRuntimeConsecutiveRepoInstallsUseCleanProfileBaselines(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Model = "gpt"
+
+	builds := 0
+	cleanups := make([]int, 3)
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		builds++
+		index := builds
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools: tool.NewRegistry(
+				runtimeNamedTool("host_keep"),
+				runtimeNamedTool("repo_a_denied"),
+			),
+			System:  "clean profile baseline",
+			Model:   "claude",
+			Profile: "main",
+		}, func() { cleanups[index]++ }, nil
+	}
+
+	targetA, err := sessions.Create(ctx, "repo a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetB, err := sessions.Create(ctx, "repo b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientA := &runtimeTestCloser{}
+	if _, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "a", Repo: "owner/a", Image: "test", SessionID: targetA.ID},
+		policy:    &repopolicy.Policy{Body: "REPO_A_POLICY", Tools: repopolicy.ToolFilter{Deny: []string{"repo_a_denied"}}},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_a")),
+		client:    clientA,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.Model != "claude" {
+		t.Fatalf("repo A model = %q, want clean profile default claude", runtime.agent.Model)
+	}
+	if !strings.Contains(runtime.agent.System, "REPO_A_POLICY") || hasTool(runtime.agent.Tools, "repo_a_denied") {
+		t.Fatalf("repo A system=%q tools=%v", runtime.agent.System, toolNames(runtime.agent.Tools))
+	}
+
+	clientB := &runtimeTestCloser{}
+	if _, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "b", Repo: "owner/b", Image: "test", SessionID: targetB.ID},
+		policy:    &repopolicy.Policy{Body: "REPO_B_POLICY"},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_b")),
+		client:    clientB,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if builds != 2 {
+		t.Fatalf("profile baseline builds = %d, want 2", builds)
+	}
+	if strings.Contains(runtime.agent.System, "REPO_A_POLICY") || !strings.Contains(runtime.agent.System, "REPO_B_POLICY") {
+		t.Fatalf("repo B inherited repo A system prompt: %q", runtime.agent.System)
+	}
+	if !hasTool(runtime.agent.Tools, "repo_a_denied") || hasTool(runtime.agent.Tools, "workspace_a") || !hasTool(runtime.agent.Tools, "workspace_b") {
+		t.Fatalf("repo B inherited repo A tools/policy: %v", toolNames(runtime.agent.Tools))
+	}
+	if cleanups[1] != 1 || cleanups[2] != 0 || clientA.closed != 1 || clientB.closed != 0 {
+		t.Fatalf("cleanup after repo B: agents=%v clients=(%d,%d)", cleanups, clientA.closed, clientB.closed)
+	}
+}
+
+func TestChatRuntimeFailedRepoInstallCleansProvisionalResources(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	oldAgent, oldSession := runtime.agent, runtime.current
+	provisionalCleanups := 0
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: oldAgent.Provider,
+			Tools:    tool.NewRegistry(runtimeNamedTool("host_keep")),
+			System:   "provisional",
+			Model:    "claude",
+			Profile:  "main",
+		}, func() { provisionalCleanups++ }, nil
+	}
+	client := &runtimeTestCloser{}
+
+	_, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "missing", Repo: "owner/missing", Image: "test", SessionID: "missing-session"},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_missing")),
+		client:    client,
+	}, nil)
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Fatalf("install err = %v, want session not found", err)
+	}
+	if provisionalCleanups != 1 || client.closed != 1 {
+		t.Fatalf("provisional cleanup: agent=%d client=%d", provisionalCleanups, client.closed)
+	}
+	if runtime.agent != oldAgent || runtime.current != oldSession || runtime.wsClient != nil {
+		t.Fatal("failed repo install mutated active runtime state")
+	}
+}
+
+func TestChatRuntimeFailedRepoAgentBuildCleansReturnedResources(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("profile agent build failed")
+	provisionalCleanups := 0
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return nil, func() { provisionalCleanups++ }, wantErr
+	}
+	client := &runtimeTestCloser{}
+
+	_, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "failed", Repo: "owner/failed", Image: "test", SessionID: "unused"},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_failed")),
+		client:    client,
+	}, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("install err = %v, want %v", err, wantErr)
+	}
+	if provisionalCleanups != 1 || client.closed != 1 {
+		t.Fatalf("failed build cleanup: agent=%d client=%d", provisionalCleanups, client.closed)
 	}
 }
 
@@ -725,6 +877,41 @@ func (runtimeTestTool) Def() llm.Tool {
 
 func (runtimeTestTool) Run(context.Context, json.RawMessage) (string, error) {
 	return "tool output", nil
+}
+
+type runtimeNamedTool string
+
+func (name runtimeNamedTool) Def() llm.Tool {
+	return llm.Tool{Name: string(name), Description: "runtime named test tool", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (runtimeNamedTool) Run(context.Context, json.RawMessage) (string, error) {
+	return "tool output", nil
+}
+
+type runtimeTestCloser struct{ closed int }
+
+func (c *runtimeTestCloser) Close() error {
+	c.closed++
+	return nil
+}
+
+func hasTool(box tool.Toolbox, name string) bool {
+	for _, def := range box.Defs() {
+		if def.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(box tool.Toolbox) []string {
+	defs := box.Defs()
+	names := make([]string, len(defs))
+	for i, def := range defs {
+		names[i] = def.Name
+	}
+	return names
 }
 
 func eventKinds(events []chatpkg.Event) map[chatpkg.EventKind]bool {
