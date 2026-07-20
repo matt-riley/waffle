@@ -15,10 +15,11 @@
 #
 # Prefer the management command over hand-editing provider config because it
 # probes the upstream and commits the encrypted credential and config
-# transactionally. Guided add supports openai, anthropic, openrouter, and the
-# openai-compatible preset. Only openai-compatible requires a base URL. It
-# performs authenticated discovery, lets you select favourite aliases, and
-# offers manual ALIAS=UPSTREAM entry if discovery fails:
+# transactionally. Presets are openai, anthropic, openrouter, and
+# openai-compatible. Only openai-compatible requires a base URL. Bare guided
+# add reads a hidden credential and uses it to authenticate model discovery.
+# If discovery fails, guided add offers manual ALIAS=UPSTREAM entry; successful
+# discovery lets you select favourite aliases:
 #   sudo waffle provider add
 #   sudo waffle provider models openrouter --search claude
 #   sudo waffle provider models openrouter --refresh
@@ -34,13 +35,15 @@
 # Records are derived, non-authoritative discovery data: each contains the
 # connection name, type, base URL, opaque scope, and model descriptors, but
 # contains no API credential. They are disposable; selected favourite aliases
-# remain authoritative configuration. Known exact IDs work directly; unknown
-# numeric or navigation-like IDs use `id:<upstream-id>` to avoid row-number
-# ambiguity. `provider model add` validates one exact ID; --default and
-# --utility assign roles. Explicit automation must supply at least one --model
-# ALIAS=UPSTREAM and read credentials from stdin or a root-owned 0600 file,
-# never from command-line values. This example deliberately configures no
-# provider, model alias, default_model, utility_model, or secret.
+# remain authoritative configuration. In the guided picker, known exact IDs
+# work directly; unknown numeric or navigation-like IDs use `id:<upstream-id>`
+# to avoid row-number ambiguity. `provider model add` takes the upstream ID
+# literally and must not receive the `id:` prefix. It validates one exact ID;
+# --default and --utility assign roles. Explicit automation must supply at
+# least one --model ALIAS=UPSTREAM and read credentials from stdin or a
+# root-owned 0600 file, never from command-line values. This example
+# deliberately configures no provider, model alias, default_model,
+# utility_model, or secret.
 
 [agent]
 default_profile = "main"

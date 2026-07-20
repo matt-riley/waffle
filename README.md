@@ -178,11 +178,11 @@ sudo waffle provider models openrouter --refresh
 sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
 ```
 
-Guided enrollment offers the `openai`, `anthropic`, `openrouter`, and
-`openai-compatible` presets. Only openai-compatible requires a base URL.
-Discovery is authenticated with the hidden credential, then lets the operator
-choose default, utility, and additional favourite aliases. If discovery fails,
-the same flow offers manual `ALIAS=UPSTREAM` entry.
+Presets are openai, anthropic, openrouter, and openai-compatible. Only
+openai-compatible requires a base URL. Bare guided add reads a hidden credential
+and uses it to authenticate model discovery. If discovery fails, guided add
+offers manual `ALIAS=UPSTREAM` entry; successful discovery lets the operator
+choose default, utility, and additional favourite aliases.
 
 After enrollment, `provider models` filters IDs and names with `--search`,
 requests upstream data with `--refresh`, and emits structured cache status and
@@ -193,10 +193,11 @@ Cache records are derived, non-authoritative discovery data. Each contains the
 connection name, type, base URL, opaque scope, and model descriptors, but
 contains no API credential.
 
-Known exact IDs work directly in the guided picker. Unknown numeric or
+In the guided picker, known exact IDs work directly; unknown numeric or
 navigation-like IDs use `id:<upstream-id>` to avoid row-number or navigation
-ambiguity. `provider model add` validates one exact upstream ID; `--default`
-and `--utility` assign its roles transactionally.
+ambiguity. `provider model add` takes the upstream ID literally and must not
+receive the `id:` prefix. It validates the exact ID; `--default` and `--utility`
+assign its roles transactionally.
 
 Explicit automation supplies every model mapping and reads the credential
 from standard input or a root-owned `0600` file. It does not perform the

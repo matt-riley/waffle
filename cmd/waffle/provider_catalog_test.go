@@ -34,7 +34,8 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		for i, line := range lines {
 			lines[i] = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
 		}
-		return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, " ")), " "))
+		prose := strings.ReplaceAll(strings.Join(lines, " "), "`", "")
+		return strings.ToLower(strings.Join(strings.Fields(prose), " "))
 	}
 	requireAll := func(label, body string, required []string) {
 		t.Helper()
@@ -47,7 +48,10 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 	}
 
 	documentationRequirements := []string{
+		"presets are openai, anthropic, openrouter, and openai-compatible",
 		"only openai-compatible requires a base URL",
+		"bare guided add reads a hidden credential and uses it to authenticate model discovery",
+		"if discovery fails, guided add offers manual ALIAS=UPSTREAM entry",
 		"provider models",
 		"--search",
 		"--refresh",
@@ -59,9 +63,9 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		"derived, non-authoritative",
 		"contains no API credential",
 		"connection name, type, base URL, opaque scope, and model descriptors",
-		"known exact IDs work directly",
-		"unknown numeric or navigation-like IDs use `id:<upstream-id>`",
+		"in the guided picker, known exact IDs work directly; unknown numeric or navigation-like IDs use `id:<upstream-id>`",
 		"provider model add",
+		"provider model add takes the upstream ID literally and must not receive the `id:` prefix",
 		"--default",
 		"--utility",
 		"ALIAS=UPSTREAM",
@@ -83,12 +87,15 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 	requireAll("provider usage", usage.String(), []string{
 		"waffle provider models <connection>",
 		"waffle provider model add <connection> <upstream-id>",
+		"presets are openai, anthropic, openrouter, and openai-compatible",
 		"only openai-compatible requires a base URL",
+		"bare guided add reads a hidden credential and uses it to authenticate model discovery",
+		"if discovery fails, guided add offers manual ALIAS=UPSTREAM entry",
 		"provider models searches with --search, refreshes upstream data with --refresh, and emits structured output with --json",
 		"owner-only catalogue cache is reused for 24 hours and is distinct from selected favourite aliases",
 		"refresh fails, a stale cache is returned with a warning",
-		"known exact IDs work directly; unknown numeric or navigation-like IDs use id:<upstream-id>",
-		"provider model add validates one upstream ID; --default and --utility assign roles",
+		"in the guided picker, known exact IDs work directly; unknown numeric or navigation-like IDs use id:<upstream-id>",
+		"provider model add takes the upstream ID literally, validates it, and must not receive the id: prefix; --default and --utility assign roles",
 		"API keys are never accepted as command-line values",
 	})
 }

@@ -26,24 +26,23 @@ sudo waffle provider models openrouter --refresh
 sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
 ```
 
-The guided command offers `openai`, `anthropic`, `openrouter`, and
-`openai-compatible` presets. Only openai-compatible requires a base URL.
-OpenAI and Anthropic use their standard API base URLs, while openrouter uses
-its standard endpoint and account-filtered model catalogue. In explicit
-automation, `--base-url` can override any preset; a custom OpenRouter URL is
-treated as a generic OpenAI-compatible endpoint rather than the standard
-account-filtered OpenRouter catalogue.
+Presets are openai, anthropic, openrouter, and openai-compatible. Only
+openai-compatible requires a base URL. OpenAI and Anthropic use their standard
+API base URLs, while openrouter uses its standard endpoint and account-filtered
+model catalogue. In explicit automation, `--base-url` can override any preset;
+a custom OpenRouter URL is treated as a generic OpenAI-compatible endpoint
+rather than the standard account-filtered OpenRouter catalogue.
 
-After the connection name and preset, guided enrollment prompts for the hidden
-API key and uses it for authenticated model discovery. Auth-free compatible
-endpoints may leave it empty. The model picker supports search, paging, exact
-upstream IDs, and selection of default, utility, and additional favourite
-aliases. Known exact IDs work directly. Unknown numeric or navigation-like IDs
-use `id:<upstream-id>` to avoid row-number or navigation ambiguity. Derived
-aliases are checked against existing aliases; collisions ask for an explicit
-replacement. If discovery fails or returns no models, Waffle prints a safe
-warning and offers manual comma-separated `ALIAS=UPSTREAM` entry. Declining
-that fallback leaves the connection unchanged.
+Bare guided add reads a hidden credential and uses it to authenticate model
+discovery. Auth-free compatible endpoints may leave it empty. The model picker
+supports search, paging, exact upstream IDs, and selection of default, utility,
+and additional favourite aliases. In the guided picker, known exact IDs work
+directly; unknown numeric or navigation-like IDs use `id:<upstream-id>` to avoid
+row-number or navigation ambiguity. Derived aliases are checked against
+existing aliases; collisions ask for an explicit replacement. If discovery
+fails, guided add offers manual `ALIAS=UPSTREAM` entry. It does the same when
+discovery returns no models, while declining that fallback leaves the
+connection unchanged.
 
 Selecting a default alias probes the upstream, commits the configuration and
 encrypted credential, starts Waffle, verifies `/healthz`, and reports
@@ -66,10 +65,10 @@ contains no API credential. The cache is disposable: removing it only forces
 discovery again, and provider removal invalidates its record. Selected
 favourite aliases remain authoritative provider configuration.
 
-`provider model add` registers one exact upstream ID as a favourite alias,
-deriving an alias when `--alias` is omitted. It probes the model before
-committing, and `--default` and `--utility` can assign its roles in the same
-transaction.
+`provider model add` takes the upstream ID literally and must not receive the
+`id:` prefix. It derives an alias when `--alias` is omitted, probes the exact
+model before committing, and lets `--default` and `--utility` assign its roles
+in the same transaction.
 
 For explicit automation, supply the connection name, preset, and at least one
 `--model ALIAS=UPSTREAM`; no catalogue selection is inferred. Pipe the key on

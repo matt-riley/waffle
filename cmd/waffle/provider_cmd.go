@@ -116,17 +116,20 @@ Usage:
   waffle provider model remove <alias> [--replace-with ALIAS]
 
 Presets are openai, anthropic, openrouter, and openai-compatible; only
-openai-compatible requires a base URL. Guided add discovers models, lets you
-choose favourites, and offers manual ALIAS=UPSTREAM entry on discovery failure.
+openai-compatible requires a base URL. Bare guided add reads a hidden credential
+and uses it to authenticate model discovery. If discovery fails, guided add
+offers manual ALIAS=UPSTREAM entry. Successful discovery lets you choose
+favourites.
 provider models searches with --search, refreshes upstream data with --refresh,
 and emits structured output with --json. The owner-only catalogue cache is
 reused for 24 hours and is distinct from selected favourite aliases. If refresh
 fails, a stale cache is returned with a warning when one exists.
-Known exact IDs work directly; unknown numeric or navigation-like IDs use
-id:<upstream-id>. provider model add validates one upstream ID; --default and
+In the guided picker, known exact IDs work directly; unknown numeric or
+navigation-like IDs use id:<upstream-id>. provider model add takes the upstream
+ID literally, validates it, and must not receive the id: prefix; --default and
 --utility assign roles. For automation, supply the connection, preset, and at
-least one --model ALIAS=UPSTREAM explicitly. With no secret-input option, add
-prompts without echo. API keys are never accepted as command-line values.
+least one --model ALIAS=UPSTREAM explicitly. API keys are never accepted as
+command-line values.
 `)
 }
 
