@@ -1,7 +1,6 @@
-# Example waffle config showing named provider connections, deterministic model
-# aliases, and named agent profiles. Copy to $WAFFLE_HOME/config.toml and
-# adjust. Profiles are a *trust boundary* (system, model, tools, sandbox) — not
-# personality presets alone.
+# Provider-free waffle config with named agent profiles. Copy to
+# $WAFFLE_HOME/config.toml and adjust. Profiles are a *trust boundary* (system,
+# model, tools, sandbox) — not personality presets alone.
 #
 # Migration: existing installs with no [agent.profile] section keep today's
 # default agent construction as the effective "main" profile. The legacy
@@ -14,38 +13,30 @@
 # connections directly and uses embedded SQLite; no external router or
 # application database is required.
 #
-# Prefer the management command over hand-editing this section because it
+# Prefer the management command over hand-editing provider config because it
 # probes the upstream and commits the encrypted credential and config
-# transactionally:
+# transactionally. Guided add supports openai, anthropic, openrouter, and a
+# custom-URL openai-compatible preset. It performs authenticated discovery,
+# lets you select favourite aliases, and offers manual ALIAS=UPSTREAM entry if
+# discovery fails:
 #   sudo waffle provider add
+#   sudo waffle provider models openrouter --search claude
+#   sudo waffle provider models openrouter --refresh
+#   sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
 #   sudo waffle provider model activate ALIAS
 #   sudo waffle provider model remove ALIAS [--replace-with ALIAS]
 #   sudo waffle provider remove CONNECTION
-
-[providers.anthropic]
-type = "anthropic"
-api_key = "secret://provider/anthropic/api-key"
-max_tokens = 8192
-
-[providers.openrouter]
-# "openai" covers OpenAI and OpenAI-compatible endpoints such as OpenRouter
-# and Ollama. Auth-free local endpoints may omit api_key.
-type = "openai"
-api_key = "secret://provider/openrouter/api-key"
-base_url = "https://openrouter.ai/api/v1"
-
-[models.claude]
-provider = "anthropic"
-model = "claude-sonnet-4-6"
-
-[models.gpt]
-provider = "openrouter"
-model = "openai/gpt-5.4"
+#
+# `provider models` reuses an owner-only catalogue cache for 24 hours;
+# --refresh requests upstream data and warns when it must return stale data.
+# Cache records are disposable and contain neither provider credentials nor
+# provider configuration. Explicit automation must supply at least one
+# --model ALIAS=UPSTREAM and read credentials from stdin or a root-owned 0600
+# file, never from command-line values. This example deliberately configures
+# no provider, model alias, default_model, utility_model, or secret.
 
 [agent]
 default_profile = "main"
-default_model = "claude"
-utility_model = "gpt"
 
 # --- main: owner interactive default (explicit for documentation) ----------
 [agent.profile.main]
@@ -60,7 +51,7 @@ deny = []
 # --- researcher: read/fetch heavy, no mutation -----------------------------
 [agent.profile.researcher]
 system = "You research thoroughly using read/fetch/search tools. Never mutate files or run shell."
-model = "utility"
+model = "default"
 sandbox = "docker"
 [agent.profile.researcher.tools]
 allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]

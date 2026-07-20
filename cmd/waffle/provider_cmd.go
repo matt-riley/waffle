@@ -115,7 +115,13 @@ Usage:
   waffle provider model activate <alias>
   waffle provider model remove <alias> [--replace-with ALIAS]
 
-With no secret-input option, add prompts without echo. API keys are never
+The guided add supports openai, anthropic, openrouter, and openai-compatible
+presets. It discovers models with the supplied credential, lets you choose
+favourites, and offers manual ALIAS=UPSTREAM entry when discovery fails.
+Catalogue results are cached for 24 hours; --refresh requests a fresh list.
+For automation, supply the connection, preset, and at least one --model
+ALIAS=UPSTREAM explicitly. With no secret-input option, add prompts without
+echo. API keys are never
 accepted as command-line values.
 `)
 }

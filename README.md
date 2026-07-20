@@ -167,8 +167,33 @@ that group; otherwise host launch fails closed.
   atomically swaps it in, and `waffle rollback` restores the previous one.
 
 On an infra-managed host, deployment puts the management command on `PATH`
-and initializes Waffle's internal identity. Enroll a provider directly on that
-host without exposing its credential through deployment inputs:
+and initializes Waffle's internal identity. The simplest first step is the
+guided flow; it keeps the credential on the host and discovers the models the
+account can use:
+
+```sh
+sudo waffle provider add
+sudo waffle provider models openrouter --search claude
+sudo waffle provider models openrouter --refresh
+sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
+```
+
+Guided enrollment offers the `openai`, `anthropic`, `openrouter`, and
+`openai-compatible` presets. The last requires a custom base URL. Discovery is
+authenticated with the hidden credential, then lets the operator choose
+default, utility, and additional favourite aliases. If discovery fails, the
+same flow offers manual `ALIAS=UPSTREAM` entry.
+
+After enrollment, `provider models` reuses an owner-only catalogue cache for
+24 hours. `--refresh` requests a new upstream list; if that refresh fails and
+a previous list exists, Waffle returns the stale list with a warning. These
+cache records are disposable discovery data, not provider configuration or
+credentials.
+
+Explicit automation supplies every model mapping and reads the credential
+from standard input or a root-owned `0600` file. It does not perform the
+guided catalogue selection and never puts the credential in Infra, shared CI,
+environment arguments, or command-line values:
 
 ```sh
 credential-command | sudo waffle provider add \

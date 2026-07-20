@@ -28,6 +28,45 @@ var presetCases = []struct {
 	{"openrouter", "openai", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1"},
 }
 
+func TestProviderDocumentationAcceptance(t *testing.T) {
+	required := []string{
+		"openai-compatible",
+		"openrouter",
+		"provider models",
+		"--refresh",
+		"provider model add",
+		"24 hours",
+		"ALIAS=UPSTREAM",
+	}
+	for _, path := range []string{
+		filepath.Join("..", "..", "README.md"),
+		filepath.Join("..", "..", "docs", "deploy.md"),
+		filepath.Join("..", "..", "config.example.toml"),
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, text := range required {
+			if !strings.Contains(string(body), text) {
+				t.Errorf("%s does not document %q", path, text)
+			}
+		}
+	}
+
+	var usage strings.Builder
+	providerUsage(&usage)
+	for _, text := range []string{
+		"waffle provider models <connection>",
+		"waffle provider model add <connection> <upstream-id>",
+		"API keys are never\naccepted as command-line values",
+	} {
+		if !strings.Contains(usage.String(), text) {
+			t.Errorf("provider usage does not document %q", text)
+		}
+	}
+}
+
 func TestProviderPresetDefaultsAndOverrides(t *testing.T) {
 	for _, tt := range presetCases {
 		t.Run(tt.input, func(t *testing.T) {

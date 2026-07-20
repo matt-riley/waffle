@@ -17,16 +17,56 @@ key, and `waffle.service` may remain inactive. Waffle has no Workweave Router,
 Postgres, or Pub/Sub emulator runtime; it connects directly to the provider
 connections enrolled on the host.
 
-Run the bare command for guided enrollment. It prompts for a connection name,
-provider type, optional base URL, one or more `ALIAS=UPSTREAM` models, default
-and utility aliases, and a hidden API key. Use `-` at optional prompts to leave
-the value unset. Selecting a default alias probes the upstream, commits the
-configuration and encrypted credential, starts Waffle, verifies `/healthz`,
-and reports **Ready**. A failed probe, restart, or health check restores the
-previous configuration, secret store, and service state.
+Run the bare command for guided enrollment. The complete operator path is:
 
-For granular automation, pipe the key on standard input without placing it in
-the process arguments:
+```sh
+sudo waffle provider add
+sudo waffle provider models openrouter --search claude
+sudo waffle provider models openrouter --refresh
+sudo waffle provider model add openrouter anthropic/claude-sonnet-4.6 --default
+```
+
+The guided command offers `openai`, `anthropic`, `openrouter`, and
+`openai-compatible` presets. OpenAI and Anthropic use their standard API base
+URLs, while openrouter uses its standard endpoint and account-filtered model
+catalogue. The `openai-compatible` preset prompts for a required custom base
+URL. In explicit automation, `--base-url` can override any preset; a custom
+OpenRouter URL is treated as a generic OpenAI-compatible endpoint rather than
+the standard account-filtered OpenRouter catalogue.
+
+After the connection name and preset, guided enrollment prompts for the hidden
+API key and uses it for authenticated model discovery. Auth-free compatible
+endpoints may leave it empty. The model picker supports search, paging, exact
+upstream IDs, and selection of default, utility, and additional favourite
+aliases. Derived aliases are checked against existing aliases; collisions ask
+for an explicit replacement. If discovery fails or returns no models, Waffle
+prints a safe warning and offers manual comma-separated `ALIAS=UPSTREAM`
+entry. Declining that fallback leaves the connection unchanged.
+
+Selecting a default alias probes the upstream, commits the configuration and
+encrypted credential, starts Waffle, verifies `/healthz`, and reports
+**Ready**. A failed probe, restart, or health check restores the previous
+configuration, secret store, and service state. Cache-write failure after a
+successful commit is only a warning and does not undo the enrolled provider.
+
+For an enrolled connection, `provider models` reads an owner-only model
+catalogue cache under the Waffle home. Directories are mode `0700`, records
+are mode `0600`, and a fresh record is reused for 24 hours. `--search` filters
+the displayed IDs and names. `--refresh` requests a fresh upstream catalogue;
+if refresh fails and an older record exists, Waffle returns that stale record
+with a warning (and exposes `stale` and `warning` in `--json`). With no usable
+record, the upstream error is returned. The cache is disposable: removing it
+only forces discovery again, and provider removal invalidates its record. It
+does not contain the provider credential and is not provider configuration.
+
+`provider model add` registers one exact upstream ID as a favourite alias,
+deriving an alias when `--alias` is omitted. It probes the model before
+committing, and `--default` and `--utility` can assign its roles in the same
+transaction.
+
+For explicit automation, supply the connection name, preset, and at least one
+`--model ALIAS=UPSTREAM`; no catalogue selection is inferred. Pipe the key on
+standard input without placing it in the process arguments:
 
 ```sh
 credential-command | sudo waffle provider add \
