@@ -23,6 +23,7 @@ import (
 // Config is the root of config.toml.
 type Config struct {
 	Gateway   Gateway                       `toml:"gateway"`
+	Chat      Chat                          `toml:"chat"`
 	Provider  Provider                      `toml:"provider"`
 	Providers map[string]ProviderConnection `toml:"providers"`
 	Models    map[string]ModelTarget        `toml:"models"`
@@ -58,6 +59,11 @@ type Config struct {
 	// including an intentionally empty table. Map length cannot represent that
 	// precedence decision after TOML decoding.
 	providerRegistryExplicit bool
+}
+
+// Chat configures the local managed-chat client connection.
+type Chat struct {
+	Socket string `toml:"socket"`
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).
@@ -876,6 +882,9 @@ func Load(path string) (Config, error) {
 	if err := validateLoopbackListen(cfg.Gateway.StatusListen); err != nil {
 		return Config{}, fmt.Errorf("gateway.status_listen: %w", err)
 	}
+	if err := validateChatSocket(cfg.Chat.Socket); err != nil {
+		return Config{}, fmt.Errorf("chat.socket: %w", err)
+	}
 	if err := validateSandboxResources(cfg.Sandbox); err != nil {
 		return Config{}, fmt.Errorf("sandbox resources: %w", err)
 	}
@@ -974,6 +983,22 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func validateChatSocket(socket string) error {
+	if socket == "" {
+		return nil
+	}
+	if strings.ContainsRune(socket, '\x00') {
+		return errors.New("must not contain a NUL byte")
+	}
+	if !filepath.IsAbs(socket) {
+		return errors.New("must be an absolute path")
+	}
+	if filepath.Clean(socket) != socket {
+		return errors.New("must be a clean path")
+	}
+	return nil
 }
 
 func legacyProviderDefaults() Provider {

@@ -18,6 +18,29 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadChatSocketRequiresAbsoluteCleanPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[chat]\nsocket = \"relative.sock\"\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative socket = %v", err)
+	}
+	writeFile(t, path, "[chat]\nsocket = \"/tmp/waffle-chat.sock\"\n")
+	cfg, err := Load(path)
+	if err != nil || cfg.Chat.Socket != "/tmp/waffle-chat.sock" {
+		t.Fatalf("chat config = %+v, %v", cfg.Chat, err)
+	}
+}
+
+func TestLoadChatSocketRejectsUncleanOrNULPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	for _, socket := range []string{"/tmp/../tmp/waffle-chat.sock", "/tmp/waffle\\u0000chat.sock"} {
+		writeFile(t, path, "[chat]\nsocket = \""+socket+"\"\n")
+		if _, err := Load(path); err == nil {
+			t.Fatalf("Load accepted socket path %q", socket)
+		}
+	}
+}
+
 func TestJobRetryPolicyParsesWithFireOnceDefaults(t *testing.T) {
 	defaults := Default().Jobs
 	if defaults.MaxAttempts != 1 || defaults.BaseBackoff != "10s" || defaults.MaxBackoff != "10m" || defaults.StallTimeout != "5m" {

@@ -43,11 +43,12 @@ func (s *Store) nowStr() string { return s.clock().Format(time.RFC3339Nano) }
 
 // Session is one conversation.
 type Session struct {
-	ID        string
-	Title     string
-	Summary   string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Title      string
+	Summary    string
+	ModelAlias string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Create starts a new session.
@@ -81,11 +82,29 @@ func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
 	return err
 }
 
+// SetModelAlias records the configured model alias selected for a session.
+func (s *Store) SetModelAlias(ctx context.Context, id, alias string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE sessions SET model_alias = ?, updated_at = ? WHERE id = ?",
+		strings.TrimSpace(alias), s.nowStr(), id)
+	if err != nil {
+		return fmt.Errorf("set session model alias: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-model result: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Get loads one session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &created, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -121,7 +140,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, created_at, updated_at
+		SELECT id, title, summary, model_alias, created_at, updated_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -134,7 +153,7 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	for rows.Next() {
 		var sess Session
 		var created, updated string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &created, &updated); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &created, &updated); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)

@@ -76,6 +76,30 @@ func TestSessionAndTurnRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionModelAliasPersistsAcrossGetLatestAndList(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	sess, err := sessions.Create(ctx, "model session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, sess.ID, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sessions.Get(ctx, sess.ID)
+	if err != nil || got.ModelAlias != "claude" {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+	latest, err := sessions.Latest(ctx)
+	if err != nil || latest.ModelAlias != "claude" {
+		t.Fatalf("Latest = %+v, %v", latest, err)
+	}
+	list, err := sessions.List(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].ModelAlias != "claude" {
+		t.Fatalf("List = %+v, %v", list, err)
+	}
+}
+
 func TestSearchFindsTextAndToolResults(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
