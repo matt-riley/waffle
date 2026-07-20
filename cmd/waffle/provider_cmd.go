@@ -437,7 +437,7 @@ func warnProviderCatalogueCache(stderr io.Writer) {
 
 func providerModelCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) < 2 {
-		return errors.New("usage: waffle provider model <add|activate|remove> ...")
+		return errors.New("usage: waffle provider model <add|activate|remove>")
 	}
 	var addRequest providerconfig.AddModelRequest
 	if args[0] == "add" {
