@@ -32,22 +32,23 @@ const chatNewConfirmArg = "confirm"
 // connection. Renderers are responsible only for displaying its state,
 // events, and command results.
 type chatRuntime struct {
-	mu           sync.Mutex
-	commandMu    sync.Mutex
-	agent        *agent.Agent
-	agentCancel  context.CancelFunc
-	sessions     *session.Store
-	current      *session.Session
-	history      []llm.Message
-	persisted    int
-	cfg          config.Config
-	st           *store.Store
-	skills       []skill.Skill
-	profileName  string
-	agentCleanup func()
-	wsBroker     *broker.Broker
-	wsURL        string
-	wsClient     io.Closer
+	mu              sync.Mutex
+	commandMu       sync.Mutex
+	agent           *agent.Agent
+	agentCancel     context.CancelFunc
+	sessions        *session.Store
+	current         *session.Session
+	history         []llm.Message
+	persisted       int
+	cfg             config.Config
+	st              *store.Store
+	skills          []skill.Skill
+	profileName     string
+	chatProfileName string
+	agentCleanup    func()
+	wsBroker        *broker.Broker
+	wsURL           string
+	wsClient        io.Closer
 
 	modelError          string
 	workspace           string
@@ -151,6 +152,7 @@ func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.agentCleanup = cleanup
 	r.skills = skills
 	r.profileName = profileName
+	r.chatProfileName = profileName
 	r.resourceCtx = resourceCtx
 	r.resourceCancel = resourceCancel
 	r.capabilities = append([]string(nil), options.Capabilities...)
@@ -561,12 +563,12 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 		}
 		r.wsBroker, r.wsURL = b, url
 	}
-	wsBroker, wsURL, profileName := r.wsBroker, r.wsURL, r.profileName
+	wsBroker, wsURL, chatProfile := r.wsBroker, r.wsURL, r.chatProfileName
 	r.mu.Unlock()
 
 	mgr := newWorkspaceManager(r.cfg, r.st, wsBroker)
 	mgr.BrokerURL = wsURL
-	ws, client, err := mgr.OpenWithProfile(ctx, repoArg, profileName)
+	ws, client, err := mgr.OpenWithProfile(ctx, repoArg, chatProfile)
 	if err != nil {
 		return chatpkg.Result{}, err
 	}
@@ -606,7 +608,7 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	}()
 
 	r.mu.Lock()
-	profileName := r.profileName
+	profileName := r.chatProfileName
 	resourceCtx := r.resourceCtx
 	r.mu.Unlock()
 	if install.workspace.Profile != "" {

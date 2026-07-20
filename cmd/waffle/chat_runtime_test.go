@@ -158,6 +158,80 @@ func TestChatRuntimeConsecutiveRepoInstallsUseCleanProfileBaselines(t *testing.T
 	}
 }
 
+func TestChatRuntimeUnboundRepoUsesOriginalChatProfileAfterBoundRepo(t *testing.T) {
+	ctx := context.Background()
+	cfg := configuredChatModels()
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"chat-default": {Model: "claude", Tools: config.ToolPolicy{Deny: []string{"chat_denied"}}},
+		"repo-a":       {Model: "gpt", Tools: config.ToolPolicy{Deny: []string{"repo_a_denied"}}},
+	}
+	runtime, sessions := newRuntimeFixture(t, cfg)
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{Profile: "chat-default"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var builtProfiles []string
+	runtime.profileAgentBuilder = func(_ context.Context, profileName string) (*agent.Agent, func(), error) {
+		builtProfiles = append(builtProfiles, profileName)
+		model := "claude"
+		if profileName == "repo-a" {
+			model = "gpt"
+		}
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools: tool.NewRegistry(
+				runtimeNamedTool("host_keep"),
+				runtimeNamedTool("chat_denied"),
+				runtimeNamedTool("repo_a_denied"),
+			),
+			System:  "profile baseline: " + profileName,
+			Model:   model,
+			Profile: profileName,
+		}, func() {}, nil
+	}
+
+	targetA, err := sessions.Create(ctx, "bound repo a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetB, err := sessions.Create(ctx, "unbound repo b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultA, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "a", Repo: "owner/a", Image: "test", SessionID: targetA.ID, Profile: "repo-a"},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_a")),
+		client:    &runtimeTestCloser{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultA.State == nil || resultA.State.Profile != "repo-a" || runtime.agent.Model != "gpt" || hasTool(runtime.agent.Tools, "repo_a_denied") {
+		t.Fatalf("bound repo A state=%+v model=%q tools=%v", resultA.State, runtime.agent.Model, toolNames(runtime.agent.Tools))
+	}
+
+	resultB, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "b", Repo: "owner/b", Image: "test", SessionID: targetB.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_b")),
+		client:    &runtimeTestCloser{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(builtProfiles, []string{"repo-a", "chat-default"}) {
+		t.Fatalf("built profiles = %v, want bound repo then original chat default", builtProfiles)
+	}
+	if resultB.State == nil || resultB.State.Profile != "chat-default" || runtime.agent.Model != "claude" {
+		t.Fatalf("unbound repo B state=%+v model=%q", resultB.State, runtime.agent.Model)
+	}
+	if !strings.Contains(runtime.agent.System, "profile baseline: chat-default") || strings.Contains(runtime.agent.System, "profile baseline: repo-a") {
+		t.Fatalf("unbound repo B system = %q", runtime.agent.System)
+	}
+	if hasTool(runtime.agent.Tools, "chat_denied") || !hasTool(runtime.agent.Tools, "repo_a_denied") || hasTool(runtime.agent.Tools, "workspace_a") {
+		t.Fatalf("unbound repo B inherited repo A policy/tools: %v", toolNames(runtime.agent.Tools))
+	}
+}
+
 func TestChatRuntimeFailedRepoInstallCleansProvisionalResources(t *testing.T) {
 	ctx := context.Background()
 	runtime, _ := newRuntimeFixture(t, configuredChatModels())
