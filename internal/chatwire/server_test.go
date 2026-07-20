@@ -717,6 +717,88 @@ func TestServerCloseCancelsActiveTurnBeforeGoodbye(t *testing.T) {
 	}
 }
 
+func TestClientGracefulCloseReturnsSafeWarningAndCleansOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		closeErr    error
+		wantMessage string
+	}{
+		{name: "redacted", closeErr: wireSafeCloseError{"reflection failed: [redacted:test]"}, wantMessage: "reflection failed: [redacted:test]"},
+		{name: "unredacted", closeErr: errors.New("opaque-close-secret-9912"), wantMessage: "chat closed with a cleanup warning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newWireFake(tc.name)
+			backend.closeErr = tc.closeErr
+			path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+			defer stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			err = client.Close(ctx)
+			var remote *RemoteError
+			if !errors.As(err, &remote) || remote.Code != "close_warning" || remote.Message != tc.wantMessage {
+				t.Fatalf("Close error = %#v", err)
+			}
+			if strings.Contains(err.Error(), "opaque-close-secret-9912") {
+				t.Fatalf("Close leaked backend error: %v", err)
+			}
+			if secondErr := client.Close(ctx); secondErr == nil || secondErr.Error() != err.Error() {
+				t.Fatalf("second Close = %v, want %v", secondErr, err)
+			}
+			backend.waitClosed(t)
+			if backend.closeCount() != 1 {
+				t.Fatalf("backend closes = %d", backend.closeCount())
+			}
+		})
+	}
+}
+
+func TestServerGracefulCloseWarningPrecedesTerminalGoodbye(t *testing.T) {
+	backend := newWireFake("close-order")
+	backend.closeErr = wireSafeCloseError{"cleanup warning"}
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	codec := NewClientCodec(conn, conn)
+	if err := encodeTestFrame(codec, TypeOpen, "open", chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codec.Decode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeTestFrame(codec, TypeClose, "close", nil); err != nil {
+		t.Fatal(err)
+	}
+	warning, err := codec.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertWireError(t, warning, "close_warning", "cleanup warning")
+	goodbye, err := codec.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goodbye.Type != TypeGoodbye || goodbye.ID != "close" {
+		t.Fatalf("goodbye = %+v", goodbye)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := codec.Decode(); err == nil {
+		t.Fatalf("post-goodbye frame = %+v", frame)
+	}
+}
+
 func TestServerCloseCancelsConnectionContextWhenBackendCancelIsStubborn(t *testing.T) {
 	t.Parallel()
 
@@ -1099,7 +1181,13 @@ type wireFakeBackend struct {
 	commandResult  chat.Result
 	cancels        int
 	closes         int
+	closeErr       error
 }
+
+type wireSafeCloseError struct{ message string }
+
+func (e wireSafeCloseError) Error() string       { return e.message }
+func (e wireSafeCloseError) SafeMessage() string { return e.message }
 
 type errorListener struct{ err error }
 
@@ -1214,7 +1302,7 @@ func (b *wireFakeBackend) Close(context.Context) error {
 	b.closes++
 	b.mu.Unlock()
 	b.closedOnce.Do(func() { close(b.closed) })
-	return nil
+	return b.closeErr
 }
 
 func (b *wireFakeBackend) cancelCount() int {

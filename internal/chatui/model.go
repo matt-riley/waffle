@@ -93,6 +93,7 @@ type Model struct {
 	stateChangeActive      bool
 	commandActive          bool
 	commandCancelRequested bool
+	commandCancel          context.CancelFunc
 	confirmNeedsTurnDrain  bool
 
 	paletteVisible   bool
@@ -251,9 +252,9 @@ func (m *Model) turnCmd(operationID uint64, input string) tea.Cmd {
 	}
 }
 
-func (m *Model) commandCmd(operationID uint64, command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
+func (m *Model) commandCmd(ctx context.Context, operationID uint64, command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
 	return func() tea.Msg {
-		result, err := m.backend.Command(m.ctx, command, func(event chat.Event) {
+		result, err := m.backend.Command(ctx, command, func(event chat.Event) {
 			m.sendOperation(eventMsg{operationID: operationID, event: event})
 		})
 		m.sendOperation(commandResultMsg{operationID: operationID, startedDuringTurn: startedDuringTurn, command: command, result: result, err: err})

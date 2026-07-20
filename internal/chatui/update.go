@@ -75,6 +75,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.continuePump(next)
 	case commandResultMsg:
 		requestedCancel := m.commandCancelRequested
+		if m.commandCancel != nil {
+			m.commandCancel()
+			m.commandCancel = nil
+		}
 		m.commandActive = false
 		m.commandCancelRequested = false
 		m.stateChangeActive = false
@@ -169,7 +173,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.turnActive {
 				m.markTurnCancelRequested()
 			}
-			m.commandCancelRequested = m.commandActive
+			m.cancelActiveCommand()
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -184,6 +188,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'd' {
 		if m.composer.Value() == "" && m.overlay == overlayNone {
+			if m.commandActive {
+				m.cancelActiveCommand()
+				m.backend.Cancel()
+			}
 			m.quitting = true
 			return m, m.closeCmd()
 		}
@@ -194,7 +202,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.turnActive {
 				m.markTurnCancelRequested()
 			}
-			m.commandCancelRequested = m.commandActive
+			m.cancelActiveCommand()
 			m.backend.Cancel()
 			return m, nil
 		}
@@ -304,11 +312,17 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) startCommand(command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
-	if command.Name == chat.CommandSkill || command.Name == chat.CommandRepo || command.Name == chat.CommandResume && command.Args != "" || command.Name == chat.CommandNew && command.Args == "confirm" {
+	ctx := m.ctx
+	if commandIsCancellable(command) {
 		m.commandActive = true
 		m.commandCancelRequested = false
+		ctx, m.commandCancel = context.WithCancel(m.ctx)
 	}
-	return m.commandCmd(m.nextOperation(), command, startedDuringTurn)
+	return m.commandCmd(ctx, m.nextOperation(), command, startedDuringTurn)
+}
+
+func commandIsCancellable(command chat.ParsedCommand) bool {
+	return command.Name == chat.CommandSkill || command.Name == chat.CommandRepo || command.Name == chat.CommandResume && command.Args != "" || command.Name == chat.CommandNew && command.Args == "confirm"
 }
 
 func (m *Model) handleOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -395,6 +409,13 @@ func (m *Model) markTurnCancelRequested() {
 	if !m.turnTerminalSeen {
 		m.canceledTurnID = m.activeTurnID
 	}
+}
+
+func (m *Model) cancelActiveCommand() {
+	if m.commandCancel != nil {
+		m.commandCancel()
+	}
+	m.commandCancelRequested = m.commandActive
 }
 
 func (m *Model) overlaySelection() (chat.ParsedCommand, bool) {

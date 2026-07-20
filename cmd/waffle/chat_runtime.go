@@ -37,6 +37,7 @@ type chatRuntime struct {
 	commandMu       sync.Mutex
 	agent           *agent.Agent
 	agentCancel     context.CancelFunc
+	commandCancel   context.CancelFunc
 	sessions        *session.Store
 	current         *session.Session
 	history         []llm.Message
@@ -65,6 +66,7 @@ type chatRuntime struct {
 	closeErr            error
 	closed              bool
 	profileAgentBuilder func(context.Context, string) (*agent.Agent, func(), error)
+	repoOpener          func(context.Context, string, string) (repoInstall, error)
 	sessionOwners       *chatSessionOwners
 	ownedSessionID      string
 }
@@ -208,6 +210,19 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 	if closed {
 		return chatpkg.Result{}, errors.New("chat runtime is closed")
 	}
+	commandCtx, commandCancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.commandCancel = commandCancel
+	r.mu.Unlock()
+	defer func() {
+		commandCancel()
+		r.mu.Lock()
+		r.commandCancel = nil
+		r.mu.Unlock()
+	}()
+	if err := commandCtx.Err(); err != nil {
+		return chatpkg.Result{}, err
+	}
 	if invalidatesNewConfirmation(command) {
 		r.mu.Lock()
 		r.pendingNewSessionID = ""
@@ -215,12 +230,12 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 	}
 	switch command.Name {
 	case chatpkg.CommandModel:
-		return r.commandModel(ctx, command.Args)
+		return r.commandModel(commandCtx, command.Args)
 	case chatpkg.CommandHelp, chatpkg.CommandModels, chatpkg.CommandNew,
 		chatpkg.CommandSessions, chatpkg.CommandResume, chatpkg.CommandStatus,
 		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill,
 		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandExit:
-		return r.runCommand(ctx, command, emit)
+		return r.runCommand(commandCtx, command, emit)
 	default:
 		return chatpkg.Result{}, fmt.Errorf("unknown chat command %q", command.Name)
 	}
@@ -626,7 +641,8 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	if resourceCtx == nil {
 		resourceCtx = context.WithoutCancel(ctx)
 	}
-	if r.wsBroker == nil {
+	repoOpener := r.repoOpener
+	if repoOpener == nil && r.wsBroker == nil {
 		b, url, err := startWorkspaceBroker(resourceCtx, r.cfg, r.st, io.Discard)
 		if err != nil {
 			r.mu.Unlock()
@@ -637,23 +653,33 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	wsBroker, wsURL, chatProfile := r.wsBroker, r.wsURL, r.chatProfileName
 	r.mu.Unlock()
 
-	mgr := newWorkspaceManager(r.cfg, r.st, wsBroker)
-	mgr.BrokerURL = wsURL
-	ws, client, err := mgr.OpenWithProfile(ctx, repoArg, chatProfile)
-	if err != nil {
-		return chatpkg.Result{}, err
+	var install repoInstall
+	if repoOpener != nil {
+		var err error
+		install, err = repoOpener(ctx, repoArg, chatProfile)
+		if err != nil {
+			return chatpkg.Result{}, err
+		}
+	} else {
+		mgr := newWorkspaceManager(r.cfg, r.st, wsBroker)
+		mgr.BrokerURL = wsURL
+		ws, client, err := mgr.OpenWithProfile(ctx, repoArg, chatProfile)
+		if err != nil {
+			return chatpkg.Result{}, err
+		}
+		policy, err := mgr.LoadRepoPolicy(ctx, client)
+		if err != nil {
+			_ = client.Close()
+			return chatpkg.Result{}, err
+		}
+		install = repoInstall{
+			workspace: ws,
+			policy:    policy,
+			tools:     sandbox.NewQueueToolbox(client),
+			client:    client,
+		}
 	}
-	policy, err := mgr.LoadRepoPolicy(ctx, client)
-	if err != nil {
-		_ = client.Close()
-		return chatpkg.Result{}, err
-	}
-	return r.installRepo(ctx, repoInstall{
-		workspace: ws,
-		policy:    policy,
-		tools:     sandbox.NewQueueToolbox(client),
-		client:    client,
-	}, emit)
+	return r.installRepo(ctx, install, emit)
 }
 
 func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, func(), error) {
@@ -1077,8 +1103,12 @@ func truncateChatTitle(input string) string {
 func (r *chatRuntime) Cancel() {
 	r.mu.Lock()
 	cancel := r.agentCancel
+	commandCancel := r.commandCancel
 	r.pendingNewSessionID = ""
 	r.mu.Unlock()
+	if commandCancel != nil {
+		commandCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -1244,8 +1274,9 @@ type redactedChatRuntimeError struct {
 	message string
 }
 
-func (e *redactedChatRuntimeError) Error() string { return e.message }
-func (e *redactedChatRuntimeError) Unwrap() error { return e.cause }
+func (e *redactedChatRuntimeError) Error() string       { return e.message }
+func (e *redactedChatRuntimeError) Unwrap() error       { return e.cause }
+func (e *redactedChatRuntimeError) SafeMessage() string { return e.message }
 
 func (r *chatRuntime) runtimeRedactor() func(string) string {
 	r.mu.Lock()

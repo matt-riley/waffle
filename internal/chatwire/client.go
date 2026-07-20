@@ -223,16 +223,26 @@ func (c *Client) close(ctx context.Context) error {
 	defer cancel()
 	id, responses, err := c.startRequest(closeCtx, TypeClose, nil)
 	if err == nil {
-		frame, responseErr := c.nextResponse(closeCtx, responses)
-		c.finishRequest(id)
-		switch {
-		case responseErr != nil:
-			err = responseErr
-		case frame.Type == TypeError:
-			err = remoteError(frame)
-		case frame.Type != TypeGoodbye:
-			err = unexpectedResponse(frame, TypeGoodbye)
+		var warning error
+		for {
+			frame, responseErr := c.nextResponse(closeCtx, responses)
+			if responseErr != nil {
+				err = errors.Join(warning, responseErr)
+				break
+			}
+			switch frame.Type {
+			case TypeError:
+				warning = errors.Join(warning, remoteError(frame))
+			case TypeGoodbye:
+				err = warning
+			default:
+				err = errors.Join(warning, unexpectedResponse(frame, TypeGoodbye))
+			}
+			if frame.Type == TypeGoodbye || frame.Type != TypeError {
+				break
+			}
 		}
+		c.finishRequest(id)
 	}
 	closeErr := c.conn.Close()
 	if errors.Is(closeErr, net.ErrClosed) {

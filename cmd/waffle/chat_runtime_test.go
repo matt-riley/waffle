@@ -1135,6 +1135,55 @@ func TestChatRuntimeSocketSessionOwnershipSwitchCloseAndReacquire(t *testing.T) 
 	}
 }
 
+func TestChatRuntimeRepoCommandCancelAndCloseOwnCommandContext(t *testing.T) {
+	for _, action := range []string{"cancel", "close"} {
+		t.Run(action, func(t *testing.T) {
+			runtime, _ := newRuntimeFixture(t, configuredChatModels())
+			if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan struct{})
+			runtime.repoOpener = func(ctx context.Context, _, _ string) (repoInstall, error) {
+				close(started)
+				<-ctx.Done()
+				return repoInstall{}, ctx.Err()
+			}
+			commandDone := make(chan error, 1)
+			go func() {
+				_, err := runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandRepo, Args: "owner/repo"}, nil)
+				commandDone <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("repo command did not start")
+			}
+			if action == "cancel" {
+				runtime.Cancel()
+			} else {
+				closeDone := make(chan error, 1)
+				go func() { closeDone <- runtime.Close(context.Background()) }()
+				select {
+				case err := <-closeDone:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("Close hung behind repo command")
+				}
+			}
+			select {
+			case err := <-commandDone:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("repo command error = %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("repo command was not canceled")
+			}
+		})
+	}
+}
+
 func TestChatRuntimeNewReflectsOldSessionAndRestoresProfileModel(t *testing.T) {
 	ctx := context.Background()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())

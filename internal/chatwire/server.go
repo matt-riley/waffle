@@ -144,6 +144,7 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 		deferredMu.Unlock()
 	}
 	var cleanupOnce sync.Once
+	var cleanupErr error
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			activeMu.Lock()
@@ -164,7 +165,7 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 			commandGroup.Wait()
 			closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), serverCloseTimeout)
 			defer closeCancel()
-			_ = backend.Close(closeCtx)
+			cleanupErr = backend.Close(closeCtx)
 		})
 	}
 	defer cleanup()
@@ -403,10 +404,25 @@ func serveConn(parent context.Context, conn net.Conn, factory Factory, audit Aud
 					return
 				}
 			}
+			if cleanupErr != nil {
+				if err := writeCloseWarning(writer, frame.ID, cleanupErr); err != nil {
+					return
+				}
+			}
 			_ = writer.send(TypeGoodbye, frame.ID, nil)
 			return
 		}
 	}
+}
+
+func writeCloseWarning(writer *serverWriter, id string, closeErr error) error {
+	type safeCloseError interface{ SafeMessage() string }
+	message := "chat closed with a cleanup warning"
+	var safe safeCloseError
+	if errors.As(closeErr, &safe) && safe.SafeMessage() != "" {
+		message = safe.SafeMessage()
+	}
+	return writer.stableError(id, "close_warning", message)
 }
 
 func writeBackendError(writer *serverWriter, id, fallbackCode, fallbackMessage string, backendErr error) error {

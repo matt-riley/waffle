@@ -22,7 +22,9 @@ type asyncBackend struct {
 	openState   chat.State
 	turn        func(string, func(chat.Event)) error
 	command     func(chat.ParsedCommand, func(chat.Event)) (chat.Result, error)
+	commandCtx  func(context.Context, chat.ParsedCommand, func(chat.Event)) (chat.Result, error)
 	cancel      func()
+	close       func() error
 	mu          sync.Mutex
 	cancelCalls int
 	closeCalls  int
@@ -34,7 +36,11 @@ func (b *asyncBackend) Open(context.Context, chat.OpenOptions) (chat.State, erro
 func (b *asyncBackend) Turn(_ context.Context, input string, emit func(chat.Event)) error {
 	return b.turn(input, emit)
 }
-func (b *asyncBackend) Command(_ context.Context, command chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+
+func (b *asyncBackend) Command(ctx context.Context, command chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+	if b.commandCtx != nil {
+		return b.commandCtx(ctx, command, emit)
+	}
 	return b.command(command, emit)
 }
 func (b *asyncBackend) Cancel() {
@@ -49,7 +55,11 @@ func (b *asyncBackend) Cancel() {
 func (b *asyncBackend) Close(context.Context) error {
 	b.mu.Lock()
 	b.closeCalls++
+	closeFn := b.close
 	b.mu.Unlock()
+	if closeFn != nil {
+		return closeFn()
+	}
 	return nil
 }
 
@@ -495,6 +505,78 @@ func TestModelSkillCommandIsBusyCancelableAndEndsOnce(t *testing.T) {
 		t.Fatalf("terminal message = %q", got)
 	}
 	m.pumpStopOnce.Do(func() { close(m.pumpStop) })
+}
+
+func TestModelRepoEarlyCancelOwnsCommandContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{name: "escape", key: key(tea.KeyEscape)},
+		{name: "ctrl_c", key: modified('c', tea.ModCtrl)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &asyncBackend{turn: func(string, func(chat.Event)) error { return nil }}
+			backend.commandCtx = func(ctx context.Context, command chat.ParsedCommand, _ func(chat.Event)) (chat.Result, error) {
+				if command.Name != chat.CommandRepo {
+					t.Fatalf("command = %+v", command)
+				}
+				select {
+				case <-ctx.Done():
+					return chat.Result{}, ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+					return chat.Result{}, errors.New("repo command context was not canceled")
+				}
+			}
+			m := New(backend, chat.OpenOptions{}, Options{Width: 96, Height: 28})
+			m.openResolved, m.opened, m.connected = true, true, true
+			m.composer.SetValue("/repo owner/repo")
+			updated, commandCmd := m.Update(key(tea.KeyEnter))
+			m = updated.(*Model)
+			updated, _ = m.Update(tc.key)
+			m = updated.(*Model)
+			done := runCommandAsync(commandCmd)
+			m, _, _ = consumePump(t, m, m.waitEventCmd())
+			<-done
+			if backend.cancelCalls != 1 {
+				t.Fatalf("backend cancel calls = %d", backend.cancelCalls)
+			}
+			if got := m.messages[len(m.messages)-1].text; got != "Command cancelled." {
+				t.Fatalf("terminal message = %q", got)
+			}
+			m.pumpStopOnce.Do(func() { close(m.pumpStop) })
+		})
+	}
+}
+
+func TestModelRepoCtrlDCancelsBeforeClose(t *testing.T) {
+	started := make(chan struct{})
+	backend := &asyncBackend{turn: func(string, func(chat.Event)) error { return nil }}
+	backend.commandCtx = func(ctx context.Context, _ chat.ParsedCommand, _ func(chat.Event)) (chat.Result, error) {
+		close(started)
+		<-ctx.Done()
+		return chat.Result{}, ctx.Err()
+	}
+	backend.close = func() error { return nil }
+	m := New(backend, chat.OpenOptions{}, Options{Width: 96, Height: 28})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.composer.SetValue("/repo owner/repo")
+	updated, commandCmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	commandDone := runCommandAsync(commandCmd)
+	<-started
+	updated, closeCmd := m.Update(modified('d', tea.ModCtrl))
+	m = updated.(*Model)
+	closeMsg := closeCmd()
+	_ = updateForTest(t, m, closeMsg)
+	select {
+	case <-commandDone:
+	case <-time.After(time.Second):
+		t.Fatal("Ctrl+D close left repo command running")
+	}
+	if backend.closeCalls != 1 {
+		t.Fatalf("close calls = %d", backend.closeCalls)
+	}
 }
 
 func TestModelExecutedCancellationStaysConnectedAndTransportLossDisconnects(t *testing.T) {
