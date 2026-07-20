@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
@@ -35,164 +35,194 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workset"
+	"golang.org/x/term"
 )
 
 const (
-	dim   = "\x1b[2m"
-	reset = "\x1b[0m"
+	chatUsageLine = "waffle chat [-c|--continue] [--profile name] [--socket absolute-path] [--plain]"
+	chatUsage     = "Usage: " + chatUsageLine + "\n\n" +
+		"Options:\n" +
+		"  -c, --continue         continue the latest session\n" +
+		"      --profile name     use an agent profile\n" +
+		"      --socket path      connect to an absolute Unix socket path\n" +
+		"      --plain            use deterministic plain-text mode\n" +
+		"  -h, --help             show this help\n"
 )
 
 // chat remains an alias for focused legacy tests. All behavior is owned by
 // chatRuntime; no renderer-specific state lives here.
 type chat = chatRuntime
 
-func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
-	continueLast := false
-	profileName := ""
+type chatOptions struct {
+	Continue bool
+	Profile  string
+	Socket   string
+	Plain    bool
+	Help     bool
+}
+
+func parseChatOptions(args []string, socketEnv string) (chatOptions, error) {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return chatOptions{Help: true}, nil
+		}
+	}
+
+	var options chatOptions
+	explicitSocket := false
 	for i := 0; i < len(args); i++ {
-		a := args[i]
+		arg := args[i]
 		switch {
-		case a == "-c" || a == "--continue":
-			continueLast = true
-		case a == "--profile":
+		case arg == "-c" || arg == "--continue":
+			options.Continue = true
+		case arg == "--profile":
 			if i+1 >= len(args) {
-				return fmt.Errorf("usage: waffle chat [-c|--continue] [--profile name]")
+				return chatOptions{}, fmt.Errorf("usage: %s", chatUsageLine)
 			}
 			i++
-			profileName = strings.TrimSpace(args[i])
-		case strings.HasPrefix(a, "--profile="):
-			profileName = strings.TrimSpace(strings.TrimPrefix(a, "--profile="))
+			options.Profile = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--profile="):
+			options.Profile = strings.TrimSpace(strings.TrimPrefix(arg, "--profile="))
+		case arg == "--socket":
+			explicitSocket = true
+			if i+1 >= len(args) {
+				return chatOptions{}, errors.New("chat socket path must be absolute")
+			}
+			i++
+			options.Socket = args[i]
+		case strings.HasPrefix(arg, "--socket="):
+			explicitSocket = true
+			options.Socket = strings.TrimPrefix(arg, "--socket=")
+		case arg == "--plain":
+			options.Plain = true
 		default:
-			return fmt.Errorf("usage: waffle chat [-c|--continue] [--profile name]")
+			return chatOptions{}, fmt.Errorf("usage: %s", chatUsageLine)
 		}
+	}
+	if !explicitSocket && socketEnv != "" {
+		options.Socket = socketEnv
+	}
+	if options.Socket != "" && !filepath.IsAbs(options.Socket) {
+		return chatOptions{}, fmt.Errorf("chat socket path %q must be absolute", options.Socket)
+	}
+	if explicitSocket && options.Socket == "" {
+		return chatOptions{}, errors.New("chat socket path must be absolute")
+	}
+	return options, nil
+}
+
+func shouldRunPlain(options chatOptions, stdin io.Reader, stdout io.Writer, isTerminal func(int) bool) bool {
+	if options.Plain {
+		return true
+	}
+	inFile, inputIsFile := stdin.(*os.File)
+	outFile, outputIsFile := stdout.(*os.File)
+	if !inputIsFile || !outputIsFile {
+		return true
+	}
+	return !isTerminal(int(inFile.Fd())) || !isTerminal(int(outFile.Fd()))
+}
+
+func chatCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+	options, err := parseChatOptions(args, os.Getenv("WAFFLE_CHAT_SOCKET"))
+	if err != nil {
+		return err
+	}
+	if options.Help {
+		_, err := io.WriteString(stdout, chatUsage)
+		return err
+	}
+
+	backend, cleanup, err := openChatBackend(ctx, options)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cleanupErr := cleanup(); err == nil {
+			err = cleanupErr
+		}
+	}()
+
+	// Task 7 replaces the interactive branch with the Focused Conversation
+	// renderer. Until then the deterministic renderer remains the only one;
+	// computing the mode here keeps all routing inputs side-effect free and
+	// gives the TUI wiring one tested decision point.
+	_ = shouldRunPlain(options, stdin, stdout, term.IsTerminal)
+	return runPlainChat(ctx, backend, chatpkg.OpenOptions{
+		Continue: options.Continue,
+		Profile:  options.Profile,
+	}, stdin, stdout, stderr)
+}
+
+func openChatBackend(ctx context.Context, options chatOptions) (chatpkg.Backend, func() error, error) {
+	if options.Socket != "" {
+		backend, err := chatwire.Dial(ctx, options.Socket)
+		if err != nil {
+			return nil, func() error { return nil }, fmt.Errorf(
+				"connect to chat socket %q: %w; check waffle.service and waffle-chat.socket",
+				options.Socket, err,
+			)
+		}
+		return withConnectionMode(backend, "unix"), func() error { return nil }, nil
 	}
 
 	cfg, st, err := openConfigAndStore(ctx)
 	if err != nil {
-		return err
+		return nil, func() error { return nil }, err
 	}
-	defer func() {
-		if cerr := st.Close(); err == nil {
-			err = cerr
-		}
-	}()
 	if len(cfg.Providers) == 0 {
-		return errors.New("no provider configured; run `sudo waffle provider add` on a managed host")
-	}
-	if profileName != "" {
-		if !config.ValidProfileName(profileName) && profileName != "main" {
-			return fmt.Errorf("invalid profile name %q", profileName)
-		}
-		if _, ok := cfg.Profile(profileName); !ok {
-			return fmt.Errorf("unknown agent profile %q", profileName)
-		}
+		_ = st.Close()
+		return nil, func() error { return nil }, errors.New("no provider configured; run `sudo waffle provider add` on a managed host")
 	}
 
 	backend, err := newChatRuntime(ctx, cfg, st)
 	if err != nil {
-		return err
+		_ = st.Close()
+		return nil, func() error { return nil }, err
 	}
-	defer func() {
-		if closeErr := backend.Close(ctx); closeErr != nil && err == nil {
-			fmt.Fprintf(stderr, "waffle: %v\n", closeErr)
-		}
-	}()
-	state, err := backend.Open(ctx, chatpkg.OpenOptions{Continue: continueLast, Profile: profileName})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "waffle chat — %s via %s — session %s. /help for commands.\n",
-		state.ModelAlias, state.ProviderLabel, state.SessionID)
-	if len(state.History) > 0 {
-		fmt.Fprintf(stdout, "(continuing with %d earlier turns)\n", len(state.History))
-	}
-	if state.ModelError != "" {
-		fmt.Fprintf(stderr, "waffle: %s\n", state.ModelError)
-	}
-
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for {
-		fmt.Fprint(stdout, "\nyou> ")
-		if !scanner.Scan() {
-			fmt.Fprintln(stdout)
-			return scanner.Err()
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		emit := func(event chatpkg.Event) { renderChatEvent(event, stdout, stderr) }
-		command, ok, parseErr := chatpkg.ParseInput(line)
-		if parseErr != nil {
-			fmt.Fprintf(stderr, "waffle: %v\n", parseErr)
-			continue
-		}
-		if ok {
-			result, commandErr := backend.Command(ctx, command, emit)
-			if commandErr != nil {
-				fmt.Fprintf(stderr, "waffle: %v\n", commandErr)
-				continue
-			}
-			renderChatResult(result, stdout)
-			if result.ShouldClose {
-				return nil
-			}
-			continue
-		}
-		if turnErr := backend.Turn(ctx, line, emit); turnErr != nil {
-			if backend.agent != nil && backend.agent.Redact != nil {
-				turnErr = fmt.Errorf("%s", backend.agent.Redact(turnErr.Error()))
-			}
-			fmt.Fprintf(stderr, "\nwaffle: %v\n", turnErr)
-		}
-	}
+	return backend, st.Close, nil
 }
 
-func renderChatEvent(event chatpkg.Event, stdout, stderr io.Writer) {
-	switch event.Kind {
-	case chatpkg.EventTextDelta:
-		fmt.Fprint(stdout, event.Text)
-	case chatpkg.EventToolStarted:
-		fmt.Fprintf(stdout, "\n%s[%s]%s\n", dim, event.ToolName, reset)
-	case chatpkg.EventToolFinished:
-		status := "ok"
-		if event.IsError {
-			status = "error"
-		}
-		fmt.Fprintf(stdout, "%s[%s → %s, %d bytes]%s\n", dim, event.ToolName, status, event.ByteCount, reset)
-	case chatpkg.EventNotice:
-		writer := stdout
-		if event.IsError {
-			writer = stderr
-		}
-		fmt.Fprintln(writer, event.Text)
-	case chatpkg.EventTurnDone:
-		fmt.Fprintln(stdout)
-	}
+type connectionModeBackend struct {
+	chatpkg.Backend
+	mode string
 }
 
-func renderChatResult(result chatpkg.Result, stdout io.Writer) {
-	if result.Text != "" {
-		fmt.Fprintln(stdout, result.Text)
+func withConnectionMode(backend chatpkg.Backend, mode string) chatpkg.Backend {
+	return &connectionModeBackend{Backend: backend, mode: mode}
+}
+
+func (b *connectionModeBackend) Open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
+	state, err := b.Backend.Open(ctx, options)
+	state.ConnectionMode = b.mode
+	return state, err
+}
+
+func (b *connectionModeBackend) Turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
+	return b.Backend.Turn(ctx, input, b.withModeEmitter(emit))
+}
+
+func (b *connectionModeBackend) Command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	result, err := b.Backend.Command(ctx, command, b.withModeEmitter(emit))
+	if result.State != nil {
+		state := *result.State
+		state.ConnectionMode = b.mode
+		result.State = &state
 	}
-	for _, command := range result.Commands {
-		fmt.Fprintf(stdout, "%-58s %s\n", command.Usage, command.Description)
+	return result, err
+}
+
+func (b *connectionModeBackend) withModeEmitter(emit func(chatpkg.Event)) func(chatpkg.Event) {
+	if emit == nil {
+		return nil
 	}
-	for _, model := range result.Models {
-		marker := " "
-		if model.Current {
-			marker = "*"
+	return func(event chatpkg.Event) {
+		if event.State != nil {
+			state := *event.State
+			state.ConnectionMode = b.mode
+			event.State = &state
 		}
-		fmt.Fprintf(stdout, "%s %s via %s (%s)\n", marker, model.Alias, model.Provider, model.Upstream)
-	}
-	for _, value := range result.Sessions {
-		fmt.Fprintf(stdout, "%s  %s  model=%s\n", value.ID, value.Title, value.ModelAlias)
-	}
-	if result.Permissions != nil {
-		fmt.Fprintf(stdout, "sandbox=%s allow=%s deny=%s deny-prefixes=%s\n",
-			result.Permissions.SandboxMode, strings.Join(result.Permissions.Allow, ","),
-			strings.Join(result.Permissions.Deny, ","), strings.Join(result.Permissions.DenyPrefixes, ","))
+		emit(event)
 	}
 }
 

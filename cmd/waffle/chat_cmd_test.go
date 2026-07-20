@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"filippo.io/age"
 
+	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/mcp"
@@ -20,6 +22,187 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/workset"
 )
+
+func TestChatOptionsParseRoutingPrecedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		socketEnv string
+		want      chatOptions
+	}{
+		{
+			name:      "explicit socket beats environment",
+			args:      []string{"--socket", "/run/waffle/explicit.sock"},
+			socketEnv: "/run/waffle/environment.sock",
+			want:      chatOptions{Socket: "/run/waffle/explicit.sock"},
+		},
+		{
+			name:      "socket environment selects remote",
+			socketEnv: "/run/waffle/chat.sock",
+			want:      chatOptions{Socket: "/run/waffle/chat.sock"},
+		},
+		{
+			name: "empty environment selects direct",
+			want: chatOptions{},
+		},
+		{
+			name: "all local options",
+			args: []string{"-c", "--profile=research", "--plain"},
+			want: chatOptions{Continue: true, Profile: "research", Plain: true},
+		},
+		{
+			name: "help short form",
+			args: []string{"-h"},
+			want: chatOptions{Help: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseChatOptions(tt.args, tt.socketEnv)
+			if err != nil {
+				t.Fatalf("parseChatOptions: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseChatOptions = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChatOptionsRequireAbsoluteExplicitSocket(t *testing.T) {
+	for _, args := range [][]string{{"--socket", "relative.sock"}, {"--socket=relative.sock"}, {"--socket"}} {
+		if _, err := parseChatOptions(args, "/run/waffle/environment.sock"); err == nil || !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("parseChatOptions(%v) error = %v, want absolute-path error", args, err)
+		}
+	}
+}
+
+func TestChatOptionsPlainSelection(t *testing.T) {
+	stdin, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdin.Close() }()
+	defer func() { _ = stdinWriter.Close() }()
+	stdoutReader, stdout, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdoutReader.Close() }()
+	defer func() { _ = stdout.Close() }()
+
+	tests := []struct {
+		name     string
+		options  chatOptions
+		inputTTY bool
+		outTTY   bool
+		want     bool
+	}{
+		{name: "explicit plain", options: chatOptions{Plain: true}, inputTTY: true, outTTY: true, want: true},
+		{name: "non terminal input", inputTTY: false, outTTY: true, want: true},
+		{name: "non terminal output", inputTTY: true, outTTY: false, want: true},
+		{name: "interactive streams", inputTTY: true, outTTY: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terminal := func(fd int) bool {
+				switch uintptr(fd) {
+				case stdin.Fd():
+					return tt.inputTTY
+				case stdout.Fd():
+					return tt.outTTY
+				default:
+					t.Fatalf("unexpected terminal probe for fd %d", fd)
+					return false
+				}
+			}
+			if got := shouldRunPlain(tt.options, stdin, stdout, terminal); got != tt.want {
+				t.Fatalf("shouldRunPlain = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if !shouldRunPlain(chatOptions{}, strings.NewReader(""), stdout, func(int) bool { return true }) {
+		t.Fatal("non-file input did not select plain mode")
+	}
+	if !shouldRunPlain(chatOptions{}, stdin, &bytes.Buffer{}, func(int) bool { return true }) {
+		t.Fatal("non-file output did not select plain mode")
+	}
+}
+
+func TestChatOptionsHelpPrintsCompleteUsageWithoutOpeningBackend(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", filepath.Join(t.TempDir(), "must-not-be-opened"))
+	t.Setenv("WAFFLE_CHAT_SOCKET", "relative-must-not-be-parsed.sock")
+	var stdout bytes.Buffer
+	if err := chatCmd(context.Background(), []string{"--help", "--socket", "relative.sock"}, strings.NewReader("unused"), &stdout, io.Discard); err != nil {
+		t.Fatalf("chatCmd --help: %v", err)
+	}
+	want := "Usage: waffle chat [-c|--continue] [--profile name] [--socket absolute-path] [--plain]\n\n" +
+		"Options:\n" +
+		"  -c, --continue         continue the latest session\n" +
+		"      --profile name     use an agent profile\n" +
+		"      --socket path      connect to an absolute Unix socket path\n" +
+		"      --plain            use deterministic plain-text mode\n" +
+		"  -h, --help             show this help\n"
+	if stdout.String() != want {
+		t.Fatalf("chat help = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestChatSocketDoesNotFallbackToWaffleHome(t *testing.T) {
+	homeMarker := filepath.Join(t.TempDir(), "WAFFLE_HOME-MUST-NOT-BE-OPENED")
+	if err := os.WriteFile(homeMarker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAFFLE_HOME", homeMarker)
+	t.Setenv("WAFFLE_CHAT_SOCKET", filepath.Join(t.TempDir(), "environment.sock"))
+	explicit := filepath.Join(t.TempDir(), "explicit.sock")
+	err := chatCmd(context.Background(), []string{"--socket", explicit, "--plain"}, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("chatCmd unavailable socket = nil, want error")
+	}
+	for _, want := range []string{explicit, "waffle.service", "waffle-chat.socket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("chatCmd unavailable socket error = %q, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), homeMarker) {
+		t.Fatalf("chatCmd fell back to WAFFLE_HOME: %v", err)
+	}
+}
+
+func TestChatSocketBackendReportsUnixConnectionMode(t *testing.T) {
+	direct := "direct"
+	backend := &plainBackend{
+		state: chatpkg.State{ConnectionMode: direct},
+		commandEvents: []chatpkg.Event{{
+			Kind:  chatpkg.EventState,
+			State: &chatpkg.State{ConnectionMode: direct},
+		}},
+		results: map[chatpkg.Name]chatpkg.Result{
+			chatpkg.CommandStatus: {State: &chatpkg.State{ConnectionMode: direct}},
+		},
+	}
+	remote := withConnectionMode(backend, "unix")
+	state, err := remote.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ConnectionMode != "unix" {
+		t.Fatalf("Open connection mode = %q", state.ConnectionMode)
+	}
+	var event chatpkg.Event
+	result, err := remote.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, func(got chatpkg.Event) { event = got })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.State == nil || event.State.ConnectionMode != "unix" {
+		t.Fatalf("event state = %+v", event.State)
+	}
+	if result.State == nil || result.State.ConnectionMode != "unix" {
+		t.Fatalf("result state = %+v", result.State)
+	}
+}
 
 func TestSplitCommand(t *testing.T) {
 	tests := []struct {
