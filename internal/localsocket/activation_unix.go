@@ -123,9 +123,11 @@ func configuredListener(path string) (net.Listener, error) {
 	if strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("chat socket path must be absolute and clean: %q", path)
 	}
-	if err := createPrivateParent(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("create chat socket parent: %w", err)
+	canonicalPath, err := preparePrivateSocketPath(path, os.Geteuid())
+	if err != nil {
+		return nil, fmt.Errorf("prepare chat socket parent: %w", err)
 	}
+	path = canonicalPath
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("chat socket path exists and is not a socket: %s", path)
@@ -190,56 +192,185 @@ func verifyOwnedSocket(path string, owner os.FileInfo) error {
 	return nil
 }
 
-func createPrivateParent(parent string) error {
-	var missing []string
-	for current := parent; ; current = filepath.Dir(current) {
-		var (
-			info os.FileInfo
-			err  error
-		)
-		if current == parent {
-			info, err = os.Lstat(current)
-		} else {
-			info, err = os.Stat(current)
-		}
-		if err == nil {
-			if current == parent && info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("chat socket parent must not be a symlink: %s", parent)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("parent component is not a directory: %s", current)
+// preparePrivateSocketPath resolves only protected symlinks, validates both
+// the requested and canonical ancestor chains, creates missing directories on
+// the canonical path, and returns the only pathname callers may mutate.
+func preparePrivateSocketPath(requestedPath string, effectiveUID int) (string, error) {
+	requestedParent := filepath.Dir(requestedPath)
+	relativeParent, err := filepath.Rel(string(filepath.Separator), requestedParent)
+	if err != nil {
+		return "", err
+	}
+	components := strings.Split(relativeParent, string(filepath.Separator))
+	if relativeParent == "." {
+		components = nil
+	}
+
+	canonicalParent := string(filepath.Separator)
+	rootInfo, err := os.Lstat(canonicalParent)
+	if err != nil {
+		return "", err
+	}
+	if err := validateTrustedAncestor(canonicalParent, rootInfo, effectiveUID); err != nil {
+		return "", err
+	}
+
+	for index, component := range components {
+		candidate := filepath.Join(canonicalParent, component)
+		info, statErr := os.Lstat(candidate)
+		if errors.Is(statErr, os.ErrNotExist) {
+			canonicalParent, err = createPrivateComponents(canonicalParent, components[index:], effectiveUID)
+			if err != nil {
+				return "", err
 			}
 			break
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
+		if statErr != nil {
+			return "", statErr
 		}
-		missing = append(missing, current)
-		next := filepath.Dir(current)
-		if next == current {
-			return fmt.Errorf("no existing parent for %s", parent)
+		if info.Mode()&os.ModeSymlink != 0 {
+			if index == len(components)-1 {
+				return "", fmt.Errorf("chat socket parent must not be a symlink: %s", requestedParent)
+			}
+			if err := validateTrustedSymlink(candidate, info, effectiveUID); err != nil {
+				return "", err
+			}
+			resolved, resolveErr := filepath.EvalSymlinks(candidate)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve trusted ancestor symlink %s: %w", candidate, resolveErr)
+			}
+			if err := validateCanonicalAncestorChain(resolved, effectiveUID); err != nil {
+				return "", err
+			}
+			canonicalParent = resolved
+			continue
 		}
+		if err := validateTrustedAncestor(candidate, info, effectiveUID); err != nil {
+			return "", err
+		}
+		canonicalParent = candidate
 	}
-	for i := len(missing) - 1; i >= 0; i-- {
-		path := missing[i]
-		if err := os.Mkdir(path, 0o700); err != nil {
+
+	if err := validatePrivateParent(canonicalParent, effectiveUID); err != nil {
+		return "", err
+	}
+	canonicalInfo, err := os.Lstat(canonicalParent)
+	if err != nil {
+		return "", err
+	}
+	if err := verifyRequestedParent(requestedParent, canonicalParent, canonicalInfo); err != nil {
+		return "", err
+	}
+	return filepath.Join(canonicalParent, filepath.Base(requestedPath)), nil
+}
+
+func createPrivateComponents(parent string, components []string, effectiveUID int) (string, error) {
+	current := parent
+	for _, component := range components {
+		current = filepath.Join(current, component)
+		if err := os.Mkdir(current, 0o700); err != nil {
 			if !errors.Is(err, os.ErrExist) {
-				return err
+				return "", err
 			}
-			info, statErr := os.Lstat(path)
-			if statErr != nil {
-				return statErr
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("raced parent component is not a directory: %s", path)
+			if err := validatePrivateParent(current, effectiveUID); err != nil {
+				return "", fmt.Errorf("refuse raced parent component: %w", err)
 			}
 			continue
 		}
-		if err := os.Chmod(path, 0o700); err != nil {
+		if err := os.Chmod(current, 0o700); err != nil {
+			return "", err
+		}
+		if err := validatePrivateParent(current, effectiveUID); err != nil {
+			return "", err
+		}
+	}
+	return current, nil
+}
+
+func validateCanonicalAncestorChain(path string, effectiveUID int) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("resolved chat socket ancestor is not absolute: %s", path)
+	}
+	relative, err := filepath.Rel(string(filepath.Separator), path)
+	if err != nil {
+		return err
+	}
+	current := string(filepath.Separator)
+	components := strings.Split(relative, string(filepath.Separator))
+	if relative == "." {
+		components = nil
+	}
+	for index := -1; index < len(components); index++ {
+		if index >= 0 {
+			current = filepath.Join(current, components[index])
+		}
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("canonical chat socket ancestor must not be a symlink: %s", current)
+		}
+		if err := validateTrustedAncestor(current, info, effectiveUID); err != nil {
 			return err
 		}
 	}
-	return validatePrivateParent(parent, os.Geteuid())
+	return nil
+}
+
+func validateTrustedAncestor(path string, info os.FileInfo, effectiveUID int) error {
+	if !info.IsDir() {
+		return fmt.Errorf("chat socket ancestor must be a directory: %s", path)
+	}
+	uid, err := fileUID(path, info)
+	if err != nil {
+		return err
+	}
+	if uid != 0 && uid != uint64(effectiveUID) {
+		return fmt.Errorf("chat socket ancestor must be owned by root or effective uid %d, got %d: %s", effectiveUID, uid, path)
+	}
+	if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+		return fmt.Errorf("group- or other-writable chat socket ancestor must have the sticky bit: %s", path)
+	}
+	return nil
+}
+
+func validateTrustedSymlink(path string, info os.FileInfo, effectiveUID int) error {
+	uid, err := fileUID(path, info)
+	if err != nil {
+		return err
+	}
+	if uid != 0 && uid != uint64(effectiveUID) {
+		return fmt.Errorf("chat socket ancestor symlink must be owned by root or effective uid %d, got %d: %s", effectiveUID, uid, path)
+	}
+	return nil
+}
+
+func fileUID(path string, info os.FileInfo) (uint64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("chat socket path ownership is unavailable: %s", path)
+	}
+	return uint64(stat.Uid), nil
+}
+
+func verifyRequestedParent(requestedParent, canonicalParent string, owner os.FileInfo) error {
+	resolved, err := filepath.EvalSymlinks(requestedParent)
+	if err != nil {
+		return fmt.Errorf("re-resolve requested chat socket parent: %w", err)
+	}
+	requestedInfo, err := os.Stat(requestedParent)
+	if err != nil {
+		return fmt.Errorf("re-inspect requested chat socket parent: %w", err)
+	}
+	canonicalInfo, err := os.Lstat(canonicalParent)
+	if err != nil {
+		return fmt.Errorf("re-inspect canonical chat socket parent: %w", err)
+	}
+	if filepath.Clean(resolved) != filepath.Clean(canonicalParent) || !os.SameFile(owner, requestedInfo) || !os.SameFile(owner, canonicalInfo) {
+		return errors.New("chat socket parent changed ownership; refusing pathname mutation")
+	}
+	return nil
 }
 
 // validatePrivateParent establishes the standalone authorization boundary.
@@ -259,12 +390,12 @@ func validatePrivateParent(parent string, effectiveUID int) error {
 	if got := info.Mode().Perm(); got != 0o700 {
 		return fmt.Errorf("chat socket parent must have mode 0700, got %#o: %s", got, parent)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("chat socket parent ownership is unavailable: %s", parent)
+	uid, err := fileUID(parent, info)
+	if err != nil {
+		return err
 	}
-	if uint64(stat.Uid) != uint64(effectiveUID) {
-		return fmt.Errorf("chat socket parent must be owned by effective uid %d, got %d: %s", effectiveUID, stat.Uid, parent)
+	if uid != uint64(effectiveUID) {
+		return fmt.Errorf("chat socket parent must be owned by effective uid %d, got %d: %s", effectiveUID, uid, parent)
 	}
 	return nil
 }

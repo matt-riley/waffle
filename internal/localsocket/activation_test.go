@@ -374,6 +374,157 @@ func TestConfiguredUnixRefusesSymlinkedFinalParent(t *testing.T) {
 	}
 }
 
+func TestConfiguredUnixRefusesPrivateParentBelowNonStickyWritableAncestor(t *testing.T) {
+	root := unixTempDir(t)
+	unsafeAncestor := filepath.Join(root, "unsafe")
+	if err := os.Mkdir(unsafeAncestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeAncestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(unsafeAncestor, "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "chat.sock")
+
+	listener, inherited, listenerErr := Listener(path)
+	mutated := false
+	if _, statErr := os.Lstat(path); statErr == nil {
+		mutated = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal(statErr)
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if listenerErr == nil || !strings.Contains(listenerErr.Error(), "sticky") || listener != nil || inherited {
+		t.Fatalf("Listener = %v, %v, %v; want non-sticky writable ancestor refusal", listener, inherited, listenerErr)
+	}
+	if mutated {
+		t.Fatal("unsafe ancestor allowed socket path mutation")
+	}
+	after, err := os.Lstat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || after.Mode().Perm() != 0o700 {
+		t.Fatalf("refused private parent changed: before=%v after=%v", before.Mode(), after.Mode())
+	}
+	ancestorInfo, err := os.Lstat(unsafeAncestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ancestorInfo.Mode().Perm(); got != 0o777 {
+		t.Fatalf("refused ancestor mode changed to %#o", got)
+	}
+}
+
+func TestConfiguredUnixRefusesSymlinkAncestorTargetingUnsafeChain(t *testing.T) {
+	root := unixTempDir(t)
+	unsafeAncestor := filepath.Join(root, "unsafe")
+	if err := os.Mkdir(unsafeAncestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeAncestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	targetParent := filepath.Join(unsafeAncestor, "private")
+	if err := os.Mkdir(targetParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(unsafeAncestor, alias); err != nil {
+		t.Fatal(err)
+	}
+	requestedPath := filepath.Join(alias, "private", "chat.sock")
+	targetPath := filepath.Join(targetParent, "chat.sock")
+
+	listener, inherited, listenerErr := Listener(requestedPath)
+	mutated := false
+	if _, statErr := os.Lstat(targetPath); statErr == nil {
+		mutated = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal(statErr)
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if listenerErr == nil || !strings.Contains(listenerErr.Error(), "sticky") || listener != nil || inherited {
+		t.Fatalf("Listener = %v, %v, %v; want unsafe canonical ancestor refusal", listener, inherited, listenerErr)
+	}
+	if mutated {
+		t.Fatal("unsafe canonical ancestor allowed target socket mutation")
+	}
+}
+
+func TestConfiguredUnixAcceptsTrustedStickyTempAncestor(t *testing.T) {
+	path := filepath.Join(unixTempDir(t), "private", "chat.sock")
+	listener, inherited, err := Listener(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listener == nil || inherited {
+		t.Fatalf("Listener = %v, %v; want configured listener", listener, inherited)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("trusted sticky temp ancestor did not create socket: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket path remained after close: %v", err)
+	}
+}
+
+func TestConfiguredUnixAcceptsTrustedSymlinkAncestor(t *testing.T) {
+	root := unixTempDir(t)
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestedPath := filepath.Join(alias, "private", "chat.sock")
+	targetPath := filepath.Join(canonicalTarget, "private", "chat.sock")
+
+	listener, inherited, err := Listener(requestedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listener == nil || inherited {
+		t.Fatalf("Listener = %v, %v; want configured listener", listener, inherited)
+	}
+	ownedListener, ok := listener.(*removingListener)
+	if !ok {
+		t.Fatalf("listener type = %T, want *removingListener", listener)
+	}
+	if ownedListener.path != targetPath {
+		t.Fatalf("listener mutation path = %q, want canonical %q", ownedListener.path, targetPath)
+	}
+	if info, err := os.Lstat(targetPath); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("canonical target socket = %v, %v; want socket", info, err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical socket path remained after close: %v", err)
+	}
+}
+
 func TestConfiguredUnixLeavesPrivateExistingParentUnchanged(t *testing.T) {
 	root := unixTempDir(t)
 	parent := filepath.Join(root, "private")
