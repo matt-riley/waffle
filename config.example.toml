@@ -45,6 +45,11 @@
 # deliberately configures no provider, model alias, default_model,
 # utility_model, or secret.
 
+# Optional standalone local chat service. Managed deployments normally receive
+# /run/waffle/chat.sock from systemd socket activation instead.
+# [chat]
+# socket = "/absolute/path/to/waffle/chat.sock"
+
 [agent]
 default_profile = "main"
 

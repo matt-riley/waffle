@@ -19,11 +19,14 @@ import (
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/channel/telegram"
+	chatpkg "github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/intake"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/localsocket"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -41,6 +44,8 @@ func serveCmd(ctx context.Context, stderr io.Writer) error {
 }
 
 type adapterFactory func(config.Config) ([]channel.Adapter, error)
+
+var serveChat = chatwire.Serve
 
 // serveCmdWithAdapterFactory runs the serve command with an explicit adapter
 // factory so command lifecycle tests can use an in-memory channel.
@@ -111,6 +116,13 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	if err != nil {
 		return err
 	}
+	chatListener, _, err := localsocket.Listener(cfg.Chat.Socket)
+	if err != nil {
+		return fmt.Errorf("chat listener: %w", err)
+	}
+	if chatListener != nil {
+		defer func() { _ = chatListener.Close() }()
+	}
 	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
 	if err != nil {
 		cleanup()
@@ -143,6 +155,22 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 		if telegramAdapter, ok := adapter.(*telegram.Adapter); ok {
 			telegramAdapter.SetPollObserver(func() { obs.MarkAdapter(telegramAdapter.Name()) })
 		}
+	}
+	chatDone := make(chan error, 1)
+	if chatListener == nil {
+		chatDone <- nil
+	} else {
+		runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
+			return newChatRuntime(runtimeCtx, cfg, st)
+		}
+		audit := newChatAudit(log, localsocket.PeerCredentials)
+		go func() {
+			serveErr := serveChat(ctx, chatListener, runtimeFactory, audit)
+			if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+				cancelOwnership()
+			}
+			chatDone <- serveErr
+		}()
 	}
 	// Lifecycle sweeps are owned by this serve process only. CLI commands
 	// perform explicit operations but never start a background reaper.
@@ -298,18 +326,38 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 	// Stop the scheduler and wait for its in-flight-job drain before the
 	// deferred cleanup tears down the shared sandbox executor and MCP
 	// clients a running cron job may still be using.
-	waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone)
+	chatErr := waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone, chatDone)
+	if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
+		return fmt.Errorf("chat server: %w", chatErr)
+	}
 	return err
 }
 
 // waitForServeWorkers preserves shutdown ordering: stop accepting/scheduling,
 // then wait for cron.Stop's in-flight-job drain and intake before deferred
 // cleanup closes the shared sandbox executor and MCP clients.
-func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-chan error, intakeDone <-chan struct{}) {
+func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-chan error, intakeDone <-chan struct{}, chatDone <-chan error) error {
 	stop()
 	lifecycleCancel()
 	<-schedDone
 	<-intakeDone
+	return <-chatDone
+}
+
+type peerCredentialLookup func(net.Conn) (localsocket.Peer, error)
+
+// newChatAudit intentionally records only lifecycle and numeric kernel
+// identity. Credential lookup failures are useful operational signals, but
+// their raw errors may contain connection or host details and are not logged.
+func newChatAudit(log *slog.Logger, lookup peerCredentialLookup) chatwire.AuditFunc {
+	return func(_ context.Context, conn net.Conn, event string) {
+		peer, err := lookup(conn)
+		if err != nil || !peer.Available {
+			log.Warn("chat connection", "event", event, "peer_credentials", "unavailable")
+			return
+		}
+		log.Info("chat connection", "event", event, "pid", peer.PID, "uid", peer.UID, "gid", peer.GID)
+	}
 }
 
 func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, sessions *session.Store, memWS memory.Workspace, skills []skill.Skill, agents map[string]*agent.Agent, b *broker.Broker, deliver schedule.Deliverer, log *slog.Logger) {

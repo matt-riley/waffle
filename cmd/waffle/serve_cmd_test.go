@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,8 +16,11 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/channel"
+	chatpkg "github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/instance"
+	"github.com/matt-riley/waffle/internal/localsocket"
 )
 
 func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
@@ -158,6 +163,137 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	_ = listener.Close()
 }
 
+func TestServeChatStartsConfiguredSocketAcceptsHandshakeAndRemovesOnShutdown(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	socketPath := filepath.Join(home, "chat.sock")
+	statusAddr := unusedTCPAddress(t)
+	writeServeTestConfig(t, home, statusAddr, socketPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var logs bytes.Buffer
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, &logs, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+
+	client := dialChatUntilReady(t, socketPath)
+	openCtx, openCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	state, err := client.Open(openCtx, chatpkg.OpenOptions{})
+	openCancel()
+	if err != nil {
+		cancel()
+		t.Fatalf("chat handshake: %v\nlogs:\n%s", err, logs.String())
+	}
+	if state.SessionID == "" {
+		cancel()
+		t.Fatalf("chat handshake returned no session: %+v", state)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve shutdown: %v\nlogs:\n%s", err, logs.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after chat context cancellation")
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configured chat socket remained after shutdown: %v", err)
+	}
+}
+
+func TestServeChatListenerErrorFailsStartup(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	socketPath := filepath.Join(home, "chat.sock")
+	if err := os.WriteFile(socketPath, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeServeTestConfig(t, home, unusedTCPAddress(t), socketPath)
+
+	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		return []channel.Adapter{blockingAdapter{}}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "chat listener") || !strings.Contains(err.Error(), "not a socket") {
+		t.Fatalf("serve listener error = %v", err)
+	}
+	contents, readErr := os.ReadFile(socketPath)
+	if readErr != nil || string(contents) != "preserve" {
+		t.Fatalf("listener failure changed configured path: %q, %v", contents, readErr)
+	}
+}
+
+func TestServeChatwireFailureFailsServe(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	writeServeTestConfig(t, home, unusedTCPAddress(t), filepath.Join(home, "chat.sock"))
+
+	want := errors.New("forced chat server failure")
+	original := serveChat
+	serveChat = func(context.Context, net.Listener, chatwire.Factory, chatwire.AuditFunc) error {
+		return want
+	}
+	defer func() { serveChat = original }()
+
+	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		return []channel.Adapter{blockingAdapter{}}, nil
+	})
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), "chat server") {
+		t.Fatalf("serve chatwire failure = %v, want wrapped %v", err, want)
+	}
+}
+
+func TestServeChatAuditCredentialFailureDoesNotRejectOrLeakDetails(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	canary := "/private/config.toml AGE-SECRET-KEY-1AUDIT"
+	audit := newChatAudit(log, func(net.Conn) (localsocket.Peer, error) {
+		return localsocket.Peer{}, fmt.Errorf("lookup failed near %s", canary)
+	})
+	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
+	audit(context.Background(), left, "connected")
+
+	got := logs.String()
+	if !strings.Contains(got, "connected") || !strings.Contains(got, "unavailable") {
+		t.Fatalf("audit log = %q, want lifecycle and unavailable marker", got)
+	}
+	if strings.Contains(got, canary) || strings.Contains(got, "config.toml") || strings.Contains(got, "AGE-SECRET") {
+		t.Fatalf("audit leaked credential lookup details: %q", got)
+	}
+}
+
+func TestServeChatAuditLogsOnlyLifecycleAndNumericPeer(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	audit := newChatAudit(log, func(net.Conn) (localsocket.Peer, error) {
+		return localsocket.Peer{PID: 123, UID: 456, GID: 789, Available: true}, nil
+	})
+	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
+	audit(context.Background(), left, "disconnected")
+
+	got := logs.String()
+	for _, want := range []string{"disconnected", "pid=123", "uid=456", "gid=789"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("audit log = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "pipe") || strings.Contains(got, "addr") || strings.Contains(got, "path") {
+		t.Fatalf("audit logged connection details outside numeric identity: %q", got)
+	}
+}
+
 // TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup models the
 // SIGTERM boundary after the gateway has stopped accepting work. Cleanup must
 // not run until the scheduler reports that cron.Stop drained its active job.
@@ -168,8 +304,10 @@ func TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup(t *testing.T
 	close(intakeDrained)
 	returned := make(chan struct{})
 
+	chatDrained := make(chan error, 1)
+	chatDrained <- nil
 	go func() {
-		waitForServeWorkers(func() { close(stopCalled) }, func() {}, schedulerDrained, intakeDrained)
+		_ = waitForServeWorkers(func() { close(stopCalled) }, func() {}, schedulerDrained, intakeDrained, chatDrained)
 		close(returned)
 	}()
 
@@ -188,6 +326,99 @@ func TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup(t *testing.T
 	case <-returned:
 	case <-time.After(time.Second):
 		t.Fatal("shutdown did not return after scheduler drain")
+	}
+}
+
+func TestServeStopsWaitsForChatServerBeforeSharedCleanup(t *testing.T) {
+	schedulerDrained := make(chan error, 1)
+	schedulerDrained <- nil
+	intakeDrained := make(chan struct{})
+	close(intakeDrained)
+	chatDrained := make(chan error, 1)
+	returned := make(chan error, 1)
+
+	go func() {
+		returned <- waitForServeWorkers(func() {}, func() {}, schedulerDrained, intakeDrained, chatDrained)
+	}()
+	select {
+	case err := <-returned:
+		t.Fatalf("shutdown returned before chat server drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	want := errors.New("chat accept failed")
+	chatDrained <- want
+	select {
+	case err := <-returned:
+		if !errors.Is(err, want) {
+			t.Fatalf("chat shutdown error = %v, want %v", err, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not return after chat server drained")
+	}
+}
+
+func dialChatUntilReady(t *testing.T, path string) *chatwire.Client {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		client, err := chatwire.Dial(ctx, path)
+		cancel()
+		if err == nil {
+			return client
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chat socket did not start at %s: %v", path, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func unusedTCPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+func writeServeTestConfig(t *testing.T, home, statusAddr, socketPath string) {
+	t.Helper()
+	body := fmt.Sprintf("[gateway]\nstatus_listen = %q\n\n[chat]\nsocket = %q\n\n[provider]\nname = \"openai\"\nmodel = \"test-model\"\napi_key = \"test-key\"\n\n[agent]\nsubagents = false\nlearn = false\n", statusAddr, socketPath)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func unixServeTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "waffle-serve-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func clearServeActivationEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"} {
+		value, present := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(name, value)
+			} else {
+				_ = os.Unsetenv(name)
+			}
+		})
 	}
 }
 
