@@ -1,0 +1,72 @@
+---
+import '../styles/global.css';
+import standing from '../assets/waffle/standing.png';
+
+interface Props {
+	title?: string;
+	description?: string;
+}
+
+const {
+	title = 'Waffle',
+	description = 'A personal AI agent project, named after a lively little kitten.',
+} = Astro.props;
+
+const pageURL = new URL(Astro.url.pathname, Astro.site ?? Astro.url);
+const socialImageURL = new URL(standing.src, Astro.site ?? Astro.url);
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="description" content={description} />
+		<meta name="generator" content={Astro.generator} />
+		<link rel="canonical" href={pageURL} />
+		<meta property="og:type" content="website" />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={pageURL} />
+		<meta property="og:image" content={socialImageURL} />
+		<meta property="og:image:alt" content="Waffle, a warm ginger tabby kitten" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:title" content={title} />
+		<meta name="twitter:description" content={description} />
+		<meta name="twitter:image" content={socialImageURL} />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="icon" href="/favicon.ico" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap"
+			rel="stylesheet"
+		/>
+		<title>{title}</title>
+		<script is:inline>
+			if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+				const root = document.documentElement;
+				root.classList.add('js-motion');
+
+				window.setTimeout(() => {
+					if (root.classList.contains('js-motion-ready')) return;
+
+					root.classList.remove('js-motion');
+					root.querySelectorAll('[data-hero-anim], [data-scroll-anim]').forEach((element) => {
+						element.style.removeProperty('opacity');
+						element.style.removeProperty('transform');
+						element.style.removeProperty('visibility');
+					});
+				}, 3000);
+			}
+		</script>
+	</head>
+	<body class="min-h-dvh text-ink antialiased">
+		<a class="skip-link" href="#main-content">Skip to content</a>
+		<div class="paper-grain" aria-hidden="true"></div>
+		<slot />
+		<script>
+			import '../scripts/motion.ts';
+		</script>
+	</body>
+</html>

@@ -1,0 +1,50 @@
+---
+import { Image } from 'astro:assets';
+import standing from '../assets/waffle/standing.png';
+import SiteHeader from './SiteHeader.astro';
+---
+
+<section class="sun-wash relative min-h-[100dvh] overflow-hidden" aria-labelledby="hero-heading">
+	<div
+		class="pointer-events-none absolute inset-y-0 left-0 w-[55%] bg-gradient-to-r from-white/55 via-white/20 to-transparent"
+		data-hero-light
+		aria-hidden="true"
+	>
+	</div>
+
+	<SiteHeader />
+
+	<div
+		class="site-shell relative z-10 grid min-h-[calc(100dvh-5rem)] items-center gap-10 pb-16 pt-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-8 lg:pb-20"
+	>
+		<div class="max-w-xl">
+			<h1
+				id="hero-heading"
+				class="font-display font-extrabold tracking-tight text-ink text-balance"
+				style="font-size: clamp(2.75rem, 7vw, 5.25rem); line-height: 0.95; letter-spacing: -0.03em;"
+				data-hero-anim
+			>
+				This is Waffle.
+			</h1>
+			<span class="ginger-rule mt-5" data-hero-anim aria-hidden="true"></span>
+			<p class="section-body mt-6 text-base sm:text-lg" data-hero-anim>
+				A personal AI agent: chat, tools, a sandbox, and a streak of trouble.
+				Built for me. Named for her.
+			</p>
+		</div>
+
+		<div class="flex items-end justify-center lg:justify-end" data-hero-anim>
+			<div data-hero-cat>
+				<Image
+					src={standing}
+					alt="Waffle, a warm ginger tabby kitten, standing and looking toward you"
+					widths={[480, 720, 960, 1200]}
+					sizes="(max-width: 1024px) 80vw, 480px"
+					class="cat-img h-auto w-full max-w-[22rem] object-contain sm:max-w-[26rem] lg:max-w-[28rem]"
+					loading="eager"
+					fetchpriority="high"
+				/>
+			</div>
+		</div>
+	</div>
+</section>

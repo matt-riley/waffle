@@ -1,0 +1,37 @@
+---
+import { Image } from 'astro:assets';
+import sitting from '../assets/waffle/sitting.png';
+---
+
+<section id="why-waffle" class="bg-paper py-24" aria-labelledby="why-heading">
+	<div
+		class="site-shell grid items-center gap-12 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16"
+		data-scroll-anim
+	>
+		<div class="max-w-xl">
+			<p class="section-label">Why Waffle</p>
+			<h2 id="why-heading" class="section-title mt-3">
+				Named after the small orange princess who runs this house.
+			</h2>
+			<p class="section-body mt-5 text-lg">
+				Curious, affectionate, and never innocent. She steals chairs, interrupts
+				focus, and still somehow owns the room. The project took her name because
+				nothing else would stick.
+			</p>
+			<p class="section-body mt-4 text-base">
+				If the agent misbehaves a little, good. That was on purpose.
+			</p>
+		</div>
+
+		<div class="flex justify-center lg:justify-end">
+			<Image
+				src={sitting}
+				alt="Waffle sitting calmly, warm ginger coat and ringed tail"
+				widths={[400, 640, 900]}
+				sizes="(max-width: 1024px) 70vw, 380px"
+				class="cat-img h-auto w-full max-w-[20rem] object-contain sm:max-w-[22rem]"
+				loading="lazy"
+			/>
+		</div>
+	</div>
+</section>

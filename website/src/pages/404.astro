@@ -1,0 +1,44 @@
+---
+import { Image } from 'astro:assets';
+import sittingAirplane from '../assets/waffle/sitting-airplane-ears.png';
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout
+	title="Page not found — Waffle"
+	description="That page is not here, but Waffle can point you back home."
+>
+	<main id="main-content" tabindex="-1">
+		<section class="sun-wash min-h-dvh py-16" aria-labelledby="not-found-heading">
+			<div
+				class="site-shell grid min-h-[calc(100dvh-8rem)] items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-16"
+			>
+				<div class="max-w-xl">
+					<p class="section-label">Lost?</p>
+					<h1 id="not-found-heading" class="section-title mt-3">
+						Nothing to see here. Waffle probably moved it.
+					</h1>
+					<p class="section-body mt-5 text-lg">
+						The page you were looking for isn’t here. The rest of the project is still
+						where she left it.
+					</p>
+					<p class="mt-8">
+						<a class="btn-soft" href="/">Back home</a>
+					</p>
+				</div>
+
+				<div class="flex justify-center lg:justify-end">
+					<Image
+						src={sittingAirplane}
+						alt="Waffle sitting with airplane ears, looking mildly suspicious"
+						widths={[400, 640, 900]}
+						sizes="(max-width: 1024px) 70vw, 380px"
+						class="cat-img h-auto w-full max-w-[20rem] object-contain sm:max-w-[22rem]"
+						loading="eager"
+						fetchpriority="high"
+					/>
+				</div>
+			</div>
+		</section>
+	</main>
+</Layout>

@@ -1,0 +1,47 @@
+---
+const links = [
+	{ id: 'about', href: '#what-it-is', label: 'About' },
+	{ id: 'why-waffle', href: '#why-waffle', label: 'Why Waffle' },
+	{
+		id: 'source',
+		href: 'https://github.com/matt-riley/waffle',
+		label: 'Source',
+		external: true,
+	},
+];
+---
+
+<header
+	class="site-shell relative z-20 flex items-center justify-between pt-7"
+	data-hero-anim
+>
+	<a
+		id="nav-logo"
+		href="/"
+		class="brand-link font-display text-lg font-extrabold tracking-tight text-ink no-underline hover:text-ink"
+	>
+		waffle
+	</a>
+	<nav aria-label="Primary" class="flex items-center gap-5 sm:gap-7">
+		{
+			links.map((link) =>
+				link.external ? (
+					<a
+							id={`nav-${link.id}`}
+						href={link.href}
+						class="nav-link"
+						target="_blank"
+						rel="noopener noreferrer"
+						aria-label={`${link.label} (opens in a new tab)`}
+					>
+						{link.label}
+					</a>
+				) : (
+					<a id={`nav-${link.id}`} href={link.href} class="nav-link">
+						{link.label}
+					</a>
+				),
+			)
+		}
+	</nav>
+</header>

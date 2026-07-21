@@ -1,0 +1,23 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Hero from '../components/Hero.astro';
+import WhatItIs from '../components/WhatItIs.astro';
+import WhatSheGetsInto from '../components/WhatSheGetsInto.astro';
+import WhyWaffle from '../components/WhyWaffle.astro';
+import SoftClose from '../components/SoftClose.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+---
+
+<Layout
+	title="Waffle — a personal agent with a streak of trouble"
+	description="A personal AI agent project: chat, tools, a sandbox, and a streak of trouble. Built for me. Named for her."
+>
+	<main id="main-content" tabindex="-1">
+		<Hero />
+		<WhatItIs />
+		<WhatSheGetsInto />
+		<WhyWaffle />
+		<SoftClose />
+	</main>
+	<SiteFooter />
+</Layout>
