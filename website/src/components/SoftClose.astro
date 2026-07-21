@@ -1,0 +1,36 @@
+---
+import { Image } from 'astro:assets';
+import pleased from '../assets/waffle/pleased.png';
+---
+
+<section class="bg-paper-warm py-24" aria-labelledby="close-heading">
+	<div class="site-shell flex max-w-3xl flex-col items-center text-center" data-scroll-anim>
+		<Image
+			src={pleased}
+			alt="Waffle looking pleased"
+			widths={[240, 360, 480]}
+			sizes="200px"
+			class="cat-img h-auto w-40 object-contain sm:w-48"
+			loading="lazy"
+		/>
+		<p class="section-label mt-8">Come say hello</p>
+		<h2 id="close-heading" class="section-title mt-3">
+			She’s usually around.<br class="hidden sm:block" /> So is the project.
+		</h2>
+		<p class="section-body mt-5 max-w-md text-base">
+			The code is open if you want a look. No pressure.
+		</p>
+		<p class="mt-8">
+			<a
+				id="cta-source"
+				href="https://github.com/matt-riley/waffle"
+				class="btn-soft"
+				target="_blank"
+				rel="noreferrer"
+				aria-label="See the source (opens in a new tab)"
+			>
+				See the source
+			</a>
+		</p>
+	</div>
+</section>

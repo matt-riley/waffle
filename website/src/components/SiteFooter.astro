@@ -1,0 +1,30 @@
+---
+const year = new Date().getFullYear();
+---
+
+<footer class="border-t border-label/10 bg-paper py-10">
+	<div class="site-shell flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<p class="font-display text-base font-extrabold tracking-tight text-ink">waffle</p>
+			<p class="section-body mt-1 text-sm">
+				A personal project with a trouble-making namesake.
+			</p>
+		</div>
+		<nav aria-label="Footer" class="flex flex-wrap gap-x-6 gap-y-2">
+			<a href="#what-it-is" class="nav-link">About</a>
+			<a href="#what-she-does" class="nav-link">What she does</a>
+			<a href="#why-waffle" class="nav-link">Why Waffle</a>
+			<a
+				href="https://github.com/matt-riley/waffle"
+				class="nav-link"
+				target="_blank"
+				rel="noreferrer"
+			>
+				Source
+			</a>
+		</nav>
+	</div>
+	<p class="site-shell mt-8 text-xs text-ink-muted/80">
+		© {year} · She was here first
+	</p>
+</footer>

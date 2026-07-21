@@ -1,0 +1,37 @@
+---
+import { Image } from 'astro:assets';
+import sittingAirplane from '../assets/waffle/sitting-airplane-ears.png';
+---
+
+<section id="what-it-is" class="bg-paper py-24" aria-labelledby="what-heading">
+	<div
+		class="site-shell grid items-center gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16"
+		data-scroll-anim
+	>
+		<div class="order-2 flex justify-center lg:order-1">
+			<Image
+				src={sittingAirplane}
+				alt="Waffle sitting with airplane ears, curious and bright"
+				widths={[400, 640, 900]}
+				sizes="(max-width: 1024px) 70vw, 380px"
+				class="cat-img h-auto w-full max-w-[20rem] object-contain sm:max-w-[22rem]"
+				loading="lazy"
+			/>
+		</div>
+
+		<div class="order-1 max-w-xl lg:order-2">
+			<p class="section-label">What it is</p>
+			<h2 id="what-heading" class="section-title mt-3">
+				A little agent with a big personality.
+			</h2>
+			<p class="section-body mt-5 text-lg">
+				She sits in the chat when I need company, pokes at tools when she’s
+				allowed, and steals the good notes for later. One binary. One very
+				orange accomplice.
+			</p>
+			<p class="section-body mt-4 text-base">
+				A project that lives here. A name that meows back.
+			</p>
+		</div>
+	</div>
+</section>
