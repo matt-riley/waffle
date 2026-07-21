@@ -399,16 +399,10 @@ func brokerPort(t *testing.T, srv *httptest.Server) string {
 	return u.Port()
 }
 
-// dockerRunProbe runs a one-shot alpine container using the network / host
-// alias / proxy settings from shipped workspaceRunArgs. withProxy applies
-// the proxy env from opts; without proxy, only network+host alias (broker
-// direct). Command is the container argv after the image.
-func dockerRunProbe(ctx context.Context, t *testing.T, opts ContainerOpts, command []string, withProxy bool) ([]byte, error) {
-	return dockerRunProbeOpts(ctx, t, opts, command, withProxy, false)
-}
-
-// dockerRunProbeLockdown is dockerRunProbe plus the same route lockdown the
-// in-container runner applies (CAP_NET_ADMIN + drop default route, keep host).
+// dockerRunProbeLockdown runs a one-shot alpine container with the network /
+// host alias / proxy settings from shipped workspace opts, plus the same route
+// lockdown the in-container runner applies (CAP_NET_ADMIN + drop default route,
+// keep host). withProxy applies proxy env from opts.
 func dockerRunProbeLockdown(ctx context.Context, t *testing.T, opts ContainerOpts, command []string, withProxy bool) ([]byte, error) {
 	return dockerRunProbeOpts(ctx, t, opts, command, withProxy, true)
 }
