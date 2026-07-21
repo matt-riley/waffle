@@ -12,8 +12,15 @@ import (
 )
 
 func forgetCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+	_ = stderr
 	if len(args) == 0 {
 		return fmt.Errorf("usage: waffle forget <query>")
+	}
+	// Help must never open the store or prompt for deletion (#126).
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprintln(stdout, "usage: waffle forget <query>")
+		fmt.Fprintln(stdout, "  search conversation turns and MEMORY.md, then delete confirmed matches")
+		return nil
 	}
 	query := strings.Join(args, " ")
 	_, st, err := openConfigAndStore(ctx)
