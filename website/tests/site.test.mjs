@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
@@ -92,4 +93,40 @@ test('the static build contains a branded 404 route with a path home', async () 
 	assert.match(notFoundSource, /href="\/"/);
 	assert.match(notFoundBuild, /Nothing to see here/);
 	assert.match(notFoundBuild, /Back home/);
+});
+
+test('new-tab links declare both opener and referrer protections', async () => {
+	const files = await Promise.all([
+		read('src/components/SiteHeader.astro'),
+		read('src/components/SiteFooter.astro'),
+		read('src/components/SoftClose.astro'),
+	]);
+
+	for (const source of files) {
+		assert.match(source, /target="_blank"[^>]*rel="noopener noreferrer"/s);
+	}
+});
+
+test('the website package cannot be published accidentally', async () => {
+	const packageJSON = JSON.parse(await read('package.json'));
+
+	assert.equal(packageJSON.private, true);
+});
+
+test('a blank configured site origin is treated as unset', () => {
+	const configURL = new URL('astro.config.mjs', websiteRoot).href;
+	const output = execFileSync(
+		process.execPath,
+		[
+			'--input-type=module',
+			'--eval',
+			`const { default: config } = await import(${JSON.stringify(configURL)}); process.stdout.write(JSON.stringify(config.site ?? null));`,
+		],
+		{
+			encoding: 'utf8',
+			env: { ...process.env, PUBLIC_SITE_URL: '   ' },
+		},
+	);
+
+	assert.equal(JSON.parse(output), null);
 });

@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config';
 
 import tailwindcss from '@tailwindcss/vite';
 
-const site = process.env.PUBLIC_SITE_URL;
+const site = process.env.PUBLIC_SITE_URL?.trim() || undefined;
 
 // https://astro.build/config
 export default defineConfig({
