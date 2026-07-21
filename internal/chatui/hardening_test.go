@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/matt-riley/waffle/internal/chat"
@@ -65,8 +66,34 @@ func (b *asyncBackend) Close(context.Context) error {
 
 func runCommandAsync(cmd tea.Cmd) <-chan tea.Msg {
 	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
+	go func() { done <- runBlockingCmd(cmd) }()
 	return done
+}
+
+// runBlockingCmd executes a tea.Cmd, expanding nested BatchMsg so backend
+// operations still block even when batched with spinner.Tick.
+func runBlockingCmd(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return msg
+	}
+	results := make(chan tea.Msg, len(batch))
+	for _, child := range batch {
+		go func(c tea.Cmd) { results <- runBlockingCmd(c) }(child)
+	}
+	var last tea.Msg
+	for range batch {
+		r := <-results
+		if _, isTick := r.(spinner.TickMsg); isTick {
+			continue
+		}
+		last = r
+	}
+	return last
 }
 
 func consumePump(t *testing.T, m *Model, pump tea.Cmd) (*Model, tea.Cmd, tea.Msg) {

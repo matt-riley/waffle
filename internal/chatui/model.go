@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/llm"
 )
@@ -88,6 +90,7 @@ type Model struct {
 
 	viewport               viewport.Model
 	composer               textarea.Model
+	spinner                spinner.Model
 	overlayList            list.Model
 	messages               []messageCard
 	tools                  []toolRow
@@ -180,6 +183,12 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 
 	noColor := options.NoColor || os.Getenv("NO_COLOR") != ""
 	overlayList := newOverlayList(nil, min(width-12, 76), min(height-10, 16), true, noColor)
+	theme := newTheme(true, noColor)
+
+	activity := spinner.New(spinner.WithSpinner(spinner.Dot))
+	if !noColor {
+		activity.Style = lipgloss.NewStyle().Foreground(theme.brand)
+	}
 
 	if noColor {
 		composer.SetStyles(textarea.Styles{})
@@ -187,8 +196,8 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 	}
 	m := &Model{
 		backend: backend, open: open, ctx: ctx,
-		viewport: vp, composer: composer, overlayList: overlayList,
-		width: width, height: height, theme: newTheme(true, noColor),
+		viewport: vp, composer: composer, spinner: activity, overlayList: overlayList,
+		width: width, height: height, theme: theme,
 		now:    time.Now,
 		events: make(chan tea.Msg, 64), closed: &atomic.Bool{},
 		pumpStop: make(chan struct{}), pumpStopOnce: &sync.Once{},

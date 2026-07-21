@@ -1,8 +1,10 @@
 package chatui
 
 import (
+	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/matt-riley/waffle/internal/chat"
 )
@@ -201,4 +203,59 @@ func TestQueuedSubmitAppendsHistory(t *testing.T) {
 	if m.historyIdx != -1 {
 		t.Fatalf("historyIdx after queue = %d, want -1", m.historyIdx)
 	}
+}
+
+func TestActivitySpinnerTicksWhenTurnActive(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30, NoColor: true})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.turnActive = true
+
+	before := m.spinner.View()
+	// spinner.Tick produces a TickMsg belonging to this spinner instance.
+	updated, cmd := m.Update(m.spinner.Tick())
+	m = updated.(*Model)
+	after := m.spinner.View()
+	if after == before {
+		t.Fatalf("spinner frame did not advance while turnActive: before=%q after=%q", before, after)
+	}
+	if cmd == nil {
+		t.Fatal("expected re-tick command while turn is active")
+	}
+	// Busy footer should include the animated glyph.
+	if footer := m.renderFooter(96); footer == "" || !containsSpinnerFrame(footer) {
+		t.Fatalf("busy footer missing spinner glyph: %q", footer)
+	}
+
+	// When the turn ends, further ticks must not keep animating.
+	m.turnActive = false
+	idleBefore := m.spinner.View()
+	updated, cmd = m.Update(m.spinner.Tick())
+	m = updated.(*Model)
+	if m.spinner.View() != idleBefore {
+		t.Fatalf("spinner advanced while turn inactive: before=%q after=%q", idleBefore, m.spinner.View())
+	}
+	if cmd != nil {
+		t.Fatal("inactive turn must not schedule another spinner tick")
+	}
+
+	// Command-only busy path also advances the spinner.
+	m.commandActive = true
+	cmdBefore := m.spinner.View()
+	updated, cmd = m.Update(m.spinner.Tick())
+	m = updated.(*Model)
+	if m.spinner.View() == cmdBefore {
+		t.Fatal("spinner did not advance while commandActive")
+	}
+	if cmd == nil {
+		t.Fatal("expected re-tick command while command is active")
+	}
+}
+
+func containsSpinnerFrame(s string) bool {
+	for _, frame := range spinner.Dot.Frames {
+		if glyph := strings.TrimSpace(frame); glyph != "" && strings.Contains(s, glyph) {
+			return true
+		}
+	}
+	return false
 }

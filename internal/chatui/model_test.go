@@ -227,18 +227,24 @@ func TestModelDoesNotStartASecondTurnWhileBusy(t *testing.T) {
 	if len(m.messages) == 0 || m.messages[len(m.messages)-1].role != roleUser || m.messages[len(m.messages)-1].text != "replacement" {
 		t.Fatalf("queued user card missing: %+v", m.messages)
 	}
-	// continuePump batches turnCmd with waitEventCmd; run children until the
-	// fake backend records the auto-submitted turn.
-	msg := next()
-	batch, ok := msg.(tea.BatchMsg)
-	if !ok {
-		t.Fatalf("turnDone cmd returned %T, want tea.BatchMsg", msg)
-	}
-	for _, child := range batch {
-		_ = child()
-	}
+	// continuePump batches beginTurn (turnCmd + spinner.Tick) with waitEventCmd.
+	// Run leaves so the fake backend records the auto-submitted turn.
+	runCmdTree(next)
 	if len(backend.turns) != 1 || backend.turns[0] != "replacement" {
 		t.Fatalf("auto-submitted turns = %q", backend.turns)
+	}
+}
+
+// runCmdTree executes a tea.Cmd tree, expanding nested BatchMsg leaves.
+func runCmdTree(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, child := range batch {
+			runCmdTree(child)
+		}
 	}
 }
 

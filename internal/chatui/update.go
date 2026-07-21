@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/matt-riley/waffle/internal/chat"
 )
 
@@ -36,6 +38,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			dark := msg.IsDark()
 			m.theme = newTheme(dark, false)
 			m.composer.SetStyles(textarea.DefaultStyles(dark))
+			m.spinner.Style = lipgloss.NewStyle().Foreground(m.theme.brand)
 			items, selected := m.overlayList.Items(), m.overlayList.Index()
 			m.overlayList = newOverlayList(items, m.overlayList.Width(), m.overlayList.Height(), dark, false)
 			m.overlayList.Select(selected)
@@ -44,6 +47,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
 		return m, nil
+	case spinner.TickMsg:
+		// Animate only while a turn or cancellable command is active; stop the
+		// tick chain as soon as activity ends so frames clear with the busy footer.
+		if !m.turnActive && !m.commandActive {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case eventMsg:
 		m.applyEvent(msg.operationID, msg.event)
 		return m, m.waitEventCmd()
@@ -421,7 +433,8 @@ func (m *Model) beginTurn(input string) tea.Cmd {
 		m.turnStartedAt = time.Now()
 	}
 	m.syncViewport(true)
-	return m.turnCmd(operationID, input)
+	// Batch spinner.Tick so the busy footer animates for the whole turn.
+	return tea.Batch(m.turnCmd(operationID, input), m.spinner.Tick)
 }
 
 // startQueuedTurn drains queuedUserInput into a new turn when the UI is idle.
@@ -436,12 +449,19 @@ func (m *Model) startQueuedTurn() tea.Cmd {
 
 func (m *Model) startCommand(command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
 	ctx := m.ctx
+	startSpin := false
 	if commandIsCancellable(command) {
+		// Start the spinner only if nothing was already animating.
+		startSpin = !m.turnActive && !m.commandActive
 		m.commandActive = true
 		m.commandCancelRequested = false
 		ctx, m.commandCancel = context.WithCancel(m.ctx)
 	}
-	return m.commandCmd(ctx, m.nextOperation(), command, startedDuringTurn)
+	cmd := m.commandCmd(ctx, m.nextOperation(), command, startedDuringTurn)
+	if startSpin {
+		return tea.Batch(cmd, m.spinner.Tick)
+	}
+	return cmd
 }
 
 func commandIsCancellable(command chat.ParsedCommand) bool {

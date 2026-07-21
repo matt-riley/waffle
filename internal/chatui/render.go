@@ -151,16 +151,18 @@ func (m *Model) renderFooter(width int) string {
 	left := "/help  /model  /sessions"
 	if m.width < 72 {
 		if m.turnActive || m.commandActive {
+			spin := m.activitySpinnerGlyph()
 			if m.turnActive {
-				return left + "  ·  working… " + formatElapsed(m.turnElapsed())
+				return left + "  ·  " + spin + " working… " + formatElapsed(m.turnElapsed())
 			}
-			return left + "  ·  working…"
+			return left + "  ·  " + spin + " working…"
 		}
 		return left
 	}
 	right := "Alt+↵ newline · ↵ send"
 	if m.turnActive || m.commandActive {
-		right = "Esc cancel · working…"
+		// Prefix spinner so existing "Esc cancel · working…" substrings still match in tests.
+		right = m.activitySpinnerGlyph() + " Esc cancel · working…"
 		if m.turnActive {
 			right += " " + formatElapsed(m.turnElapsed())
 			if m.liveInputTokens > 0 || m.liveOutputTokens > 0 {
@@ -172,6 +174,11 @@ func (m *Model) renderFooter(width int) string {
 	}
 	gap := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
 	return m.theme.mutedText(left + strings.Repeat(" ", gap) + right)
+}
+
+// activitySpinnerGlyph returns the current spinner frame for the busy footer.
+func (m *Model) activitySpinnerGlyph() string {
+	return strings.TrimSpace(m.spinner.View())
 }
 
 func (m *Model) turnElapsed() time.Duration {
