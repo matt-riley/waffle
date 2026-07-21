@@ -47,6 +47,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.St
 	}
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
+	// Release the HTTP response body (and pooled connection) on every path,
+	// including early accumulate errors and stream.Err() failures.
+	defer func() { _ = stream.Close() }()
 	msg := anthropic.Message{}
 	for stream.Next() {
 		event := stream.Current()
