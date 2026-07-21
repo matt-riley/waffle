@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/tool"
 )
@@ -29,6 +30,9 @@ type Server struct {
 	Command string
 	Args    []string
 	Env     []string // allowlisted parent environment variable names
+	// DockerContainer is the docker --name set by WrapDocker. ConnectRestricted
+	// copies it onto Client so Close can docker stop/rm the container (#97).
+	DockerContainer string
 }
 
 // rpcRequest / rpcResponse are JSON-RPC 2.0 envelopes.
@@ -57,10 +61,11 @@ func (e *rpcError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Cod
 // demultiplexes responses by request id, so concurrent calls (the agent
 // dispatches tools in parallel) never race on the stdout stream.
 type Client struct {
-	name string
-	cmd  *exec.Cmd
-	in   io.WriteCloser
-	out  *bufio.Reader
+	name          string
+	containerName string // docker --name when sandbox-wrapped; cleaned up on Close (#97)
+	cmd           *exec.Cmd
+	in            io.WriteCloser
+	out           *bufio.Reader
 
 	writeMu sync.Mutex // serializes writes to stdin
 
@@ -115,6 +120,9 @@ type DockerWrapOpts struct {
 // only BuildProcessEnv(s.Env) as docker -e name=value pairs — never ambient
 // host secrets. The returned Server.Env is empty so ConnectRestricted only
 // passes PATH to the docker client process itself.
+//
+// The container is given a unique --name (waffle-mcp-<suffix>) so Client.Close
+// can stop/rm it if killing the docker CLI leaves the container orphaned (#97).
 func WrapDocker(s Server, opts DockerWrapOpts) Server {
 	if opts.Image == "" {
 		opts.Image = "debian:stable-slim"
@@ -122,7 +130,14 @@ func WrapDocker(s Server, opts DockerWrapOpts) Server {
 	if opts.Network == "" {
 		opts.Network = "none"
 	}
-	args := []string{"run", "-i", "--rm", "--network", opts.Network}
+	suffix, err := id.NewBytes(4)
+	if err != nil {
+		// crypto/rand is effectively always available; fall back so naming
+		// (and Close cleanup) still works if it is not.
+		suffix = fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	name := "waffle-mcp-" + suffix
+	args := []string{"run", "-i", "--rm", "--name", name, "--network", opts.Network}
 	if opts.WorkDir != "" {
 		args = append(args, "-v", opts.WorkDir+":/work", "-w", "/work")
 	}
@@ -132,10 +147,11 @@ func WrapDocker(s Server, opts DockerWrapOpts) Server {
 	args = append(args, opts.Image, s.Command)
 	args = append(args, s.Args...)
 	return Server{
-		Name:    s.Name,
-		Command: "docker",
-		Args:    args,
-		Env:     nil,
+		Name:            s.Name,
+		Command:         "docker",
+		Args:            args,
+		Env:             nil,
+		DockerContainer: name,
 	}
 }
 
@@ -205,11 +221,12 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 		return nil, fmt.Errorf("mcp %s: start %q (mode=%s): %w", s.Name, s.Command, opts.Mode, err)
 	}
 	c := &Client{
-		name:    s.Name,
-		cmd:     cmd,
-		in:      stdin,
-		out:     bufio.NewReader(stdout),
-		pending: map[int]chan rpcResponse{},
+		name:          s.Name,
+		containerName: s.DockerContainer,
+		cmd:           cmd,
+		in:            stdin,
+		out:           bufio.NewReader(stdout),
+		pending:       map[int]chan rpcResponse{},
 	}
 	go c.readLoop()
 
@@ -228,8 +245,20 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	return c, nil
 }
 
-// Close terminates the server process.
+// Close terminates the server process. When the server was docker-wrapped
+// (containerName set), it first stops and force-removes the named container
+// so killing only the local docker CLI cannot leave an orphaned container
+// running (#97). Stop/rm use short timeouts so Close returns promptly.
 func (c *Client) Close() error {
+	if c.containerName != "" {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(stopCtx, "docker", "stop", "-t", "1", c.containerName).Run()
+		cancel()
+		rmCtx, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = exec.CommandContext(rmCtx, "docker", "rm", "-f", c.containerName).Run()
+		cancel2()
+	}
+
 	var first error
 	if err := c.in.Close(); err != nil {
 		first = err

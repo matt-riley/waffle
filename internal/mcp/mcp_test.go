@@ -383,6 +383,20 @@ func TestSandboxMCPUsesRestrictedExecutor(t *testing.T) {
 			if got.Command == "docker" && len(got.Env) != 0 {
 				t.Fatalf("docker-wrapped Server.Env = %v, want nil/empty", got.Env)
 			}
+			// Docker-wrapped launches must name the container for Close cleanup (#97).
+			if got.Command == "docker" {
+				if got.DockerContainer == "" {
+					t.Fatalf("docker-wrapped Server.DockerContainer empty; args=%v", got.Args)
+				}
+				if !strings.HasPrefix(got.DockerContainer, "waffle-mcp-") {
+					t.Fatalf("DockerContainer = %q, want waffle-mcp- prefix", got.DockerContainer)
+				}
+				if !strings.Contains(joined, "--name\x00"+got.DockerContainer) {
+					t.Errorf("docker args missing --name %s; args=%v", got.DockerContainer, got.Args)
+				}
+			} else if got.DockerContainer != "" {
+				t.Fatalf("non-docker Server.DockerContainer = %q, want empty", got.DockerContainer)
+			}
 		})
 	}
 }
@@ -406,5 +420,151 @@ func TestWrapDockerOnlyAllowlistedEnv(t *testing.T) {
 	}
 	if strings.Contains(joined, "WAFFLE_HOME") || strings.Contains(joined, "GITHUB_TOKEN") || strings.Contains(joined, "/nope") {
 		t.Fatalf("secret leaked into docker args: %v", s.Args)
+	}
+}
+
+// TestWrapDockerNamesContainer asserts docker-wrapped MCP servers get a unique
+// --name and keep --network none so Close can stop/rm the container (#97).
+func TestWrapDockerNamesContainer(t *testing.T) {
+	s := WrapDocker(Server{
+		Name:    "x",
+		Command: "my-mcp",
+		Args:    []string{"--stdio"},
+	}, DockerWrapOpts{Image: "img:1"})
+	if s.Command != "docker" {
+		t.Fatalf("Command = %q", s.Command)
+	}
+	if s.DockerContainer == "" {
+		t.Fatal("DockerContainer empty")
+	}
+	if !strings.HasPrefix(s.DockerContainer, "waffle-mcp-") {
+		t.Fatalf("DockerContainer = %q, want waffle-mcp- prefix", s.DockerContainer)
+	}
+	// Suffix is id.NewBytes(4) → 8 hex chars.
+	suffix := strings.TrimPrefix(s.DockerContainer, "waffle-mcp-")
+	if len(suffix) != 8 {
+		t.Fatalf("name suffix %q length = %d, want 8 hex chars", suffix, len(suffix))
+	}
+
+	// --name <container> and --network none must both be present as tokens.
+	var nameIdx, netIdx = -1, -1
+	for i, a := range s.Args {
+		switch a {
+		case "--name":
+			nameIdx = i
+		case "--network":
+			netIdx = i
+		}
+	}
+	if nameIdx < 0 || nameIdx+1 >= len(s.Args) {
+		t.Fatalf("missing --name in args: %v", s.Args)
+	}
+	if s.Args[nameIdx+1] != s.DockerContainer {
+		t.Fatalf("--name value = %q, want DockerContainer %q", s.Args[nameIdx+1], s.DockerContainer)
+	}
+	if s.Args[nameIdx+1] == "" {
+		t.Fatal("--name value empty")
+	}
+	if netIdx < 0 || netIdx+1 >= len(s.Args) || s.Args[netIdx+1] != "none" {
+		t.Fatalf("want --network none in args: %v", s.Args)
+	}
+	// Still keep --rm for the normal docker lifecycle path.
+	foundRM := false
+	for _, a := range s.Args {
+		if a == "--rm" {
+			foundRM = true
+			break
+		}
+	}
+	if !foundRM {
+		t.Fatalf("missing --rm in args: %v", s.Args)
+	}
+
+	// Two wraps get distinct names.
+	s2 := WrapDocker(Server{Name: "y", Command: "other"}, DockerWrapOpts{})
+	if s2.DockerContainer == s.DockerContainer {
+		t.Fatalf("two WrapDocker calls produced same name %q", s.DockerContainer)
+	}
+}
+
+// TestCloseStopsNamedContainer puts a fake docker binary on PATH that records
+// stop/rm invocations. Client.Close must issue docker stop/rm for the named
+// container before killing the local process (#97).
+func TestCloseStopsNamedContainer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake docker is unix-only")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "docker.log")
+	fakeDocker := filepath.Join(dir, "docker")
+	// Record argv; succeed immediately. Used only for stop/rm during Close.
+	script := fmt.Sprintf("#!/usr/bin/env bash\nprintf '%%s\\n' \"$*\" >> %q\nexit 0\n", logPath)
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const containerName = "waffle-mcp-testclose"
+	path := writeFakeServer(t)
+	ctx := context.Background()
+	client, err := ConnectRestricted(ctx, Server{
+		Name:            "fake",
+		Command:         "bash",
+		Args:            []string{path},
+		DockerContainer: containerName,
+	}, RestrictOpts{Mode: "sandbox"})
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	if client.containerName != containerName {
+		t.Fatalf("containerName = %q, want %q", client.containerName, containerName)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read docker log: %v", err)
+	}
+	body := string(raw)
+	wantStop := "stop -t 1 " + containerName
+	wantRM := "rm -f " + containerName
+	if !strings.Contains(body, wantStop) {
+		t.Errorf("docker log missing %q:\n%s", wantStop, body)
+	}
+	if !strings.Contains(body, wantRM) {
+		t.Errorf("docker log missing %q:\n%s", wantRM, body)
+	}
+}
+
+// TestCloseWithoutContainerSkipsDocker ensures host MCP Close does not
+// invoke docker when no container was named.
+func TestCloseWithoutContainerSkipsDocker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake server is unix-only")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "docker.log")
+	fakeDocker := filepath.Join(dir, "docker")
+	script := fmt.Sprintf("#!/usr/bin/env bash\nprintf '%%s\\n' \"$*\" >> %q\nexit 0\n", logPath)
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	path := writeFakeServer(t)
+	client, err := Connect(context.Background(), Server{Name: "fake", Command: "bash", Args: []string{path}})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if client.containerName != "" {
+		t.Fatalf("containerName = %q, want empty", client.containerName)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if raw, err := os.ReadFile(logPath); err == nil && len(raw) > 0 {
+		t.Fatalf("host MCP Close must not invoke docker; log:\n%s", raw)
 	}
 }
