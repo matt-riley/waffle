@@ -3,6 +3,7 @@ package gitcred
 import (
 	"context"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,6 +85,7 @@ func TestHelperAgainstBroker(t *testing.T) {
 func TestRunRequiresEnv(t *testing.T) {
 	t.Setenv(EnvBroker, "")
 	t.Setenv(EnvToken, "")
+	t.Setenv(EnvTokenFile, filepath.Join(t.TempDir(), "missing.token"))
 	err := Run(context.Background(), "get", strings.NewReader(""), nil)
 	if err == nil || !strings.Contains(err.Error(), "WAFFLE_BROKER") {
 		t.Errorf("err = %v", err)
@@ -116,5 +118,64 @@ func TestRunGet(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "password=p") {
 		t.Errorf("out = %q", out.String())
+	}
+}
+
+func TestRunGetFromTokenFile(t *testing.T) {
+	b := broker.New(nil, nil)
+	b.GitCredential = func(ctx context.Context, sessionID, host, path string) (string, string, error) {
+		return "u", "p", nil
+	}
+	srv := httptest.NewServer(b)
+	defer srv.Close()
+	token, err := b.Mint(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	tokenPath := filepath.Join(t.TempDir(), "session.token")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prefer file when env token is unset (#106).
+	t.Setenv(EnvBroker, srv.URL)
+	t.Setenv(EnvToken, "")
+	t.Setenv(EnvTokenFile, tokenPath)
+
+	var out strings.Builder
+	if err := Run(context.Background(), "get", strings.NewReader("host=github.com\n"), &out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "password=p") {
+		t.Errorf("out = %q", out.String())
+	}
+}
+
+func TestSessionTokenPrefersEnvOverFile(t *testing.T) {
+	t.Setenv(EnvToken, "from-env")
+	tokenPath := filepath.Join(t.TempDir(), "session.token")
+	if err := os.WriteFile(tokenPath, []byte("from-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvTokenFile, tokenPath)
+	got, err := sessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "from-env" {
+		t.Errorf("sessionToken = %q, want from-env", got)
+	}
+}
+
+func TestSessionTokenEmptyFile(t *testing.T) {
+	t.Setenv(EnvToken, "")
+	tokenPath := filepath.Join(t.TempDir(), "session.token")
+	if err := os.WriteFile(tokenPath, []byte("  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvTokenFile, tokenPath)
+	if _, err := sessionToken(); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Errorf("err = %v, want empty-file error", err)
 	}
 }

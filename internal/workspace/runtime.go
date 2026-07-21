@@ -61,6 +61,11 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 		return err
 	}
 	opts.SelfPath = selfPath
+	// Deliver broker session token via restricted file on the queue
+	// bind-mount — never via docker run -e (#106).
+	if err := sandbox.WriteSessionToken(opts.QueueDir, opts.Token); err != nil {
+		return err
+	}
 	if err := d.docker(ctx, "volume", "create", opts.Volume); err != nil {
 		return err
 	}
@@ -94,10 +99,11 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 	if opts.BrokerURL != "" || opts.ProxyURL != "" {
 		args = append(args, "--add-host", "waffle-host:host-gateway")
 		if opts.BrokerURL != "" {
-			args = append(args,
-				"-e", "WAFFLE_BROKER="+opts.BrokerURL,
-				"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
-			)
+			args = append(args, "-e", "WAFFLE_BROKER="+opts.BrokerURL)
+			// Path only — never the token value (#106).
+			if opts.Token != "" {
+				args = append(args, "-e", sandbox.EnvSessionTokenFile+"="+sandbox.ContainerSessionTokenPath)
+			}
 		}
 	}
 	if opts.ProxyURL != "" {

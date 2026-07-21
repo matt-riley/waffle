@@ -100,9 +100,10 @@ type DockerOpts struct {
 	CPUs   float64
 	PIDs   int
 	Disk   string
-	// BrokerURL and Token, when set, are exported into the container as
-	// WAFFLE_BROKER / WAFFLE_SESSION_TOKEN so in-sandbox tools can reach
-	// the host-side credential broker — never a raw key.
+	// BrokerURL and Token, when set, let in-sandbox tools reach the host-side
+	// credential broker — never a raw key. BrokerURL is exported as
+	// WAFFLE_BROKER (not secret). Token is written to a 0600 file under
+	// QueueDir (SessionTokenFileName) and never passed via docker -e (#106).
 	BrokerURL string
 	Token     string
 	// SelfPath overrides the waffle binary to mount (default: this one).
@@ -114,12 +115,59 @@ const (
 	DefaultMemoryLimit = "2g"
 	DefaultCPULimit    = 2.0
 	DefaultPIDLimit    = 512
+
+	// SessionTokenFileName is the host-side filename under QueueDir that holds
+	// the broker session token. The queue dir is bind-mounted at
+	// ContainerQueueMount, so the in-container path is ContainerSessionTokenPath.
+	SessionTokenFileName = "session.token"
+	// ContainerQueueMount is the in-container mount point for opts.QueueDir.
+	ContainerQueueMount = "/waffle/queue"
+	// ContainerSessionTokenPath is the conventional in-container path of the
+	// session token file (QueueDir/SessionTokenFileName on the host).
+	ContainerSessionTokenPath = ContainerQueueMount + "/" + SessionTokenFileName
+	// EnvSessionTokenFile is an optional path-only env var pointing at the
+	// token file. The value is a filesystem path, not the secret itself.
+	EnvSessionTokenFile = "WAFFLE_SESSION_TOKEN_FILE"
 )
+
+// WriteSessionToken writes token to queueDir/SessionTokenFileName with mode
+// 0600. A empty token is a no-op. Call before docker run so the bind-mounted
+// queue dir exposes the token without putting it in Config.Env (#106).
+func WriteSessionToken(queueDir, token string) error {
+	if token == "" {
+		return nil
+	}
+	if queueDir == "" {
+		return fmt.Errorf("sandbox: queue dir required to write session token")
+	}
+	if err := os.MkdirAll(queueDir, 0o700); err != nil {
+		return fmt.Errorf("sandbox: create queue dir for session token: %w", err)
+	}
+	path := filepath.Join(queueDir, SessionTokenFileName)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return fmt.Errorf("sandbox: write session token: %w", err)
+	}
+	// Re-assert mode in case a restrictive umask is not the only concern —
+	// the secret must not be group/world readable.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("sandbox: chmod session token: %w", err)
+	}
+	return nil
+}
+
+// RemoveSessionToken deletes the session token file from queueDir if present.
+func RemoveSessionToken(queueDir string) {
+	if queueDir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(queueDir, SessionTokenFileName))
+}
 
 // DockerExecutor is a tool.Toolbox whose tools execute inside a container.
 type DockerExecutor struct {
 	client    *Client
 	container string
+	queueDir  string
 	defs      []llm.Tool
 
 	// Timeout bounds one tool call end to end (queue round trip included).
@@ -151,6 +199,14 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 		return nil, err
 	}
 
+	// Deliver the broker session token via a restricted file on the queue
+	// bind-mount — never via docker run -e, which lands in Config.Env and
+	// process listings (#106).
+	if err := WriteSessionToken(opts.QueueDir, opts.Token); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+
 	args := dockerRunArgs(name, opts)
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
@@ -159,6 +215,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 			out, err = exec.CommandContext(ctx, "docker", dockerRunArgs(name, opts)...).CombinedOutput()
 		}
 		if err != nil {
+			RemoveSessionToken(opts.QueueDir)
 			_ = client.Close()
 			return nil, fmt.Errorf("sandbox: docker run: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
@@ -168,6 +225,7 @@ func StartDocker(ctx context.Context, opts DockerOpts) (*DockerExecutor, error) 
 	return &DockerExecutor{
 		client:    client,
 		container: name,
+		queueDir:  opts.QueueDir,
 		defs:      tool.BuiltinsWithFetch(opts.FetchAllowPrivate).Defs(),
 		Timeout:   DefaultToolTimeout, // > bash's 10-minute cap; dead-runner detection is faster
 	}, nil
@@ -205,8 +263,11 @@ func dockerRunArgs(name string, opts DockerOpts) []string {
 		args = append(args,
 			"--add-host", "waffle-host:host-gateway",
 			"-e", "WAFFLE_BROKER="+opts.BrokerURL,
-			"-e", "WAFFLE_SESSION_TOKEN="+opts.Token,
 		)
+		// Path only — never the token value (#106).
+		if opts.Token != "" {
+			args = append(args, "-e", EnvSessionTokenFile+"="+ContainerSessionTokenPath)
+		}
 	}
 	args = append(args, opts.Image, "/usr/local/bin/waffle", "runner", "--queue", "/waffle/queue")
 	for _, entry := range opts.FetchAllowPrivate {
@@ -257,6 +318,7 @@ func (d *DockerExecutor) Close() error {
 	} else if err != nil {
 		err = fmt.Errorf("sandbox: docker rm: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
+	RemoveSessionToken(d.queueDir)
 	return errors.Join(err, d.client.Close())
 }
 

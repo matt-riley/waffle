@@ -219,12 +219,131 @@ func TestDockerRunArgs(t *testing.T) {
 		"-v /home/u/.waffle/sandboxes/x:/waffle/queue",
 		"-v /home/u/project:/work",
 		"--add-host waffle-host:host-gateway",
-		"-e WAFFLE_SESSION_TOKEN=wk_abc",
+		"-e WAFFLE_BROKER=http://waffle-host:8421",
+		"-e " + EnvSessionTokenFile + "=" + ContainerSessionTokenPath,
 		"debian:stable-slim /usr/local/bin/waffle runner --queue /waffle/queue",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q:\n%s", want, joined)
 		}
+	}
+	// Session token must never appear as a docker -e value (#106).
+	if strings.Contains(joined, "WAFFLE_SESSION_TOKEN=") {
+		t.Errorf("args must not pass WAFFLE_SESSION_TOKEN via -e:\n%s", joined)
+	}
+	if strings.Contains(joined, "wk_abc") {
+		t.Errorf("args must not contain the session token value:\n%s", joined)
+	}
+}
+
+func TestWriteSessionToken(t *testing.T) {
+	dir := t.TempDir()
+	const token = "wk_secret_token"
+	if err := WriteSessionToken(dir, token); err != nil {
+		t.Fatalf("WriteSessionToken: %v", err)
+	}
+	path := filepath.Join(dir, SessionTokenFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(data) != token {
+		t.Errorf("token file = %q, want %q", data, token)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("token file mode = %o, want 0600", mode)
+	}
+
+	// Empty token is a no-op.
+	emptyDir := t.TempDir()
+	if err := WriteSessionToken(emptyDir, ""); err != nil {
+		t.Fatalf("empty token: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(emptyDir, SessionTokenFileName)); !os.IsNotExist(err) {
+		t.Errorf("empty token should not create file, err=%v", err)
+	}
+
+	if err := WriteSessionToken("", "wk_x"); err == nil {
+		t.Error("expected error for empty queue dir")
+	}
+
+	RemoveSessionToken(dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("RemoveSessionToken left file, err=%v", err)
+	}
+}
+
+func TestStartDockerWritesSessionToken(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	// Capture docker args to a file; assert queue token exists at launch.
+	if err := os.WriteFile(docker, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$WAFFLE_TEST_DOCKER_ARGS"
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-v" ]; then
+		mount=$2
+		case "$mount" in
+			*:/waffle/queue)
+				queue_dir=${mount%:/waffle/queue}
+				test -f "$queue_dir/session.token"
+				test -f "$queue_dir/inbound.db"
+				exit 0
+				;;
+		esac
+		shift 2
+		continue
+	fi
+	shift
+done
+echo "queue mount not found" >&2
+exit 1
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	argsFile := filepath.Join(t.TempDir(), "docker-args")
+	t.Setenv("WAFFLE_TEST_DOCKER_ARGS", argsFile)
+
+	runner := filepath.Join(t.TempDir(), "waffle")
+	if err := os.WriteFile(runner, []byte("runner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	queueDir := filepath.Join(t.TempDir(), "sandbox")
+	const token = "wk_launch_token"
+	executor, err := StartDocker(context.Background(), DockerOpts{
+		QueueDir:  queueDir,
+		SelfPath:  runner,
+		BrokerURL: "http://waffle-host:8421",
+		Token:     token,
+	})
+	if err != nil {
+		t.Fatalf("StartDocker: %v", err)
+	}
+	defer func() { _ = executor.Close() }()
+
+	got, err := os.ReadFile(filepath.Join(queueDir, SessionTokenFileName))
+	if err != nil {
+		t.Fatalf("session token file: %v", err)
+	}
+	if string(got) != token {
+		t.Errorf("token file = %q, want %q", got, token)
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("docker args capture: %v", err)
+	}
+	joined := string(rawArgs)
+	if strings.Contains(joined, "WAFFLE_SESSION_TOKEN=") || strings.Contains(joined, token) {
+		t.Errorf("docker invocation leaked session token:\n%s", joined)
+	}
+	if !strings.Contains(joined, EnvSessionTokenFile+"="+ContainerSessionTokenPath) {
+		t.Errorf("docker args missing token-file path env:\n%s", joined)
 	}
 }
 
