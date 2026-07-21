@@ -3,13 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/spill"
 	"github.com/matt-riley/waffle/internal/tool"
+	"github.com/matt-riley/waffle/internal/usage"
 )
 
 // ChildProfile is a named specialist posture for spawn_subagent (#71).
@@ -68,7 +71,12 @@ type SubagentTool struct {
 	Persist func(ctx context.Context, parentSession, childSession string, packet WorkPacket, handoff Handoff) error
 	// NewChildSession creates a session for the child when Persist is set.
 	NewChildSession func(ctx context.Context, title string) (sessionID string, err error)
-	Log             *slog.Logger
+	// Usage and Limits mirror the parent Agent so child runs share budget checks
+	// and accounting (#96). When a child session is attached, spend is still
+	// charged to the parent budget key via usage.WithBudgetKey.
+	Usage  *usage.Store
+	Limits usage.Limits
+	Log    *slog.Logger
 }
 
 func (t SubagentTool) Def() llm.Tool {
@@ -193,13 +201,19 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		MaxTokens:     maxTok,
 		Redact:        t.Redact,
 		Spill:         t.Spill,
+		Usage:         t.Usage,
+		Limits:        t.Limits,
 		MaxIterations: 30,
 		Profile:       effectiveProfile(profileName),
 		Log:           t.Log,
 	}
 	runCtx := ctx
 	if childSession != "" {
+		// Keep transcript isolation on the child session, but charge spend to
+		// the parent budget key so parent limits still apply (#96).
+		parentBudget := usage.BudgetKey(ctx, sessionID(ctx))
 		runCtx = WithSession(ctx, childSession)
+		runCtx = usage.WithBudgetKey(runCtx, parentBudget)
 	}
 	history, err := sub.Run(runCtx, []llm.Message{llm.UserText(p.Task)}, Hooks{})
 	if err != nil {
@@ -277,6 +291,17 @@ func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken stri
 	if sub.Provider == nil {
 		return Handoff{}, fmt.Errorf("no provider for repair")
 	}
+	// Match Agent.Run budget/pause checks so repair Completes cannot bypass limits (#96).
+	if sub.Usage != nil {
+		if paused, err := sub.Usage.Paused(ctx); err != nil {
+			return Handoff{}, err
+		} else if paused {
+			return Handoff{}, errors.New("waffle is paused")
+		}
+		if err := sub.Usage.Check(ctx, usage.BudgetKey(ctx, sessionID(ctx)), sub.Limits, time.Now()); err != nil {
+			return Handoff{}, err
+		}
+	}
 	prompt := llm.UserText("Your previous reply was not a valid handoff JSON object. Reply with ONLY a ```json fenced object with status (done|partial|blocked|failed) and summary. Previous reply was:\n" + truncate(broken, 2000))
 	resp, err := sub.Provider.Complete(ctx, llm.Request{
 		Model:     sub.Model,
@@ -286,6 +311,9 @@ func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken stri
 	}, nil)
 	if err != nil {
 		return Handoff{}, err
+	}
+	if sub.Usage != nil {
+		_ = sub.Usage.AddRequest(ctx, usage.BudgetKey(ctx, sessionID(ctx)), resp.Usage)
 	}
 	return ParseHandoff(resp.Message.Text())
 }
