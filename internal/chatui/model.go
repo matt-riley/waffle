@@ -90,6 +90,7 @@ type Model struct {
 	overlayResult          chat.Result
 	pendingConfirm         chat.ParsedCommand
 	deferredCommand        *chat.ParsedCommand
+	queuedUserInput        string // plain-text submit while turnActive; replace-on-requeue
 	stateChangeActive      bool
 	commandActive          bool
 	commandCancelRequested bool

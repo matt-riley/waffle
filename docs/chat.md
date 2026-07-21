@@ -102,6 +102,13 @@ Deploy remains unhealthy.
 - `/exit` closes gracefully. If the service disconnects, acknowledge the
   frozen transcript with `Enter`, `Escape`, or `Ctrl+C`.
 
+While a model turn is already running, plain-text `Enter` does not start a
+second concurrent turn. The message is **queued** (composer cleared, a Notice
+card acknowledges the queue) and auto-submitted as the next turn once the
+active turn finishes. Submitting again while a queue is held **replaces** the
+queued draft and shows a replace notice. Recognized slash commands (for
+example `/help` or `/status`) still run immediately during an active turn.
+
 ## Commands
 
 Command names match the complete first word. For example, `/modelsx` is an

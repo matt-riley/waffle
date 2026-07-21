@@ -71,6 +71,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			command := *m.deferredCommand
 			m.deferredCommand = nil
 			next = m.startCommand(command, false)
+		} else if matches && !m.awaitingAck {
+			next = m.startQueuedTurn()
 		}
 		return m, m.continuePump(next)
 	case commandResultMsg:
@@ -102,7 +104,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, m.continuePump(m.closeCmd())
 		}
-		return m, m.continuePump(nil)
+		var next tea.Cmd
+		if !m.turnActive && !m.commandActive && !m.awaitingAck {
+			next = m.startQueuedTurn()
+		}
+		return m, m.continuePump(next)
 	case closeDoneMsg:
 		if msg.err != nil && m.err == nil {
 			m.err = msg.err
@@ -290,6 +296,18 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.turnActive && !ok {
+		// Queue mode: hold plain text and auto-submit when the active turn ends.
+		// A second queue while one is held replaces the prior draft (documented).
+		notice := "Message queued — will send when the current turn finishes."
+		if m.queuedUserInput != "" {
+			notice = "Replaced queued message — will send when the current turn finishes."
+		}
+		m.queuedUserInput = input
+		m.composer.Reset()
+		m.paletteVisible = false
+		m.exitArmed = false
+		m.messages = append(m.messages, messageCard{role: roleNotice, text: notice})
+		m.syncViewport(true)
 		return m, nil
 	}
 	m.composer.Reset()
@@ -302,13 +320,28 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		return m, m.startCommand(command, m.turnActive)
 	}
 
+	return m, m.beginTurn(input)
+}
+
+// beginTurn appends the user card and starts a backend turn.
+func (m *Model) beginTurn(input string) tea.Cmd {
 	m.messages = append(m.messages, messageCard{role: roleUser, text: input})
 	m.turnActive = true
 	operationID := m.nextOperation()
 	m.activeTurnID = operationID
 	m.turnTerminalSeen = false
 	m.syncViewport(true)
-	return m, m.turnCmd(operationID, input)
+	return m.turnCmd(operationID, input)
+}
+
+// startQueuedTurn drains queuedUserInput into a new turn when the UI is idle.
+func (m *Model) startQueuedTurn() tea.Cmd {
+	input := strings.TrimSpace(m.queuedUserInput)
+	if input == "" {
+		return nil
+	}
+	m.queuedUserInput = ""
+	return m.beginTurn(input)
 }
 
 func (m *Model) startCommand(command chat.ParsedCommand, startedDuringTurn bool) tea.Cmd {
@@ -502,6 +535,7 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result, star
 			m.turnActive, m.activeTurnID = false, 0
 			m.turnTerminalSeen = false
 			m.deferredCommand = nil
+			m.queuedUserInput = ""
 		}
 	}
 	if result.Text != "" {
@@ -602,6 +636,7 @@ func (m *Model) disconnect(err error) {
 	m.connected = false
 	m.awaitingAck = true
 	m.turnActive = false
+	m.queuedUserInput = ""
 	m.err = err
 	m.messages = append(m.messages, messageCard{role: roleError, text: fmt.Sprintf("Connection lost: %v\nPress Enter to close.", err)})
 	m.syncViewport(true)

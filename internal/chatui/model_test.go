@@ -175,19 +175,104 @@ func TestModelExitKeysAndMultiline(t *testing.T) {
 func TestModelDoesNotStartASecondTurnWhileBusy(t *testing.T) {
 	backend := newFakeBackend(chat.State{})
 	m := New(backend, chat.OpenOptions{}, Options{Width: 100, Height: 30})
+	m.openResolved, m.opened, m.connected = true, true, true
 	m.turnActive = true
+	m.activeTurnID = 1
 	m.composer.SetValue("second turn")
 	updated, cmd := m.Update(key(tea.KeyEnter))
 	m = updated.(*Model)
 	if cmd != nil {
 		t.Fatal("busy submit returned a backend command")
 	}
-	if got := m.composer.Value(); got != "second turn" {
-		t.Fatalf("busy composer = %q", got)
+	if got := m.composer.Value(); got != "" {
+		t.Fatalf("busy composer after queue = %q, want empty", got)
+	}
+	if m.queuedUserInput != "second turn" {
+		t.Fatalf("queued input = %q", m.queuedUserInput)
+	}
+	if !hasNoticeContaining(m, "queued") {
+		t.Fatalf("expected queue notice, messages=%+v", m.messages)
 	}
 	if len(backend.turns) != 0 {
 		t.Fatalf("busy turns = %q", backend.turns)
 	}
+
+	// Replacing the queue updates the held draft and notices the replacement.
+	m.composer.SetValue("replacement")
+	updated, cmd = m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	if cmd != nil {
+		t.Fatal("replace queue returned a backend command")
+	}
+	if m.queuedUserInput != "replacement" {
+		t.Fatalf("replaced queue = %q", m.queuedUserInput)
+	}
+	if !hasNoticeContaining(m, "Replaced queued") {
+		t.Fatalf("expected replace notice, messages=%+v", m.messages)
+	}
+
+	// Completing the active turn auto-submits the queued message.
+	updated, next := m.Update(turnDoneMsg{operationID: 1})
+	m = updated.(*Model)
+	if next == nil {
+		t.Fatal("turnDone did not start queued turn")
+	}
+	if m.queuedUserInput != "" {
+		t.Fatalf("queue not drained: %q", m.queuedUserInput)
+	}
+	if !m.turnActive {
+		t.Fatal("queued turn did not become active")
+	}
+	if len(m.messages) == 0 || m.messages[len(m.messages)-1].role != roleUser || m.messages[len(m.messages)-1].text != "replacement" {
+		t.Fatalf("queued user card missing: %+v", m.messages)
+	}
+	// continuePump batches turnCmd with waitEventCmd; run children until the
+	// fake backend records the auto-submitted turn.
+	msg := next()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("turnDone cmd returned %T, want tea.BatchMsg", msg)
+	}
+	for _, child := range batch {
+		_ = child()
+	}
+	if len(backend.turns) != 1 || backend.turns[0] != "replacement" {
+		t.Fatalf("auto-submitted turns = %q", backend.turns)
+	}
+}
+
+func TestModelHelpWorksWhileTurnActive(t *testing.T) {
+	backend := newFakeBackend(chat.State{})
+	backend.commandResult = chat.Result{Commands: chat.Commands()}
+	m := New(backend, chat.OpenOptions{}, Options{Width: 100, Height: 30})
+	m.openResolved, m.opened, m.connected = true, true, true
+	m.turnActive = true
+	m.activeTurnID = 3
+	m.composer.SetValue("/help")
+	updated, cmd := m.Update(key(tea.KeyEnter))
+	m = updated.(*Model)
+	if cmd == nil {
+		t.Fatal("/help while busy did not start a command")
+	}
+	if m.queuedUserInput != "" {
+		t.Fatalf("help must not queue: %q", m.queuedUserInput)
+	}
+	m = updateForTest(t, m, commandResultMsg{
+		command: chat.ParsedCommand{Name: chat.CommandHelp},
+		result:  chat.Result{Commands: chat.Commands()},
+	})
+	if m.overlay != overlayHelp {
+		t.Fatalf("help overlay = %v", m.overlay)
+	}
+}
+
+func hasNoticeContaining(m *Model, substr string) bool {
+	for _, card := range m.messages {
+		if card.role == roleNotice && strings.Contains(card.text, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestModelResizeStreamsToolsAndDisconnect(t *testing.T) {
