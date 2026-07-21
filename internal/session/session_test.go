@@ -100,6 +100,37 @@ func TestSessionModelAliasPersistsAcrossGetLatestAndList(t *testing.T) {
 	}
 }
 
+func TestSettersReturnNotFoundForMissingSession(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	missingID := "ses_does_not_exist"
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "SetTitle",
+			call: func() error { return s.SetTitle(ctx, missingID, "title") },
+		},
+		{
+			name: "SetSummary",
+			call: func() error { return s.SetSummary(ctx, missingID, "summary") },
+		},
+		{
+			name: "SetModelAlias",
+			call: func() error { return s.SetModelAlias(ctx, missingID, "alias") },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("%s = %v, want ErrNotFound", tt.name, err)
+			}
+		})
+	}
+}
+
 func TestSearchFindsTextAndToolResults(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

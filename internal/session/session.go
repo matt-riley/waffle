@@ -70,16 +70,36 @@ func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
 
 // SetTitle names a session (typically from its first user message).
 func (s *Store) SetTitle(ctx context.Context, id, title string) error {
-	_, err := s.db.ExecContext(ctx,
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`, title, s.nowStr(), id)
-	return err
+	if err != nil {
+		return fmt.Errorf("set session title: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-title result: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetSummary records the reflection pass's summary.
 func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
-	_, err := s.db.ExecContext(ctx,
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`, summary, s.nowStr(), id)
-	return err
+	if err != nil {
+		return fmt.Errorf("set session summary: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-summary result: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetModelAlias records the configured model alias selected for a session.
