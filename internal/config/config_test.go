@@ -526,6 +526,86 @@ func TestHomeRespectsEnv(t *testing.T) {
 	}
 }
 
+func TestPathPrecedence(t *testing.T) {
+	// Reset process override so cases do not leak across subtests.
+	SetConfigPath("")
+	t.Cleanup(func() { SetConfigPath("") })
+
+	t.Setenv("WAFFLE_HOME", "/tmp/waffle-path-home")
+	t.Setenv("WAFFLE_CONFIG", "")
+
+	// Default: $WAFFLE_HOME/config.toml
+	got, err := Path()
+	if err != nil {
+		t.Fatalf("Path default: %v", err)
+	}
+	want := filepath.Join("/tmp/waffle-path-home", "config.toml")
+	if got != want {
+		t.Errorf("Path default = %q, want %q", got, want)
+	}
+
+	// Env overrides default.
+	t.Setenv("WAFFLE_CONFIG", "/custom/via-env.toml")
+	got, err = Path()
+	if err != nil {
+		t.Fatalf("Path env: %v", err)
+	}
+	if got != "/custom/via-env.toml" {
+		t.Errorf("Path env = %q, want /custom/via-env.toml", got)
+	}
+
+	// SetConfigPath (CLI flag) overrides env.
+	SetConfigPath("/custom/via-flag.toml")
+	got, err = Path()
+	if err != nil {
+		t.Fatalf("Path flag: %v", err)
+	}
+	if got != "/custom/via-flag.toml" {
+		t.Errorf("Path flag = %q, want /custom/via-flag.toml", got)
+	}
+
+	// Clearing override restores env precedence.
+	SetConfigPath("")
+	got, err = Path()
+	if err != nil {
+		t.Fatalf("Path after clear: %v", err)
+	}
+	if got != "/custom/via-env.toml" {
+		t.Errorf("Path after clear = %q, want /custom/via-env.toml", got)
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", "/tmp/waffle-resolve-home")
+	t.Setenv("WAFFLE_CONFIG", "/env/config.toml")
+
+	got, err := ResolvePath("/flag/config.toml")
+	if err != nil {
+		t.Fatalf("ResolvePath flag: %v", err)
+	}
+	if got != "/flag/config.toml" {
+		t.Errorf("ResolvePath flag = %q, want /flag/config.toml", got)
+	}
+
+	got, err = ResolvePath("")
+	if err != nil {
+		t.Fatalf("ResolvePath env: %v", err)
+	}
+	if got != "/env/config.toml" {
+		t.Errorf("ResolvePath env = %q, want /env/config.toml", got)
+	}
+
+	t.Setenv("WAFFLE_CONFIG", "")
+	got, err = ResolvePath("")
+	if err != nil {
+		t.Fatalf("ResolvePath default: %v", err)
+	}
+	want := filepath.Join("/tmp/waffle-resolve-home", "config.toml")
+	if got != want {
+		t.Errorf("ResolvePath default = %q, want %q", got, want)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

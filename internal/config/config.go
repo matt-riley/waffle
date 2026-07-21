@@ -834,8 +834,34 @@ func homePath(name string) (string, error) {
 	return filepath.Join(h, name), nil
 }
 
-// Path returns the location of config.toml.
-func Path() (string, error) { return homePath("config.toml") }
+// pathOverride is set by SetConfigPath (typically from the CLI --config/-c flag).
+// Empty means no process-level override.
+var pathOverride string
+
+// SetConfigPath sets a process-level config path override. An empty path clears
+// the override so Path falls back to WAFFLE_CONFIG or the default location.
+// Intended for CLI flag handling and tests (use t.Cleanup to reset).
+func SetConfigPath(p string) {
+	pathOverride = p
+}
+
+// ResolvePath returns the config file path with precedence:
+// flagPath (if non-empty) > WAFFLE_CONFIG env > $WAFFLE_HOME/config.toml.
+func ResolvePath(flagPath string) (string, error) {
+	if flagPath != "" {
+		return flagPath, nil
+	}
+	if v := os.Getenv("WAFFLE_CONFIG"); v != "" {
+		return v, nil
+	}
+	return homePath("config.toml")
+}
+
+// Path returns the location of config.toml, honoring SetConfigPath override,
+// then WAFFLE_CONFIG, then the default under WAFFLE_HOME.
+func Path() (string, error) {
+	return ResolvePath(pathOverride)
+}
 
 // DBPath returns the location of waffle's SQLite database.
 func DBPath() (string, error) { return homePath("waffle.db") }

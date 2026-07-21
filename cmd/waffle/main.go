@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/backup"
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/telemetry"
@@ -82,6 +84,14 @@ func main() {
 var errUsage = errors.New("usage")
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	args, configPath, err := parseGlobalArgs(args)
+	if err != nil {
+		return err
+	}
+	if configPath != "" {
+		config.SetConfigPath(configPath)
+	}
+
 	if len(args) == 0 {
 		usage(stderr)
 		return errUsage
@@ -186,11 +196,49 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 }
 
+// parseGlobalArgs strips leading global flags from args.
+// Supported: --config PATH, --config=PATH, -c PATH, -c=PATH.
+// Returns the remaining args and any config path override (empty if unset).
+// Unknown flags and the subcommand stop stripping and are left in rest.
+func parseGlobalArgs(args []string) (rest []string, configPath string, err error) {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "--config" || a == "-c":
+			if i+1 >= len(args) {
+				return nil, "", fmt.Errorf("%s requires a path argument", a)
+			}
+			configPath = args[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--config="):
+			configPath = strings.TrimPrefix(a, "--config=")
+			if configPath == "" {
+				return nil, "", errors.New("--config requires a path argument")
+			}
+			i++
+		case strings.HasPrefix(a, "-c="):
+			configPath = strings.TrimPrefix(a, "-c=")
+			if configPath == "" {
+				return nil, "", errors.New("-c requires a path argument")
+			}
+			i++
+		default:
+			return args[i:], configPath, nil
+		}
+	}
+	return args[i:], configPath, nil
+}
+
 func usage(w io.Writer) {
 	fmt.Fprint(w, `waffle — a personal AI agent
 
 Usage:
-  waffle <command> [arguments]
+  waffle [global flags] <command> [arguments]
+
+Global flags:
+  -c, --config path   config file (default: $WAFFLE_HOME/config.toml;
+                      also: WAFFLE_CONFIG env)
 
 Commands:
   setup     first-run: secret init, provider add, starter profile
