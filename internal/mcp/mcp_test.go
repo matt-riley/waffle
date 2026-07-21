@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A tiny MCP server written as a shell script: reads JSON-RPC lines,
@@ -68,6 +70,82 @@ func TestDockerSandboxMCPExecution(t *testing.T) {
 	if len(box.Defs()) != 0 {
 		t.Fatalf("unexpected tools: %v", box.Defs())
 	}
+}
+
+// TestDockerCloseRemovesContainer is the gated #97 proof: after Close on a
+// docker-wrapped MCP client, docker inspect must not find the named container.
+// Run with: WAFFLE_TEST_DOCKER=1 go test ./internal/mcp -run TestDockerCloseRemovesContainer -count=1 -v
+func TestDockerCloseRemovesContainer(t *testing.T) {
+	if os.Getenv("WAFFLE_TEST_DOCKER") != "1" {
+		t.Skip("set WAFFLE_TEST_DOCKER=1 to run Docker MCP container cleanup integration")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not on PATH")
+	}
+
+	server := Server{
+		Name:    "close-cleanup",
+		Command: "sh",
+		Args: []string{"-c", `while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id";;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id";;
+  esac
+done`},
+	}
+	planned, opts := PlanLaunch(server, "sandbox", "docker", "", "alpine:3.20", "none")
+	if planned.DockerContainer == "" {
+		t.Fatal("PlanLaunch sandbox+docker must set DockerContainer name")
+	}
+	name := planned.DockerContainer
+
+	client, err := ConnectRestricted(context.Background(), planned, opts)
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	if client.containerName != name {
+		t.Fatalf("client.containerName = %q, want %q", client.containerName, name)
+	}
+
+	// Container must exist while the session is live.
+	if !dockerContainerExists(t, name) {
+		t.Fatalf("container %q not running after connect (docker inspect failed)", name)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After Close, stop/rm must have removed it — inspect must fail.
+	deadline := time.Now().Add(10 * time.Second)
+	for dockerContainerExists(t, name) {
+		if time.Now().After(deadline) {
+			t.Fatalf("container %q still present after Close (docker inspect succeeded)", name)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// dockerContainerExists reports whether docker inspect finds name (any state).
+func dockerContainerExists(t *testing.T, name string) bool {
+	t.Helper()
+	cmd := exec.Command("docker", "inspect", name)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true
+	}
+	// Missing container: docker returns non-zero; surface other failures.
+	msg := string(out) + err.Error()
+	if strings.Contains(msg, "No such object") || strings.Contains(msg, "no such object") {
+		return false
+	}
+	// Also accept empty-name / not found patterns from docker CLI variants.
+	if strings.Contains(strings.ToLower(msg), "no such") {
+		return false
+	}
+	t.Logf("docker inspect %s: %v\n%s", name, err, out)
+	return false
 }
 
 func TestConnectListAndCall(t *testing.T) {
