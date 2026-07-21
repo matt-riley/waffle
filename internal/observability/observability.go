@@ -156,12 +156,18 @@ func (s *Service) RecordUsage(_ context.Context, id string, usage llm.Usage) err
 }
 
 // Finish persists an active run's final metrics and removes it from memory.
+// When the store is nil, the run is still removed from the active map but
+// metrics are not persisted (graceful degrade, matching HealthSnapshot).
 func (s *Service) Finish(ctx context.Context, id, outcome string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	run, exists := s.active[id]
 	if !exists {
 		return fmt.Errorf("run %q is not active", id)
+	}
+	if s.store == nil {
+		delete(s.active, id)
+		return nil
 	}
 	endedAt := s.now()
 	if _, err := s.store.DB.ExecContext(ctx, `
@@ -177,7 +183,8 @@ func (s *Service) Finish(ctx context.Context, id, outcome string) error {
 }
 
 // Snapshot returns active runs, recent completed runs, and the stable empty
-// retry queue placeholder.
+// retry queue placeholder. When the store is nil, recent runs are empty
+// (graceful degrade, matching HealthSnapshot).
 func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	now := s.now()
 	s.mu.Lock()
@@ -191,6 +198,10 @@ func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	}
 	s.mu.Unlock()
 	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+
+	if s.store == nil {
+		return Snapshot{Active: active, Recent: make([]RecentRun, 0), RetryQueue: make([]any, 0)}, nil
+	}
 
 	rows, err := s.store.DB.QueryContext(ctx, `
 		SELECT id, session_id, source, phase, outcome,

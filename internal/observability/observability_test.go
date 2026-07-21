@@ -155,6 +155,55 @@ func TestSnapshotIsEmptyWithStableEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestNilStoreFinishAndSnapshotDoNotPanic(t *testing.T) {
+	svc := New(nil, nil)
+	ctx := context.Background()
+
+	if err := svc.Start(ctx, "r1", "s1", "src", "agent", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot with an active run and no store must not panic.
+	snap, err := svc.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot with nil store: %v", err)
+	}
+	if len(snap.Active) != 1 {
+		t.Fatalf("active runs = %d, want 1", len(snap.Active))
+	}
+	if snap.Recent == nil || snap.RetryQueue == nil {
+		t.Fatalf("nil-store snapshot arrays must not be nil: %+v", snap)
+	}
+	if len(snap.Recent) != 0 || len(snap.RetryQueue) != 0 {
+		t.Errorf("nil-store recent/retry = %+v, want empty", snap)
+	}
+
+	// Finish removes from active without persisting when store is nil.
+	if err := svc.Finish(ctx, "r1", "ok"); err != nil {
+		t.Fatalf("Finish with nil store: %v", err)
+	}
+
+	snap, err = svc.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot after Finish: %v", err)
+	}
+	if len(snap.Active) != 0 {
+		t.Errorf("active after Finish = %d, want 0", len(snap.Active))
+	}
+	if len(snap.Recent) != 0 {
+		t.Errorf("recent after Finish with nil store = %d, want 0", len(snap.Recent))
+	}
+
+	// HealthSnapshot already degrades gracefully with a nil store.
+	health, err := svc.HealthSnapshot(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("HealthSnapshot with nil store: %v", err)
+	}
+	if health.Database || health.Healthy {
+		t.Errorf("nil-store health = %+v, want Database=false Healthy=false", health)
+	}
+}
+
 func testService(t *testing.T) (context.Context, *Service, *time.Time) {
 	t.Helper()
 	ctx := context.Background()
