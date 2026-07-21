@@ -355,3 +355,24 @@ caches it until five minutes before expiry, and records `backend=github-app`
 plus the repo scope in its audit row. If `[github.app]` is absent, waffle uses
 the scoped `GITHUB_TOKEN`/`secret://github/token` fallback. A session bound to
 repository A cannot mint a credential for repository B.
+
+## Workspace egress
+
+`[workspace] egress` controls how repository workspace containers reach the
+network. Defaults are deny-by-default:
+
+| Value | Docker network | Host broker (`waffle-host`) | Wider internet |
+| --- | --- | --- | --- |
+| `none` (default) | user-defined bridge `waffle-ws` | reachable via `--add-host waffle-host:host-gateway` | proxy-aware HTTP(S) clients are pointed at the broker with an empty allowlist (deny-all). Raw TCP on the bridge is **not** blocked by Docker and may still leave the host — treat `none` as best-effort, not a hard network jail. |
+| `allowlist` | same `waffle-ws` bridge | same host-gateway path | HTTP(S) only through the broker egress proxy for hosts listed in `[workspace] allowlist` |
+| `full` | default Docker `bridge` | same host-gateway path when the broker URL is set | unrestricted |
+
+Waffle creates the `waffle-ws` network on demand (`docker network create waffle-ws`)
+before starting a none/allowlist workspace. Operators do not need to pre-create
+it; concurrent creates are ignored when the network already exists.
+
+**Why not `--network none`?** Docker network mode `none` has no route to the
+host gateway, so `WAFFLE_BROKER` / `waffle git-credential` cannot reach the
+credential broker and `ws open` clone fails. The dedicated bridge keeps the
+broker path working while still avoiding open container egress for the default
+posture.

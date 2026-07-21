@@ -20,8 +20,9 @@ type ContainerOpts struct {
 	Network   string
 	BrokerURL string
 	Token     string
-	// ProxyURL is the host broker's egress proxy. It is only used for the
-	// allowlist posture; the broker remains the policy enforcement point.
+	// ProxyURL is the host broker's egress proxy. Used for allowlist and
+	// for none (when set) so proxy-aware clients hit the broker; the broker
+	// remains the policy enforcement point.
 	ProxyURL   string
 	ProxyToken string
 	SelfPath   string // waffle binary to bind-mount
@@ -66,6 +67,11 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 	if err := sandbox.WriteSessionToken(opts.QueueDir, opts.Token); err != nil {
 		return err
 	}
+	// Ensure the user-defined bridge for none/allowlist exists before run so
+	// waffle-host:host-gateway can resolve (#95).
+	if err := d.ensureNetwork(ctx, opts.Network); err != nil {
+		return err
+	}
 	if err := d.docker(ctx, "volume", "create", opts.Volume); err != nil {
 		return err
 	}
@@ -77,6 +83,25 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 		return err
 	}
 	return nil
+}
+
+// ensureNetwork creates a user-defined Docker network when needed. Built-in
+// modes (bridge/none/host) are left alone. "already exists" is ignored so
+// concurrent workspace starts are safe.
+func (d DockerRuntime) ensureNetwork(ctx context.Context, name string) error {
+	switch name {
+	case "", "bridge", "none", "host":
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "docker", "network", "create", name).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(string(out))
+	if strings.Contains(msg, "already exists") {
+		return nil
+	}
+	return fmt.Errorf("docker network create %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
 }
 
 // workspaceRunArgs builds the docker run invocation; separated for testing.

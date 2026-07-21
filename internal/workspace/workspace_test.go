@@ -466,6 +466,168 @@ func TestReaperKeepsDirtyTTLWorkspaceAndNotifies(t *testing.T) {
 	}
 }
 
+// fakeSweepManager records Idle/Close calls and fails a configured workspace id (#110).
+type fakeSweepManager struct {
+	items      []Workspace
+	failIdle   string
+	idleCalls  []string
+	closeCalls []string
+}
+
+func (f *fakeSweepManager) List(context.Context) ([]Workspace, error) {
+	out := make([]Workspace, len(f.items))
+	copy(out, f.items)
+	return out, nil
+}
+
+func (f *fakeSweepManager) Idle(_ context.Context, id string) error {
+	f.idleCalls = append(f.idleCalls, id)
+	if id == f.failIdle {
+		return fmt.Errorf("simulated idle failure for %s", id)
+	}
+	// Reflect idle status for subsequent close checks in the same pass.
+	for i := range f.items {
+		if f.items[i].ID == id {
+			f.items[i].Status = StatusIdle
+		}
+	}
+	return nil
+}
+
+func (f *fakeSweepManager) Close(_ context.Context, id string, _ bool) (*CloseReport, error) {
+	f.closeCalls = append(f.closeCalls, id)
+	for i := range f.items {
+		if f.items[i].ID == id {
+			f.items[i].Status = StatusClosed
+		}
+	}
+	return nil, nil
+}
+
+// TestReaperSweepContinuesAfterIdleError: middle workspace Idle fails; first
+// and third still get Idle; Sweep returns a joined error naming the failed id (#110).
+func TestReaperSweepContinuesAfterIdleError(t *testing.T) {
+	stale := time.Now().Add(-2 * time.Hour).UTC()
+	fake := &fakeSweepManager{
+		failIdle: "ws-mid",
+		items: []Workspace{
+			{ID: "ws-first", Repo: "o/a", Status: StatusOpen, LastActive: stale, UpdatedAt: stale},
+			{ID: "ws-mid", Repo: "o/b", Status: StatusOpen, LastActive: stale, UpdatedAt: stale},
+			{ID: "ws-third", Repo: "o/c", Status: StatusOpen, LastActive: stale, UpdatedAt: stale},
+		},
+	}
+	r := &Reaper{
+		Manager:     fake,
+		IdleTimeout: time.Hour,
+		Now:         time.Now,
+	}
+	err := r.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("Sweep should return joined error when middle Idle fails")
+	}
+	if !strings.Contains(err.Error(), "ws-mid") {
+		t.Fatalf("joined error should mention failed id: %v", err)
+	}
+	if !strings.Contains(err.Error(), "idle workspace") {
+		t.Fatalf("joined error should mention idle: %v", err)
+	}
+	wantIdle := []string{"ws-first", "ws-mid", "ws-third"}
+	if len(fake.idleCalls) != 3 {
+		t.Fatalf("idle calls = %v, want all three workspaces", fake.idleCalls)
+	}
+	for i, id := range wantIdle {
+		if fake.idleCalls[i] != id {
+			t.Fatalf("idleCalls[%d]=%q, want %q (full=%v)", i, fake.idleCalls[i], id, fake.idleCalls)
+		}
+	}
+	// First and third should have been marked idle despite mid failure.
+	for _, id := range []string{"ws-first", "ws-third"} {
+		found := false
+		for _, ws := range fake.items {
+			if ws.ID == id {
+				found = true
+				if ws.Status != StatusIdle {
+					t.Errorf("%s status=%q, want idle", id, ws.Status)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("workspace %s missing from fake items", id)
+		}
+	}
+	// Mid remains open because Idle failed.
+	for _, ws := range fake.items {
+		if ws.ID == "ws-mid" && ws.Status != StatusOpen {
+			t.Errorf("ws-mid status=%q, want open (Idle failed)", ws.Status)
+		}
+	}
+}
+
+// TestReaperSweepContinuesAfterNotifyError: notify failure on a dirty workspace
+// is joined and does not abort the rest of the pass (#110).
+func TestReaperSweepContinuesAfterNotifyError(t *testing.T) {
+	stale := time.Now().Add(-48 * time.Hour).UTC()
+	fake := &fakeSweepManager{
+		items: []Workspace{
+			{ID: "ws-a", Repo: "o/a", Status: StatusIdle, LastActive: stale, UpdatedAt: stale},
+			{ID: "ws-b", Repo: "o/b", Status: StatusIdle, LastActive: stale, UpdatedAt: stale},
+		},
+	}
+	// Override Close to report dirty for first workspace only.
+	closing := &dirtyFirstCloser{inner: fake, dirtyID: "ws-a"}
+	var notified []string
+	r := &Reaper{
+		Manager:  closing,
+		CloseTTL: time.Hour,
+		Now:      time.Now,
+		Notify: func(_ context.Context, got Workspace, msg string) error {
+			notified = append(notified, got.ID)
+			return fmt.Errorf("notify transport down")
+		},
+	}
+	err := r.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("Sweep should return joined error when notify fails")
+	}
+	if !strings.Contains(err.Error(), "ws-a") {
+		t.Fatalf("error should mention notify target: %v", err)
+	}
+	// Second workspace still closed.
+	if len(closing.inner.closeCalls) < 2 {
+		t.Fatalf("close calls = %v, want both workspaces processed", closing.inner.closeCalls)
+	}
+	if len(notified) == 0 || notified[0] != "ws-a" {
+		t.Fatalf("notified = %v", notified)
+	}
+	for _, ws := range fake.items {
+		if ws.ID == "ws-b" && ws.Status != StatusClosed {
+			t.Errorf("ws-b status=%q, want closed after notify failure on ws-a", ws.Status)
+		}
+	}
+}
+
+// dirtyFirstCloser wraps a SweepManager so Close on dirtyID returns a dirty report.
+type dirtyFirstCloser struct {
+	inner   *fakeSweepManager
+	dirtyID string
+}
+
+func (d *dirtyFirstCloser) List(ctx context.Context) ([]Workspace, error) {
+	return d.inner.List(ctx)
+}
+
+func (d *dirtyFirstCloser) Idle(ctx context.Context, id string) error {
+	return d.inner.Idle(ctx, id)
+}
+
+func (d *dirtyFirstCloser) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
+	if id == d.dirtyID {
+		d.inner.closeCalls = append(d.inner.closeCalls, id)
+		return &CloseReport{Dirty: " M file.txt"}, fmt.Errorf("workspace %s has unsaved work", id)
+	}
+	return d.inner.Close(ctx, id, force)
+}
+
 func TestOpenRefreshesBrokerTokenForExistingWorkspace(t *testing.T) {
 	ctx := context.Background()
 	mgr, rt := newTestManager(t, &scriptedBash{})

@@ -88,7 +88,12 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 		}
 		mgr := newWorkspaceManager(cfg, st, b)
 		mgr.BrokerURL = brokerURL
-		if cfg.Workspace.Egress == "allowlist" {
+		// allowlist and none: point HTTP(S)_PROXY at the broker so proxy-aware
+		// clients cannot reach the wider internet without an allowlist entry.
+		// none uses an empty broker allowlist (deny-all); allowlist is preloaded.
+		// full leaves ProxyURL unset for unrestricted egress (#95).
+		switch cfg.Workspace.Egress {
+		case "allowlist", "none", "":
 			mgr.ProxyURL = brokerURL + "/egress"
 		}
 		ws, client, openErr := mgr.OpenWithProfile(ctx, repoArg, profile)

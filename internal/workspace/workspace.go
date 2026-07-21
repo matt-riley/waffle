@@ -72,11 +72,14 @@ type Manager struct {
 	// DefaultImage when the repo has no devcontainer (or before we can
 	// look).
 	DefaultImage string
-	// Network for workspace containers; cloning needs egress, so default
-	// bridge.
+	// Network for workspace containers when egress is full; default bridge.
 	Network string
-	// Egress is none (default), allowlist, or full. Allowlist uses the
-	// host-side broker rather than granting the container a network.
+	// Egress is none (default), allowlist, or full.
+	// none/allowlist attach to WorkspaceBrokerNetwork so the host broker is
+	// reachable via waffle-host:host-gateway (Docker network mode "none"
+	// cannot reach the host). full uses Network/bridge for open egress.
+	// allowlist (and none, when ProxyURL is set) point HTTP(S)_PROXY at the
+	// host broker; none with an empty broker allowlist denies non-broker HTTPS.
 	Egress          string
 	EgressAllowlist []string
 	ProxyURL        string
@@ -332,13 +335,21 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	return ws, client, nil
 }
 
+// WorkspaceBrokerNetwork is the user-defined Docker bridge used by
+// none/allowlist workspace containers so --add-host waffle-host:host-gateway
+// can reach the host credential broker (#95). Docker network mode "none"
+// has no host route.
+const WorkspaceBrokerNetwork = "waffle-ws"
+
 // egressNetwork is the docker network mode implied by an egress posture.
+// none/allowlist use a dedicated bridge (not Docker "none") so the host
+// broker remains reachable; full uses the default bridge for open egress.
 func egressNetwork(egress string) string {
 	switch egress {
 	case "full":
 		return "bridge"
 	default: // "", "none", "allowlist"
-		return "none"
+		return WorkspaceBrokerNetwork
 	}
 }
 
@@ -347,13 +358,20 @@ func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
 	if egress == "" {
 		egress = "none"
 	}
-	network := m.Network
-	proxy := ""
-	if egress == "none" || egress == "allowlist" {
-		network = "none"
+	network := egressNetwork(egress)
+	if egress == "full" && m.Network != "" {
+		network = m.Network
 	}
-	if egress == "allowlist" {
+	proxy := ""
+	// allowlist routes HTTP(S) through the broker proxy. none also points
+	// proxy-aware apps at the broker so non-broker HTTPS fails under an
+	// empty/deny-all allowlist; raw TCP on the bridge may still reach the
+	// internet — see docs/deploy.md.
+	if egress == "allowlist" || egress == "none" {
 		proxy = m.ProxyURL
+		if proxy == "" && m.BrokerURL != "" {
+			proxy = strings.TrimRight(m.BrokerURL, "/") + "/egress"
+		}
 	}
 	return ContainerOpts{
 		Name:       ws.Container,

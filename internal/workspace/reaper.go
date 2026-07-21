@@ -2,14 +2,23 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
+// SweepManager is the Manager surface Reaper.Sweep needs. *Manager implements
+// it; tests may supply a fake that fails individual Idle/Close calls (#110).
+type SweepManager interface {
+	List(ctx context.Context) ([]Workspace, error)
+	Idle(ctx context.Context, id string) error
+	Close(ctx context.Context, id string, force bool) (*CloseReport, error)
+}
+
 // Reaper sweeps workspaces from the single serve owner. A zero timeout
 // disables that part of the sweep.
 type Reaper struct {
-	Manager     *Manager
+	Manager     SweepManager
 	IdleTimeout time.Duration
 	CloseTTL    time.Duration
 	Now         func() time.Time
@@ -23,7 +32,18 @@ func (r *Reaper) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Sweep performs one deterministic lifecycle pass.
+// managerIdleTimeout returns the Manager's IdleTimeout when the concrete
+// type is *Manager (may be tightened by repo policy #53); otherwise zero.
+func (r *Reaper) managerIdleTimeout() time.Duration {
+	if m, ok := r.Manager.(*Manager); ok && m != nil {
+		return m.IdleTimeout
+	}
+	return 0
+}
+
+// Sweep performs one deterministic lifecycle pass. Per-workspace Idle/Close
+// (and dirty-notify) failures are accumulated with errors.Join and do not
+// abort the rest of the pass (#110).
 func (r *Reaper) Sweep(ctx context.Context) error {
 	if r == nil || r.Manager == nil {
 		return nil
@@ -35,11 +55,12 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 	now := r.now()
 	idleTimeout := r.IdleTimeout
 	// Prefer manager idle when set (may be tightened by repo policy #53).
-	if r.Manager != nil && r.Manager.IdleTimeout > 0 {
-		if idleTimeout <= 0 || r.Manager.IdleTimeout < idleTimeout {
-			idleTimeout = r.Manager.IdleTimeout
+	if mt := r.managerIdleTimeout(); mt > 0 {
+		if idleTimeout <= 0 || mt < idleTimeout {
+			idleTimeout = mt
 		}
 	}
+	var errs []error
 	for _, ws := range items {
 		last := ws.LastActive
 		if last.IsZero() {
@@ -48,9 +69,10 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 		age := now.Sub(last)
 		if ws.Status == StatusOpen && idleTimeout > 0 && age >= idleTimeout {
 			if err := r.Manager.Idle(ctx, ws.ID); err != nil {
-				return fmt.Errorf("idle workspace %s: %w", ws.ID, err)
+				errs = append(errs, fmt.Errorf("idle workspace %s: %w", ws.ID, err))
+			} else {
+				ws.Status = StatusIdle
 			}
-			ws.Status = StatusIdle
 		}
 		if r.CloseTTL <= 0 || age < r.CloseTTL || ws.Status == StatusClosed {
 			continue
@@ -62,11 +84,11 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 		if report != nil && (report.Dirty != "" || report.Unpushed != "") && r.Notify != nil {
 			msg := fmt.Sprintf("workspace %s passed its close TTL but has unpushed or unsaved work; it was kept", ws.Repo)
 			if err := r.Notify(ctx, ws, msg); err != nil {
-				return fmt.Errorf("notify workspace %s: %w", ws.ID, err)
+				errs = append(errs, fmt.Errorf("notify workspace %s: %w", ws.ID, err))
 			}
 			continue
 		}
-		return fmt.Errorf("close workspace %s: %w", ws.ID, closeErr)
+		errs = append(errs, fmt.Errorf("close workspace %s: %w", ws.ID, closeErr))
 	}
-	return nil
+	return errors.Join(errs...)
 }

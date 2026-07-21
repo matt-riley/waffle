@@ -92,8 +92,11 @@ What's here, by capability:
   refuses on unpushed work. Egress is deny-by-default; choose
   `[workspace] egress = "none"` (default), `"allowlist"` with
   `allowlist = ["api.github.com"]` (host broker proxy), or `"full"` only when
-  unrestricted network access is required. Allowlisted HTTP requests are
-  token-authenticated, audited, and rejected if DNS resolves to private
+  unrestricted network access is required. `none` and `allowlist` attach the
+  container to the `waffle-ws` user-defined Docker bridge (not `--network none`)
+  so the host credential broker remains reachable via `waffle-host`; see
+  [docs/deploy.md](docs/deploy.md#workspace-egress). Allowlisted HTTP requests
+  are token-authenticated, audited, and rejected if DNS resolves to private
   address space.
   Under `waffle serve`, open workspaces stop after 30 minutes idle and close
   after 168 hours only when clean; set `[workspace] idle_timeout` or
