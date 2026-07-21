@@ -332,24 +332,30 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	prefix := fullHistory[:n-recentWindow]
 	// Cache by session + prefix length so successive iterations of one Run
 	// (and successive Runs in-process) do not re-summarize unchanged prefixes (#61).
+	// When session id is empty, skip the cache entirely: keying only on
+	// prefix length would collide across unrelated runs on the same Agent (#120).
 	sid := sessionID(ctx)
-	cacheKey := fmt.Sprintf("%s:%d", sid, len(prefix))
 	summaryText := ""
-	a.summaryMu.Lock()
-	if a.summaryCache != nil {
-		if e, ok := a.summaryCache[cacheKey]; ok && e.prefixLen == len(prefix) {
-			summaryText = e.text
-		}
-	}
-	a.summaryMu.Unlock()
-	if summaryText == "" {
-		summaryText = a.summarize(ctx, prefix, onUsage)
+	if sid != "" {
+		cacheKey := fmt.Sprintf("%s:%d", sid, len(prefix))
 		a.summaryMu.Lock()
-		if a.summaryCache == nil {
-			a.summaryCache = map[string]summaryEntry{}
+		if a.summaryCache != nil {
+			if e, ok := a.summaryCache[cacheKey]; ok && e.prefixLen == len(prefix) {
+				summaryText = e.text
+			}
 		}
-		a.summaryCache[cacheKey] = summaryEntry{prefixLen: len(prefix), text: summaryText}
 		a.summaryMu.Unlock()
+		if summaryText == "" {
+			summaryText = a.summarize(ctx, prefix, onUsage)
+			a.summaryMu.Lock()
+			if a.summaryCache == nil {
+				a.summaryCache = map[string]summaryEntry{}
+			}
+			a.summaryCache[cacheKey] = summaryEntry{prefixLen: len(prefix), text: summaryText}
+			a.summaryMu.Unlock()
+		}
+	} else {
+		summaryText = a.summarize(ctx, prefix, onUsage)
 	}
 
 	// Carry as extra system text so it never lands at messages[0]. System

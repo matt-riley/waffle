@@ -401,6 +401,61 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 	}
 }
 
+// TestSummaryCacheSkippedWhenSessionIDEmpty verifies that two unrelated
+// runs on the same Agent with no session ID and equal-length prefixes do
+// not share a cached summary (#120).
+func TestSummaryCacheSkippedWhenSessionIDEmpty(t *testing.T) {
+	// Two histories of equal length (so equal prefix lengths) but different content.
+	histA := make([]llm.Message, 0, (recentWindow+3)*2+1)
+	histB := make([]llm.Message, 0, (recentWindow+3)*2+1)
+	for i := 0; i < recentWindow+3; i++ {
+		histA = append(histA, llm.UserText(fmt.Sprintf("alpha-%d", i)))
+		histA = append(histA, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: fmt.Sprintf("alpha-a%d", i)}}})
+		histB = append(histB, llm.UserText(fmt.Sprintf("beta-%d", i)))
+		histB = append(histB, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: fmt.Sprintf("beta-a%d", i)}}})
+	}
+	histA = append(histA, llm.UserText("question-a"))
+	histB = append(histB, llm.UserText("question-b"))
+	if len(histA) != len(histB) {
+		t.Fatalf("hist lengths differ: %d vs %d", len(histA), len(histB))
+	}
+
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("summary about alpha"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("answer-a"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("summary about beta"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("answer-b"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+	// No WithSession — empty session id (would collide on ":N" before the fix).
+	if _, err := a.Run(context.Background(), histA, Hooks{}); err != nil {
+		t.Fatalf("run A: %v", err)
+	}
+	if _, err := a.Run(context.Background(), histB, Hooks{}); err != nil {
+		t.Fatalf("run B: %v", err)
+	}
+
+	// Without caching, each run summarizes independently: 2 summarize + 2 main.
+	if len(p.requests) != 4 {
+		t.Fatalf("requests=%d want 4 (summarize+main per run, no cache share)", len(p.requests))
+	}
+	// Main request for run B must contain beta summary, not alpha.
+	mainB := p.requests[3]
+	if !strings.Contains(mainB.System, "summary about beta") {
+		t.Errorf("run B system text should contain beta summary, got: %q", mainB.System)
+	}
+	if strings.Contains(mainB.System, "summary about alpha") {
+		t.Errorf("run B system text cross-contaminated with alpha summary: %q", mainB.System)
+	}
+	// Cache must remain empty when sid is absent.
+	a.summaryMu.Lock()
+	cacheLen := len(a.summaryCache)
+	a.summaryMu.Unlock()
+	if cacheLen != 0 {
+		t.Errorf("summaryCache len=%d want 0 when session id empty", cacheLen)
+	}
+}
+
 // TestSummaryCacheSingleCallPerPrefix verifies M iterations over overflowing
 // history summarize each prefix length at most once (#61).
 func TestSummaryCacheSingleCallPerPrefix(t *testing.T) {
