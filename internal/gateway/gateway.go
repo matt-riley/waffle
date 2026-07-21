@@ -22,6 +22,7 @@ import (
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/textcut"
 	"github.com/matt-riley/waffle/internal/usage"
 )
 
@@ -478,8 +479,9 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 			}
 		}
 		// Keep short to avoid channel limits and excessive internal detail.
+		// Cut on a rune boundary so multi-byte error text stays valid UTF-8 (#107).
 		if len(detail) > 200 {
-			detail = detail[:200] + "..."
+			detail = textcut.Cut(detail, 200) + "..."
 		}
 		reply = "something went wrong: " + detail
 	}

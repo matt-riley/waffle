@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type sequenceResolver struct {
@@ -279,6 +280,34 @@ func TestTruncateKeepsHeadAndTail(t *testing.T) {
 	}
 	if len(got) > 50 {
 		t.Fatalf("truncate produced %d bytes, want <= 50", len(got))
+	}
+}
+
+// TestTruncateUTF8Safe ensures head/tail cuts never split multi-byte runes (#107).
+func TestTruncateUTF8Safe(t *testing.T) {
+	// Mix ASCII with 4-byte emoji so many byte limits land mid-rune.
+	s := "hi " + strings.Repeat("🌍", 40) + " mid " + strings.Repeat("🎉", 40) + " end"
+	for _, limit := range []int{1, 2, 3, 4, 5, 10, 17, 31, 50, 80, 100, 200} {
+		got := Truncate(s, limit)
+		if !utf8.ValidString(got) {
+			t.Fatalf("Truncate(limit=%d) invalid UTF-8: %q (%v)", limit, got, []byte(got))
+		}
+		if len(got) > limit {
+			t.Fatalf("Truncate(limit=%d) len=%d > limit", limit, len(got))
+		}
+	}
+	// café: é is 2 bytes; force mid-rune cut on a short budget.
+	cafe := strings.Repeat("café ", 30)
+	got := Truncate(cafe, 25)
+	if !utf8.ValidString(got) {
+		t.Fatalf("café Truncate invalid: %q", got)
+	}
+	if len(got) > 25 {
+		t.Fatalf("café Truncate len=%d > 25", len(got))
+	}
+	// Below limit: unchanged.
+	if Truncate("café 🌍", 100) != "café 🌍" {
+		t.Fatal("short multi-byte string modified")
 	}
 }
 

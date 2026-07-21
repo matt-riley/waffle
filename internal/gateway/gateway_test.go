@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/channel"
@@ -656,6 +657,74 @@ func TestGroupOwnerUsesRestrictedAgentTier(t *testing.T) {
 	}
 	if g.AgentGroup != "group" {
 		t.Errorf("agent_group = %q, want group", g.AgentGroup)
+	}
+}
+
+// errProvider always fails Complete with a fixed multi-byte error string.
+type errProvider struct{ msg string }
+
+func (p errProvider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
+	return nil, errors.New(p.msg)
+}
+
+// TestGatewayErrorDetailUTF8Safe ensures agent error replies cut on rune
+// boundaries when the detail is longer than 200 bytes (#107).
+func TestGatewayErrorDetailUTF8Safe(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	adapter := newFakeAdapter()
+	// Error text: ASCII prefix + many 4-byte emoji so byte 200 lands mid-rune.
+	errMsg := "boom " + strings.Repeat("🌍", 80)
+	if len(errMsg) <= 200 {
+		t.Fatalf("fixture too short: %d", len(errMsg))
+	}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: errProvider{msg: errMsg}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = gw.Run(ctx) }()
+
+	// Pair owner.
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner-1", SenderName: "Matt", Text: "hi"}
+	adapter.waitForReply(t, "c1", 1)
+	pending, _ := entities.Pairings(context.Background())
+	if _, err := entities.Approve(context.Background(), pending[0].Code, ""); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	adapter.inbound <- channel.Message{Channel: "fake", ChatID: "c1", SenderID: "owner-1", SenderName: "Matt", Text: "go"}
+	replies := adapter.waitForReply(t, "c1", 2)
+	reply := replies[1]
+	if !strings.HasPrefix(reply, "something went wrong: ") {
+		t.Fatalf("reply = %q", reply)
+	}
+	if !utf8.ValidString(reply) {
+		t.Fatalf("reply invalid UTF-8: %q bytes=%v", reply, []byte(reply))
+	}
+	detail := strings.TrimPrefix(reply, "something went wrong: ")
+	// detail is Cut(err, 200) + "..." so body without "..." is <= 200.
+	if !strings.HasSuffix(detail, "...") {
+		t.Fatalf("detail missing ellipsis: %q", detail)
+	}
+	body := strings.TrimSuffix(detail, "...")
+	if len(body) > 200 {
+		t.Fatalf("detail body len=%d > 200", len(body))
+	}
+	if !utf8.ValidString(body) {
+		t.Fatalf("detail body invalid UTF-8: %q", body)
 	}
 }
 

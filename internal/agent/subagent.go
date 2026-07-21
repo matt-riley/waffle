@@ -11,6 +11,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/spill"
+	"github.com/matt-riley/waffle/internal/textcut"
 	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/usage"
 )
@@ -353,5 +354,6 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	// Cut on a rune boundary so multi-byte text (emoji, accents) stays valid UTF-8 (#107).
+	return textcut.Cut(s, n) + "…"
 }

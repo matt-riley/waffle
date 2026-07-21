@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // Tool is one callable capability.
@@ -102,7 +103,8 @@ func capHostReturn(s string) string {
 
 // Truncate caps tool output so a chatty command can't blow out the context
 // window or bloat the queue DB; it keeps the head and tail, which is where
-// the signal usually is.
+// the signal usually is. Head and tail cuts land on UTF-8 rune boundaries so
+// the result is always valid UTF-8 with len <= limit (#107).
 func Truncate(s string, limit int) string {
 	if limit <= 0 {
 		return ""
@@ -116,7 +118,7 @@ func Truncate(s string, limit int) string {
 		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", len(s)-head-tail)
 		available := limit - len(marker)
 		if available <= 0 {
-			return s[:limit]
+			return textcut.Cut(s, limit)
 		}
 		nextHead := available / 2
 		nextTail := available - nextHead
@@ -125,5 +127,7 @@ func Truncate(s string, limit int) string {
 		}
 		head, tail = nextHead, nextTail
 	}
-	return s[:head] + marker + s[len(s)-tail:]
+	// Snap both ends down to rune boundaries; lengths only shrink, so
+	// len(head)+len(marker)+len(tail) stays <= limit.
+	return textcut.Cut(s, head) + marker + textcut.CutSuffix(s, tail)
 }
