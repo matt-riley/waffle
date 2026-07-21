@@ -196,11 +196,14 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 	}
 	cfg, err := config.Load(cfgPath)
 	add("config parses", err, cfgPath)
-	if _, statErr := os.Stat(cfgPath); errors.Is(statErr, os.ErrNotExist) {
-		// Config.Load supplies defaults when no file exists. Its default
-		// secret reference is a template, not an operator-configured key, so
-		// doctor should report the provider as unconfigured rather than fail.
-		cfg.Provider.APIKey = ""
+	configOK := err == nil
+	if configOK {
+		if _, statErr := os.Stat(cfgPath); errors.Is(statErr, os.ErrNotExist) {
+			// Config.Load supplies defaults when no file exists. Its default
+			// secret reference is a template, not an operator-configured key, so
+			// doctor should report the provider as unconfigured rather than fail.
+			cfg.Provider.APIKey = ""
+		}
 	}
 
 	// Migrate a consistent snapshot of the real DB (or a fresh one if there
@@ -239,50 +242,59 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		add("secret store", nil, "no identity configured (skipped)")
 	}
 
-	// A one-token authenticated completion exercises the provider path that
-	// chat and upgrade ultimately depend on. Missing credentials are an
-	// intentional unconfigured state; all other probe failures block doctor.
-	info, err := providerCheckConfig(ctx, cfg)
-	add("provider reachable", err, info)
-
 	if _, err := exec.LookPath("golangci-lint"); err != nil {
 		add("golangci-lint gate", nil, "not installed (optional; verify gate skipped)")
 	} else {
 		add("golangci-lint gate", nil, "installed (verify gate armed)")
 	}
 
-	// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
-	// container entrypoint. On a non-linux host that must be an explicitly
-	// configured linux build; otherwise the sandbox dies on start with a
-	// misleading "runner appears dead" timeout (#42). This gates on
-	// cfg.UsesDocker(): the global [sandbox] mode is docker, or any
-	// [agent.group.*] opts into docker while the global mode stays host (#33).
-	// Repo workspaces always use docker regardless of mode, but they are not
-	// gated here — `ws open` resolves the same runner binary at use time via
-	// sandbox.ResolveRunnerBinary, so it fails fast with the same error; doctor
-	// can't know ahead of time whether the operator will open one.
-	if cfg.UsesDocker() {
-		info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
-		add("sandbox runner", err, info)
-		// Queue pair round-trip on the host filesystem (same IPC docker mode uses).
-		// Full container start is separate: we probe the daemon and, when available,
-		// a short `docker run --rm` of the configured image's true entrypoint probe.
-		qInfo, qErr := sandboxQueueRoundTrip()
-		add("sandbox queue round-trip", qErr, qInfo)
-		dInfo, dErr := sandboxDockerRoundTrip(cfg.Sandbox.Image)
-		add("sandbox docker round-trip", dErr, dInfo)
+	// Provider, sandbox, and MCP checks need a successfully parsed config.
+	// Running them against a zero-value cfg after Load fails is misleading (#114).
+	if !configOK {
+		const skipReason = "skipped: config did not parse"
+		add("provider reachable", nil, skipReason)
+		add("sandbox runner", nil, skipReason)
+		add("mcp servers", nil, skipReason)
 	} else {
-		add("sandbox runner", nil, "host mode (skipped)")
-	}
+		// A one-token authenticated completion exercises the provider path that
+		// chat and upgrade ultimately depend on. Missing credentials are an
+		// intentional unconfigured state; all other probe failures block doctor.
+		info, err := providerCheckConfig(ctx, cfg)
+		add("provider reachable", err, info)
 
-	// MCP execution authorities (#77 / #79): list each server's name, groups,
-	// and execution authority (host / sandbox / restricted). Informational —
-	// config load already rejects illegal codeintel host/secret setups.
-	if len(cfg.MCP) == 0 {
-		add("mcp servers", nil, "none configured")
-	} else {
-		for _, s := range cfg.MCP {
-			add("mcp "+s.Name+" authority", nil, formatMCPDoctorInfo(s))
+		// Sandbox runner: docker mode bind-mounts a linux waffle binary as the
+		// container entrypoint. On a non-linux host that must be an explicitly
+		// configured linux build; otherwise the sandbox dies on start with a
+		// misleading "runner appears dead" timeout (#42). This gates on
+		// cfg.UsesDocker(): the global [sandbox] mode is docker, or any
+		// [agent.group.*] opts into docker while the global mode stays host (#33).
+		// Repo workspaces always use docker regardless of mode, but they are not
+		// gated here — `ws open` resolves the same runner binary at use time via
+		// sandbox.ResolveRunnerBinary, so it fails fast with the same error; doctor
+		// can't know ahead of time whether the operator will open one.
+		if cfg.UsesDocker() {
+			info, err := sandboxRunnerCheck(cfg.Sandbox.RunnerBinary)
+			add("sandbox runner", err, info)
+			// Queue pair round-trip on the host filesystem (same IPC docker mode uses).
+			// Full container start is separate: we probe the daemon and, when available,
+			// a short `docker run --rm` of the configured image's true entrypoint probe.
+			qInfo, qErr := sandboxQueueRoundTrip()
+			add("sandbox queue round-trip", qErr, qInfo)
+			dInfo, dErr := sandboxDockerRoundTrip(cfg.Sandbox.Image)
+			add("sandbox docker round-trip", dErr, dInfo)
+		} else {
+			add("sandbox runner", nil, "host mode (skipped)")
+		}
+
+		// MCP execution authorities (#77 / #79): list each server's name, groups,
+		// and execution authority (host / sandbox / restricted). Informational —
+		// config load already rejects illegal codeintel host/secret setups.
+		if len(cfg.MCP) == 0 {
+			add("mcp servers", nil, "none configured")
+		} else {
+			for _, s := range cfg.MCP {
+				add("mcp "+s.Name+" authority", nil, formatMCPDoctorInfo(s))
+			}
 		}
 	}
 

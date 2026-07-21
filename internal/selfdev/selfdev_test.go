@@ -576,6 +576,71 @@ func TestDoctorReportsProviderFailure(t *testing.T) {
 	t.Fatal("Doctor did not report a provider reachable check")
 }
 
+func TestDoctorSkipsConfigDependentChecksWhenConfigInvalid(t *testing.T) {
+	// #114: after config.Load fails, provider/sandbox/MCP must be reported as
+	// skipped — not run against a zero-value cfg.
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	// Invalid TOML (unclosed string) so Load fails while the file exists.
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("this is not = valid toml [[["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	checks, ok, err := Doctor(context.Background())
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if ok {
+		t.Fatalf("Doctor ok = true, want false; checks = %+v", checks)
+	}
+
+	byName := map[string]Check{}
+	for _, c := range checks {
+		byName[c.Name] = c
+	}
+
+	cfgCheck, found := byName["config parses"]
+	if !found || cfgCheck.OK {
+		t.Fatalf("config parses = %+v, want failed check", cfgCheck)
+	}
+
+	for _, name := range []string{"provider reachable", "sandbox runner", "mcp servers"} {
+		c, found := byName[name]
+		if !found {
+			t.Errorf("missing check %q; checks = %+v", name, checks)
+			continue
+		}
+		if !c.OK {
+			t.Errorf("%s should be OK (skipped), got %+v", name, c)
+		}
+		if !strings.Contains(c.Info, "skipped: config did not parse") {
+			t.Errorf("%s info = %q, want skipped: config did not parse", name, c.Info)
+		}
+	}
+	// Must not run docker-mode probes or invent host-mode skip wording.
+	for _, name := range []string{"sandbox queue round-trip", "sandbox docker round-trip"} {
+		if _, found := byName[name]; found {
+			t.Errorf("unexpected check %q after config parse failure", name)
+		}
+	}
+	if c, found := byName["sandbox runner"]; found && strings.Contains(c.Info, "host mode") {
+		t.Errorf("sandbox runner must not report host mode on parse failure: %+v", c)
+	}
+
+	// Config-independent checks still run.
+	for _, name := range []string{"database migrates", "secret store", "golangci-lint gate"} {
+		if _, found := byName[name]; !found {
+			// secret store opens vs secret store depending on identity.
+			if name == "secret store" {
+				if _, openFound := byName["secret store opens"]; openFound {
+					continue
+				}
+			}
+			t.Errorf("missing independent check %q; checks = %+v", name, checks)
+		}
+	}
+}
+
 func TestVerifyStepsIncludeEval(t *testing.T) {
 	steps := verifySteps()
 	foundEval := false
