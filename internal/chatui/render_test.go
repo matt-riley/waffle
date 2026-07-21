@@ -111,6 +111,29 @@ func TestRenderMarkdownPlainTextKeepsStructure(t *testing.T) {
 	}
 }
 
+func TestRenderPaletteIncludesDescriptions(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30, NoColor: true})
+	m.palette = chat.Commands()
+	m.paletteVisible = true
+	m.paletteIndex = 0
+	got := m.renderPalette(96)
+	if !strings.Contains(got, "show commands and keys") {
+		t.Fatalf("palette missing help description: %q", got)
+	}
+	if !strings.Contains(got, "/help — ") {
+		t.Fatalf("palette missing Usage — Description form: %q", got)
+	}
+	// Full command set remains legible (truncated with ansi.Truncate, not empty).
+	if !strings.Contains(got, "Commands:") || strings.TrimSpace(got) == "Commands:" {
+		t.Fatalf("palette empty: %q", got)
+	}
+	// Narrow width still truncates safely.
+	narrow := m.renderPalette(40)
+	if !strings.Contains(narrow, "Commands:") {
+		t.Fatalf("narrow palette = %q", narrow)
+	}
+}
+
 func TestBusyFooterElapsedAndLiveTokens(t *testing.T) {
 	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30, NoColor: true})
 	m.turnActive = true

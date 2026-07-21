@@ -207,7 +207,11 @@ func (m *Model) renderPalette(width int) string {
 		if i == m.paletteIndex {
 			prefix = "› "
 		}
-		values = append(values, prefix+sanitizeLine(command.Usage))
+		entry := sanitizeLine(command.Usage)
+		if command.Description != "" {
+			entry += " — " + sanitizeLine(command.Description)
+		}
+		values = append(values, prefix+entry)
 	}
 	return m.theme.mutedText("Commands: " + ansi.Truncate(strings.Join(values, "  "), width-10, "…"))
 }
