@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/observability"
 )
 
 func TestStatusRendersActiveRecentAndTotals(t *testing.T) {
@@ -27,7 +30,7 @@ func TestStatusRendersActiveRecentAndTotals(t *testing.T) {
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	err := statusCmdWithClient(context.Background(), server.URL, server.Client(), &stdout)
+	err := statusCmdWithClient(context.Background(), server.URL, server.Client(), &stdout, false)
 	if err != nil {
 		t.Fatalf("statusCmdWithClient() error = %v", err)
 	}
@@ -45,9 +48,51 @@ func TestStatusRendersActiveRecentAndTotals(t *testing.T) {
 	}
 }
 
+func TestStatusJSONOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"active": [{"id":"run-active","session_id":"s1","source":"gateway","phase":"agent","elapsed_ms":1500,"input_tokens":120,"output_tokens":45}],
+			"recent": [{"id":"run-recent","session_id":"s2","source":"cron","phase":"agent","outcome":"ok","runtime_ms":3000,"input_tokens":200,"output_tokens":100}],
+			"retry_queue": []
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := statusCmdWithClient(context.Background(), server.URL, server.Client(), &stdout, true)
+	if err != nil {
+		t.Fatalf("statusCmdWithClient() error = %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty for --json", stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not valid JSON: %s", stdout.String())
+	}
+	var snapshot observability.Snapshot
+	if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if len(snapshot.Active) != 1 || snapshot.Active[0].ID != "run-active" {
+		t.Fatalf("active = %+v", snapshot.Active)
+	}
+	if len(snapshot.Recent) != 1 || snapshot.Recent[0].ID != "run-recent" {
+		t.Fatalf("recent = %+v", snapshot.Recent)
+	}
+}
+
+func TestStatusRejectsNonJSONArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := statusCmd(context.Background(), []string{"oops"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("statusCmd accepted unexpected args")
+	}
+}
+
 func TestStatusReportsUnavailableEndpoint(t *testing.T) {
 	var stdout bytes.Buffer
-	err := statusCmdWithClient(context.Background(), "http://127.0.0.1:1", http.DefaultClient, &stdout)
+	err := statusCmdWithClient(context.Background(), "http://127.0.0.1:1", http.DefaultClient, &stdout, false)
 	if err == nil {
 		t.Fatal("statusCmdWithClient() error = nil, want unavailable endpoint error")
 	}

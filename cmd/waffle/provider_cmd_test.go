@@ -807,6 +807,42 @@ func TestProviderCommandListJSONAndHumanOutputNeverExposeCredentials(t *testing.
 	}
 }
 
+func TestProviderCommandListJSONStructure(t *testing.T) {
+	fake := installFakeProviderManager(t)
+	fake.list = []byte(`{"state":"ready","default_model":"gpt","providers":{"openai":{"type":"openai","base_url":""}},"models":{"gpt":{"provider":"openai","model":"gpt-test"}}}`)
+	var stdout, stderr bytes.Buffer
+	if err := providerCmd(context.Background(), []string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not valid JSON: %s", stdout.String())
+	}
+	var listing providerconfig.Listing
+	if err := json.Unmarshal(stdout.Bytes(), &listing); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if listing.State != "ready" || listing.DefaultModel != "gpt" {
+		t.Fatalf("listing = %+v", listing)
+	}
+	if listing.Providers["openai"].Type != "openai" {
+		t.Fatalf("providers = %+v", listing.Providers)
+	}
+	// Human mode must not be pure JSON listing shape alone; verify it differs.
+	stdout.Reset()
+	if err := providerCmd(context.Background(), []string{"list"}, strings.NewReader(""), &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stdout.String(), `"state"`) {
+		t.Fatalf("human list unexpectedly looks like JSON: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "openai") {
+		t.Fatalf("human list missing provider: %s", stdout.String())
+	}
+}
+
 func TestProviderCommandTestAndRemoveForwardExactConnection(t *testing.T) {
 	fake := installFakeProviderManager(t)
 	for _, args := range [][]string{{"test", "openai"}, {"remove", "openai"}} {

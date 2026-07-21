@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/instance"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
@@ -182,5 +186,73 @@ func TestGitCredentialRefusesOnLookupError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "db is busy") {
 		t.Errorf("error should wrap the lookup failure, got: %v", err)
+	}
+}
+
+func TestWorkspaceListJSONOutput(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(home, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := session.New(st).Create(ctx, "ws-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"ws-test01", "owner/repo", "https://github.com/owner/repo.git", "img:latest", "c1", "v1",
+		sess.ID, workspace.StatusOpen, now, now, now, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := wsCmd(ctx, []string{"ls", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("ws ls --json: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not valid JSON: %s", stdout.String())
+	}
+	var list []workspaceJSON
+	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("list = %+v, want one", list)
+	}
+	got := list[0]
+	if got.ID != "ws-test01" || got.Repo != "owner/repo" || got.Status != workspace.StatusOpen {
+		t.Fatalf("workspace = %+v", got)
+	}
+	if got.Image != "img:latest" || got.SessionID != sess.ID || got.Profile != "reviewer" {
+		t.Fatalf("workspace details = %+v", got)
+	}
+}
+
+func TestWorkspaceListJSONEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	if err := wsCmd(ctx, []string{"ls", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var list []workspaceJSON
+	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, stdout.String())
+	}
+	if list == nil || len(list) != 0 {
+		t.Fatalf("list = %+v, want empty non-nil array", list)
 	}
 }

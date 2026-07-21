@@ -56,10 +56,21 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 
 	switch args[0] {
 	case "ls", "list":
+		rest, jsonOut := takeJSONFlag(args[1:])
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: waffle ws ls|list [--json]")
+		}
 		mgr := newWorkspaceManager(cfg, st, nil)
 		list, listErr := mgr.List(ctx)
 		if listErr != nil {
 			return listErr
+		}
+		if jsonOut {
+			out := make([]workspaceJSON, 0, len(list))
+			for _, ws := range list {
+				out = append(out, workspaceToJSON(ws))
+			}
+			return writeJSON(stdout, out)
 		}
 		if len(list) == 0 {
 			fmt.Fprintln(stdout, "no workspaces — open one with: waffle ws open <owner/repo>")
@@ -198,11 +209,32 @@ func wsUsage(w io.Writer) {
 Usage:
   waffle ws open <owner/repo> [--profile name]
                                  clone the repo into a fresh container
-  waffle ws ls|list              list workspaces
+  waffle ws ls|list [--json]     list workspaces
   waffle ws idle <id>            stop the container, keep the volume
   waffle ws close|rm|remove <id> [--force]
                                  tear down (refuses if work is unpushed)
 `)
+}
+
+// workspaceJSON is the machine-readable shape for `waffle ws ls --json`.
+type workspaceJSON struct {
+	ID        string `json:"id"`
+	Repo      string `json:"repo"`
+	Status    string `json:"status"`
+	Image     string `json:"image"`
+	SessionID string `json:"session_id"`
+	Profile   string `json:"profile,omitempty"`
+}
+
+func workspaceToJSON(ws workspace.Workspace) workspaceJSON {
+	return workspaceJSON{
+		ID:        ws.ID,
+		Repo:      ws.Repo,
+		Status:    ws.Status,
+		Image:     ws.Image,
+		SessionID: ws.SessionID,
+		Profile:   ws.Profile,
+	}
 }
 
 func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *workspace.Manager {

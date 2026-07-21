@@ -13,12 +13,16 @@ import (
 )
 
 func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+	args, jsonOut := takeJSONFlag(args)
 	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
 	case "ls", "list":
+		if len(args) > 1 {
+			return errors.New("usage: waffle session ls|list [--json]")
+		}
 		_, st, openErr := openConfigAndStore(ctx)
 		if openErr != nil {
 			return openErr
@@ -31,6 +35,13 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		sessions, listErr := session.New(st).List(ctx, 20)
 		if listErr != nil {
 			return listErr
+		}
+		if jsonOut {
+			out := make([]sessionJSON, 0, len(sessions))
+			for _, s := range sessions {
+				out = append(out, sessionToJSON(s))
+			}
+			return writeJSON(stdout, out)
 		}
 		if len(sessions) == 0 {
 			fmt.Fprintln(stdout, "no sessions yet — start one with: waffle chat")
@@ -102,12 +113,23 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 		return nil
 	case "help", "-h", "--help":
-		fmt.Fprintln(stdout, "usage: waffle session ls|list | waffle session rm|remove <id> | waffle session profile <chat> <name>")
+		fmt.Fprintln(stdout, "usage: waffle session ls|list [--json] | waffle session rm|remove <id> | waffle session profile <chat> <name>")
 		return nil
 	default:
-		fmt.Fprintln(stderr, "usage: waffle session ls|list | waffle session rm|remove <id> | waffle session profile <chat> <name>")
+		fmt.Fprintln(stderr, "usage: waffle session ls|list [--json] | waffle session rm|remove <id> | waffle session profile <chat> <name>")
 		return fmt.Errorf("unknown session command %q", sub)
 	}
+}
+
+// sessionJSON is the machine-readable shape for `waffle session ls --json`.
+type sessionJSON struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Summary string `json:"summary,omitempty"`
+}
+
+func sessionToJSON(s session.Session) sessionJSON {
+	return sessionJSON{ID: s.ID, Title: s.Title, Summary: s.Summary}
 }
 
 func confirmed(r io.Reader) bool {

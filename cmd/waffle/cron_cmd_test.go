@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -279,5 +280,60 @@ func TestCronListRendersPersistedAttemptAndNextRetry(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("output missing %q: %s", want, stdout.String())
 		}
+	}
+}
+
+func TestCronListJSONOutput(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	if err := cronCmd(ctx, []string{"add", "standup", "0 9 * * 1-5", "summarize", "day", "--deliver", "telegram:900"}, &stdout, &stderr); err != nil {
+		t.Fatalf("cron add: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cronCmd(ctx, []string{"ls", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("cron ls --json: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not valid JSON: %s", stdout.String())
+	}
+	var jobs []cronJobJSON
+	if err := json.Unmarshal(stdout.Bytes(), &jobs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v, want one", jobs)
+	}
+	j := jobs[0]
+	if j.ID == "" || j.Name != "standup" || j.Cron != "0 9 * * 1-5" || j.Prompt != "summarize day" {
+		t.Fatalf("job = %+v", j)
+	}
+	if j.Deliver != "telegram:900" || !j.Enabled {
+		t.Fatalf("deliver/enabled = %+v", j)
+	}
+}
+
+func TestCronListJSONEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	if err := cronCmd(ctx, []string{"ls", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var jobs []cronJobJSON
+	if err := json.Unmarshal(stdout.Bytes(), &jobs); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, stdout.String())
+	}
+	if jobs == nil {
+		t.Fatal("want non-nil empty JSON array")
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs = %+v, want empty", jobs)
 	}
 }

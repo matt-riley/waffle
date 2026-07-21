@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -29,9 +30,20 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 
 	switch args[0] {
 	case "ls", "list":
+		rest, jsonOut := takeJSONFlag(args[1:])
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: waffle cron ls|list [--json]")
+		}
 		list, err := jobs.List(ctx)
 		if err != nil {
 			return err
+		}
+		if jsonOut {
+			out := make([]cronJobJSON, 0, len(list))
+			for _, j := range list {
+				out = append(out, cronJobToJSON(j))
+			}
+			return writeJSON(stdout, out)
 		}
 		if len(list) == 0 {
 			fmt.Fprintln(stdout, "no jobs — add one with: waffle cron add <name> <cron> <prompt>")
@@ -134,7 +146,7 @@ Jobs fire while `+"`waffle serve`"+` is running.
 Usage:
   waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat_id] [--profile name]
   waffle cron add <name> "<m> <h> <dom> <mon> <dow>" <prompt...> [--deliver=channel:chat_id] [--profile=name]
-  waffle cron ls|list
+  waffle cron ls|list [--json]
   waffle cron run <id>     run a job now
   waffle cron rm|remove <id>
 
@@ -149,6 +161,44 @@ func orNone(s string) string {
 		return "(log)"
 	}
 	return s
+}
+
+// cronJobJSON is the machine-readable shape for `waffle cron ls --json`.
+type cronJobJSON struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Cron        string `json:"cron"`
+	Prompt      string `json:"prompt"`
+	Deliver     string `json:"deliver"`
+	Profile     string `json:"profile"`
+	Enabled     bool   `json:"enabled"`
+	LastRun     string `json:"last_run,omitempty"`
+	LastStatus  string `json:"last_status"`
+	Attempt     int    `json:"attempt"`
+	MaxAttempts int    `json:"max_attempts"`
+	NextRetry   string `json:"next_retry,omitempty"`
+}
+
+func cronJobToJSON(j schedule.Job) cronJobJSON {
+	out := cronJobJSON{
+		ID:          j.ID,
+		Name:        j.Name,
+		Cron:        j.Cron,
+		Prompt:      j.Prompt,
+		Deliver:     j.Deliver,
+		Profile:     j.Profile,
+		Enabled:     j.Enabled,
+		LastStatus:  j.LastStatus,
+		Attempt:     j.Attempt,
+		MaxAttempts: j.MaxAttempts,
+	}
+	if !j.LastRun.IsZero() {
+		out.LastRun = j.LastRun.UTC().Format(time.RFC3339)
+	}
+	if !j.NextRetry.IsZero() {
+		out.NextRetry = j.NextRetry.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 // normalizeCronAddFields expands a single-string 5-field cron expression into

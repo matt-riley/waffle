@@ -17,6 +17,7 @@ const statusRequestTimeout = 2 * time.Second
 
 // statusCmd prints the local gateway's current and recently completed runs.
 func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	args, jsonOut := takeJSONFlag(args)
 	if len(args) != 0 {
 		statusUsage(stderr)
 		return errUsage
@@ -31,12 +32,12 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	client := &http.Client{Timeout: statusRequestTimeout}
-	return statusCmdWithClient(ctx, "http://"+cfg.Gateway.StatusListen, client, stdout)
+	return statusCmdWithClient(ctx, "http://"+cfg.Gateway.StatusListen, client, stdout, jsonOut)
 }
 
 // statusCmdWithClient fetches and renders a status snapshot. Its endpoint and
 // client are explicit so callers can use an in-process test server.
-func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Client, stdout io.Writer) (err error) {
+func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Client, stdout io.Writer, jsonOut bool) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/status", nil)
 	if err != nil {
 		return fmt.Errorf("create status request: %w", err)
@@ -57,6 +58,9 @@ func statusCmdWithClient(ctx context.Context, baseURL string, client *http.Clien
 	var snapshot observability.Snapshot
 	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
 		return fmt.Errorf("decode status response from %s: %w", baseURL, err)
+	}
+	if jsonOut {
+		return writeJSON(stdout, snapshot)
 	}
 	renderStatus(stdout, snapshot)
 	return nil
@@ -107,5 +111,5 @@ func formatRunDuration(milliseconds int64) string {
 }
 
 func statusUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: waffle status")
+	fmt.Fprintln(w, "Usage: waffle status [--json]")
 }

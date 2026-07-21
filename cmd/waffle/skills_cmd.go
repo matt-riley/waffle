@@ -13,7 +13,7 @@ import (
 func skillsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	_ = stderr
 	if len(args) == 0 {
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list [--json]>")
 	}
 	switch args[0] {
 	case "audit":
@@ -23,7 +23,7 @@ func skillsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	case "ls", "list":
 		return skillsListCmd(ctx, args[1:], stdout)
 	default:
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list [--json]>")
 	}
 }
 
@@ -57,8 +57,9 @@ func skillsActivateCmd(ctx context.Context, args []string, stdout io.Writer) err
 }
 
 func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
+	args, jsonOut := takeJSONFlag(args)
 	if len(args) > 0 {
-		return fmt.Errorf("usage: waffle skills ls|list")
+		return fmt.Errorf("usage: waffle skills ls|list [--json]")
 	}
 	_, st, err := openConfigAndStore(ctx)
 	if err != nil {
@@ -81,6 +82,17 @@ func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, s := range active {
 		activeSet[s.Name] = true
 	}
+	if jsonOut {
+		out := make([]skillJSON, 0, len(all))
+		for _, s := range all {
+			out = append(out, skillJSON{
+				Name:        s.Name,
+				Description: s.Description,
+				Active:      activeSet[s.Name],
+			})
+		}
+		return writeJSON(stdout, out)
+	}
 	if len(all) == 0 {
 		fmt.Fprintln(stdout, "no skills")
 		return nil
@@ -93,4 +105,11 @@ func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s  %-10s  %s\n", s.Name, stLabel, s.Description)
 	}
 	return nil
+}
+
+// skillJSON is the machine-readable shape for `waffle skills ls --json`.
+type skillJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Active      bool   `json:"active"`
 }
