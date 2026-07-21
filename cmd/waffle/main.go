@@ -181,6 +181,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return upgradeCmd(ctx, args[1:], stdout, stderr)
 	case "rollback":
 		return rollbackCmd(stdout)
+	case "completion":
+		return completionCmd(args[1:], stdout, stderr)
 	case "git-credential":
 		op := ""
 		if len(args) > 1 {
@@ -265,6 +267,7 @@ Commands:
   upgrade   rebuild and verify waffle, then swap in the new binary
             --no-verify skips vet/tests/lint (unsafe)
   rollback  restore the previous binary
+  completion generate shell completion scripts (bash|zsh|fish)
   version   print version
   help      show this help
 
