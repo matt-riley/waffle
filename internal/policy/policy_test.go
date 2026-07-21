@@ -249,6 +249,42 @@ func TestChildPolicyCannotWidenParent(t *testing.T) {
 	}
 }
 
+func TestNarrowRejectsUnverifiableChildRegexAllow(t *testing.T) {
+	parent := []Rule{{Name: "no-curl", Tool: "bash", Match: "curl", Action: ActionDeny}}
+	child := []Rule{{Name: "allow-curl-re", Tool: "bash", Regex: `curl\s+https://`, Action: ActionAllow}}
+	if _, err := Narrow(parent, child); err == nil {
+		t.Fatal("expected error for regex allow")
+	} else if !strings.Contains(err.Error(), "allow-curl-re") {
+		t.Fatalf("error should name child rule: %v", err)
+	} else if !strings.Contains(err.Error(), "regex allow") {
+		t.Fatalf("error should mention regex allow: %v", err)
+	}
+
+	// Child regex deny still allowed (deny only narrows).
+	childDeny := []Rule{{Name: "deny-curl-re", Tool: "bash", Regex: `curl\s+https://`, Action: ActionDeny}}
+	merged, err := Narrow(parent, childDeny)
+	if err != nil {
+		t.Fatalf("child regex deny should narrow successfully: %v", err)
+	}
+	if len(merged) != 2 {
+		t.Fatalf("merged len = %d", len(merged))
+	}
+
+	// Exact Match allow that does not conflict with parent still succeeds.
+	parentOther := []Rule{{Name: "no-wget", Tool: "bash", Match: "wget", Action: ActionDeny}}
+	childMatchAllow := []Rule{{Name: "allow-echo", Tool: "bash", Match: "echo", Action: ActionAllow}}
+	if _, err := Narrow(parentOther, childMatchAllow); err != nil {
+		t.Fatalf("exact Match allow that does not widen parent should succeed: %v", err)
+	}
+
+	// Regex allow is rejected even when parent has no conflicting denials
+	// (unverifiable subset — fail closed for future repo-policy use).
+	emptyParent := []Rule{}
+	if _, err := Narrow(emptyParent, child); err == nil {
+		t.Fatal("expected regex allow to be rejected even without parent denials")
+	}
+}
+
 func TestSessionEventsSatisfiedSinceWrite(t *testing.T) {
 	ev := NewSessionEvents()
 	if ev.SatisfiedSinceWrite("s", "k") {

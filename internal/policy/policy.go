@@ -378,13 +378,14 @@ func Narrow(parent, child []Rule) ([]Rule, error) {
 		if c.Action != ActionAllow {
 			continue
 		}
+		// Regex allows cannot be soundly probed as a subset of the parent
+		// domain (and would first-match-win over later parent denials). Fail closed.
+		if c.Regex != "" {
+			return nil, fmt.Errorf("child policy %q: regex allow rules cannot be verified as narrowing parent (refusing unverifiable widen)", c.Name)
+		}
 		// Probe: does any parent deny rule match the same domain as this allow?
 		// Use child Match (or empty cmd for tool-only) as the command probe.
 		probeCmd := c.Match
-		if probeCmd == "" && c.Regex != "" {
-			// Cannot reliably probe regex allows against parent; skip widen check.
-			continue
-		}
 		toolName := c.Tool
 		if toolName == "" {
 			toolName = "bash"
