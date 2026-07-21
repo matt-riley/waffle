@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.5.0](https://github.com/matt-riley/waffle/compare/v0.4.0...v0.5.0) (2026-07-21)
+
+
+### Features
+
+* **#123:** live elapsed and tokens in busy chat footer ([e7cdfc3](https://github.com/matt-riley/waffle/commit/e7cdfc3cc16bf3456713bbd297467ef19317c25c))
+* **#124:** add waffle setup first-run command ([07ebd59](https://github.com/matt-riley/waffle/commit/07ebd5976dcb32cb2ea4454f254c461f5c43384e))
+* **#125:** show command descriptions in slash palette ([0451e54](https://github.com/matt-riley/waffle/commit/0451e54566003c2d4b66d2c4a88c6202d56ea0df))
+
+
+### Bug Fixes
+
+* **#100:** close Anthropic stream after Complete ([961e4d6](https://github.com/matt-riley/waffle/commit/961e4d68bd2c399f18bba8a260eeba563b99fd49))
+* **#101:** wait for intake dispatch goroutines on shutdown ([d018c1d](https://github.com/matt-riley/waffle/commit/d018c1d87f769bb2dde0614ffe684ed7ba6161c1))
+* **#102:** fail closed on unverifiable child regex allows in Narrow ([503ddbd](https://github.com/matt-riley/waffle/commit/503ddbd77d5d2b3e2ede145539f0c24af7349300))
+* **#103:** serialize MEMORY.md mutations across tools ([a99003a](https://github.com/matt-riley/waffle/commit/a99003a01e9bed36c3445db2133677e8c2b56afc))
+* **#104:** make workset Add/Replace cap checks transactional ([bb2bbc8](https://github.com/matt-riley/waffle/commit/bb2bbc83704f40b44559763491601b43f84f5f18))
+* **#105:** reject policy rules with empty tool/match/regex ([0e1a20e](https://github.com/matt-riley/waffle/commit/0e1a20e67c4aa5f0544f67dbd14c96da6cc02887))
+* **#106:** deliver sandbox session token via file, not docker -e ([d41a827](https://github.com/matt-riley/waffle/commit/d41a827c8d1d17ac773b17ae53cd456c9d5e1e02))
+* **#107:** UTF-8-safe truncation for tools, subagents, gateway ([99a8233](https://github.com/matt-riley/waffle/commit/99a8233c97d8e127efc9e31f64e2cf7069f2ad8d))
+* **#108:** fail closed when group-tier GroupProfiles is nil ([ffd7d8f](https://github.com/matt-riley/waffle/commit/ffd7d8f3df0b16fd8dab7f5b8c4c488096881e86))
+* **#111:** throttle transcript re-render during text streaming ([19039e7](https://github.com/matt-riley/waffle/commit/19039e7a909ab821018038be9fd598ca72416a07))
+* **#112:** remove modulo bias from NewPairingCode ([5d24c0a](https://github.com/matt-riley/waffle/commit/5d24c0ab55aa69d4f4f1d4f77e4cc8787e1f4b72))
+* **#113:** warn on memory notes FTS Upsert failure ([a1bfa4a](https://github.com/matt-riley/waffle/commit/a1bfa4a6ddd7b86d0007e6632b15ec613d763c63))
+* **#114:** skip config-dependent doctor checks after load failure ([8c39827](https://github.com/matt-riley/waffle/commit/8c398271611c003a7925aec2aef6a217220f0dae))
+* **#115:** consistent nil-store handling in Finish/Snapshot ([f4afc31](https://github.com/matt-riley/waffle/commit/f4afc319a8a95e1a17336505a291e5aba29de4ae))
+* **#116:** return ErrNotFound from SetTitle/SetSummary ([6564df9](https://github.com/matt-riley/waffle/commit/6564df90418eaff4b28a0d1c20f5731369320a11))
+* **#117:** paginate GitHub ListOpen via Link headers ([ed79908](https://github.com/matt-riley/waffle/commit/ed79908ba4ee1a9b958b2067c962f3720f172798))
+* **#119:** flock secret filestore across processes ([73c2ac6](https://github.com/matt-riley/waffle/commit/73c2ac6d8249e7238698c22538811019c0ccf510))
+* **#120:** skip summary cache when session id empty ([b2369c2](https://github.com/matt-riley/waffle/commit/b2369c269d2a3f87e02b4dc634fe116c94f147ce))
+* **#122:** queue or notice busy chat composer submit ([be0c26d](https://github.com/matt-riley/waffle/commit/be0c26de191d007d7d52168f6f799e46aea45843))
+* **#95,#110:** host-reachable workspace network and reaper continue ([5ab9354](https://github.com/matt-riley/waffle/commit/5ab93547f1b1f9f611b501183507209c9cbb7941))
+* **#95:** drop unused dockerRunProbe helper (lint) ([ab0031c](https://github.com/matt-riley/waffle/commit/ab0031c82732190b7a1ffcf88aed93f7db2749fd))
+* **#95:** fail-closed netlock; Docker tests drive shipped lockdown ([77362d4](https://github.com/matt-riley/waffle/commit/77362d491ed38e0bc0ce5979261ec91c221992cc))
+* **#95:** lock down workspace routes; allow repo host for clone ([d364584](https://github.com/matt-riley/waffle/commit/d364584adb8f6e01959e82e0d21f14f61ee62e26))
+* **#96:** enforce parent usage limits on subagent runs ([dfe8c8f](https://github.com/matt-riley/waffle/commit/dfe8c8f7a0744cabc9a66226789ac7e75bad7a49))
+* **#97:** stop docker MCP containers on Close ([b0a0b63](https://github.com/matt-riley/waffle/commit/b0a0b63763d9d6686872924713327f059d7a9aa6))
+* **#98:** redact longest secret values first ([52ef31f](https://github.com/matt-riley/waffle/commit/52ef31f1978cab5e4a845eac792efe5a7dcd9ca9))
+* **#99,#109:** bind broker synchronously and join on shutdown ([a2f8daf](https://github.com/matt-riley/waffle/commit/a2f8daf711694f5f6bbb47deced27ddf63160407))
+* check Close returns in netlock lockdown ([#137](https://github.com/matt-riley/waffle/issues/137)) ([9dcec00](https://github.com/matt-riley/waffle/commit/9dcec00179e6744f7d6090c14eaaf33ac3ef3d91))
+
 ## [0.4.0](https://github.com/matt-riley/waffle/compare/v0.3.0...v0.4.0) (2026-07-21)
 
 
