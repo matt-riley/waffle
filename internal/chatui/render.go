@@ -3,6 +3,7 @@ package chatui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -150,6 +151,9 @@ func (m *Model) renderFooter(width int) string {
 	left := "/help  /model  /sessions"
 	if m.width < 72 {
 		if m.turnActive || m.commandActive {
+			if m.turnActive {
+				return left + "  ·  working… " + formatElapsed(m.turnElapsed())
+			}
 			return left + "  ·  working…"
 		}
 		return left
@@ -157,11 +161,43 @@ func (m *Model) renderFooter(width int) string {
 	right := "Alt+↵ newline · ↵ send"
 	if m.turnActive || m.commandActive {
 		right = "Esc cancel · working…"
+		if m.turnActive {
+			right += " " + formatElapsed(m.turnElapsed())
+			if m.liveInputTokens > 0 || m.liveOutputTokens > 0 {
+				right = fmt.Sprintf("%d in · %d out · %s", m.liveInputTokens, m.liveOutputTokens, right)
+			}
+		}
 	} else if m.inputTokens > 0 || m.outputTokens > 0 {
 		right = fmt.Sprintf("%d in · %d out · %s", m.inputTokens, m.outputTokens, right)
 	}
 	gap := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
 	return m.theme.mutedText(left + strings.Repeat(" ", gap) + right)
+}
+
+func (m *Model) turnElapsed() time.Duration {
+	if m.turnStartedAt.IsZero() {
+		return 0
+	}
+	now := time.Now
+	if m.now != nil {
+		now = m.now
+	}
+	elapsed := now().Sub(m.turnStartedAt)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func formatElapsed(d time.Duration) string {
+	secs := int(d / time.Second)
+	if secs < 0 {
+		secs = 0
+	}
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%dm %ds", secs/60, secs%60)
 }
 
 func (m *Model) renderPalette(width int) string {

@@ -1069,6 +1069,9 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 			emitMu.Lock()
 			observedUsage = value
 			emitMu.Unlock()
+			// Emit mid-turn usage so the chat UI can update live token counts
+			// before EventTurnDone. Empty text does not append to the transcript.
+			emitEvent(chatpkg.Event{Kind: chatpkg.EventTextDelta, Usage: value})
 		},
 	})
 

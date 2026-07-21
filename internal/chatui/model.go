@@ -103,20 +103,27 @@ type Model struct {
 	commandCancel          context.CancelFunc
 	confirmNeedsTurnDrain  bool
 
-	paletteVisible   bool
-	paletteIndex     int
-	turnActive       bool
-	quitting         bool
-	exitArmed        bool
-	connected        bool
-	awaitingAck      bool
-	opened           bool
-	openResolved     bool
-	width            int
-	height           int
-	err              error
-	inputTokens      int
-	outputTokens     int
+	paletteVisible bool
+	paletteIndex   int
+	turnActive     bool
+	quitting       bool
+	exitArmed      bool
+	connected      bool
+	awaitingAck    bool
+	opened         bool
+	openResolved   bool
+	width          int
+	height         int
+	err            error
+	inputTokens    int
+	outputTokens   int
+	// live*Tokens are absolute mid-turn usage observations for the busy footer.
+	// They do not affect the cumulative idle inputTokens/outputTokens totals.
+	liveInputTokens  int
+	liveOutputTokens int
+	turnStartedAt    time.Time
+	// now is injectable for tests; defaults to time.Now.
+	now              func() time.Time
 	theme            theme
 	events           chan tea.Msg
 	pumpStop         chan struct{}
@@ -176,6 +183,7 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 		backend: backend, open: open, ctx: ctx,
 		viewport: vp, composer: composer, overlayList: overlayList,
 		width: width, height: height, theme: newTheme(true, noColor),
+		now:    time.Now,
 		events: make(chan tea.Msg, 64), closed: &atomic.Bool{},
 		pumpStop: make(chan struct{}), pumpStopOnce: &sync.Once{},
 	}

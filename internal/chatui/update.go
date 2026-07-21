@@ -55,6 +55,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTurnID = 0
 			m.canceledTurnID = 0
 			m.turnTerminalSeen = false
+			m.liveInputTokens, m.liveOutputTokens = 0, 0
+			m.turnStartedAt = time.Time{}
 		}
 		if msg.err != nil && matches {
 			switch {
@@ -331,6 +333,12 @@ func (m *Model) beginTurn(input string) tea.Cmd {
 	operationID := m.nextOperation()
 	m.activeTurnID = operationID
 	m.turnTerminalSeen = false
+	m.liveInputTokens, m.liveOutputTokens = 0, 0
+	if m.now != nil {
+		m.turnStartedAt = m.now()
+	} else {
+		m.turnStartedAt = time.Now()
+	}
 	m.syncViewport(true)
 	return m.turnCmd(operationID, input)
 }
@@ -493,6 +501,10 @@ func (m *Model) applyEvent(operationID uint64, event chat.Event) {
 				now.Sub(m.lastViewportSync) < viewportSyncMinInterval {
 				fullSync = false
 			}
+		} else {
+			// Usage-only mid-turn observation: footer reads live tokens from
+			// View without rebuilding the transcript viewport.
+			fullSync = false
 		}
 	case chat.EventToolStarted:
 		m.tools = append(m.tools, toolRow{name: event.ToolName, messageIndex: m.currentAssistantIndex()})
@@ -526,6 +538,13 @@ func (m *Model) applyEvent(operationID uint64, event chat.Event) {
 		m.outputTokens += event.Usage.OutputTokens
 		m.textDeltaSinceSync = 0
 	}
+	// Mid-turn usage observations are absolute cumulative values for the
+	// current turn (from OnUsage). EventTurnDone already folds usage into
+	// idle totals above — keep live counters separate.
+	if event.Kind != chat.EventTurnDone && (event.Usage.InputTokens > 0 || event.Usage.OutputTokens > 0) {
+		m.liveInputTokens = event.Usage.InputTokens
+		m.liveOutputTokens = event.Usage.OutputTokens
+	}
 	if fullSync {
 		m.syncViewport(true)
 		m.textDeltaSinceSync = 0
@@ -551,6 +570,8 @@ func (m *Model) applyResult(command chat.ParsedCommand, result chat.Result, star
 			m.messages = cardsFromHistory(result.State.History)
 			m.tools = nil
 			m.inputTokens, m.outputTokens = 0, 0
+			m.liveInputTokens, m.liveOutputTokens = 0, 0
+			m.turnStartedAt = time.Time{}
 			m.turnActive, m.activeTurnID = false, 0
 			m.turnTerminalSeen = false
 			m.deferredCommand = nil

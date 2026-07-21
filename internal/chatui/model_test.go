@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -368,10 +369,13 @@ func TestModelHeaderConnectionAndFooterLifecycle(t *testing.T) {
 		}
 	}
 	m.turnActive = true
-	if footer := m.renderFooter(96); !strings.Contains(footer, "Esc cancel · working…") {
+	m.turnStartedAt = time.Unix(0, 0)
+	m.now = func() time.Time { return time.Unix(12, 0) }
+	if footer := m.renderFooter(96); !strings.Contains(footer, "Esc cancel · working… 12s") {
 		t.Fatalf("busy footer = %q", footer)
 	}
 	m.turnActive = false
+	m.turnStartedAt = time.Time{}
 	m.applyEvent(0, chat.Event{Kind: chat.EventTurnDone, Usage: llm.Usage{InputTokens: 12, OutputTokens: 7}})
 	if footer := m.renderFooter(96); !strings.Contains(footer, "12 in · 7 out") {
 		t.Fatalf("usage footer = %q", footer)

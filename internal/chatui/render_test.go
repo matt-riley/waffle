@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -107,5 +108,54 @@ func TestRenderMarkdownPlainTextKeepsStructure(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("markdown missing %q in %q", want, got)
 		}
+	}
+}
+
+func TestBusyFooterElapsedAndLiveTokens(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30, NoColor: true})
+	m.turnActive = true
+	start := time.Unix(1_700_000_000, 0)
+	m.turnStartedAt = start
+	m.now = func() time.Time { return start.Add(12 * time.Second) }
+	early := m.renderFooter(96)
+	if !strings.Contains(early, "working… 12s") {
+		t.Fatalf("early busy footer = %q", early)
+	}
+	m.now = func() time.Time { return start.Add(75 * time.Second) }
+	later := m.renderFooter(96)
+	if !strings.Contains(later, "working… 1m 15s") {
+		t.Fatalf("later busy footer = %q", later)
+	}
+	if early == later {
+		t.Fatal("busy footer elapsed did not change across renders")
+	}
+
+	// Mid-turn usage updates the busy footer before turn completion.
+	m.applyEvent(0, chat.Event{Kind: chat.EventTextDelta, Usage: llm.Usage{InputTokens: 9, OutputTokens: 4}})
+	if m.liveInputTokens != 9 || m.liveOutputTokens != 4 {
+		t.Fatalf("live tokens = %d/%d", m.liveInputTokens, m.liveOutputTokens)
+	}
+	if footer := m.renderFooter(96); !strings.Contains(footer, "9 in · 4 out") || !strings.Contains(footer, "working…") {
+		t.Fatalf("live token busy footer = %q", footer)
+	}
+	// Idle totals remain untouched until EventTurnDone.
+	if m.inputTokens != 0 || m.outputTokens != 0 {
+		t.Fatalf("idle totals polluted mid-turn: %d/%d", m.inputTokens, m.outputTokens)
+	}
+
+	// Narrow footer stays compact with a short elapsed suffix.
+	m.width = 58
+	if footer := m.renderFooter(54); !strings.Contains(footer, "working…") || !strings.Contains(footer, "1m 15s") {
+		t.Fatalf("narrow busy footer = %q", footer)
+	}
+
+	// Idle layout unchanged when not busy.
+	m.width = 100
+	m.turnActive = false
+	m.liveInputTokens, m.liveOutputTokens = 0, 0
+	m.inputTokens, m.outputTokens = 12, 7
+	idle := m.renderFooter(96)
+	if !strings.Contains(idle, "12 in · 7 out") || strings.Contains(idle, "working") {
+		t.Fatalf("idle footer = %q", idle)
 	}
 }
