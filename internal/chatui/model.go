@@ -139,6 +139,12 @@ type Model struct {
 	lastViewportSync   time.Time
 	// syncViewportCalls is a test-only counter of full transcript rebuilds.
 	syncViewportCalls int
+
+	// Prompt history for Up/Down traversal (oldest first).
+	// historyIdx == -1 means draft mode (not browsing).
+	history      []string
+	historyIdx   int // index into history; -1 = editing draft
+	historyDraft string
 }
 
 // New constructs a Focused Conversation model. Backend.Open remains asynchronous
@@ -183,9 +189,10 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 		backend: backend, open: open, ctx: ctx,
 		viewport: vp, composer: composer, overlayList: overlayList,
 		width: width, height: height, theme: newTheme(true, noColor),
-		now:    time.Now,
-		events: make(chan tea.Msg, 64), closed: &atomic.Bool{},
-		pumpStop: make(chan struct{}), pumpStopOnce: &sync.Once{},
+		now:        time.Now,
+		events:     make(chan tea.Msg, 64), closed: &atomic.Bool{},
+		pumpStop:   make(chan struct{}), pumpStopOnce: &sync.Once{},
+		historyIdx: -1,
 	}
 	m.resize(width, height)
 	return m

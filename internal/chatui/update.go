@@ -237,6 +237,34 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleOverlayKey(msg)
 	}
 
+	// Prompt history: plain Up/Down when not in palette (Ctrl+Up/Down already
+	// routed to the viewport above). Only intercept when the cursor is on the
+	// first line (Up) or last line while browsing (Down), so multi-line drafts
+	// can still move the cursor within the composer.
+	if !m.paletteVisible && !key.Mod.Contains(tea.ModCtrl) && !key.Mod.Contains(tea.ModAlt) {
+		switch key.Code {
+		case tea.KeyUp:
+			if m.composer.Value() == "" || m.composer.Line() == 0 {
+				if m.historyUp() {
+					m.refreshPalette()
+					m.syncLayout()
+					return m, nil
+				}
+			}
+		case tea.KeyDown:
+			if m.historyIdx >= 0 {
+				lineCount := m.composer.LineCount()
+				if lineCount <= 1 || m.composer.Line() >= lineCount-1 {
+					if m.historyDown() {
+						m.refreshPalette()
+						m.syncLayout()
+						return m, nil
+					}
+				}
+			}
+		}
+	}
+
 	if key.Code == tea.KeyTab {
 		m.refreshPalette()
 		if len(m.palette) > 0 {
@@ -263,6 +291,57 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.refreshPalette()
 	m.syncLayout()
 	return m, cmd
+}
+
+// historyUp loads the previous submitted prompt into the composer.
+// Returns true when the key was handled (even if already at the oldest entry).
+func (m *Model) historyUp() bool {
+	if len(m.history) == 0 {
+		return false
+	}
+	if m.historyIdx < 0 {
+		m.historyDraft = m.composer.Value()
+		m.historyIdx = len(m.history) - 1
+	} else if m.historyIdx > 0 {
+		m.historyIdx--
+	} else {
+		// Already at the oldest entry; consume the key.
+		return true
+	}
+	m.composer.SetValue(m.history[m.historyIdx])
+	return true
+}
+
+// historyDown advances toward the current draft. Returns true when browsing.
+func (m *Model) historyDown() bool {
+	if m.historyIdx < 0 {
+		return false
+	}
+	if m.historyIdx+1 >= len(m.history) {
+		m.historyIdx = -1
+		m.composer.SetValue(m.historyDraft)
+		m.historyDraft = ""
+		return true
+	}
+	m.historyIdx++
+	m.composer.SetValue(m.history[m.historyIdx])
+	return true
+}
+
+// rememberPrompt appends a submitted prompt to session history and resets
+// navigation state. Consecutive duplicates are skipped.
+func (m *Model) rememberPrompt(input string) {
+	if input == "" {
+		return
+	}
+	if n := len(m.history); n > 0 && m.history[n-1] == input {
+		m.historyIdx = -1
+		m.historyDraft = ""
+		return
+	}
+	m.history = append(m.history, input)
+	m.historyIdx = -1
+	m.historyDraft = ""
 }
 
 func (m *Model) refreshPalette() {
@@ -305,6 +384,7 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		if m.queuedUserInput != "" {
 			notice = "Replaced queued message — will send when the current turn finishes."
 		}
+		m.rememberPrompt(input)
 		m.queuedUserInput = input
 		m.composer.Reset()
 		m.paletteVisible = false
@@ -313,6 +393,7 @@ func (m *Model) submit() (tea.Model, tea.Cmd) {
 		m.syncViewport(true)
 		return m, nil
 	}
+	m.rememberPrompt(input)
 	m.composer.Reset()
 	m.paletteVisible = false
 	m.exitArmed = false
