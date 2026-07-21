@@ -48,7 +48,7 @@ func isNoRoute(err error) bool {
 
 func resolveIPv4(host string) (net.IP, error) {
 	if f, err := os.Open("/etc/hosts"); err == nil {
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
@@ -87,7 +87,7 @@ func defaultGateway() (gw net.IP, ifindex int, err error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	if !sc.Scan() {
 		return nil, 0, fmt.Errorf("no default route")
@@ -149,7 +149,7 @@ func netlinkRoute(msgType int, dst net.IP, prefixLen int, gw net.IP, ifindex int
 	if err != nil {
 		return err
 	}
-	defer unix.Close(s)
+	defer func() { _ = unix.Close(s) }()
 
 	sa := &unix.SockaddrNetlink{Family: unix.AF_NETLINK}
 	if err := unix.Bind(s, sa); err != nil {
