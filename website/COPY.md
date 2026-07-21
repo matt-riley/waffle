@@ -11,7 +11,7 @@ Personal narrative with a streak of mischief. Still not conversion copy.
 ### What it is
 - **Title:** A little agent with a big personality.
 - **Body:** She sits in the chat when I need company, pokes at tools when she’s allowed, and steals the good notes for later. One binary. One very orange accomplice.
-- **Close:** A project that lives here. A name that meows back.
+- **Close:** I wrote the code. She supplied the personality.
 
 ### What she gets into
 **Title:** Three favorite crimes.

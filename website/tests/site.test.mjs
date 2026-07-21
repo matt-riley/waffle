@@ -14,6 +14,13 @@ async function read(relativePath) {
 	}
 }
 
+function navDestinations(html, label) {
+	const nav = html.match(new RegExp(`<nav aria-label="${label}"[\\s\\S]*?<\\/nav>`));
+	assert.ok(nav, `${label} navigation is present`);
+
+	return [...nav[0].matchAll(/href="([^"]+)"/g)].map((match) => match[1]).sort();
+}
+
 test('motion enhancement fails open when the GSAP module does not become ready', async () => {
 	const [layout, motion] = await Promise.all([
 		read('src/layouts/Layout.astro'),
@@ -47,10 +54,25 @@ test('navigation labels and section ids describe their destinations', async () =
 
 	assert.doesNotMatch(header, /label:\s*'Notes'/);
 	assert.match(header, /href:\s*'#why-waffle'.*label:\s*'Why Waffle'/);
-	assert.match(footer, /href="#what-she-does"[^>]*>What she does</);
 	assert.match(footer, /href="#why-waffle"[^>]*>Why Waffle</);
 	assert.match(activities, /id="what-she-does"/);
 	assert.match(namesake, /id="why-waffle"/);
+});
+
+test('header and footer navigation expose the same destinations', async () => {
+	const builtHome = await read('dist/index.html');
+
+	assert.deepEqual(navDestinations(builtHome, 'Footer'), navDestinations(builtHome, 'Primary'));
+});
+
+test('approved personal copy appears on the page and in the copy document', async () => {
+	const [builtHome, copy] = await Promise.all([read('dist/index.html'), read('COPY.md')]);
+
+	for (const content of [builtHome, copy]) {
+		assert.match(content, /One binary\. One very orange accomplice\./);
+		assert.match(content, /I wrote the code\. She supplied the personality\./);
+		assert.doesNotMatch(content, /A project that lives here\. A name that meows back\./);
+	}
 });
 
 test('shared layout exposes a skip link and every page exposes the main target', async () => {
