@@ -66,10 +66,21 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 	return nil
 }
 
+const upgradeUsage = `Usage: waffle upgrade [ref] [--no-verify]
+  Upgrade the waffle binary from the configured [repo] dir.
+  ref           optional git commit/branch/tag to build
+  --no-verify   skip vet/tests/lint (unsafe)
+  -h, --help    show this help
+`
+
 func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	ref, noVerify, err := parseUpgradeArgs(args)
+	ref, noVerify, help, err := parseUpgradeArgs(args)
 	if err != nil {
 		return err
+	}
+	if help {
+		fmt.Fprint(stdout, upgradeUsage)
+		return nil
 	}
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -102,18 +113,21 @@ func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	return nil
 }
 
-func parseUpgradeArgs(args []string) (ref string, noVerify bool, err error) {
+func parseUpgradeArgs(args []string) (ref string, noVerify bool, help bool, err error) {
 	for _, arg := range args {
-		if arg == "--no-verify" {
+		switch arg {
+		case "-h", "--help", "help":
+			return "", false, true, nil
+		case "--no-verify":
 			noVerify = true
 			continue
 		}
 		if ref != "" {
-			return "", false, fmt.Errorf("upgrade accepts at most one ref")
+			return "", false, false, fmt.Errorf("upgrade accepts at most one ref")
 		}
 		ref = arg
 	}
-	return ref, noVerify, nil
+	return ref, noVerify, false, nil
 }
 
 func rollbackCmd(stdout io.Writer) error {
