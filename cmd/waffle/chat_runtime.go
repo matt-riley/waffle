@@ -111,7 +111,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	}
 
 	profileName := strings.TrimSpace(options.Profile)
-	if profileName != "" && profileName != "main" && !config.ValidProfileName(profileName) {
+	if profileName != "" && !config.ValidProfileName(profileName) {
 		return chatpkg.State{}, fmt.Errorf("invalid profile name %q", profileName)
 	}
 	if _, ok := r.cfg.Profile(profileName); !ok {

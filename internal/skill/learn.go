@@ -21,6 +21,7 @@ import (
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // Allowed proposal surfaces (#65). Anything else is rejected.
@@ -303,7 +304,7 @@ func (l *Learner) attributeOnce(ctx context.Context, p FailurePattern) (string, 
 		label = "recurring tool failure: " + p.Class
 	}
 	if len(label) > 120 {
-		label = label[:120]
+		label = textcut.Cut(label, 120)
 	}
 	return label, nil
 }
@@ -607,10 +608,9 @@ func (l *Learner) applyAccepted(ctx context.Context, p *Proposal) error {
 }
 
 func oneLine(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
+	s = memory.OneLine(s)
 	if len(s) > 200 {
-		s = s[:200] + "…"
+		s = textcut.Cut(s, 200) + "…"
 	}
 	return s
 }
@@ -898,11 +898,7 @@ func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 	for _, s := range all {
 		st := statusOverride[s.Name]
 		if st == "" {
-			raw, err := os.ReadFile(s.Path)
-			if err != nil {
-				continue
-			}
-			if isActiveFrontmatter(string(raw)) {
+			if isActiveFrontmatter(s.raw) {
 				st = StatusActive
 			} else {
 				st = StatusInactive

@@ -18,6 +18,7 @@ type Skill struct {
 	Name        string
 	Description string
 	Path        string // the SKILL.md file
+	raw         string // SKILL.md content as read by Discover
 }
 
 // Discover finds skills under dir (each in its own subdirectory). A missing
@@ -43,7 +44,7 @@ func Discover(dir string) ([]Skill, error) {
 		if err != nil {
 			return nil, err
 		}
-		s := Skill{Name: e.Name(), Path: path}
+		s := Skill{Name: e.Name(), Path: path, raw: string(body)}
 		s.Name, s.Description = parseFrontmatter(string(body), e.Name())
 		skills = append(skills, s)
 	}

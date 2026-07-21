@@ -407,7 +407,6 @@ func (c *Client) Toolbox(ctx context.Context) (tool.Toolbox, error) {
 			Description: t.Description,
 			InputSchema: t.InputSchema,
 		})
-		tb.remote = append(tb.remote, t.Name)
 	}
 	return tb, nil
 }
@@ -416,7 +415,6 @@ type toolbox struct {
 	client *Client
 	prefix string
 	defs   []llm.Tool
-	remote []string
 }
 
 func (t *toolbox) Defs() []llm.Tool { return t.defs }

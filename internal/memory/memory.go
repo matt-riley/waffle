@@ -206,10 +206,7 @@ func (w Workspace) renderMemorySection() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	selected, omitted, err := selectMemoryLines(string(body), w.budget())
-	if err != nil {
-		return "", err
-	}
+	selected, omitted := selectMemoryLines(string(body), w.budget())
 	if len(selected) == 0 && omitted == 0 {
 		return "", nil
 	}
@@ -281,7 +278,7 @@ func extractBody(line string) string {
 
 // bodyKey normalizes a note body for exact-duplicate comparison.
 func bodyKey(body string) string {
-	s := oneLine(body)
+	s := OneLine(body)
 	if i := strings.LastIndex(s, " (supersedes #"); i >= 0 && strings.HasSuffix(s, ")") {
 		s = strings.TrimSpace(s[:i])
 	}
@@ -301,13 +298,13 @@ func loadNotes(content string) []note {
 
 // selectMemoryLines picks lines under budget: pinned first, then newest.
 // Returns selected raw lines in display order and the count of omitted notes.
-func selectMemoryLines(content string, budget int) ([]string, int, error) {
+func selectMemoryLines(content string, budget int) ([]string, int) {
 	notes := loadNotes(content)
 	if len(notes) == 0 {
-		return nil, 0, nil
+		return nil, 0
 	}
 	if budget <= 0 {
-		return nil, len(notes), nil
+		return nil, len(notes)
 	}
 
 	// Sort: pinned first (stable by index), then unpinned by date desc, index desc.
@@ -345,7 +342,7 @@ func selectMemoryLines(content string, budget int) ([]string, int, error) {
 	for i, n := range selected {
 		out[i] = n.raw
 	}
-	return out, omitted, nil
+	return out, omitted
 }
 
 // Append adds one dated note to MEMORY.md and returns its stable ID.
@@ -373,7 +370,7 @@ func (w Workspace) appendCandidate(c Candidate) (string, error) {
 	if w.Notes != nil && w.Notes.Now != nil {
 		day = w.Notes.Now().UTC()
 	}
-	line := formatNoteLine(noteID, day, false, c.Provenance, oneLine(c.Body), "")
+	line := formatNoteLine(noteID, day, false, c.Provenance, OneLine(c.Body), "")
 	if err := appendFileLine(w.MemoryPath(), line); err != nil {
 		return "", err
 	}
@@ -393,7 +390,7 @@ func formatNoteLine(noteID string, day time.Time, pin bool, p Provenance, body, 
 	if pin {
 		pinMark = " [pin]"
 	}
-	body = oneLine(body)
+	body = OneLine(body)
 	if supersedes != "" {
 		body = fmt.Sprintf("%s (supersedes #%s)", body, supersedes)
 	}
@@ -487,11 +484,10 @@ func (w Workspace) removeNoteByID(noteID string) (string, error) {
 		return "", fmt.Errorf("memory note %q not found", noteID)
 	}
 	// Drop a single trailing empty element introduced by a final newline so
-	// the file stays tidy after removals.
+	// the file stays tidy after removals. Only restore the trailing newline
+	// when the original file had one — otherwise write as-is.
 	out := strings.Join(kept, "\n")
-	if out != "" && !strings.HasSuffix(content, "\n") {
-		// original had no trailing newline — write as-is
-	} else if out != "" && !strings.HasSuffix(out, "\n") {
+	if out != "" && strings.HasSuffix(content, "\n") && !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
 	if err := os.WriteFile(w.MemoryPath(), []byte(out), 0o600); err != nil {
@@ -551,7 +547,7 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	if w.Notes != nil && w.Notes.Now != nil {
 		day = w.Notes.Now().UTC()
 	}
-	line := formatNoteLine(newID, day, pin, p, oneLine(body), oldID)
+	line := formatNoteLine(newID, day, pin, p, OneLine(body), oldID)
 	if err := appendFileLine(w.MemoryPath(), line); err != nil {
 		return "", err
 	}
@@ -559,7 +555,9 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	return newID, nil
 }
 
-func oneLine(s string) string {
+// OneLine collapses s to a single line, joining whitespace-separated fields
+// with a single space.
+func OneLine(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 

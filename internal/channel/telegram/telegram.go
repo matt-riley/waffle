@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/channel"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // DefaultBaseURL is the real Bot API.
@@ -44,9 +44,10 @@ type Adapter struct {
 	onPoll  func()
 
 	// Bot identity from getMe, cached after the first successful call.
-	botMu   sync.Mutex
-	botID   int64
-	botUser string // username without leading @
+	botMu        sync.Mutex
+	botID        int64
+	botUser      string         // username without leading @
+	botMentionRe *regexp.Regexp // matches "@botUser" mentions, compiled once with botUser
 }
 
 // New builds an adapter. baseURL may be empty for the real API.
@@ -184,13 +185,13 @@ func (a *Adapter) toInbound(ctx context.Context, m *tgMessage) (channel.Message,
 			slog.Default().Error("telegram getMe for group gate", "err", err)
 			return channel.Message{}, false
 		}
-		botID, botUser := a.botIdentity()
-		if !addressedToBot(m, botID, botUser) {
+		botID, botUser, mentionRe := a.botIdentity()
+		if !addressedToBot(m, botID, botUser, mentionRe) {
 			return channel.Message{}, false
 		}
 		// Strip @bot so the agent sees the owner's intent, not the address.
 		// A bare @mention may leave empty text; still deliver so a nudge runs.
-		text = stripBotMention(text, botUser)
+		text = stripBotMention(text, mentionRe)
 	}
 
 	name := m.From.FirstName
@@ -219,7 +220,7 @@ func isGroupChat(chatType string) bool {
 
 // addressedToBot reports whether the message @mentions the bot or is a
 // reply to one of the bot's messages.
-func addressedToBot(m *tgMessage, botID int64, botUser string) bool {
+func addressedToBot(m *tgMessage, botID int64, botUser string, mentionRe *regexp.Regexp) bool {
 	if m.ReplyToMessage != nil && m.ReplyToMessage.From.ID == botID {
 		return true
 	}
@@ -245,7 +246,7 @@ func addressedToBot(m *tgMessage, botID int64, botUser string) bool {
 		}
 	}
 	// Fallback: plain-text @username (entities missing in some proxies).
-	if botUser != "" && regexp.MustCompile(`(?i)@`+regexp.QuoteMeta(botUser)+`\b`).MatchString(m.Text) {
+	if mentionRe != nil && mentionRe.MatchString(m.Text) {
 		return true
 	}
 	return false
@@ -263,18 +264,17 @@ func entityText(text string, e messageEntity) string {
 
 // stripBotMention removes @botusername occurrences (case-insensitive) and
 // trims surrounding whitespace.
-func stripBotMention(text, botUser string) string {
-	if botUser == "" {
+func stripBotMention(text string, mentionRe *regexp.Regexp) string {
+	if mentionRe == nil {
 		return strings.TrimSpace(text)
 	}
-	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUser) + `\b`)
-	return strings.TrimSpace(re.ReplaceAllString(text, ""))
+	return strings.TrimSpace(mentionRe.ReplaceAllString(text, ""))
 }
 
-func (a *Adapter) botIdentity() (id int64, user string) {
+func (a *Adapter) botIdentity() (id int64, user string, mentionRe *regexp.Regexp) {
 	a.botMu.Lock()
 	defer a.botMu.Unlock()
-	return a.botID, a.botUser
+	return a.botID, a.botUser, a.botMentionRe
 }
 
 // ensureBot loads the bot's id/username via getMe once and caches them.
@@ -305,8 +305,15 @@ func (a *Adapter) ensureBot(ctx context.Context) error {
 	a.botMu.Lock()
 	a.botID = me.ID
 	a.botUser = me.Username
+	a.botMentionRe = botMentionRegexp(me.Username)
 	a.botMu.Unlock()
 	return nil
+}
+
+// botMentionRegexp compiles the case-insensitive "@user" mention pattern
+// used to detect and strip bot mentions in group chats.
+func botMentionRegexp(user string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(user) + `\b`)
 }
 
 func (a *Adapter) getUpdates(ctx context.Context, offset int64) ([]update, error) {
@@ -415,7 +422,7 @@ func split(text string, limit int) []string {
 	var chunks []string
 	for len(text) > limit {
 		cut := runeBoundary(text, limit)
-		if i := lastIndexByte(text[:limit], '\n'); i > limit/2 {
+		if i := strings.LastIndexByte(text[:limit], '\n'); i > limit/2 {
 			cut = i + 1
 		}
 		chunks = append(chunks, text[:cut])
@@ -430,23 +437,10 @@ func split(text string, limit int) []string {
 // runeBoundary returns the largest index <= limit at which text can be cut
 // without splitting a multi-byte rune (i.e. text[index] begins a rune).
 func runeBoundary(text string, limit int) int {
-	i := limit
-	for i > 0 && !utf8.RuneStart(text[i]) {
-		i--
+	if cut := len(textcut.Cut(text, limit)); cut > 0 {
+		return cut
 	}
-	if i == 0 {
-		return limit // a single rune longer than limit; cut anyway to progress
-	}
-	return i
-}
-
-func lastIndexByte(s string, b byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
+	return limit // a single rune longer than limit; cut anyway to progress
 }
 
 var _ channel.Adapter = (*Adapter)(nil)

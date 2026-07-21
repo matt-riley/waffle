@@ -83,7 +83,7 @@ func (t UpdateTool) Run(ctx context.Context, input json.RawMessage) (string, err
 		}
 		return fmt.Sprintf("dropped id=%s", in.ID), nil
 	case "clear_assumptions":
-		n, err := t.Store.DropStaleAssumptions(ctx, sid, 0, false)
+		n, err := t.Store.DropStaleAssumptions(ctx, sid, 0)
 		if err != nil {
 			return "", err
 		}
@@ -94,9 +94,8 @@ func (t UpdateTool) Run(ctx context.Context, input json.RawMessage) (string, err
 }
 
 // DropStaleAssumptions removes unpinned model-sourced assumptions older than
-// maxAge (zero = all ages). When pinnedOnly is true, only unpinned entries
-// matching the filter are removed (always the case for assumptions cleanup).
-func (s *Store) DropStaleAssumptions(ctx context.Context, sessionID string, maxAge time.Duration, includePinned bool) (int, error) {
+// maxAge (zero = all ages). Pinned entries are never removed.
+func (s *Store) DropStaleAssumptions(ctx context.Context, sessionID string, maxAge time.Duration) (int, error) {
 	entries, err := s.List(ctx, sessionID)
 	if err != nil {
 		return 0, err
@@ -113,7 +112,7 @@ func (s *Store) DropStaleAssumptions(ctx context.Context, sessionID string, maxA
 		if e.Source != SourceModel {
 			continue
 		}
-		if e.Pinned && !includePinned {
+		if e.Pinned {
 			continue
 		}
 		if !cutoff.IsZero() && e.UpdatedAt.After(cutoff) {
@@ -130,7 +129,7 @@ func (s *Store) DropStaleAssumptions(ctx context.Context, sessionID string, maxA
 // DropUnpinnedModelAssumptions clears model assumptions that are not pinned
 // (used on /reset).
 func (s *Store) DropUnpinnedModelAssumptions(ctx context.Context, sessionID string) (int, error) {
-	return s.DropStaleAssumptions(ctx, sessionID, 0, false)
+	return s.DropStaleAssumptions(ctx, sessionID, 0)
 }
 
 // DropStaleAssumptionsAll removes unpinned model assumptions across all sessions (#70).

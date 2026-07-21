@@ -51,28 +51,38 @@ type Hooks struct {
 // Callers should re-Load on each session start / dispatch so mtime changes
 // apply without restarting serve (#53).
 func Load(repoRoot string) (*Policy, error) {
+	path, mtime, ok, err := statCandidate(repoRoot)
+	if err != nil || !ok {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	p, err := Parse(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	p.Path = path
+	p.ModTime = mtime
+	return p, nil
+}
+
+// statCandidate stats the first FileNames entry present in repoRoot, without
+// reading its content — used by Cache.Get to check for changes cheaply.
+func statCandidate(repoRoot string) (path string, mtime time.Time, ok bool, err error) {
 	for _, name := range FileNames {
-		path := filepath.Join(repoRoot, name)
-		st, err := os.Stat(path)
+		p := filepath.Join(repoRoot, name)
+		st, err := os.Stat(p)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return "", time.Time{}, false, err
 		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		p, err := Parse(string(raw))
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", name, err)
-		}
-		p.Path = path
-		p.ModTime = st.ModTime()
-		return p, nil
+		return p, st.ModTime(), true, nil
 	}
-	return nil, nil
+	return "", time.Time{}, false, nil
 }
 
 // Cache reloads policy when ModTime changes (#53 mtime reload).
@@ -87,20 +97,25 @@ type Cache struct {
 func NewCache(repoRoot string) *Cache { return &Cache{root: repoRoot} }
 
 // Get returns the current policy, reloading when the file mtime advances.
+// A cheap stat is done first so an unchanged file skips the read+parse.
 func (c *Cache) Get() (*Policy, error) {
 	if c == nil {
 		return nil, nil
 	}
-	p, err := Load(c.root)
+	path, mtime, ok, err := statCandidate(c.root)
 	if err != nil {
 		return nil, err
 	}
-	if p == nil {
+	if !ok {
 		c.pol, c.mt, c.path = nil, time.Time{}, ""
 		return nil, nil
 	}
-	if c.pol != nil && c.path == p.Path && !p.ModTime.After(c.mt) {
+	if c.pol != nil && c.path == path && !mtime.After(c.mt) {
 		return c.pol, nil
+	}
+	p, err := Load(c.root)
+	if err != nil {
+		return nil, err
 	}
 	c.pol, c.mt, c.path = p, p.ModTime, p.Path
 	return p, nil

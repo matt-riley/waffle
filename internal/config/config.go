@@ -143,6 +143,21 @@ func ParseDuration(value string) (time.Duration, error) {
 	return time.ParseDuration(value)
 }
 
+// requirePositiveDurations validates each named duration field, skipping
+// (per the optional skip predicate) values that disable the setting rather
+// than name a duration. format takes the field name then its raw value.
+func requirePositiveDurations(fields map[string]string, skip func(string) bool, format string) error {
+	for name, value := range fields {
+		if skip != nil && skip(value) {
+			continue
+		}
+		if d, err := ParseDuration(value); err != nil || d <= 0 {
+			return fmt.Errorf(format, name, value)
+		}
+	}
+	return nil
+}
+
 // Tools configures builtin tool network policy.
 type Tools struct {
 	Fetch Fetch `toml:"fetch"`
@@ -223,9 +238,10 @@ type Agent struct {
 // ProfileNameMax is the maximum length of a profile slug (#71).
 const ProfileNameMax = 64
 
-// profileNameRE is the allowed profile name form: slug [a-z0-9-], 1–64 chars.
-// Empty, whitespace, path separators, and shell metacharacters are rejected.
-var profileNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$|^[a-z0-9]$`)
+// slugNameRE is the allowed slug form shared by profile names, provider
+// connection names, and model aliases: [a-z0-9-], 1–64 chars. Empty,
+// whitespace, path separators, and shell metacharacters are rejected.
+var slugNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$|^[a-z0-9]$`)
 
 // AgentProfile is one named agent posture (#71).
 // Profiles are a trust boundary: system prompt, model, sandbox mode, and
@@ -332,17 +348,17 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	// Unattended / multi-party tiers deny host bash and durable memory
 	// writes by default; only an explicit tool policy for that group opts out.
 	if restrictedDefaultGroup(group) && !explicitTools {
-		r.Deny = appendUnique(r.Deny, "bash")
-		r.Deny = appendUnique(r.Deny, "remember")
-		r.Deny = appendUnique(r.Deny, "memory_update")
-		r.Deny = appendUnique(r.Deny, "distill_skill")
+		r.Deny = AppendUnique(r.Deny, "bash")
+		r.Deny = AppendUnique(r.Deny, "remember")
+		r.Deny = AppendUnique(r.Deny, "memory_update")
+		r.Deny = AppendUnique(r.Deny, "distill_skill")
 		// Working-set mutation is owner-session only by default (#67).
-		r.Deny = appendUnique(r.Deny, "workspace_update")
+		r.Deny = AppendUnique(r.Deny, "workspace_update")
 	}
 	if r.Mode == "docker" {
-		r.Deny = appendUnique(r.Deny, "remember")
-		r.Deny = appendUnique(r.Deny, "memory_update")
-		r.Deny = appendUnique(r.Deny, "distill_skill")
+		r.Deny = AppendUnique(r.Deny, "remember")
+		r.Deny = AppendUnique(r.Deny, "memory_update")
+		r.Deny = AppendUnique(r.Deny, "distill_skill")
 	}
 	return r
 }
@@ -389,7 +405,7 @@ func ValidProfileName(name string) bool {
 	if name == "" || len(name) > ProfileNameMax {
 		return false
 	}
-	return profileNameRE.MatchString(name)
+	return slugNameRE.MatchString(name)
 }
 
 // knownProfileTools are tool names that may appear in profile allow/deny.
@@ -409,7 +425,7 @@ var knownProfileTools = map[string]bool{
 }
 
 func validateProfiles(path string, agent Agent) error {
-	if agent.DefaultProfile != "" && !ValidProfileName(agent.DefaultProfile) && agent.DefaultProfile != "main" {
+	if agent.DefaultProfile != "" && !ValidProfileName(agent.DefaultProfile) {
 		return fmt.Errorf("agent.default_profile: invalid name %q (want slug [a-z0-9-] max %d)", agent.DefaultProfile, ProfileNameMax)
 	}
 	if err := detectDuplicateProfileTables(path); err != nil {
@@ -516,7 +532,9 @@ func restrictedDefaultGroup(group string) bool {
 	return group == GroupCron || group == GroupIssue || group == GroupGroup
 }
 
-func appendUnique(s []string, v string) []string {
+// AppendUnique returns s with v appended, unless s already contains v. The
+// input slice is never mutated in place.
+func AppendUnique(s []string, v string) []string {
 	for _, x := range s {
 		if x == v {
 			return s
@@ -713,17 +731,15 @@ func (c Config) ProviderRegistrySource() ProviderRegistrySource {
 // name or model alias. These names are also used as secret-store path parts.
 const ProviderConnectionNameMax = 64
 
-var providerRegistryNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$|^[a-z0-9]$`)
-
 // ValidProviderConnectionName reports whether name is safe for use as a
 // provider registry key and secret-store path component.
 func ValidProviderConnectionName(name string) bool {
-	return len(name) <= ProviderConnectionNameMax && providerRegistryNameRE.MatchString(name)
+	return len(name) <= ProviderConnectionNameMax && slugNameRE.MatchString(name)
 }
 
 // ValidModelAlias reports whether alias is a valid model catalog key.
 func ValidModelAlias(alias string) bool {
-	return len(alias) <= ProviderConnectionNameMax && providerRegistryNameRE.MatchString(alias)
+	return len(alias) <= ProviderConnectionNameMax && slugNameRE.MatchString(alias)
 }
 
 // ResolveModel resolves alias to exactly one connection and upstream model.
@@ -915,7 +931,7 @@ func Load(path string) (Config, error) {
 	if err := validateSandboxResources(cfg.Sandbox); err != nil {
 		return Config{}, fmt.Errorf("sandbox resources: %w", err)
 	}
-	if err := validatePolicy(cfg.Policy, cfg.Sandbox.Enforcer); err != nil {
+	if err := validatePolicy(cfg.Policy); err != nil {
 		return Config{}, err
 	}
 	if err := validateLimits(cfg.Limits); err != nil {
@@ -928,10 +944,8 @@ func Load(path string) (Config, error) {
 	if cfg.Jobs.MaxAttempts < 1 {
 		return Config{}, fmt.Errorf("jobs.max_attempts must be at least 1")
 	}
-	for name, value := range map[string]string{"base_backoff": cfg.Jobs.BaseBackoff, "max_backoff": cfg.Jobs.MaxBackoff, "stall_timeout": cfg.Jobs.StallTimeout} {
-		if d, err := ParseDuration(value); err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("jobs.%s must be a positive duration, got %q", name, value)
-		}
+	if err := requirePositiveDurations(map[string]string{"jobs.base_backoff": cfg.Jobs.BaseBackoff, "jobs.max_backoff": cfg.Jobs.MaxBackoff, "jobs.stall_timeout": cfg.Jobs.StallTimeout}, nil, "%s must be a positive duration, got %q"); err != nil {
+		return Config{}, err
 	}
 	if cfg.Memory.WriteGate != "auto" && cfg.Memory.WriteGate != "notify" && cfg.Memory.WriteGate != "review" {
 		return Config{}, fmt.Errorf("memory.write_gate: must be auto, notify, or review")
@@ -939,17 +953,13 @@ func Load(path string) (Config, error) {
 	if cfg.Memory.InjectBudget < 0 {
 		return Config{}, fmt.Errorf("memory.inject_budget: must be >= 0")
 	}
-	for name, value := range map[string]string{
+	// Empty or "0" disables the corresponding idle-reflection setting (#59).
+	disablesEmptyOrZero := func(v string) bool { return v == "" || v == "0" }
+	if err := requirePositiveDurations(map[string]string{
 		"memory.reflect_after": cfg.Memory.ReflectAfter,
 		"memory.reflect_every": cfg.Memory.ReflectEvery,
-	} {
-		if value == "" || value == "0" {
-			// Empty or "0" disables the corresponding idle-reflection setting (#59).
-			continue
-		}
-		if d, err := ParseDuration(value); err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("%s must be a positive duration (or \"0\" to disable), got %q", name, value)
-		}
+	}, disablesEmptyOrZero, "%s must be a positive duration (or \"0\" to disable), got %q"); err != nil {
+		return Config{}, err
 	}
 	switch cfg.Selfdev.Approval {
 	case "manual", "ci", "auto-patch":
@@ -959,13 +969,9 @@ func Load(path string) (Config, error) {
 	if err := validateWorkspaceEgress(cfg.Workspace); err != nil {
 		return Config{}, fmt.Errorf("workspace egress: %w", err)
 	}
-	for name, value := range map[string]string{"workspace.idle_timeout": cfg.Workspace.IdleTimeout, "workspace.close_ttl": cfg.Workspace.CloseTTL, "store.retain": cfg.Store.Retain} {
-		if value == "0" {
-			continue
-		}
-		if d, err := ParseDuration(value); err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("%s must be 0 or a positive duration, got %q", name, value)
-		}
+	disablesZero := func(v string) bool { return v == "0" }
+	if err := requirePositiveDurations(map[string]string{"workspace.idle_timeout": cfg.Workspace.IdleTimeout, "workspace.close_ttl": cfg.Workspace.CloseTTL, "store.retain": cfg.Store.Retain}, disablesZero, "%s must be 0 or a positive duration, got %q"); err != nil {
+		return Config{}, err
 	}
 	app := cfg.GitHub.App
 	if app.AppID < 0 || app.InstallationID < 0 {
@@ -1194,8 +1200,7 @@ func (p PolicyConfig) PolicyRules() []PolicyRule {
 	return out
 }
 
-func validatePolicy(p PolicyConfig, enforcer string) error {
-	_ = enforcer
+func validatePolicy(p PolicyConfig) error {
 	rules := p.PolicyRules()
 	for i, r := range rules {
 		label := "policy.rule"

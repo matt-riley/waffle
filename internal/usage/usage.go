@@ -23,6 +23,12 @@ func New(st *store.Store) *Store { return &Store{db: st.DB} }
 
 func period(now time.Time, d time.Duration) string { return now.UTC().Truncate(d).Format(time.RFC3339) }
 
+// usagePeriods are the two rolling windows every usage row is tracked under.
+var usagePeriods = []struct {
+	name string
+	d    time.Duration
+}{{"day", 24 * time.Hour}, {"hour", time.Hour}}
+
 func (s *Store) Add(ctx context.Context, session string, u llm.Usage) error {
 	return s.addAt(ctx, session, u, time.Now().UTC(), false)
 }
@@ -137,10 +143,7 @@ func (s *Store) ReserveRequestAt(ctx context.Context, session string, l Limits, 
 	if l.RequestsPerHour > 0 && requests >= l.RequestsPerHour {
 		return 0, fmt.Errorf("usage limit exceeded: hourly request budget (%d)", l.RequestsPerHour)
 	}
-	for _, p := range []struct {
-		name string
-		d    time.Duration
-	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+	for _, p := range usagePeriods {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,reserved_tokens)
 			VALUES (?, ?, ?, 1, 0, 0, ?)
 			ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,reserved_tokens=reserved_tokens+excluded.reserved_tokens`, session, p.name, period(now, p.d), reserved); err != nil {
@@ -171,10 +174,7 @@ func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, p := range []struct {
-		name string
-		d    time.Duration
-	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+	for _, p := range usagePeriods {
 		res, err := tx.ExecContext(ctx, `UPDATE usage SET
 			input_tokens=CASE WHEN input_tokens > ? THEN ? ELSE input_tokens+? END,
 			output_tokens=CASE WHEN output_tokens > ? THEN ? ELSE output_tokens+? END,
@@ -220,10 +220,7 @@ func (s *Store) AddTokensAt(ctx context.Context, session string, u llm.Usage, no
 	if session == "" || (u.InputTokens == 0 && u.OutputTokens == 0) {
 		return nil
 	}
-	for _, p := range []struct {
-		name string
-		d    time.Duration
-	}{{"day", 24 * time.Hour}, {"hour", time.Hour}} {
+	for _, p := range usagePeriods {
 		_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens)
 			VALUES (?, ?, ?, 0, ?, ?)
 			ON CONFLICT(session_id,period,period_start) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens`,

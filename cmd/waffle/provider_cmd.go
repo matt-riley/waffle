@@ -695,12 +695,9 @@ func redactCatalogueError(err error, private ...string) error {
 }
 
 func providerList(ctx context.Context, args []string, stdout io.Writer) error {
-	jsonOutput := false
-	for _, arg := range args {
-		if arg != "--json" || jsonOutput {
-			return fmt.Errorf("unknown provider list option %q", arg)
-		}
-		jsonOutput = true
+	args, jsonOutput := takeJSONFlag(args)
+	if len(args) > 0 {
+		return fmt.Errorf("unknown provider list option %q", args[0])
 	}
 	manager, err := openProviderManager()
 	if err != nil {

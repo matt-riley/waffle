@@ -24,10 +24,10 @@ func TestSplitCommandQuotes(t *testing.T) {
 }
 
 func TestMatchBashPrefixQuoted(t *testing.T) {
-	if !matchBashPrefix(`rm -rf "/tmp/foo bar"`, `rm -rf`) {
+	if !MatchBashPrefix(`rm -rf "/tmp/foo bar"`, `rm -rf`) {
 		t.Fatal("expected prefix match on quoted path")
 	}
-	if matchBashPrefix(`echo rm -rf /`, `rm -rf`) {
+	if MatchBashPrefix(`echo rm -rf /`, `rm -rf`) {
 		t.Fatal("should not match when rm is not leading")
 	}
 }

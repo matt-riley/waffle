@@ -277,6 +277,29 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg))
 }
 
+var (
+	syncedWorkspacesMu sync.Mutex
+	syncedWorkspaces   = map[string]bool{}
+)
+
+// syncWorkspaceOnce reindexes a workspace's on-disk MEMORY.md into FTS at
+// most once per (workspace dir, agent name) per process — buildAgent* is
+// called once per agent-group/profile combination (serve builds many agents
+// from the same workspace at startup), and the notes on disk don't change
+// between those calls, so repeating the full resync would just redo the same
+// delete-and-reinsert pass for no benefit.
+func syncWorkspaceOnce(notesIdx *memory.NotesIndex, agentName string, ws memory.Workspace) {
+	key := ws.Dir + "\x00" + agentName
+	syncedWorkspacesMu.Lock()
+	done := syncedWorkspaces[key]
+	syncedWorkspaces[key] = true
+	syncedWorkspacesMu.Unlock()
+	if done {
+		return
+	}
+	_ = notesIdx.SyncWorkspace(context.Background(), agentName, ws)
+}
+
 func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver) (*agent.Agent, func(), error) {
 	cleanup := func() {}
 	pol := cfg.AgentPolicy(group)
@@ -362,7 +385,7 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 	if agentName == "" {
 		agentName = memory.DefaultAgent
 	}
-	_ = notesIdx.SyncWorkspace(context.Background(), agentName, ws)
+	syncWorkspaceOnce(notesIdx, agentName, ws)
 	hostToolList := []tool.Tool{
 		memory.RememberTool{WS: ws, Notes: notesIdx, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
 		memory.MemoryUpdateTool{WS: ws, Notes: notesIdx, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
@@ -780,18 +803,9 @@ func loadProfileSystem(s string) (string, error) {
 }
 
 func appendUniqueStrings(base []string, more ...string) []string {
-	out := append([]string(nil), base...)
+	out := base
 	for _, m := range more {
-		found := false
-		for _, x := range out {
-			if x == m {
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, m)
-		}
+		out = config.AppendUnique(out, m)
 	}
 	return out
 }

@@ -95,7 +95,7 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if name == "" || name == "-" || name == "clear" {
 			name = ""
 		} else {
-			if !config.ValidProfileName(name) && name != "main" {
+			if !config.ValidProfileName(name) {
 				return fmt.Errorf("invalid profile name %q (slug [a-z0-9-] max %d)", name, config.ProfileNameMax)
 			}
 			if _, ok := cfg.Profile(name); !ok {

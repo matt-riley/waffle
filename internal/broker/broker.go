@@ -745,16 +745,11 @@ func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sess
 	}
 	outURL := *targetURL
 	outURL.Scheme, outURL.Host = base.Scheme, base.Host
-	req := r.Clone(r.Context())
-	req.URL = &outURL
-	req.Host = base.Host
-	req.Header.Del("Authorization")
-	req.Header.Del("Proxy-Authorization")
-	if target.Header != "" {
-		req.Header.Set(target.Header, target.Value)
-	}
 	proxy := httputil.NewSingleHostReverseProxy(base)
 	proxy.Transport = safeTransport{}
+	// ReverseProxy.ServeHTTP clones r internally before calling Director, so
+	// the rewrite only needs to happen once, here — not again on a
+	// pre-mutated copy of r.
 	proxy.Director = func(out *http.Request) {
 		out.URL = &outURL
 		out.Host = base.Host
@@ -765,16 +760,23 @@ func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sess
 		}
 	}
 	b.record(r.Context(), token, sessionID, "egress", host+targetURL.EscapedPath())
-	proxy.ServeHTTP(w, req)
+	proxy.ServeHTTP(w, r)
 }
+
+// safeHTTPTransport is built once and reused across every proxied egress
+// request, so connections are pooled instead of each RoundTrip getting its
+// own throwaway Transport (and connection pool).
+var safeHTTPTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	t.DialContext = safeDialContext
+	return t
+}()
 
 type safeTransport struct{}
 
 func (safeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = nil
-	t.DialContext = safeDialContext
-	return t.RoundTrip(r)
+	return safeHTTPTransport.RoundTrip(r)
 }
 
 func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {

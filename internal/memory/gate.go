@@ -90,8 +90,7 @@ func (g *Gate) decide(c Candidate) (Candidate, error) {
 	// Untrusted evidence and instruction-shaped skills always require review
 	// unless the owner explicitly approves them.
 	pending := g.Mode == "review" || c.Provenance.UntrustedContext ||
-		c.Provenance.TrustClass == "untrusted_derived" ||
-		(c.Kind == "skill" && g.Mode == "review")
+		c.Provenance.TrustClass == "untrusted_derived"
 	if pending {
 		c.Status = "pending"
 		if err := os.MkdirAll(filepath.Dir(g.pendingPath(c.ID)), 0o700); err != nil {

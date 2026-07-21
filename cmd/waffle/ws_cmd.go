@@ -87,7 +87,7 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 			return openParseErr
 		}
 		if profile != "" {
-			if !config.ValidProfileName(profile) && profile != "main" {
+			if !config.ValidProfileName(profile) {
 				return fmt.Errorf("invalid profile name %q", profile)
 			}
 			if _, ok := cfg.Profile(profile); !ok {

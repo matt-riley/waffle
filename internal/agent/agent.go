@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -70,8 +71,6 @@ func SessionID(ctx context.Context) string {
 	return sesspkg.IDFromContext(ctx)
 }
 
-func sessionID(ctx context.Context) string { return SessionID(ctx) }
-
 // Hooks observe a Run for UI purposes. Any field may be nil.
 type Hooks struct {
 	OnText      func(delta string)
@@ -119,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		cumulativeUsage.InputTokens += callUsage.InputTokens
 		cumulativeUsage.OutputTokens += callUsage.OutputTokens
 		if a.Usage != nil {
-			_ = a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, sessionID(ctx)), callUsage)
+			_ = a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), callUsage)
 		}
 		if hooks.OnUsage != nil {
 			hooks.OnUsage(cumulativeUsage)
@@ -133,7 +132,7 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 			} else if paused {
 				return history, errors.New("waffle is paused")
 			}
-			if err := a.Usage.Check(ctx, usage.BudgetKey(ctx, sessionID(ctx)), a.Limits, time.Now()); err != nil {
+			if err := a.Usage.Check(ctx, usage.BudgetKey(ctx, SessionID(ctx)), a.Limits, time.Now()); err != nil {
 				return history, err
 			}
 		}
@@ -285,19 +284,19 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	// Sandbox limitation: tools that truncate inside the container never
 	// deliver full bytes here; only host/MCP large strings are spilled.
 	// expand_output works only when the result marker includes a spill id.
-	if a.Spill != nil && !res.IsError {
-		if sid := sessionID(ctx); sid != "" && utf8.RuneCountInString(res.Content) > tool.OutputLimit {
-			spillID, partial, serr := a.Spill.Save(ctx, sid, use.Name, res.Content)
-			if serr == nil && spillID != "" {
-				res.Content = tool.Truncate(res.Content, tool.OutputLimit) + spill.Marker(spillID, partial)
-			} else {
-				res.Content = tool.Truncate(res.Content, tool.OutputLimit)
+	if utf8.RuneCountInString(res.Content) > tool.OutputLimit {
+		spilled := false
+		if a.Spill != nil && !res.IsError {
+			if sid := SessionID(ctx); sid != "" {
+				if spillID, partial, serr := a.Spill.Save(ctx, sid, use.Name, res.Content); serr == nil && spillID != "" {
+					res.Content = tool.Truncate(res.Content, tool.OutputLimit) + spill.Marker(spillID, partial)
+					spilled = true
+				}
 			}
-		} else if utf8.RuneCountInString(res.Content) > tool.OutputLimit {
+		}
+		if !spilled {
 			res.Content = tool.Truncate(res.Content, tool.OutputLimit)
 		}
-	} else if utf8.RuneCountInString(res.Content) > tool.OutputLimit {
-		res.Content = tool.Truncate(res.Content, tool.OutputLimit)
 	}
 	return res
 }
@@ -334,7 +333,7 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	// (and successive Runs in-process) do not re-summarize unchanged prefixes (#61).
 	// When session id is empty, skip the cache entirely: keying only on
 	// prefix length would collide across unrelated runs on the same Agent (#120).
-	sid := sessionID(ctx)
+	sid := SessionID(ctx)
 	summaryText := ""
 	if sid != "" {
 		cacheKey := fmt.Sprintf("%s:%d", sid, len(prefix))
@@ -453,10 +452,11 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage fun
 			if size+len(line) > maxSummaryInput {
 				break
 			}
-			lines = append([]string{line}, lines...) // keep chronological order
+			lines = append(lines, line) // reversed; un-reversed below
 			size += len(line)
 		}
 	}
+	slices.Reverse(lines) // restore chronological order
 	input := strings.Join(lines, "")
 	flat := llm.UserText("Prior turns (summarize these):\n" + input)
 	prompt := llm.UserText("Summarize the prior conversation turns above in 2-3 sentences for context. Focus on key facts, decisions, work done and anything unfinished. Reply with only the summary.")

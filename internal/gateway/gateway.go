@@ -74,7 +74,7 @@ func (g *Gateway) agentFor(group string) (*agent.Agent, error) {
 			return selected, nil
 		}
 	}
-	if group == "main" && g.Agent != nil {
+	if group == config.GroupMain && g.Agent != nil {
 		return g.Agent, nil
 	}
 	return nil, fmt.Errorf("gateway: no agent configured for group %s", group)
@@ -269,8 +269,12 @@ func (g *Gateway) ensureGroups() {
 	}
 }
 
-func (g *Gateway) lockGroup(key string) func() {
+// acquireGroupRef returns the shared groupLock for key, creating it if
+// needed, with its refcount already incremented. Callers must release the
+// ref (via releaseGroupRef) exactly once, whether or not l.mu is acquired.
+func (g *Gateway) acquireGroupRef(key string) *groupLock {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.ensureGroups()
 	l, ok := g.groups[key]
 	if !ok {
@@ -278,50 +282,40 @@ func (g *Gateway) lockGroup(key string) func() {
 		g.groups[key] = l
 	}
 	l.refs++
-	g.mu.Unlock()
+	return l
+}
 
+// releaseGroupRef decrements key's refcount and removes the entry once no
+// handler still references it.
+func (g *Gateway) releaseGroupRef(key string, l *groupLock) {
+	g.mu.Lock()
+	l.refs--
+	if l.refs == 0 {
+		delete(g.groups, key)
+	}
+	g.mu.Unlock()
+}
+
+func (g *Gateway) lockGroup(key string) func() {
+	l := g.acquireGroupRef(key)
 	l.mu.Lock()
 	return func() {
 		l.mu.Unlock()
-		g.mu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(g.groups, key)
-		}
-		g.mu.Unlock()
+		g.releaseGroupRef(key, l)
 	}
 }
 
 // tryLockGroup acquires the conversation lock without blocking. ok is false
 // when another handler already holds it (#59 idle reflection).
 func (g *Gateway) tryLockGroup(key string) (unlock func(), ok bool) {
-	g.mu.Lock()
-	g.ensureGroups()
-	l, exists := g.groups[key]
-	if !exists {
-		l = &groupLock{}
-		g.groups[key] = l
-	}
-	l.refs++
-	g.mu.Unlock()
-
+	l := g.acquireGroupRef(key)
 	if !l.mu.TryLock() {
-		g.mu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(g.groups, key)
-		}
-		g.mu.Unlock()
+		g.releaseGroupRef(key, l)
 		return nil, false
 	}
 	return func() {
 		l.mu.Unlock()
-		g.mu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(g.groups, key)
-		}
-		g.mu.Unlock()
+		g.releaseGroupRef(key, l)
 	}, true
 }
 
@@ -405,6 +399,15 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 	return true, nil
 }
 
+// modelFor returns a's utility model when set, else its main model —
+// the model used for summarization/reflection calls (#61).
+func modelFor(a *agent.Agent) string {
+	if a.UtilityModel != "" {
+		return a.UtilityModel
+	}
+	return a.Model
+}
+
 func (g *Gateway) providerForSession(ctx context.Context, sessionID string) (llm.Provider, string) {
 	// Prefer the agent bound to the channel group (and profile, if set); fall back to main.
 	if g.Entities != nil {
@@ -412,21 +415,13 @@ func (g *Gateway) providerForSession(ctx context.Context, sessionID string) (llm
 		if err == nil && found {
 			if group, err := g.Entities.GroupFor(ctx, ch, chatID, ""); err == nil {
 				if selected, err := g.agentForGroup(group); err == nil && selected != nil {
-					model := selected.Model
-					if selected.UtilityModel != "" {
-						model = selected.UtilityModel
-					}
-					return selected.Provider, model
+					return selected.Provider, modelFor(selected)
 				}
 			}
 		}
 	}
 	if g.Agent != nil {
-		model := g.Agent.Model
-		if g.Agent.UtilityModel != "" {
-			model = g.Agent.UtilityModel
-		}
-		return g.Agent.Provider, model
+		return g.Agent.Provider, modelFor(g.Agent)
 	}
 	return nil, ""
 }
@@ -604,15 +599,11 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	}
 	// Turn-count reflection for conversations that never go idle (#59).
 	// Already holds the conversation group lock via handle → converse.
-	if g.ReflectEveryTurns > 0 && runErr == nil {
-		if n, err := g.Sessions.TurnCount(ctx, group.SessionID); err == nil && n > 0 && n%g.ReflectEveryTurns == 0 {
-			model := selected.Model
-			if selected.UtilityModel != "" {
-				model = selected.UtilityModel
-			}
-			if _, err := g.reflectSessionLocked(ctx, group.SessionID, newHistory, model, false); err != nil {
-				log.Warn("reflect every turns", "err", err)
-			}
+	// persisted is the turn count as of the loop above — the same value
+	// Sessions.TurnCount would return, without a redundant query.
+	if g.ReflectEveryTurns > 0 && runErr == nil && persisted > 0 && persisted%g.ReflectEveryTurns == 0 {
+		if _, err := g.reflectSessionLocked(ctx, group.SessionID, newHistory, modelFor(selected), false); err != nil {
+			log.Warn("reflect every turns", "err", err)
 		}
 	}
 	if runErr != nil {

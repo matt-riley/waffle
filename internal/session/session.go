@@ -15,6 +15,7 @@ import (
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // ErrNotFound is returned when a session doesn't exist.
@@ -471,7 +472,7 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 		}
 		h.Snippet = h.Summary
 		if len(h.Snippet) > 240 {
-			h.Snippet = h.Snippet[:240] + "…"
+			h.Snippet = textcut.Cut(h.Snippet, 240) + "…"
 		}
 		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
 			return nil, err

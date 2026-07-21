@@ -79,7 +79,7 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat] [--profile name]\n       waffle cron add <name> \"<m> <h> <dom> <mon> <dow>\" <prompt...> [--deliver channel:chat] [--profile name]")
 		}
 		if profile != "" {
-			if !config.ValidProfileName(profile) && profile != "main" {
+			if !config.ValidProfileName(profile) {
 				return fmt.Errorf("invalid profile name %q", profile)
 			}
 			if _, ok := cfg.Profile(profile); !ok {

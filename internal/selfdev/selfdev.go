@@ -59,14 +59,19 @@ func providerCheck(ctx context.Context, p config.Provider) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return probeHealthCheck(ctx, provider, p.Model)
+}
+
+// probeHealthCheck sends a minimal authenticated completion to confirm the
+// provider/model pair is reachable, bounded by providerProbeTimeout.
+func probeHealthCheck(ctx context.Context, provider llm.Provider, model string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
 	defer cancel()
-	_, err = provider.Complete(ctx, llm.Request{
-		Model:     p.Model,
+	if _, err := provider.Complete(ctx, llm.Request{
+		Model:     model,
 		MaxTokens: 1,
 		Messages:  []llm.Message{llm.UserText("health check")},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		return "", err
 	}
 	return "authenticated completion", nil
@@ -90,17 +95,7 @@ func providerCheckConfig(ctx context.Context, cfg config.Config) (string, error)
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
-	defer cancel()
-	_, err = provider.Complete(ctx, llm.Request{
-		Model:     target.UpstreamModel,
-		MaxTokens: 1,
-		Messages:  []llm.Message{llm.UserText("health check")},
-	}, nil)
-	if err != nil {
-		return "", err
-	}
-	return "authenticated completion", nil
+	return probeHealthCheck(ctx, provider, target.UpstreamModel)
 }
 
 func namedProvider(cfg config.Config, alias string) (llm.Provider, config.ResolvedModel, string, error) {

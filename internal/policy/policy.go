@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // Action is allow, deny, or require.
@@ -201,6 +202,13 @@ func (e *Engine) Check(name string, input json.RawMessage) Decision {
 
 // CheckSession is Check with an explicit session id for require evaluation.
 func (e *Engine) CheckSession(session, name string, input json.RawMessage) Decision {
+	d, _ := e.checkSessionCmd(session, name, input)
+	return d
+}
+
+// checkSessionCmd is CheckSession but also returns the extracted command, so
+// callers that need it for audit logging don't re-extract it.
+func (e *Engine) checkSessionCmd(session, name string, input json.RawMessage) (Decision, string) {
 	if e.Events == nil {
 		e.Events = NewSessionEvents()
 	}
@@ -219,12 +227,12 @@ func (e *Engine) CheckSession(session, name string, input json.RawMessage) Decis
 			if e.Events.SatisfiedSinceWrite(session, r.Requires) {
 				d.Allowed = true
 				d.Verdict = ActionAllow
-				return d
+				return d, cmd
 			}
 			d.Allowed = false
 			d.Verdict = ActionDeny
 			d.Message = e.requireDenyMessage(r)
-			return d
+			return d, cmd
 		case ActionDeny:
 			d := Decision{
 				Rule:     r.Name,
@@ -233,17 +241,17 @@ func (e *Engine) CheckSession(session, name string, input json.RawMessage) Decis
 				Allowed:  false,
 			}
 			d.Message = e.denyMessage(r, cmd)
-			return d
+			return d, cmd
 		default: // allow (and unknown treated as allow after validation)
 			return Decision{
 				Allowed:  true,
 				Rule:     r.Name,
 				Verdict:  ActionAllow,
 				Guidance: r.Guidance,
-			}
+			}, cmd
 		}
 	}
-	return Decision{Allowed: true, Verdict: ActionAllow}
+	return Decision{Allowed: true, Verdict: ActionAllow}, cmd
 }
 
 func (e *Engine) denyMessage(r Rule, cmd string) string {
@@ -295,20 +303,11 @@ func (e *Engine) ObserveSuccess(session, tool string, input json.RawMessage) {
 		}
 		// Also: successful bash whose command matches a Requires string as prefix
 		// satisfies that key (e.g. Requires="go test" or rule name elsewhere).
-		if tool == "bash" && r.Requires != "" && matchBashPrefix(cmd, r.Requires) {
+		if tool == "bash" && r.Requires != "" && MatchBashPrefix(cmd, r.Requires) {
 			e.Events.NoteSatisfy(session, r.Requires)
 		}
 		// Successful bash matching another rule's Match when that rule is the
 		// require target (already handled via r.matches + Name above).
-	}
-	// If the successful bash command itself is a known satisfy prefix used as
-	// Requires by any rule, note it even when no allow rule matched by Name.
-	if tool == "bash" && cmd != "" {
-		for _, r := range e.Rules {
-			if r.Action == ActionRequire && r.Requires != "" && matchBashPrefix(cmd, r.Requires) {
-				e.Events.NoteSatisfy(session, r.Requires)
-			}
-		}
 	}
 }
 
@@ -320,9 +319,9 @@ func (e *Engine) CheckAndAudit(ctx context.Context, name string, input json.RawM
 // CheckAndAuditSession is CheckAndAudit with an explicit session id (preferred
 // under concurrent serve).
 func (e *Engine) CheckAndAuditSession(ctx context.Context, sessionID, name string, input json.RawMessage) Decision {
-	d := e.CheckSession(sessionID, name, input)
+	d, cmd := e.checkSessionCmd(sessionID, name, input)
 	if e.AuditDB != nil && (d.Rule != "" || !d.Allowed) {
-		_ = LogAudit(ctx, e.AuditDB, sessionID, name, extractCommand(name, input), d)
+		_ = LogAudit(ctx, e.AuditDB, sessionID, name, cmd, d)
 	}
 	return d
 }
@@ -427,7 +426,7 @@ func (r Rule) matches(tool, cmd string) bool {
 		// Prefix/match only applies to bash command text.
 		return strings.HasPrefix(strings.TrimSpace(cmd), r.Match)
 	}
-	return matchBashPrefix(cmd, r.Match)
+	return MatchBashPrefix(cmd, r.Match)
 }
 
 func extractCommand(name string, input json.RawMessage) string {
@@ -503,9 +502,9 @@ func SplitCommand(cmd string) []string {
 	return tokens
 }
 
-// matchBashPrefix reports whether cmd's leading tokens match the prefix string
+// MatchBashPrefix reports whether cmd's leading tokens match the prefix string
 // (itself split with the same quote rules).
-func matchBashPrefix(cmd, prefix string) bool {
+func MatchBashPrefix(cmd, prefix string) bool {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return false
@@ -531,5 +530,5 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return textcut.Cut(s, n) + "…"
 }

@@ -62,7 +62,7 @@ func TestUpdateToolAndDropAssumptions(t *testing.T) {
 	if _, err := st.DB.ExecContext(ctx, `UPDATE working_set_entries SET updated_at = ? WHERE id = ?`, past, oldID); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.DropStaleAssumptions(ctx, "s1", 24*time.Hour, false)
+	n, err := s.DropStaleAssumptions(ctx, "s1", 24*time.Hour)
 	if err != nil || n != 1 {
 		t.Fatalf("stale drop n=%d err=%v", n, err)
 	}

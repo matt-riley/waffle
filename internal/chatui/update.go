@@ -191,11 +191,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Mod.Contains(tea.ModCtrl) && key.Code == 'c' {
 		if m.turnActive || m.commandActive {
-			if m.turnActive {
-				m.markTurnCancelRequested()
-			}
-			m.cancelActiveCommand()
-			m.backend.Cancel()
+			m.cancelActive()
 			return m, nil
 		}
 		if m.exitArmed {
@@ -220,11 +216,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Code == tea.KeyEscape {
 		if m.turnActive || m.commandActive {
-			if m.turnActive {
-				m.markTurnCancelRequested()
-			}
-			m.cancelActiveCommand()
-			m.backend.Cancel()
+			m.cancelActive()
 			return m, nil
 		}
 		if m.overlay != overlayNone || m.paletteVisible {
@@ -552,6 +544,15 @@ func (m *Model) markTurnCancelRequested() {
 	if !m.turnTerminalSeen {
 		m.canceledTurnID = m.activeTurnID
 	}
+}
+
+// cancelActive interrupts any in-flight turn or command (Ctrl+C / Escape).
+func (m *Model) cancelActive() {
+	if m.turnActive {
+		m.markTurnCancelRequested()
+	}
+	m.cancelActiveCommand()
+	m.backend.Cancel()
 }
 
 func (m *Model) cancelActiveCommand() {

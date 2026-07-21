@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/usage"
 )
+
+// mutationTools names tools that write state (files, workspace, memory) or
+// run arbitrary commands. Read-only subagent packets deny these, and profile
+// widening checks treat them as the set that must not silently reappear via
+// a wildcard allow.
+var mutationTools = []string{"write_file", "edit_file", "bash", "workspace_update", "remember", "distill_skill", "memory_update"}
 
 // ChildProfile is a named specialist posture for spawn_subagent (#71).
 // Tools may only tighten the parent's toolbox (deny more / narrow allow).
@@ -117,7 +124,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	}
 	var profile ChildProfile
 	if profileName != "" {
-		if len(t.AllowedProfiles) > 0 && !containsStr(t.AllowedProfiles, profileName) {
+		if len(t.AllowedProfiles) > 0 && !slices.Contains(t.AllowedProfiles, profileName) {
 			return "", fmt.Errorf("profile %q is not in the parent's allowed child set", profileName)
 		}
 		cp, ok := t.Profiles[profileName]
@@ -173,9 +180,10 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 
 	// Read-only packets strip mutation tools.
 	if p.ReadOnly && childTools != nil {
-		childTools = tool.Restrict(childTools, tool.Policy{Deny: []string{
-			"write_file", "edit_file", "bash", "workspace_update", "remember", "distill_skill", "memory_update",
-		}, Profile: effectiveProfile(profileName)})
+		childTools = tool.Restrict(childTools, tool.Policy{
+			Deny:    mutationTools,
+			Profile: effectiveProfile(profileName),
+		})
 	}
 
 	model := t.Model
@@ -212,7 +220,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	if childSession != "" {
 		// Keep transcript isolation on the child session, but charge spend to
 		// the parent budget key so parent limits still apply (#96).
-		parentBudget := usage.BudgetKey(ctx, sessionID(ctx))
+		parentBudget := usage.BudgetKey(ctx, SessionID(ctx))
 		runCtx = WithSession(ctx, childSession)
 		runCtx = usage.WithBudgetKey(runCtx, parentBudget)
 	}
@@ -255,7 +263,7 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	}
 
 	if t.Persist != nil && childSession != "" {
-		_ = t.Persist(context.WithoutCancel(ctx), sessionID(ctx), childSession, p, h)
+		_ = t.Persist(context.WithoutCancel(ctx), SessionID(ctx), childSession, p, h)
 	}
 	return FormatHandoffResult(h), nil
 }
@@ -279,7 +287,7 @@ func profileWideningTool(parent tool.Toolbox, policy tool.Policy) string {
 		}
 	}
 	if wildcard {
-		for _, name := range []string{"write_file", "edit_file", "bash", "workspace_update", "remember", "memory_update", "distill_skill"} {
+		for _, name := range mutationTools {
 			if _, ok := available[name]; !ok && policy.Permits(name) {
 				return name
 			}
@@ -299,7 +307,7 @@ func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken stri
 		} else if paused {
 			return Handoff{}, errors.New("waffle is paused")
 		}
-		if err := sub.Usage.Check(ctx, usage.BudgetKey(ctx, sessionID(ctx)), sub.Limits, time.Now()); err != nil {
+		if err := sub.Usage.Check(ctx, usage.BudgetKey(ctx, SessionID(ctx)), sub.Limits, time.Now()); err != nil {
 			return Handoff{}, err
 		}
 	}
@@ -314,7 +322,7 @@ func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken stri
 		return Handoff{}, err
 	}
 	if sub.Usage != nil {
-		_ = sub.Usage.AddRequest(ctx, usage.BudgetKey(ctx, sessionID(ctx)), resp.Usage)
+		_ = sub.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), resp.Usage)
 	}
 	return ParseHandoff(resp.Message.Text())
 }
@@ -339,15 +347,6 @@ func runObservedVerification(ctx context.Context, tb tool.Toolbox, cmds []string
 		out = append(out, vr)
 	}
 	return out
-}
-
-func containsStr(ss []string, v string) bool {
-	for _, s := range ss {
-		if s == v {
-			return true
-		}
-	}
-	return false
 }
 
 func truncate(s string, n int) string {

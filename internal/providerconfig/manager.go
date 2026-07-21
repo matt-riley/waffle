@@ -275,7 +275,7 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
 		}
 	}
 
-	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, req.APIKey)
+	return m.commit(ctx, before, configStage, secretStage, candidate, req.APIKey)
 }
 
 // Remove deletes an unreferenced connection and its scoped credential.
@@ -332,7 +332,7 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 		return err
 	}
 	defer func() { _ = os.Remove(secretStage) }()
-	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, "")
+	return m.commit(ctx, before, configStage, secretStage, candidate, "")
 }
 
 // Test probes the first alias for a named connection using its encrypted key.
@@ -474,7 +474,7 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 	if err := m.Probe(ctx, resolved, key); err != nil {
 		return redactError(fmt.Errorf("probe model alias %q: %w", req.Alias, err), key)
 	}
-	return m.commit(ctx, before, configStage, secretStage, candidate, Status{}, key)
+	return m.commit(ctx, before, configStage, secretStage, candidate, key)
 }
 
 // ActivateModel validates an existing alias, makes it the default, and moves
@@ -532,7 +532,7 @@ func (m *Manager) ActivateModel(ctx context.Context, alias string) (err error) {
 	if err := m.Probe(ctx, target, key); err != nil {
 		return redactError(fmt.Errorf("probe model alias %q: %w", alias, err), key)
 	}
-	return m.commit(ctx, before, stage, secretStage, candidate, Status{}, key)
+	return m.commit(ctx, before, stage, secretStage, candidate, key)
 }
 
 // RemoveModel deletes an alias. replacement reassigns default, utility, and
@@ -628,8 +628,8 @@ func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (e
 		}
 		expectedAgent.Profiles = profiles
 	}
-	if !equalProviderMaps(candidate.Providers, before.cfg.Providers) ||
-		!equalModelMaps(candidate.Models, expectedModels) ||
+	if !equalMaps(candidate.Providers, before.cfg.Providers) ||
+		!equalMaps(candidate.Models, expectedModels) ||
 		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
 		return errors.New("unrelated configuration changed during model removal")
 	}
@@ -654,22 +654,10 @@ func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (e
 			return redactError(probeErr, key)
 		}
 	}
-	return m.commit(ctx, before, stage, secretStage, candidate, Status{}, "")
+	return m.commit(ctx, before, stage, secretStage, candidate, "")
 }
 
-func equalProviderMaps(a, b map[string]config.ProviderConnection) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for name, value := range a {
-		if other, ok := b[name]; !ok || other != value {
-			return false
-		}
-	}
-	return true
-}
-
-func equalModelMaps(a, b map[string]config.ModelTarget) bool {
+func equalMaps[V comparable](a, b map[string]V) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -883,7 +871,7 @@ func (m *Manager) stageSecrets(original []byte, mutate func(secret.Store) error)
 	return stage, nil
 }
 
-func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, _ Status, key string) (err error) {
+func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, key string) (err error) {
 	journal := transactionJournal{
 		Phase: "prepared", ConfigExisted: before.configExist, SecretExisted: before.secretExist,
 		ReadyExisted: before.readyExist, ConfigMode: uint32(before.configMode),
@@ -1112,8 +1100,8 @@ func validateAddModelCandidate(before, candidate config.Config, req AddModelRequ
 	if req.Utility {
 		expectedAgent.UtilityModel = req.Alias
 	}
-	if !equalProviderMaps(candidate.Providers, before.Providers) ||
-		!equalModelMaps(candidate.Models, expectedModels) ||
+	if !equalMaps(candidate.Providers, before.Providers) ||
+		!equalMaps(candidate.Models, expectedModels) ||
 		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
 		return errors.New("unrelated provider, model, or agent configuration changed during model addition")
 	}

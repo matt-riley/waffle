@@ -25,6 +25,11 @@ import (
 	"github.com/matt-riley/waffle/internal/usage"
 )
 
+// ErrStalled marks a run that was canceled by the stall watchdog rather than
+// by the caller, so fire's retry-status logic can detect it without matching
+// on formatted error text.
+var ErrStalled = errors.New("job stalled")
+
 // Job is one scheduled task.
 type Job struct {
 	ID      string
@@ -407,7 +412,7 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	}
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
-			return "", fmt.Errorf("stalled after %s: %w", policy.StallTimeout, runErr)
+			return "", fmt.Errorf("%w after %s: %w", ErrStalled, policy.StallTimeout, runErr)
 		}
 		return "", runErr
 	}
@@ -697,7 +702,7 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		}
 		next := clock.Now().Add(delay)
 		status := fmt.Sprintf("retrying: %v", err)
-		if strings.HasPrefix(err.Error(), "stalled after ") {
+		if errors.Is(err, ErrStalled) {
 			status = "Stalled"
 		}
 		_ = s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, status, next)

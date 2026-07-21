@@ -115,7 +115,8 @@ func (s *Service) HealthSnapshot(ctx context.Context, staleAfter time.Duration) 
 	}
 	lastTick := s.schedulerLast
 	s.mu.Unlock()
-	if lastTick.IsZero() || now.Sub(lastTick) > staleAfter {
+	schedulerStale := lastTick.IsZero() || now.Sub(lastTick) > staleAfter
+	if schedulerStale {
 		healthy = false
 	}
 	dbOK := true
@@ -123,7 +124,7 @@ func (s *Service) HealthSnapshot(ctx context.Context, staleAfter time.Duration) 
 		dbOK = false
 		healthy = false
 	}
-	return Health{Healthy: healthy && dbOK, Adapters: adapters, Scheduler: SchedulerHealth{LastTick: lastTick.UTC().Format(time.RFC3339Nano), Stale: lastTick.IsZero() || now.Sub(lastTick) > staleAfter}, Database: dbOK}, nil
+	return Health{Healthy: healthy && dbOK, Adapters: adapters, Scheduler: SchedulerHealth{LastTick: lastTick.UTC().Format(time.RFC3339Nano), Stale: schedulerStale}, Database: dbOK}, nil
 }
 
 // Start registers a new active run. profile is the named agent profile (#71);

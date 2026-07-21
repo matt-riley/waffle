@@ -3,14 +3,14 @@ package instance
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/id"
 )
 
 var ErrHeld = errors.New("serve owner lock is held")
@@ -233,9 +233,9 @@ func replaceRecord(path string, record Record) error {
 }
 
 func ownerToken() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	tok, err := id.NewBytes(16)
+	if err != nil {
 		return "", fmt.Errorf("generate instance owner token: %w", err)
 	}
-	return hex.EncodeToString(b[:]), nil
+	return tok, nil
 }

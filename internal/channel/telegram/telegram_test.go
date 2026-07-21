@@ -275,32 +275,34 @@ func TestGroupBotCommandAtUsernameDelivered(t *testing.T) {
 }
 
 func TestStripBotMention(t *testing.T) {
-	got := stripBotMention("hi @Waffle_Bot there", "waffle_bot")
+	re := botMentionRegexp("waffle_bot")
+	got := stripBotMention("hi @Waffle_Bot there", re)
 	if strings.Join(strings.Fields(got), " ") != "hi there" {
 		t.Fatalf("strip = %q", got)
 	}
-	if got := stripBotMention("no mention", "waffle_bot"); got != "no mention" {
+	if got := stripBotMention("no mention", re); got != "no mention" {
 		t.Fatalf("unchanged = %q", got)
 	}
 }
 
 func TestAddressedToBotHelpers(t *testing.T) {
+	re := botMentionRegexp("waffle_bot")
 	m := &tgMessage{
 		Text: "ping @waffle_bot",
 		Entities: []messageEntity{
 			{Type: "mention", Offset: 5, Length: 11},
 		},
 	}
-	if !addressedToBot(m, 99, "waffle_bot") {
+	if !addressedToBot(m, 99, "waffle_bot", re) {
 		t.Error("expected mention to address bot")
 	}
-	if addressedToBot(&tgMessage{Text: "nope"}, 99, "waffle_bot") {
+	if addressedToBot(&tgMessage{Text: "nope"}, 99, "waffle_bot", re) {
 		t.Error("plain text should not address bot")
 	}
-	if !addressedToBot(&tgMessage{Text: "ask @Waffle_Bot instead"}, 99, "waffle_bot") {
+	if !addressedToBot(&tgMessage{Text: "ask @Waffle_Bot instead"}, 99, "waffle_bot", re) {
 		t.Error("plain-text mention should address bot")
 	}
-	if addressedToBot(&tgMessage{Text: "ask @waffle_bot_backup instead"}, 99, "waffle_bot") {
+	if addressedToBot(&tgMessage{Text: "ask @waffle_bot_backup instead"}, 99, "waffle_bot", re) {
 		t.Error("username prefix should not address bot")
 	}
 }

@@ -10,10 +10,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
+	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -199,7 +200,7 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string
 		return nil, err
 	}
 	if agentGroup == "" {
-		agentGroup = "main"
+		agentGroup = config.GroupMain
 	}
 	g.AgentGroup = agentGroup
 	g.SessionID = sess.ID
@@ -308,8 +309,7 @@ type ProfileAudit struct {
 
 // SetProfileByChat sets profile when chat_id uniquely identifies a row.
 func (s *Store) SetProfileByChat(ctx context.Context, chatRef, profile string) error {
-	channel, chatID, ok := strings.Cut(chatRef, ":")
-	if ok && channel != "" && chatID != "" {
+	if channel, chatID, ok := schedule.ParseTarget(chatRef); ok {
 		return s.SetProfile(ctx, channel, chatID, profile)
 	}
 	// chat-only: must be unique

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/policy"
 )
 
 // Toolbox is anything that can offer and execute tools: the in-process
@@ -121,54 +122,61 @@ func Restrict(tb Toolbox, p Policy) Toolbox {
 	if p.IsZero() {
 		return tb
 	}
-	return &restricted{tb: tb, policy: p}
+	r := &restricted{tb: tb, policy: p}
+	for _, d := range tb.Defs() {
+		if p.Permits(d.Name) {
+			r.defs = append(r.defs, d)
+		}
+	}
+	return r
 }
 
 type restricted struct {
 	tb     Toolbox
 	policy Policy
+	// defs is computed once in Restrict since policy never changes for the
+	// lifetime of a restricted toolbox.
+	defs []llm.Tool
 }
 
-func (r *restricted) Defs() []llm.Tool {
-	var defs []llm.Tool
-	for _, d := range r.tb.Defs() {
-		if r.policy.Permits(d.Name) {
-			defs = append(defs, d)
-		}
-	}
-	return defs
-}
+func (r *restricted) Defs() []llm.Tool { return r.defs }
 
-func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+// checkPolicy runs the shared allow/deny + action checks common to Run and
+// RunWithID. Returns a non-nil error if the call should be denied.
+func (r *restricted) checkPolicy(ctx context.Context, name string, input json.RawMessage) error {
 	if !r.policy.Permits(name) {
-		return "", r.policy.denyTool(name)
+		return r.policy.denyTool(name)
 	}
 	if err := r.policy.checkCommand(name, input); err != nil {
-		return "", err
+		return err
 	}
 	if r.policy.CheckAction != nil {
 		if err := r.policy.CheckAction(ctx, name, input); err != nil {
-			return "", err
+			return err
 		}
 	}
-	out, err := r.tb.Run(ctx, name, input)
+	return nil
+}
+
+// observe runs ObserveSuccess after a successful dispatch, if set.
+func (r *restricted) observe(ctx context.Context, name string, input json.RawMessage, err error) {
 	if err == nil && r.policy.ObserveSuccess != nil {
 		r.policy.ObserveSuccess(ctx, name, input)
 	}
+}
+
+func (r *restricted) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	if err := r.checkPolicy(ctx, name, input); err != nil {
+		return "", err
+	}
+	out, err := r.tb.Run(ctx, name, input)
+	r.observe(ctx, name, input, err)
 	return out, err
 }
 
 func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.RawMessage) (string, error) {
-	if !r.policy.Permits(name) {
-		return "", r.policy.denyTool(name)
-	}
-	if err := r.policy.checkCommand(name, input); err != nil {
+	if err := r.checkPolicy(ctx, name, input); err != nil {
 		return "", err
-	}
-	if r.policy.CheckAction != nil {
-		if err := r.policy.CheckAction(ctx, name, input); err != nil {
-			return "", err
-		}
 	}
 	var (
 		out string
@@ -179,9 +187,7 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 	} else {
 		out, err = r.tb.Run(ctx, name, input)
 	}
-	if err == nil && r.policy.ObserveSuccess != nil {
-		r.policy.ObserveSuccess(ctx, name, input)
-	}
+	r.observe(ctx, name, input, err)
 	return out, err
 }
 
@@ -218,7 +224,7 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		if pref == "" {
 			continue
 		}
-		if matchCommandPrefix(cmd, pref) {
+		if policy.MatchBashPrefix(cmd, pref) {
 			msg := fmt.Sprintf("bash command denied by policy: prefix %q is not allowed", pref)
 			if p.Guidance != "" {
 				msg += " — " + p.Guidance
@@ -227,73 +233,6 @@ func (p Policy) checkCommand(name string, input json.RawMessage) error {
 		}
 	}
 	return nil
-}
-
-// matchCommandPrefix reports whether cmd starts with prefix, using a simple
-// string prefix or quote-aware token comparison.
-func matchCommandPrefix(cmd, prefix string) bool {
-	if strings.HasPrefix(cmd, prefix) {
-		return true
-	}
-	want := splitShellTokens(prefix)
-	got := splitShellTokens(cmd)
-	if len(want) == 0 || len(got) < len(want) {
-		return false
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// splitShellTokens splits on whitespace respecting single/double quotes.
-// Does not expand shell indirection (see package docs / plan.md).
-func splitShellTokens(cmd string) []string {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return nil
-	}
-	var tokens []string
-	var cur strings.Builder
-	var quote rune
-	esc := false
-	flush := func() {
-		if cur.Len() > 0 {
-			tokens = append(tokens, cur.String())
-			cur.Reset()
-		}
-	}
-	for _, r := range cmd {
-		if esc {
-			cur.WriteRune(r)
-			esc = false
-			continue
-		}
-		if quote == 0 && r == '\\' {
-			esc = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-				continue
-			}
-			cur.WriteRune(r)
-			continue
-		}
-		switch r {
-		case '\'', '"':
-			quote = r
-		case ' ', '\t', '\n', '\r':
-			flush()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	flush()
-	return tokens
 }
 
 // Combine merges toolboxes; the first box offering a name wins. Used to

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -18,6 +17,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"github.com/matt-riley/waffle/internal/modelcatalog"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 const (
@@ -229,23 +229,12 @@ func sanitizeAnthropicCatalogError(apiKey string, err error) error {
 	}
 	message = "anthropic catalogue: " + modelcatalog.SafeText(message)
 	if len(message) > maxAnthropicCatalogErrorBytes {
-		message = truncateUTF8(message, maxAnthropicCatalogErrorBytes)
+		message = textcut.Cut(message, maxAnthropicCatalogErrorBytes)
 	}
 	return &anthropicCatalogError{
 		message: message,
 		match:   safeAnthropicCatalogMatch(err),
 	}
-}
-
-func truncateUTF8(value string, maxBytes int) string {
-	if len(value) <= maxBytes {
-		return value
-	}
-	value = value[:maxBytes]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
 }
 
 func safeAnthropicCatalogMatch(err error) error {

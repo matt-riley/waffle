@@ -103,11 +103,12 @@ func (s *Service) loc(path, symbol, kind, source string, start, end int, stale b
 
 // IndexFile parses path into the cache (for staleness tests and cached-index source).
 func (s *Service) IndexFile(path string) error {
-	hash, err := fileHash(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	syms, err := parseSymbols(path)
+	hash := fileHashBytes(b)
+	syms, err := parseSymbols(path, b)
 	if err != nil {
 		return err
 	}
@@ -277,7 +278,7 @@ func (s *Service) Structure(ctx context.Context, path string) ([]CodeLocation, e
 func (s *Service) BlastRadius(ctx context.Context, path, symbol string) ([]CodeLocation, error) {
 	if symbol == "" && path != "" {
 		// Best-effort: use first top-level func in file.
-		syms, _ := parseSymbols(path)
+		syms, _ := parseSymbols(path, nil)
 		if len(syms) > 0 {
 			symbol = syms[0].Name
 		}
@@ -355,10 +356,11 @@ func (s *Service) SuggestTests(ctx context.Context, symbol string) ([]CodeLocati
 }
 
 func (s *Service) symbolsFor(path string) (syms []symbolRec, stale bool, source, indexedAt string, err error) {
-	hash, err := fileHash(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false, "", "", err
 	}
+	hash := fileHashBytes(b)
 	s.mu.Lock()
 	ce, ok := s.cache[path]
 	s.mu.Unlock()
@@ -371,7 +373,7 @@ func (s *Service) symbolsFor(path string) (syms []symbolRec, stale bool, source,
 		// Stale cache: re-parse live and mark stale on the old metadata path
 		// is avoided — live parse wins (source=text-fallback).
 	}
-	live, err := parseSymbols(path)
+	live, err := parseSymbols(path, b)
 	if err != nil {
 		return nil, stale, "", indexedAt, err
 	}
@@ -411,13 +413,26 @@ func fileHash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+	return fileHashBytes(b), nil
 }
 
-func parseSymbols(path string) ([]symbolRec, error) {
+func fileHashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// parseSymbols parses path for symbols. When src is non-nil it is parsed
+// directly instead of re-reading path from disk (callers that already have
+// the file's bytes, e.g. for hashing, should pass them here).
+func parseSymbols(path string, src []byte) ([]symbolRec, error) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
+	var f *ast.File
+	var err error
+	if src != nil {
+		f, err = parser.ParseFile(fset, path, src, 0)
+	} else {
+		f, err = parser.ParseFile(fset, path, nil, 0)
+	}
 	if err != nil {
 		return nil, err
 	}

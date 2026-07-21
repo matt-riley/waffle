@@ -26,6 +26,8 @@ import (
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/intake"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/llm/anthropicp"
+	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/localsocket"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
@@ -590,27 +592,24 @@ func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws me
 		profileNames = append(profileNames, name)
 	}
 	sort.Strings(profileNames)
+	profileTiers := []struct {
+		group string
+		label string
+		dest  map[string]*agent.Agent
+	}{
+		{config.GroupMain, "main", profilesMain},
+		{config.GroupGroup, "group", profilesGroup},
+		{config.GroupCron, "cron", profilesCron},
+	}
 	for _, name := range profileNames {
-		mainA, mainCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupMain, name, runtime)
-		cleanups = append(cleanups, mainCloser)
-		if err != nil {
-			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (main): %w", name, err)
+		for _, tier := range profileTiers {
+			a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, tier.group, name, runtime)
+			cleanups = append(cleanups, closer)
+			if err != nil {
+				return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (%s): %w", name, tier.label, err)
+			}
+			tier.dest[name] = a
 		}
-		profilesMain[name] = mainA
-
-		groupA, groupCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupGroup, name, runtime)
-		cleanups = append(cleanups, groupCloser)
-		if err != nil {
-			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (group): %w", name, err)
-		}
-		profilesGroup[name] = groupA
-
-		cronA, cronCloser, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, config.GroupCron, name, runtime)
-		cleanups = append(cleanups, cronCloser)
-		if err != nil {
-			return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)
-		}
-		profilesCron[name] = cronA
 	}
 
 	return agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, nil
@@ -674,14 +673,14 @@ func brokerUpstreamsWithSecretResolver(cfg config.Config, secrets secretResolver
 		switch connection.Type {
 		case "anthropic":
 			if base == "" {
-				base = "https://api.anthropic.com"
+				base = anthropicp.DefaultBaseURL
 			}
 			if key != "" {
 				header, value = "x-api-key", key
 			}
 		case "openai":
 			if base == "" {
-				base = "https://api.openai.com"
+				base = openaip.DefaultBaseURL
 			}
 			if key != "" {
 				header, value = "Authorization", "Bearer "+key

@@ -1,26 +1,11 @@
 package skill
 
 import (
-	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/matt-riley/waffle/internal/memory"
-	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
-
-// ErrorPattern is a recurring tool-error signature found in turns (#65).
-// Prefer FailurePattern (with evidence session IDs) for new code.
-type ErrorPattern struct {
-	// Signature is a normalized error fingerprint.
-	Signature string
-	Count     int
-	// Samples are short example lines.
-	Samples []string
-	// SessionIDs are evidence sessions (populated when available).
-	SessionIDs []string
-}
 
 var (
 	// toolErrorRE matches agent-loop tool error prefixes.
@@ -29,26 +14,9 @@ var (
 	spaceRE = regexp.MustCompile(`\s+`)
 	// drop volatile tokens (paths, numbers, hex ids).
 	volatileRE = regexp.MustCompile(`(?i)(/[^\s]+)|(\b[0-9a-f]{8,}\b)|(\b\d+\b)`)
+	// skillNameRE strips non-slug characters when deriving a skill name.
+	skillNameRE = regexp.MustCompile(`[^a-z0-9]+`)
 )
-
-// MineToolErrors scans recent session turns for tool-error patterns (#65).
-// Thin adapter over MineFailurePatterns for older callers.
-func MineToolErrors(ctx context.Context, sessions *session.Store, sessionLimit int) ([]ErrorPattern, error) {
-	fps, err := MineFailurePatterns(ctx, sessions, "", sessionLimit)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ErrorPattern, len(fps))
-	for i, p := range fps {
-		out[i] = ErrorPattern{
-			Signature:  p.Class,
-			Count:      p.Count,
-			Samples:    p.Samples,
-			SessionIDs: p.SessionIDs,
-		}
-	}
-	return out, nil
-}
 
 func fingerprintError(content string) (sig, sample string) {
 	content = strings.TrimSpace(content)
@@ -57,7 +25,7 @@ func fingerprintError(content string) (sig, sample string) {
 	}
 	sample = content
 	if len(sample) > 120 {
-		sample = sample[:120] + "…"
+		sample = textcut.Cut(sample, 120) + "…"
 	}
 	m := toolErrorRE.FindStringSubmatch(content)
 	raw := content
@@ -71,60 +39,20 @@ func fingerprintError(content string) (sig, sample string) {
 		return "", ""
 	}
 	if len(raw) > 80 {
-		raw = raw[:80]
+		raw = textcut.Cut(raw, 80)
 	}
 	return raw, sample
 }
 
-// ProposeSkills writes pending skill candidates for recurring error patterns
-// via the memory write gate (#65). Returns how many candidates were submitted.
-func ProposeSkills(ctx context.Context, patterns []ErrorPattern, gate *memory.Gate, minCount int) (int, error) {
-	if gate == nil {
-		return 0, fmt.Errorf("no gate")
-	}
-	if minCount <= 0 {
-		minCount = 2
-	}
-	n := 0
-	for _, p := range patterns {
-		if p.Count < minCount {
-			continue
-		}
-		name := skillNameFromSignature(p.Signature)
-		body := fmt.Sprintf("# Recover from: %s\n\nSeen %d times recently.\n\n## Samples\n\n", p.Signature, p.Count)
-		for _, s := range p.Samples {
-			body += "- " + s + "\n"
-		}
-		body += "\n## Suggested approach\n\n1. Reproduce with the same tool input.\n2. Fix the root cause (permissions, missing deps, bad path).\n3. Re-run and confirm the error is gone.\n"
-		c := memory.Candidate{
-			Kind:        "skill",
-			Name:        name,
-			Description: "auto-mined recovery for recurring tool error: " + p.Signature,
-			Body:        body,
-			Provenance: memory.Provenance{
-				SourceKind: "reflection",
-				TrustClass: "model_derived",
-			},
-		}
-		// Always pending for mined skills: use untrusted so gate requires review.
-		c.Provenance.TrustClass = "untrusted_derived"
-		if _, err := gate.SubmitForReview(c); err != nil {
-			return n, err
-		}
-		n++
-	}
-	return n, nil
-}
-
 func skillNameFromSignature(sig string) string {
 	s := strings.ToLower(sig)
-	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
+	s = skillNameRE.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "tool-error"
 	}
 	if len(s) > 40 {
-		s = s[:40]
+		s = textcut.Cut(s, 40)
 	}
 	return "recover-" + s
 }
