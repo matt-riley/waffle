@@ -129,7 +129,10 @@ func TestProfileDenialLogsEffectivePolicySourceAndRuleWithoutInput(t *testing.T)
 		{
 			name: "action rule",
 			policy: tool.Policy{Profile: "reviewer", CheckAction: func(_ context.Context, name string, input json.RawMessage) error {
-				engine := policypkg.NewEngine([]policypkg.Rule{{Name: "no-private-bash", Tool: "bash", Action: policypkg.ActionDeny}}, policypkg.EnforcerNone)
+				engine, err := policypkg.NewEngine([]policypkg.Rule{{Name: "no-private-bash", Tool: "bash", Action: policypkg.ActionDeny}}, policypkg.EnforcerNone)
+				if err != nil {
+					return err
+				}
 				decision := engine.Check(name, input)
 				if decision.Allowed {
 					return nil

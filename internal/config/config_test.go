@@ -1109,6 +1109,27 @@ guidance = "run go test after edits"
 	}
 }
 
+func TestPolicyRulesRejectEmptySelectors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	// Rule with only name+action (no tool/match/regex) must fail closed at Load.
+	writeFile(t, path, `
+[[policy.rule]]
+name = "x"
+action = "deny"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("empty tool+match+regex policy rule accepted")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "x") {
+		t.Fatalf("error should name the rule: %q", msg)
+	}
+	if !strings.Contains(msg, "tool") || !strings.Contains(msg, "match") || !strings.Contains(msg, "regex") {
+		t.Fatalf("error should mention tool/match/regex: %q", msg)
+	}
+}
+
 func TestUsesDocker(t *testing.T) {
 	// Global host mode, no groups -> no docker.
 	cfg := Default()

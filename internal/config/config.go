@@ -79,8 +79,9 @@ type PolicyConfig struct {
 type PolicyRule struct {
 	// Name is a stable audit label (required).
 	Name string `toml:"name"`
-	// Tool is the tool name to match (e.g. "bash"). Empty matches any tool
-	// only when match/regex are also empty — prefer setting tool explicitly.
+	// Tool is the tool name to match (e.g. "bash"). Empty means any tool only
+	// when match or regex is set; a rule with tool, match, and regex all empty
+	// is rejected at Load (need tool, match, or regex).
 	Tool string `toml:"tool"`
 	// Match is a bash command prefix (quote-aware token match).
 	Match string `toml:"match"`

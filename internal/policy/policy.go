@@ -40,7 +40,9 @@ const (
 type Rule struct {
 	// Name is a stable audit label.
 	Name string
-	// Tool is the tool name to match (e.g. "bash"). Empty matches any tool.
+	// Tool is the tool name to match (e.g. "bash"). Empty means any tool only
+	// when Match or Regex is set; a rule with Tool, Match, and Regex all empty
+	// is invalid (Compile rejects it).
 	Tool string
 	// Match is a command prefix (bash tokens after quote-aware split).
 	Match string
@@ -58,8 +60,12 @@ type Rule struct {
 	re *regexp.Regexp
 }
 
-// Compile prepares Regex if present.
+// Compile validates selectors and prepares Regex if present.
+// A rule must set at least one of Tool, Match, or Regex.
 func (r *Rule) Compile() error {
+	if r.Tool == "" && r.Match == "" && r.Regex == "" {
+		return fmt.Errorf("policy rule %q: need tool, match, or regex", r.Name)
+	}
 	if r.Regex == "" {
 		return nil
 	}
@@ -172,15 +178,18 @@ type Decision struct {
 }
 
 // NewEngine builds an engine with compiled rules and a session event log.
-func NewEngine(rules []Rule, enforcer string) *Engine {
+// Returns an error if any rule fails Compile (including empty selectors).
+func NewEngine(rules []Rule, enforcer string) (*Engine, error) {
 	e := &Engine{Rules: rules, Enforcer: enforcer, Events: NewSessionEvents()}
 	if e.Enforcer == "" {
 		e.Enforcer = EnforcerNone
 	}
 	for i := range e.Rules {
-		_ = e.Rules[i].Compile()
+		if err := e.Rules[i].Compile(); err != nil {
+			return nil, err
+		}
 	}
-	return e
+	return e, nil
 }
 
 // Check evaluates rules against a tool invocation. name is the tool name;
@@ -336,12 +345,16 @@ func LogAudit(ctx context.Context, db *sql.DB, session, tool, command string, d 
 }
 
 // NewEngineFromStore builds an engine with optional audit persistence.
-func NewEngineFromStore(st *store.Store, rules []Rule, enforcer string) *Engine {
-	e := NewEngine(rules, enforcer)
+// Returns an error if any rule fails Compile (including empty selectors).
+func NewEngineFromStore(st *store.Store, rules []Rule, enforcer string) (*Engine, error) {
+	e, err := NewEngine(rules, enforcer)
+	if err != nil {
+		return nil, err
+	}
 	if st != nil {
 		e.AuditDB = st.DB
 	}
-	return e
+	return e, nil
 }
 
 // Narrow merges child rules under a parent so the child may only *narrow*

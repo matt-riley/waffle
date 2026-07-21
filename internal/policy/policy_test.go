@@ -115,12 +115,15 @@ func TestPolicyAuditRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	e := NewEngineFromStore(st, []Rule{{
+	e, err := NewEngineFromStore(st, []Rule{{
 		Name:   "no-rm",
 		Tool:   "bash",
 		Match:  "rm -rf",
 		Action: ActionDeny,
 	}}, EnforcerFeedback)
+	if err != nil {
+		t.Fatal(err)
+	}
 	e.SessionID = "sess-1"
 	d := e.CheckAndAudit(ctx, "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
 	if d.Allowed {
@@ -146,7 +149,7 @@ func TestAllowWhenNoMatch(t *testing.T) {
 func TestTestsBeforeCommitRequireE2E(t *testing.T) {
 	// Full tests-before-commit scenario (#66):
 	// edit → commit blocked → test passes → commit allowed → write again → commit denied.
-	e := NewEngine([]Rule{
+	e, err := NewEngine([]Rule{
 		{
 			Name:   "go-test-green",
 			Tool:   "bash",
@@ -162,6 +165,9 @@ func TestTestsBeforeCommitRequireE2E(t *testing.T) {
 			Guidance: "run `go test ./...` after your last edit and before committing",
 		},
 	}, EnforcerFeedback)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const sess = "sess-require-e2e"
 	commitIn := json.RawMessage(`{"command":"git commit -m ok"}`)
 	testIn := json.RawMessage(`{"command":"go test ./..."}`)
@@ -259,5 +265,52 @@ func TestSessionEventsSatisfiedSinceWrite(t *testing.T) {
 	ev.NoteSatisfy("s", "k")
 	if !ev.SatisfiedSinceWrite("s", "k") {
 		t.Fatal("re-satisfy after write should hold")
+	}
+}
+
+func TestCompileRejectsEmptySelectors(t *testing.T) {
+	r := Rule{Name: "global-deny", Action: ActionDeny}
+	err := r.Compile()
+	if err == nil {
+		t.Fatal("expected Compile to reject empty tool/match/regex")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "global-deny") {
+		t.Fatalf("error should name the rule: %q", msg)
+	}
+	if !strings.Contains(msg, "tool") || !strings.Contains(msg, "match") || !strings.Contains(msg, "regex") {
+		t.Fatalf("error should mention tool/match/regex: %q", msg)
+	}
+
+	// Empty Tool is valid when Match is set (any-tool prefix match).
+	ok := Rule{Name: "any-rm", Match: "rm -rf", Action: ActionDeny}
+	if err := ok.Compile(); err != nil {
+		t.Fatalf("match-only rule should compile: %v", err)
+	}
+	// Empty Tool is valid when Regex is set.
+	okRE := Rule{Name: "any-curl", Regex: `curl\s+http://`, Action: ActionDeny}
+	if err := okRE.Compile(); err != nil {
+		t.Fatalf("regex-only rule should compile: %v", err)
+	}
+}
+
+func TestNewEngineRejectsEmptySelectors(t *testing.T) {
+	_, err := NewEngine([]Rule{{Name: "noop-global", Action: ActionDeny}}, EnforcerNone)
+	if err == nil {
+		t.Fatal("NewEngine should reject all-empty selectors")
+	}
+	if !strings.Contains(err.Error(), "noop-global") {
+		t.Fatalf("error should name the rule: %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool") {
+		t.Fatalf("error should mention tool: %v", err)
+	}
+
+	_, err = NewEngineFromStore(nil, []Rule{{Name: "noop-store", Action: ActionDeny}}, EnforcerNone)
+	if err == nil {
+		t.Fatal("NewEngineFromStore should reject all-empty selectors")
+	}
+	if !strings.Contains(err.Error(), "noop-store") {
+		t.Fatalf("error should name the rule: %v", err)
 	}
 }

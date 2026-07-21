@@ -327,7 +327,10 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 				Guidance: r.Guidance,
 			})
 		}
-		engine := policypkg.NewEngineFromStore(&store.Store{DB: sessions.DB()}, rules, cfg.Sandbox.Enforcer)
+		engine, err := policypkg.NewEngineFromStore(&store.Store{DB: sessions.DB()}, rules, cfg.Sandbox.Enforcer)
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("policy engine: %w", err)
+		}
 		toolPolicy.CheckAction = func(ctx context.Context, name string, input json.RawMessage) error {
 			d := engine.CheckAndAuditSession(ctx, session.IDFromContext(ctx), name, input)
 			if !d.Allowed {
@@ -513,6 +516,12 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 		maxIter = profile.MaxIterations
 	}
 
+	usageStore := usagepkg.New(&store.Store{DB: sessions.DB()})
+	limits := func() usagepkg.Limits {
+		l := cfg.LimitsFor(group)
+		return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
+	}()
+
 	// Subagents get the execution + MCP tools, but not the ability to
 	// spawn further subagents (their toolbox omits spawn_subagent).
 	// Working-set broadcast is filled per-run when the parent has entries (#68).
@@ -526,6 +535,8 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 			Redact:              runtime.redact,
 			BroadcastWorkingSet: true,
 			WorkingSetBroadcast: "", // filled below if non-empty at build time; runtime inject via note
+			Usage:               usageStore,
+			Limits:              limits,
 			Log:                 slog.Default(),
 		}
 		// Pointer wrapper freezes working-set broadcast across parallel
@@ -569,12 +580,9 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 		MaxIterations: maxIter,
 		Redact:        runtime.redact,
 		Spill:         spillStore,
-		Usage:         usagepkg.New(&store.Store{DB: sessions.DB()}),
-		Limits: func() usagepkg.Limits {
-			l := cfg.LimitsFor(group)
-			return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
-		}(),
-		Log: slog.Default(),
+		Usage:         usageStore,
+		Limits:        limits,
+		Log:           slog.Default(),
 	}, cleanup, nil
 }
 

@@ -162,11 +162,12 @@ that group; otherwise host launch fails closed.
   and multi-party channel chats on the `group` tier — all three **deny host
   `bash` and memory writes by default**. Override only with an explicit
   `[agent.group.cron]` / `[agent.group.issue]` / `[agent.group.group]` tool
-  policy. Action-level `[[policy.rule]]` tables match tool name + optional
-  bash prefix/regex with allow/deny/require and guidance; `[sandbox] enforcer`
-  is `none` (default) or `feedback` (include guidance in denials). Decisions
-  are audited in `policy_audit`. Bash matching is quote-aware but does **not**
-  expand shell indirection — see [docs/plan.md](docs/plan.md).
+  policy. Action-level `[[policy.rule]]` tables match tool name and/or bash
+  prefix/regex (at least one of `tool`, `match`, or `regex` is required) with
+  allow/deny/require and guidance; `[sandbox] enforcer` is `none` (default) or
+  `feedback` (include guidance in denials). Decisions are audited in
+  `policy_audit`. Bash matching is quote-aware but does **not** expand shell
+  indirection — see [docs/plan.md](docs/plan.md).
 - **Self-improvement** — `waffle doctor` self-checks, `waffle upgrade`
   rebuilds from a local checkout, gates on the new binary's own doctor,
   atomically swaps it in, and `waffle rollback` restores the previous one.

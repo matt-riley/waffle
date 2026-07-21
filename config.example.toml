@@ -92,3 +92,16 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 #   waffle cron add dig 0 9 * * 1 "summarize starred repos" --profile researcher
 #   waffle chat --profile reviewer
 #   waffle ws open owner/repo --profile reviewer
+
+# Action-level tool rules (#66). Each rule requires at least one of tool,
+# match, or regex (empty selectors are rejected at load). Empty tool matches
+# any tool only when match or regex is set.
+# [sandbox]
+# enforcer = "feedback"  # none (default) | feedback
+#
+# [[policy.rule]]
+# name = "no-rm"
+# tool = "bash"
+# match = "rm -rf"
+# action = "deny"
+# guidance = "use safer cleanup"
