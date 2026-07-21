@@ -459,8 +459,8 @@ func TestServerOversizedTurnEventCancelsTurnContextWhenCancelIsStubborn(t *testi
 		if !errors.As(err, &remote) || remote.Code != "turn_failed" {
 			t.Fatalf("Turn error = %#v", err)
 		}
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("oversized turn event did not cancel the turn context")
+	case <-ctx.Done():
+		t.Fatalf("oversized turn event did not cancel the turn context: %v", ctx.Err())
 	}
 }
 
@@ -519,8 +519,8 @@ func TestServerOversizedCommandDoesNotCancelConcurrentTurn(t *testing.T) {
 		if !errors.As(err, &remote) || remote.Code != "command_failed" {
 			t.Fatalf("Command error = %#v", err)
 		}
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("oversized command event did not cancel its command context")
+	case <-ctx.Done():
+		t.Fatalf("oversized command event did not cancel its command context: %v", ctx.Err())
 	}
 	if got := backend.cancelCount(); got != 0 {
 		t.Fatalf("oversized command canceled backend %d times", got)
@@ -1083,6 +1083,321 @@ func TestServerClearsTurnActiveBeforeTerminalFrameIsObservable(t *testing.T) {
 	}
 }
 
+func TestServerAdmitsNextCommandWhileResultFrameIsObservable(t *testing.T) {
+	t.Parallel()
+	testServerAdmitsNextCommandWhileTerminalFrameIsObservable(t, TypeCommandResult, nil)
+}
+
+func TestServerAdmitsNextCommandWhileBackendErrorFrameIsObservable(t *testing.T) {
+	t.Parallel()
+	testServerAdmitsNextCommandWhileTerminalFrameIsObservable(t, TypeError, errors.New("backend command failed"))
+}
+
+func TestServerFailedCommandWriteNeverRunsPipelinedCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		terminalType string
+		firstErr     error
+		failEvent    bool
+	}{
+		{name: "result", terminalType: TypeCommandResult},
+		{name: "backend_error", terminalType: TypeError, firstErr: errors.New("backend command failed")},
+		{name: "event_then_stable_error", terminalType: TypeError, failEvent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testServerFailedCommandWriteNeverRunsPipelinedCommand(t, tc.terminalType, tc.firstErr, tc.failEvent)
+		})
+	}
+}
+
+func TestServerCanceledSettlingWaiterPreservesPredecessorBarrier(t *testing.T) {
+	t.Parallel()
+
+	serverSide, clientSide := net.Pipe()
+	blocking := &blockingReturnConn{
+		Conn:      serverSide,
+		frameType: TypeCommandResult,
+		observed:  make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	backend := &terminalOrderBackend{
+		wireFakeBackend: newWireFake("canceled-waiter-order"),
+		calls:           make(chan chat.ParsedCommand, 3),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan struct{})
+	go func() {
+		serveConn(ctx, blocking, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+		close(serverDone)
+	}()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	t.Cleanup(func() {
+		release()
+		cancel()
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+	codec := NewClientCodec(clientSide, clientSide)
+	if err := encodeTestFrame(codec, TypeOpen, "open", chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codec.Decode(); err != nil {
+		t.Fatal(err)
+	}
+	blocking.armed.Store(true)
+	if err := encodeTestFrame(codec, TypeCommand, "first", chat.ParsedCommand{Name: chat.CommandSkill, Args: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalOrderCommandCall(t, ctx, backend.calls, chat.CommandSkill)
+	firstTerminal, err := codec.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstTerminal.Type != TypeCommandResult || firstTerminal.ID != "first" {
+		t.Fatalf("first terminal frame = %+v", firstTerminal)
+	}
+	select {
+	case <-blocking.observed:
+	case <-ctx.Done():
+		t.Fatal("first terminal frame write did not remain blocked")
+	}
+	if err := encodeTestFrame(codec, TypeCommand, "second", chat.ParsedCommand{Name: chat.CommandStatus, Args: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeTestFrame(codec, TypeCancel, "cancel", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeTestFrame(codec, TypeCommand, "third", chat.ParsedCommand{Name: chat.CommandUsage, Args: "third"}); err != nil {
+		t.Fatal(err)
+	}
+	assertNoTerminalOrderCommandCall(t, backend.calls)
+	release()
+	secondTerminal, err := codec.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondTerminal.Type != TypeError || secondTerminal.ID != "second" {
+		t.Fatalf("second terminal frame = %+v", secondTerminal)
+	}
+	assertTerminalOrderCommandCall(t, ctx, backend.calls, chat.CommandUsage)
+	thirdTerminal, err := codec.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thirdTerminal.Type != TypeCommandResult || thirdTerminal.ID != "third" {
+		t.Fatalf("third terminal frame = %+v", thirdTerminal)
+	}
+	_ = clientSide.Close()
+	select {
+	case <-serverDone:
+	case <-ctx.Done():
+		t.Fatal("server connection did not close")
+	}
+}
+
+func testServerAdmitsNextCommandWhileTerminalFrameIsObservable(t *testing.T, terminalType string, firstErr error) {
+	t.Helper()
+
+	serverSide, clientSide := net.Pipe()
+	blocking := &blockingReturnConn{
+		Conn:      serverSide,
+		frameType: terminalType,
+		observed:  make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	backend := &terminalOrderBackend{
+		wireFakeBackend: newWireFake("command-terminal-order"),
+		calls:           make(chan chat.ParsedCommand, 2),
+		firstErr:        firstErr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan struct{})
+	go func() {
+		serveConn(ctx, blocking, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+		close(serverDone)
+	}()
+	observedClient := &observedRequestConn{
+		Conn:     clientSide,
+		needle:   []byte(`"args":"second"`),
+		observed: make(chan struct{}),
+	}
+	client := &Client{
+		conn:      observedClient,
+		codec:     NewClientCodec(observedClient, observedClient),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
+	}
+	go client.readLoop()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	t.Cleanup(func() {
+		release()
+		cancel()
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	blocking.armed.Store(true)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.Command(ctx, chat.ParsedCommand{Name: chat.CommandSkill, Args: "first"}, nil)
+		firstDone <- err
+	}()
+	assertTerminalOrderCommandCall(t, ctx, backend.calls, chat.CommandSkill)
+	select {
+	case <-blocking.observed:
+	case <-ctx.Done():
+		t.Fatal("first command terminal frame was not observed")
+	}
+	if err := <-firstDone; !errors.Is(err, firstErr) {
+		var remote *RemoteError
+		if firstErr == nil || !errors.As(err, &remote) || remote.Code != "command_failed" {
+			t.Fatalf("first Command error = %#v, want %v", err, firstErr)
+		}
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus, Args: "second"}, nil)
+		secondDone <- err
+	}()
+	select {
+	case <-observedClient.observed:
+	case <-ctx.Done():
+		t.Fatal("second command request was not written")
+	}
+	assertNoTerminalOrderCommandCall(t, backend.calls)
+	release()
+	assertTerminalOrderCommandCall(t, ctx, backend.calls, chat.CommandStatus)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Command: %v", err)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-serverDone:
+	case <-ctx.Done():
+		t.Fatal("server connection did not close")
+	}
+}
+
+func testServerFailedCommandWriteNeverRunsPipelinedCommand(t *testing.T, terminalType string, firstErr error, failEvent bool) {
+	t.Helper()
+
+	serverSide, clientSide := net.Pipe()
+	failing := &terminalWriteFailureConn{
+		Conn:         serverSide,
+		terminalType: terminalType,
+		attempted:    make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	backend := &terminalOrderBackend{
+		wireFakeBackend: newWireFake("failed-command-write"),
+		calls:           make(chan chat.ParsedCommand, 2),
+		firstErr:        firstErr,
+		firstEvent:      failEvent,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan struct{})
+	go func() {
+		serveConn(ctx, failing, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+		close(serverDone)
+	}()
+	observedClient := &observedRequestConn{
+		Conn:     clientSide,
+		needle:   []byte(`"args":"second"`),
+		observed: make(chan struct{}),
+	}
+	client := &Client{
+		conn:      observedClient,
+		codec:     NewClientCodec(observedClient, observedClient),
+		pending:   make(map[string]chan Frame),
+		routeDone: make(map[string]chan struct{}),
+		closed:    make(chan struct{}),
+	}
+	go client.readLoop()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(failing.release) }) }
+	t.Cleanup(func() {
+		release()
+		cancel()
+		_ = clientSide.Close()
+		_ = serverSide.Close()
+	})
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	failing.armed.Store(true)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.Command(ctx, chat.ParsedCommand{Name: chat.CommandSkill, Args: "first"}, nil)
+		firstDone <- err
+	}()
+	assertTerminalOrderCommandCall(t, ctx, backend.calls, chat.CommandSkill)
+	select {
+	case <-failing.attempted:
+	case <-ctx.Done():
+		t.Fatal("first command terminal write was not attempted")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus, Args: "second"}, nil)
+		secondDone <- err
+	}()
+	select {
+	case <-observedClient.observed:
+	case <-ctx.Done():
+		t.Fatal("pipelined command request was not written")
+	}
+	assertNoTerminalOrderCommandCall(t, backend.calls)
+	release()
+	select {
+	case <-serverDone:
+	case <-ctx.Done():
+		t.Fatal("server connection did not close after terminal write failure")
+	}
+	if err := <-firstDone; err == nil {
+		t.Fatal("first Command unexpectedly succeeded")
+	}
+	if err := <-secondDone; err == nil {
+		t.Fatal("pipelined Command unexpectedly succeeded")
+	}
+	select {
+	case parsed := <-backend.calls:
+		t.Fatalf("pipelined command reached backend after terminal write failure: %q", parsed.Name)
+	default:
+	}
+}
+
+func assertTerminalOrderCommandCall(t *testing.T, ctx context.Context, calls <-chan chat.ParsedCommand, want chat.Name) {
+	t.Helper()
+	select {
+	case parsed := <-calls:
+		if parsed.Name != want {
+			t.Fatalf("backend command = %q, want %q", parsed.Name, want)
+		}
+	case <-ctx.Done():
+		t.Fatalf("backend command %q was not called: %v", want, ctx.Err())
+	}
+}
+
+func assertNoTerminalOrderCommandCall(t *testing.T, calls <-chan chat.ParsedCommand) {
+	t.Helper()
+	select {
+	case parsed := <-calls:
+		t.Fatalf("backend command %q started before predecessor terminal write settled", parsed.Name)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestServerAuditsConnectionLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -1215,19 +1530,75 @@ func (c *toggleWriteConn) Write(payload []byte) (int, error) {
 
 type blockingReturnConn struct {
 	net.Conn
-	armed    atomic.Bool
+	armed     atomic.Bool
+	once      sync.Once
+	frameType string
+	observed  chan struct{}
+	release   chan struct{}
+}
+
+type observedRequestConn struct {
+	net.Conn
 	once     sync.Once
+	needle   []byte
 	observed chan struct{}
-	release  chan struct{}
+}
+
+func (c *observedRequestConn) Write(payload []byte) (int, error) {
+	written, err := c.Conn.Write(payload)
+	if err == nil && bytes.Contains(payload, c.needle) {
+		c.once.Do(func() { close(c.observed) })
+	}
+	return written, err
+}
+
+type terminalWriteFailureConn struct {
+	net.Conn
+	armed        atomic.Bool
+	once         sync.Once
+	terminalType string
+	attempted    chan struct{}
+	release      chan struct{}
+}
+
+func (c *terminalWriteFailureConn) Write(payload []byte) (int, error) {
+	if bytes.Contains(payload, []byte(`"type":"`+c.terminalType+`"`)) && c.armed.CompareAndSwap(true, false) {
+		c.once.Do(func() { close(c.attempted) })
+		<-c.release
+		return 0, errors.New("injected terminal write failure")
+	}
+	return c.Conn.Write(payload)
 }
 
 func (c *blockingReturnConn) Write(payload []byte) (int, error) {
 	written, err := c.Conn.Write(payload)
-	if err == nil && bytes.Contains(payload, []byte(`"type":"turn_done"`)) && c.armed.CompareAndSwap(true, false) {
+	frameType := c.frameType
+	if frameType == "" {
+		frameType = TypeTurnDone
+	}
+	if err == nil && bytes.Contains(payload, []byte(`"type":"`+frameType+`"`)) && c.armed.CompareAndSwap(true, false) {
 		c.once.Do(func() { close(c.observed) })
 		<-c.release
 	}
 	return written, err
+}
+
+type terminalOrderBackend struct {
+	*wireFakeBackend
+	calls      chan chat.ParsedCommand
+	firstErr   error
+	firstEvent bool
+}
+
+func (b *terminalOrderBackend) Command(_ context.Context, parsed chat.ParsedCommand, emit func(chat.Event)) (chat.Result, error) {
+	b.calls <- parsed
+	if parsed.Name == chat.CommandSkill && b.firstEvent {
+		emit(chat.Event{Kind: chat.EventNotice, Text: strings.Repeat("x", MaxFrameBytes)})
+	}
+	if parsed.Name == chat.CommandSkill && b.firstErr != nil {
+		return chat.Result{}, b.firstErr
+	}
+	return b.commandResult, nil
 }
 
 func newWireFake(id string) *wireFakeBackend {
