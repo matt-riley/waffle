@@ -25,11 +25,14 @@ type ContainerOpts struct {
 	// remains the policy enforcement point.
 	ProxyURL   string
 	ProxyToken string
-	SelfPath   string // waffle binary to bind-mount
-	Memory     string
-	CPUs       float64
-	PIDs       int
-	Disk       string
+	// NetLockdown, when true, grants CAP_NET_ADMIN and sets WAFFLE_NET_LOCKDOWN
+	// so the in-container runner drops the default route (host broker only).
+	NetLockdown bool
+	SelfPath    string // waffle binary to bind-mount
+	Memory      string
+	CPUs        float64
+	PIDs        int
+	Disk        string
 }
 
 // Runtime abstracts the container engine so the lifecycle logic is
@@ -86,13 +89,19 @@ func (d DockerRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) e
 }
 
 // ensureNetwork creates a user-defined Docker network when needed. Built-in
-// modes (bridge/none/host) are left alone. "already exists" is ignored so
-// concurrent workspace starts are safe.
+// modes (bridge/none/host) are left alone. Concurrent creates are ignored.
+//
+// For WorkspaceBrokerNetwork we prefer a normal bridge (not --internal):
+// Docker's --internal mode also blocks host-gateway on Docker Desktop, which
+// breaks the broker. Isolation for none/allowlist is enforced by the runner's
+// netlock (drop default route, keep waffle-host) plus the broker egress proxy.
 func (d DockerRuntime) ensureNetwork(ctx context.Context, name string) error {
 	switch name {
 	case "", "bridge", "none", "host":
 		return nil
 	}
+	// If a stale network exists with the wrong shape, leave it; route lockdown
+	// + proxy policy provide isolation regardless of Internal flag.
 	out, err := exec.CommandContext(ctx, "docker", "network", "create", name).CombinedOutput()
 	if err == nil {
 		return nil
@@ -116,11 +125,18 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 		"--cpus", fmt.Sprintf("%g", cpus),
 		"--pids-limit", fmt.Sprintf("%d", pids),
 		"--security-opt", "no-new-privileges",
-		"-v", opts.SelfPath + ":/usr/local/bin/waffle:ro",
-		"-v", opts.QueueDir + ":/waffle/queue",
-		"-v", opts.Volume + ":/work",
-		"-w", "/work",
 	}
+	// none/allowlist: CAP_NET_ADMIN so the runner can drop the default route
+	// while keeping waffle-host (broker) reachable (#95).
+	if opts.NetLockdown {
+		args = append(args, "--cap-add", "NET_ADMIN")
+	}
+	args = append(args,
+		"-v", opts.SelfPath+":/usr/local/bin/waffle:ro",
+		"-v", opts.QueueDir+":/waffle/queue",
+		"-v", opts.Volume+":/work",
+		"-w", "/work",
+	)
 	if opts.BrokerURL != "" || opts.ProxyURL != "" {
 		args = append(args, "--add-host", "waffle-host:host-gateway")
 		if opts.BrokerURL != "" {
@@ -130,6 +146,12 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 				args = append(args, "-e", sandbox.EnvSessionTokenFile+"="+sandbox.ContainerSessionTokenPath)
 			}
 		}
+	}
+	if opts.NetLockdown {
+		args = append(args,
+			"-e", "WAFFLE_NET_LOCKDOWN=1",
+			"-e", "WAFFLE_NET_LOCKDOWN_HOST=waffle-host",
+		)
 	}
 	if opts.ProxyURL != "" {
 		proxyURL := opts.ProxyURL

@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/matt-riley/waffle/internal/netlock"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/tool"
 )
@@ -18,6 +20,23 @@ import (
 // pair. It has no access to config, secrets, or the database — only the
 // queue directory and whatever the container can see.
 func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
+	// Workspace none/allowlist containers set WAFFLE_NET_LOCKDOWN so the
+	// runner drops the default route (keeping waffle-host only) before
+	// serving tools — broker reachable, raw internet not (#95).
+	if v := strings.TrimSpace(os.Getenv("WAFFLE_NET_LOCKDOWN")); v == "1" || strings.EqualFold(v, "true") {
+		host := strings.TrimSpace(os.Getenv("WAFFLE_NET_LOCKDOWN_HOST"))
+		if host == "" {
+			host = "waffle-host"
+		}
+		if err := netlock.LockdownExceptHost(host); err != nil {
+			fmt.Fprintf(stderr, "waffle runner: net lockdown: %v\n", err)
+			// Continue: better a running runner than a dead workspace; tests
+			// assert lockdown on the probe path separately.
+		} else {
+			fmt.Fprintf(stderr, "waffle runner: network lockdown active (host=%s)\n", host)
+		}
+	}
+
 	dir, err := queueDirArg(args)
 	if err != nil {
 		return err

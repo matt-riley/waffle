@@ -99,6 +99,10 @@ type Manager struct {
 	// the clone succeeds, so the broker needs this earlier binding to avoid
 	// refusing the clone's own credential request.
 	BindGitScope func(sessionID, repo string)
+	// AllowGitHost, when set, adds host to the broker egress allowlist so
+	// git clone/fetch through HTTP_PROXY works under egress=none (which
+	// otherwise denies all hosts). Called with the repo URL host at open (#95).
+	AllowGitHost func(host string)
 	// ExecTimeout bounds one in-container command.
 	ExecTimeout time.Duration
 	// Hooks are host-configured lifecycle commands (#54). Merged with
@@ -138,6 +142,15 @@ func NewManager(st *store.Store, sessions *session.Store, rt Runtime, queueRoot 
 var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 
 // normalizeRepo accepts "owner/name" or a full https URL.
+// gitHostFromURL returns the lowercase hostname of an https git URL, or "".
+func gitHostFromURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 func normalizeRepo(arg string) (repo, url string, err error) {
 	arg = strings.TrimSuffix(strings.TrimSpace(arg), ".git")
 	if repoRE.MatchString(arg) {
@@ -235,6 +248,13 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	// failure below via revokeSession, which also clears this binding).
 	if m.BindGitScope != nil {
 		m.BindGitScope(sess.ID, repo)
+	}
+	// Under none (and when proxy is used), allow this repo's git host through
+	// the broker so clone succeeds while other hosts stay denied (#95).
+	if m.AllowGitHost != nil {
+		if host := gitHostFromURL(url); host != "" {
+			m.AllowGitHost(host)
+		}
 	}
 	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
 		m.revokeSession(sess.ID)
@@ -374,20 +394,21 @@ func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
 		}
 	}
 	return ContainerOpts{
-		Name:       ws.Container,
-		Image:      ws.Image,
-		Volume:     ws.Volume,
-		QueueDir:   m.queueDir(ws.ID),
-		Network:    network,
-		BrokerURL:  m.BrokerURL,
-		Token:      token,
-		SelfPath:   m.RunnerBinary,
-		Memory:     m.Memory,
-		CPUs:       m.CPUs,
-		PIDs:       m.PIDs,
-		Disk:       m.Disk,
-		ProxyURL:   proxy,
-		ProxyToken: token,
+		Name:        ws.Container,
+		Image:       ws.Image,
+		Volume:      ws.Volume,
+		QueueDir:    m.queueDir(ws.ID),
+		Network:     network,
+		BrokerURL:   m.BrokerURL,
+		Token:       token,
+		SelfPath:    m.RunnerBinary,
+		Memory:      m.Memory,
+		CPUs:        m.CPUs,
+		PIDs:        m.PIDs,
+		Disk:        m.Disk,
+		ProxyURL:    proxy,
+		ProxyToken:  token,
+		NetLockdown: egress == "none" || egress == "allowlist",
 	}
 }
 

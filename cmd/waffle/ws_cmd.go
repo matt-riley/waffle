@@ -234,6 +234,16 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 		}
 		mgr.RevokeSession = b.RevokeSession
 		mgr.BindGitScope = b.BindGitRepo
+		// none: allow the repo's git host through broker egress so clone works
+		// via HTTP_PROXY while other hosts stay denied (#95).
+		if cfg.Workspace.Egress == "none" || cfg.Workspace.Egress == "" {
+			mgr.AllowGitHost = func(host string) {
+				if host == "" {
+					return
+				}
+				b.SetEgress([]broker.EgressTarget{{Host: host, BaseURL: "https://" + host}})
+			}
+		}
 	}
 	return mgr
 }
@@ -281,6 +291,8 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	}
 
 	b := broker.New(st, brokerUpstreams(cfg))
+	// allowlist: configured hosts. none: empty here; Open adds the repo host
+	// so git clone can use the proxy while other hosts stay denied (#95).
 	if cfg.Workspace.Egress == "allowlist" {
 		targets := make([]broker.EgressTarget, 0, len(cfg.Workspace.Allowlist))
 		for _, host := range cfg.Workspace.Allowlist {

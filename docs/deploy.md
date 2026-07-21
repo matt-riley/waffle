@@ -363,22 +363,20 @@ network. Defaults are deny-by-default:
 
 | Value | Docker network | Host broker (`waffle-host`) | Wider internet |
 | --- | --- | --- | --- |
-| `none` (default) | user-defined bridge `waffle-ws` | reachable via `--add-host waffle-host:host-gateway` | HTTP(S)/ALL_PROXY (and lowercase variants) point at the broker egress face with an **empty allowlist** (deny-all). Proxy-aware clients cannot reach arbitrary external hosts. |
-| `allowlist` | same `waffle-ws` bridge | same host-gateway path | HTTP(S) only through the broker egress proxy for hosts listed in `[workspace] allowlist`; non-allowlisted hosts get 403 |
+| `none` (default) | user-defined bridge `waffle-ws` | reachable via `--add-host waffle-host:host-gateway` | **Route lockdown** (runner drops the default route, keeps only `waffle-host`) blocks raw internet. HTTP(S)_PROXY points at the broker; the repo's git host is allowlisted for clone/fetch; other hosts get 403. |
+| `allowlist` | same `waffle-ws` bridge | same host-gateway path | Same route lockdown + HTTP(S) only through the broker for hosts in `[workspace] allowlist` |
 | `full` | default Docker `bridge` | same host-gateway path when the broker URL is set | unrestricted |
 
 Waffle creates the `waffle-ws` network on demand (`docker network create waffle-ws`)
 before starting a none/allowlist workspace. Operators do not need to pre-create
 it; concurrent creates are ignored when the network already exists.
 
-**Why not `--network none`?** Docker network mode `none` has no route to the
-host gateway, so `WAFFLE_BROKER` / `waffle git-credential` cannot reach the
-credential broker and `ws open` clone fails. The dedicated bridge restores
-host-gateway reachability. Default/allowlist isolation for the wider internet
-is enforced by the broker egress proxy (empty allowlist under `none`; configured
-hosts under `allowlist`), which is the same path git/HTTP clients use when
-proxy env vars are set.
+**Why not Docker `--network none` or `--internal`?** Mode `none` has no route to
+the host gateway, so the credential broker is unreachable. Docker `--internal`
+also blocks host-gateway on Docker Desktop. Instead, `waffle-ws` is a normal
+bridge (so host-gateway works) and the **linux runner** applies netlock at
+start (`CAP_NET_ADMIN` + drop default route, host `/32` only). That yields the
+same operational outcome: broker reachable, raw external probes fail.
 
-**Note:** Process that ignore proxy env and open raw sockets can still use the
-bridge. Treat `none` as broker-reachable + proxy-deny-by-default for standard
-clients, not a kernel-level network jail.
+**Clone under `none`:** before `git clone`, Open allows the repository host on
+the broker egress allowlist so proxy-aware git can fetch that host only.
