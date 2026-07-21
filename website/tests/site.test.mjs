@@ -27,6 +27,16 @@ test('motion enhancement fails open when the GSAP module does not become ready',
 	assert.match(motion, /classList\.add\('js-motion-ready'\)/);
 });
 
+test('motion enhancement stays disabled after the fail-open guard runs', async () => {
+	const motion = await read('src/scripts/motion.ts');
+
+	assert.match(
+		motion,
+		/if \(prefersReducedMotion\(\)\) \{[\s\S]*?return;[\s\S]*?\}\s*if \(!root\.classList\.contains\('js-motion'\)\) return;\s*gsap\.registerPlugin/,
+	);
+	assert.doesNotMatch(motion, /root\.classList\.add\('js-motion'\)/);
+});
+
 test('navigation labels and section ids describe their destinations', async () => {
 	const [header, footer, activities, namesake] = await Promise.all([
 		read('src/components/SiteHeader.astro'),

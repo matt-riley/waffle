@@ -102,7 +102,8 @@ export function initMotion(): void {
 		return;
 	}
 
-	root.classList.add('js-motion');
+	if (!root.classList.contains('js-motion')) return;
+
 	gsap.registerPlugin(ScrollTrigger);
 	initHeroTimeline();
 	initScrollReveals();
