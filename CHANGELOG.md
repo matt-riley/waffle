@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0](https://github.com/matt-riley/waffle/compare/v0.5.0...v0.6.0) (2026-07-21)
+
+
+### Features
+
+* **#130:** add prompt history traversal with Up/Down ([c9a8498](https://github.com/matt-riley/waffle/commit/c9a8498a68ec44b8270d5d3ae09c7c63944cd984))
+* **#132:** add activity spinner during active turns ([69ef685](https://github.com/matt-riley/waffle/commit/69ef685154e7b80069c970cca027b848a607032b))
+* **#133:** add --config/-c and WAFFLE_CONFIG override ([60cbca2](https://github.com/matt-riley/waffle/commit/60cbca2539f13eb26b13ad53da02bcfa7ec18dda))
+* **#134:** add --json flag to listing subcommands ([7182741](https://github.com/matt-riley/waffle/commit/71827413355812645c8f996a4d5a27a43d6af08e))
+* **#136:** add shell completion for bash zsh fish ([35f8a51](https://github.com/matt-riley/waffle/commit/35f8a5127e3cf5554bc6ffdc4d8b69d8f361a6b0))
+
+
+### Bug Fixes
+
+* **#118:** remove redundant min/max helpers ([26ca0ad](https://github.com/matt-riley/waffle/commit/26ca0ad2701237787956c857bc8d61a44c4b5cc6))
+* **#126:** prevent data loss on forget --help ([c47481d](https://github.com/matt-riley/waffle/commit/c47481d0e91ffcbc9b093f400e167b0292f42089))
+* **#127:** prevent daemon launch on serve --help ([1978a7a](https://github.com/matt-riley/waffle/commit/1978a7ae50f311b4a292ccc9a52a9e2d7644cc8d))
+* **#128:** prevent git checkout on upgrade --help ([eb49927](https://github.com/matt-riley/waffle/commit/eb49927871fd2bfe34813b88e50af551f261d9a5))
+* **#129:** support single-string cron and --deliver= ([6ddf758](https://github.com/matt-riley/waffle/commit/6ddf75821d76b572f7e6e3ac652d47708f66c486))
+* **#131:** use AST-based markdown renderer ([66fc684](https://github.com/matt-riley/waffle/commit/66fc684844e0c7161aea2ffb0e3a86050d43ffef))
+
 ## [0.5.0](https://github.com/matt-riley/waffle/compare/v0.4.0...v0.5.0) (2026-07-21)
 
 
