@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -56,13 +57,14 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 		return nil
 
 	case "add":
-		// waffle cron add <name> <cron(5 fields)> <prompt...> [--deliver channel:chat] [--profile name]
+		// waffle cron add <name> <cron(5 fields or quoted string)> <prompt...> [--deliver channel:chat] [--profile name]
 		fields, deliver, profile, err := splitCronFlags(args[1:])
 		if err != nil {
 			return err
 		}
+		fields = normalizeCronAddFields(fields)
 		if len(fields) < 7 {
-			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat] [--profile name]")
+			return fmt.Errorf("usage: waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat] [--profile name]\n       waffle cron add <name> \"<m> <h> <dom> <mon> <dow>\" <prompt...> [--deliver channel:chat] [--profile name]")
 		}
 		if profile != "" {
 			if !config.ValidProfileName(profile) && profile != "main" {
@@ -131,12 +133,14 @@ Jobs fire while `+"`waffle serve`"+` is running.
 
 Usage:
   waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat_id] [--profile name]
+  waffle cron add <name> "<m> <h> <dom> <mon> <dow>" <prompt...> [--deliver=channel:chat_id] [--profile=name]
   waffle cron ls
   waffle cron run <id>     run a job now
   waffle cron rm <id>
 
 Example:
   waffle cron add standup 0 9 * * 1-5 "Summarize my starred repos" --deliver telegram:900 --profile researcher
+  waffle cron add standup "0 9 * * 1-5" "Summarize my starred repos" --deliver=telegram:900
 `)
 }
 
@@ -147,10 +151,31 @@ func orNone(s string) string {
 	return s
 }
 
+// normalizeCronAddFields expands a single-string 5-field cron expression into
+// five separate fields so both of these forms work:
+//
+//	name 0 9 * * 1-5 prompt...
+//	name "0 9 * * 1-5" prompt...
+func normalizeCronAddFields(fields []string) []string {
+	if len(fields) < 3 {
+		return fields
+	}
+	cronParts := strings.Fields(fields[1])
+	if len(cronParts) != 5 {
+		return fields
+	}
+	expanded := make([]string, 0, 1+5+len(fields)-2)
+	expanded = append(expanded, fields[0])
+	expanded = append(expanded, cronParts...)
+	expanded = append(expanded, fields[2:]...)
+	return expanded
+}
+
 func splitCronFlags(args []string) (fields []string, deliver, profile string, err error) {
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--deliver":
+		arg := args[i]
+		switch {
+		case arg == "--deliver":
 			if i+1 == len(args) {
 				return nil, "", "", fmt.Errorf("--deliver requires a value (channel:chat_id, e.g. telegram:900)")
 			}
@@ -159,14 +184,27 @@ func splitCronFlags(args []string) (fields []string, deliver, profile string, er
 				return nil, "", "", fmt.Errorf("bad delivery target %q (want channel:chat_id)", deliver)
 			}
 			i++
-		case "--profile":
+		case strings.HasPrefix(arg, "--deliver="):
+			deliver = strings.TrimPrefix(arg, "--deliver=")
+			if deliver == "" {
+				return nil, "", "", fmt.Errorf("--deliver requires a value (channel:chat_id, e.g. telegram:900)")
+			}
+			if _, _, ok := schedule.ParseTarget(deliver); !ok {
+				return nil, "", "", fmt.Errorf("bad delivery target %q (want channel:chat_id)", deliver)
+			}
+		case arg == "--profile":
 			if i+1 == len(args) {
 				return nil, "", "", fmt.Errorf("--profile requires a name")
 			}
 			profile = args[i+1]
 			i++
+		case strings.HasPrefix(arg, "--profile="):
+			profile = strings.TrimPrefix(arg, "--profile=")
+			if profile == "" {
+				return nil, "", "", fmt.Errorf("--profile requires a name")
+			}
 		default:
-			fields = append(fields, args[i])
+			fields = append(fields, arg)
 		}
 	}
 	return fields, deliver, profile, nil
