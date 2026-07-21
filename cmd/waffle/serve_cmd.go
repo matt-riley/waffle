@@ -139,14 +139,24 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	var serveBroker *broker.Broker
+	var brokerDone <-chan struct{}
 	if cfg.Broker.Listen != "" {
+		// Bind synchronously so a busy address fails startup instead of
+		// logging "credential broker up" and continuing with a dead broker (#99).
+		ln, err := net.Listen("tcp", cfg.Broker.Listen)
+		if err != nil {
+			return fmt.Errorf("credential broker cannot bind %s: %w", cfg.Broker.Listen, err)
+		}
 		upstreams := brokerUpstreams(cfg)
 		b := broker.New(st, upstreams)
 		serveBroker = b
 		b.Usage = usagepkg.New(st)
 		b.Limits = brokerLimits(cfg, config.GroupMain)
+		done := make(chan struct{})
+		brokerDone = done
 		go func() {
-			if err := b.Serve(ctx, cfg.Broker.Listen); err != nil {
+			defer close(done)
+			if err := b.ServeListener(ctx, ln); err != nil {
 				log.Error("broker stopped", "err", err)
 			}
 		}()
@@ -337,8 +347,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 
 	// Stop the scheduler and wait for its in-flight-job drain before the
 	// deferred cleanup tears down the shared sandbox executor and MCP
-	// clients a running cron job may still be using.
-	chatErr := waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone, chatDone)
+	// clients a running cron job may still be using. Also join the credential
+	// broker so a fast restart does not hit "address already in use" (#109).
+	chatErr := waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone, chatDone, brokerDone)
 	if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
 		return fmt.Errorf("chat server: %w", chatErr)
 	}
@@ -346,14 +357,20 @@ func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapt
 }
 
 // waitForServeWorkers preserves shutdown ordering: stop accepting/scheduling,
-// then wait for cron.Stop's in-flight-job drain and intake before deferred
-// cleanup closes the shared sandbox executor and MCP clients.
-func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-chan error, intakeDone <-chan struct{}, chatDone <-chan error) error {
+// then wait for cron.Stop's in-flight-job drain, intake, chat, and the
+// credential broker (when started) before deferred cleanup closes the shared
+// sandbox executor and MCP clients. brokerDone may be nil when the broker was
+// not started.
+func waitForServeWorkers(stop, lifecycleCancel context.CancelFunc, schedDone <-chan error, intakeDone <-chan struct{}, chatDone <-chan error, brokerDone <-chan struct{}) error {
 	stop()
 	lifecycleCancel()
 	<-schedDone
 	<-intakeDone
-	return <-chatDone
+	chatErr := <-chatDone
+	if brokerDone != nil {
+		<-brokerDone
+	}
+	return chatErr
 }
 
 type peerCredentialLookup func(net.Conn) (localsocket.Peer, error)

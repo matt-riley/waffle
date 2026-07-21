@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -374,7 +375,7 @@ func TestAcceptanceIssue10ShutdownWaitsForInFlightCronBeforeCleanup(t *testing.T
 	chatDrained := make(chan error, 1)
 	chatDrained <- nil
 	go func() {
-		_ = waitForServeWorkers(func() { close(stopCalled) }, func() {}, schedulerDrained, intakeDrained, chatDrained)
+		_ = waitForServeWorkers(func() { close(stopCalled) }, func() {}, schedulerDrained, intakeDrained, chatDrained, nil)
 		close(returned)
 	}()
 
@@ -405,7 +406,7 @@ func TestServeStopsWaitsForChatServerBeforeSharedCleanup(t *testing.T) {
 	returned := make(chan error, 1)
 
 	go func() {
-		returned <- waitForServeWorkers(func() {}, func() {}, schedulerDrained, intakeDrained, chatDrained)
+		returned <- waitForServeWorkers(func() {}, func() {}, schedulerDrained, intakeDrained, chatDrained, nil)
 	}()
 	select {
 	case err := <-returned:
@@ -421,6 +422,134 @@ func TestServeStopsWaitsForChatServerBeforeSharedCleanup(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("shutdown did not return after chat server drained")
+	}
+}
+
+// TestServeStopsWaitsForBrokerBeforeReturn ensures shutdown joins the broker
+// ServeListener goroutine so a restart can rebind the same address (#109).
+func TestServeStopsWaitsForBrokerBeforeReturn(t *testing.T) {
+	schedulerDrained := make(chan error, 1)
+	schedulerDrained <- nil
+	intakeDrained := make(chan struct{})
+	close(intakeDrained)
+	chatDrained := make(chan error, 1)
+	chatDrained <- nil
+	brokerDrained := make(chan struct{})
+	returned := make(chan struct{})
+
+	go func() {
+		_ = waitForServeWorkers(func() {}, func() {}, schedulerDrained, intakeDrained, chatDrained, brokerDrained)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("shutdown returned before broker drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(brokerDrained)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not return after broker drained")
+	}
+}
+
+// TestServeCredentialBrokerBindFailureIsNotSwallowed occupies the broker
+// listen address and asserts serve fails startup without logging success (#99).
+func TestServeCredentialBrokerBindFailureIsNotSwallowed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	brokerAddr := held.Addr().String()
+	statusAddr := unusedTCPAddress(t)
+
+	configBody := fmt.Sprintf(
+		"[gateway]\nstatus_listen = %q\n\n[broker]\nlisten = %q\n\n[provider]\napi_key = \"test-key\"\n\n[agent]\nsubagents = false\nlearn = false\n",
+		statusAddr, brokerAddr,
+	)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	err = serveCmdWithAdapterFactory(context.Background(), &logs, func(config.Config) ([]channel.Adapter, error) {
+		t.Fatal("adapter factory must not run after broker bind failure")
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "credential broker cannot bind") {
+		t.Fatalf("serve broker bind = %v, want cannot bind error\nlogs:\n%s", err, logs.String())
+	}
+	if strings.Contains(logs.String(), "credential broker up") {
+		t.Fatalf("logged broker success before bind failure:\n%s", logs.String())
+	}
+}
+
+// TestServeCredentialBrokerPortReleasedOnShutdown starts serve with a broker,
+// cancels it, and asserts the listen port is free — then rebinds in a loop so
+// a fast restart cannot hit "address already in use" (#109).
+func TestServeCredentialBrokerPortReleasedOnShutdown(t *testing.T) {
+	brokerAddr := unusedTCPAddress(t)
+
+	for i := 0; i < 8; i++ {
+		home := t.TempDir()
+		t.Setenv("WAFFLE_HOME", home)
+		statusAddr := unusedTCPAddress(t)
+		configBody := fmt.Sprintf(
+			"[gateway]\nstatus_listen = %q\n\n[broker]\nlisten = %q\n\n[provider]\napi_key = \"test-key\"\n\n[agent]\nsubagents = false\nlearn = false\n",
+			statusAddr, brokerAddr,
+		)
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- serveCmdWithAdapterFactory(ctx, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+				return []channel.Adapter{blockingAdapter{}}, nil
+			})
+		}()
+
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			conn, dialErr := net.DialTimeout("tcp", brokerAddr, 50*time.Millisecond)
+			if dialErr == nil {
+				_ = conn.Close()
+				break
+			}
+			select {
+			case err := <-done:
+				cancel()
+				t.Fatalf("serve exited before broker up (iteration %d): %v", i, err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatalf("broker did not start (iteration %d): last dial error: %v", i, dialErr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("serve shutdown (iteration %d): %v", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("serve did not return after cancel (iteration %d)", i)
+		}
+
+		ln, err := net.Listen("tcp", brokerAddr)
+		if err != nil {
+			t.Fatalf("broker port still bound after serve return (iteration %d): %v", i, err)
+		}
+		_ = ln.Close()
 	}
 }
 
