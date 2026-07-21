@@ -408,14 +408,6 @@ func (s *Service) walkGo(ctx context.Context, fn func(path string) error) error 
 	})
 }
 
-func fileHash(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return fileHashBytes(b), nil
-}
-
 func fileHashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
