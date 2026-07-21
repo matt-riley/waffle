@@ -36,7 +36,8 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 	}
 	var closeID string
 	var closeForce bool
-	if args[0] == "close" {
+	switch args[0] {
+	case "close", "rm", "remove":
 		closeID, closeForce, err = parseWorkspaceCloseArgs(args[1:])
 		if err != nil {
 			return err
@@ -54,7 +55,7 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 	}()
 
 	switch args[0] {
-	case "ls":
+	case "ls", "list":
 		mgr := newWorkspaceManager(cfg, st, nil)
 		list, listErr := mgr.List(ctx)
 		if listErr != nil {
@@ -124,7 +125,7 @@ func wsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err er
 		fmt.Fprintf(stdout, "workspace %s stopped; volume kept\n", args[1])
 		return nil
 
-	case "close":
+	case "close", "rm", "remove":
 		mgr := newWorkspaceManager(cfg, st, nil)
 		report, closeErr := mgr.Close(ctx, closeID, closeForce)
 		if closeErr != nil {
@@ -151,15 +152,15 @@ func parseWorkspaceCloseArgs(args []string) (id string, force bool, err error) {
 		case arg == "--force":
 			force = true
 		case strings.HasPrefix(arg, "-"):
-			return "", false, fmt.Errorf("unknown flag %q\nusage: waffle ws close <id> [--force]", arg)
+			return "", false, fmt.Errorf("unknown flag %q\nusage: waffle ws close|rm|remove <id> [--force]", arg)
 		case id != "":
-			return "", false, fmt.Errorf("expected one workspace id, got %q and %q\nusage: waffle ws close <id> [--force]", id, arg)
+			return "", false, fmt.Errorf("expected one workspace id, got %q and %q\nusage: waffle ws close|rm|remove <id> [--force]", id, arg)
 		default:
 			id = arg
 		}
 	}
 	if id == "" {
-		return "", false, fmt.Errorf("usage: waffle ws close <id> [--force]")
+		return "", false, fmt.Errorf("usage: waffle ws close|rm|remove <id> [--force]")
 	}
 	return id, force, nil
 }
@@ -197,9 +198,10 @@ func wsUsage(w io.Writer) {
 Usage:
   waffle ws open <owner/repo> [--profile name]
                                  clone the repo into a fresh container
-  waffle ws ls                   list workspaces
+  waffle ws ls|list              list workspaces
   waffle ws idle <id>            stop the container, keep the volume
-  waffle ws close <id> [--force] tear down (refuses if work is unpushed)
+  waffle ws close|rm|remove <id> [--force]
+                                 tear down (refuses if work is unpushed)
 `)
 }
 

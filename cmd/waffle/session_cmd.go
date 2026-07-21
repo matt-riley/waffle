@@ -18,7 +18,7 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		sub = args[0]
 	}
 	switch sub {
-	case "ls":
+	case "ls", "list":
 		_, st, openErr := openConfigAndStore(ctx)
 		if openErr != nil {
 			return openErr
@@ -43,9 +43,9 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			}
 		}
 		return nil
-	case "rm":
+	case "rm", "remove":
 		if len(args) != 2 {
-			return errors.New("usage: waffle session rm <id>")
+			return errors.New("usage: waffle session rm|remove <id>")
 		}
 		_, st, openErr := openConfigAndStore(ctx)
 		if openErr != nil {
@@ -102,10 +102,10 @@ func sessionCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 		return nil
 	case "help", "-h", "--help":
-		fmt.Fprintln(stdout, "usage: waffle session ls | waffle session rm <id> | waffle session profile <chat> <name>")
+		fmt.Fprintln(stdout, "usage: waffle session ls|list | waffle session rm|remove <id> | waffle session profile <chat> <name>")
 		return nil
 	default:
-		fmt.Fprintln(stderr, "usage: waffle session ls | waffle session rm <id> | waffle session profile <chat> <name>")
+		fmt.Fprintln(stderr, "usage: waffle session ls|list | waffle session rm|remove <id> | waffle session profile <chat> <name>")
 		return fmt.Errorf("unknown session command %q", sub)
 	}
 }

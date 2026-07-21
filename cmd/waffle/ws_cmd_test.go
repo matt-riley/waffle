@@ -71,8 +71,8 @@ func TestParseWorkspaceCloseArgs(t *testing.T) {
 		{name: "force after id", args: []string{"a", "--force"}, wantID: "a", wantForce: true},
 		{name: "force before id", args: []string{"--force", "a"}, wantID: "a", wantForce: true},
 		{name: "duplicate force", args: []string{"a", "--force", "--force"}, wantID: "a", wantForce: true},
-		{name: "no id", args: nil, wantErr: "usage: waffle ws close <id> [--force]"},
-		{name: "force without id", args: []string{"--force"}, wantErr: "usage: waffle ws close <id> [--force]"},
+		{name: "no id", args: nil, wantErr: "usage: waffle ws close|rm|remove <id> [--force]"},
+		{name: "force without id", args: []string{"--force"}, wantErr: "usage: waffle ws close|rm|remove <id> [--force]"},
 		{name: "extra id", args: []string{"a", "b"}, wantErr: "expected one workspace id, got \"a\" and \"b\""},
 		{name: "unknown flag", args: []string{"a", "--froce"}, wantErr: "unknown flag \"--froce\""},
 	}

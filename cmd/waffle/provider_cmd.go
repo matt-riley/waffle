@@ -50,7 +50,7 @@ func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	switch args[0] {
 	case "add":
 		return providerAdd(ctx, args[1:], stdin, stdout, stderr)
-	case "list":
+	case "ls", "list":
 		return providerList(ctx, args[1:], stdout)
 	case "models":
 		return providerModels(ctx, args[1:], stdout, stderr)
@@ -67,9 +67,9 @@ func providerCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 		fmt.Fprintf(stdout, "provider %s is reachable\n", args[1])
 		return nil
-	case "remove":
+	case "rm", "remove":
 		if len(args) != 2 {
-			return errors.New("usage: waffle provider remove <connection>")
+			return errors.New("usage: waffle provider rm|remove <connection>")
 		}
 		manager, err := openProviderManager()
 		if err != nil {
@@ -107,10 +107,10 @@ Usage:
   waffle provider add [--name NAME] [--type anthropic|openai|openrouter|openai-compatible] [--base-url URL]
                       [--model ALIAS=UPSTREAM]... [--default ALIAS] [--utility ALIAS]
                       [--api-key-stdin | --api-key-file PATH]
-  waffle provider list [--json]
+  waffle provider ls|list [--json]
   waffle provider models <connection> [--search QUERY] [--refresh] [--json]
   waffle provider test <connection>
-  waffle provider remove <connection>
+  waffle provider rm|remove <connection>
   waffle provider model add <connection> <upstream-id> [--alias ALIAS] [--default] [--utility]
   waffle provider model activate <alias>
   waffle provider model remove <alias> [--replace-with ALIAS]

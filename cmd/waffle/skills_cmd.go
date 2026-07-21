@@ -9,21 +9,21 @@ import (
 	"github.com/matt-riley/waffle/internal/skill"
 )
 
-// skillsCmd implements skill utilities: audit, activate, ls (#65).
+// skillsCmd implements skill utilities: audit, activate, ls|list (#65).
 func skillsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	_ = stderr
 	if len(args) == 0 {
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list>")
 	}
 	switch args[0] {
 	case "audit":
 		return skillsAuditCmd(ctx, args[1:], stdout)
 	case "activate":
 		return skillsActivateCmd(ctx, args[1:], stdout)
-	case "ls":
+	case "ls", "list":
 		return skillsListCmd(ctx, args[1:], stdout)
 	default:
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list>")
 	}
 }
 
@@ -58,7 +58,7 @@ func skillsActivateCmd(ctx context.Context, args []string, stdout io.Writer) err
 
 func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) > 0 {
-		return fmt.Errorf("usage: waffle skills ls")
+		return fmt.Errorf("usage: waffle skills ls|list")
 	}
 	_, st, err := openConfigAndStore(ctx)
 	if err != nil {

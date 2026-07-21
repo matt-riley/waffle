@@ -28,7 +28,7 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 	jobs := schedule.NewStore(st)
 
 	switch args[0] {
-	case "ls":
+	case "ls", "list":
 		list, err := jobs.List(ctx)
 		if err != nil {
 			return err
@@ -88,9 +88,9 @@ func cronCmd(ctx context.Context, args []string, stdout, stderr io.Writer) (err 
 		fmt.Fprintln(stdout)
 		return nil
 
-	case "rm":
+	case "rm", "remove":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: waffle cron rm <id>")
+			return fmt.Errorf("usage: waffle cron rm|remove <id>")
 		}
 		if err := jobs.Remove(ctx, args[1]); err != nil {
 			return err
@@ -134,9 +134,9 @@ Jobs fire while `+"`waffle serve`"+` is running.
 Usage:
   waffle cron add <name> <m> <h> <dom> <mon> <dow> <prompt...> [--deliver channel:chat_id] [--profile name]
   waffle cron add <name> "<m> <h> <dom> <mon> <dow>" <prompt...> [--deliver=channel:chat_id] [--profile=name]
-  waffle cron ls
+  waffle cron ls|list
   waffle cron run <id>     run a job now
-  waffle cron rm <id>
+  waffle cron rm|remove <id>
 
 Example:
   waffle cron add standup 0 9 * * 1-5 "Summarize my starred repos" --deliver telegram:900 --profile researcher
