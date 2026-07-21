@@ -25,6 +25,47 @@ import (
 	"github.com/matt-riley/waffle/internal/localsocket"
 )
 
+// TestServeHelpPrintsUsageWithoutStartingDaemon verifies -h/--help return
+// usage immediately without config, ownership, sockets, or background work (#127).
+func TestServeHelpPrintsUsageWithoutStartingDaemon(t *testing.T) {
+	// Point WAFFLE_HOME at a path that must not be opened for help.
+	t.Setenv("WAFFLE_HOME", filepath.Join(t.TempDir(), "must-not-be-opened"))
+
+	want := "Usage: waffle serve\n\n" +
+		"Start the Waffle gateway daemon (Telegram, chat socket, cron, lifecycle).\n" +
+		"Configuration is read from $WAFFLE_HOME/config.toml (default ~/.waffle).\n\n" +
+		"Options:\n" +
+		"  -h, --help    show this help\n"
+
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"--help", "ignored"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var buf bytes.Buffer
+			// No config, no home setup: must return quickly without binding ports.
+			if err := serveCmd(context.Background(), args, &buf); err != nil {
+				t.Fatalf("serveCmd(%v): %v", args, err)
+			}
+			if buf.String() != want {
+				t.Fatalf("serve help = %q, want %q", buf.String(), want)
+			}
+		})
+	}
+}
+
+func TestServeCmdWithAdapterFactoryHelpSkipsFactory(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", filepath.Join(t.TempDir(), "must-not-be-opened"))
+	var buf bytes.Buffer
+	err := serveCmdWithAdapterFactory(context.Background(), []string{"--help"}, &buf, func(config.Config) ([]channel.Adapter, error) {
+		t.Fatal("adapter factory must not run for --help")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("serveCmdWithAdapterFactory --help: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Usage: waffle serve") {
+		t.Fatalf("help output missing usage: %q", buf.String())
+	}
+}
+
 func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WAFFLE_HOME", home)
@@ -48,7 +89,7 @@ func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		done <- serveCmdWithAdapterFactory(context.Background(), nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 			return []channel.Adapter{blockingAdapter{}}, nil
 		})
 	}()
@@ -93,7 +134,7 @@ func TestServeRefusesLiveOwnerBeforeDatabaseMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = lease.Release() }()
-	err = serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+	err = serveCmdWithAdapterFactory(context.Background(), nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 		t.Fatal("adapter factory called while owner lock held")
 		return nil, nil
 	})
@@ -126,7 +167,7 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- serveCmdWithAdapterFactory(ctx, os.Stderr, func(config.Config) ([]channel.Adapter, error) {
+		done <- serveCmdWithAdapterFactory(ctx, nil, os.Stderr, func(config.Config) ([]channel.Adapter, error) {
 			return []channel.Adapter{blockingAdapter{}}, nil
 		})
 	}()
@@ -178,7 +219,7 @@ func TestServeChatStartsConfiguredSocketAcceptsHandshakeAndRemovesOnShutdown(t *
 	done := make(chan error, 1)
 	var logs bytes.Buffer
 	go func() {
-		done <- serveCmdWithAdapterFactory(ctx, &logs, func(config.Config) ([]channel.Adapter, error) {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &logs, func(config.Config) ([]channel.Adapter, error) {
 			return []channel.Adapter{blockingAdapter{}}, nil
 		})
 	}()
@@ -220,7 +261,7 @@ func TestServeChatListenerErrorFailsStartup(t *testing.T) {
 	}
 	writeServeTestConfig(t, home, unusedTCPAddress(t), socketPath)
 
-	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+	err := serveCmdWithAdapterFactory(context.Background(), nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 		return []channel.Adapter{blockingAdapter{}}, nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "chat listener") || !strings.Contains(err.Error(), "not a socket") {
@@ -245,7 +286,7 @@ func TestServeChatwireFailureFailsServe(t *testing.T) {
 	}
 	defer func() { serveChat = original }()
 
-	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+	err := serveCmdWithAdapterFactory(context.Background(), nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 		return []channel.Adapter{blockingAdapter{}}, nil
 	})
 	if !errors.Is(err, want) || !strings.Contains(err.Error(), "chat server") {
@@ -268,7 +309,7 @@ func TestServeChatListenerCloseErrorFailsOtherwiseSuccessfulShutdown(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveCmdWithAdapterFactory(ctx, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 			return []channel.Adapter{blockingAdapter{}}, nil
 		})
 	}()
@@ -308,7 +349,7 @@ func TestServeChatListenerCloseErrorDoesNotMaskChatServerError(t *testing.T) {
 	}
 	defer func() { serveChat = originalServe }()
 
-	err := serveCmdWithAdapterFactory(context.Background(), &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+	err := serveCmdWithAdapterFactory(context.Background(), nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
 		return []channel.Adapter{blockingAdapter{}}, nil
 	})
 	if !errors.Is(err, serveWant) {
@@ -477,7 +518,7 @@ func TestServeCredentialBrokerBindFailureIsNotSwallowed(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	err = serveCmdWithAdapterFactory(context.Background(), &logs, func(config.Config) ([]channel.Adapter, error) {
+	err = serveCmdWithAdapterFactory(context.Background(), nil, &logs, func(config.Config) ([]channel.Adapter, error) {
 		t.Fatal("adapter factory must not run after broker bind failure")
 		return nil, nil
 	})
@@ -510,7 +551,7 @@ func TestServeCredentialBrokerPortReleasedOnShutdown(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			done <- serveCmdWithAdapterFactory(ctx, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+			done <- serveCmdWithAdapterFactory(ctx, nil, io.Discard, func(config.Config) ([]channel.Adapter, error) {
 				return []channel.Adapter{blockingAdapter{}}, nil
 			})
 		}()

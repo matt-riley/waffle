@@ -146,7 +146,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "pause", "resume":
 		return pauseCmd(ctx, args[0], stdout)
 	case "serve":
-		return serveCmd(ctx, stderr)
+		return serveCmd(ctx, args[1:], stderr)
 	case "status":
 		return statusCmd(ctx, args[1:], stdout, stderr)
 	case "pair":

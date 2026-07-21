@@ -39,8 +39,14 @@ import (
 	"github.com/matt-riley/waffle/internal/workspace"
 )
 
-func serveCmd(ctx context.Context, stderr io.Writer) error {
-	return serveCmdWithAdapterFactory(ctx, stderr, configuredAdapters)
+const serveUsage = "Usage: waffle serve\n\n" +
+	"Start the Waffle gateway daemon (Telegram, chat socket, cron, lifecycle).\n" +
+	"Configuration is read from $WAFFLE_HOME/config.toml (default ~/.waffle).\n\n" +
+	"Options:\n" +
+	"  -h, --help    show this help\n"
+
+func serveCmd(ctx context.Context, args []string, stderr io.Writer) error {
+	return serveCmdWithAdapterFactory(ctx, args, stderr, configuredAdapters)
 }
 
 type adapterFactory func(config.Config) ([]channel.Adapter, error)
@@ -50,7 +56,15 @@ var openChatListener = localsocket.Listener
 
 // serveCmdWithAdapterFactory runs the serve command with an explicit adapter
 // factory so command lifecycle tests can use an in-memory channel.
-func serveCmdWithAdapterFactory(ctx context.Context, stderr io.Writer, makeAdapters adapterFactory) (err error) {
+func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Writer, makeAdapters adapterFactory) (err error) {
+	// Resolve help before any ownership, listeners, or background work (#127).
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			_, err := io.WriteString(stderr, serveUsage)
+			return err
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancelOwnership := context.WithCancel(ctx)
