@@ -331,10 +331,3 @@ func cardsFromHistory(history []llm.Message) []messageCard {
 	}
 	return cards
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

@@ -231,10 +231,3 @@ func (s *Service) Snapshot(ctx context.Context) (snap Snapshot, err error) {
 	}
 	return Snapshot{Active: active, Recent: recent, RetryQueue: make([]any, 0)}, nil
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
