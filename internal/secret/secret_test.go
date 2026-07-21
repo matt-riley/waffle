@@ -137,6 +137,49 @@ func TestRedactor(t *testing.T) {
 	}
 }
 
+// TestRedactorLongestMatchWins covers #98: when one secret value is a literal
+// prefix of another and names sort so the shorter value would be considered
+// first, redacting text that contains the longer value must redact the entire
+// longer value — no leaked suffix.
+func TestRedactorLongestMatchWins(t *testing.T) {
+	s := newTestStore(t)
+	// Names sort alphabetically: aaa/token before zzz/token, so the shorter
+	// value would be listed first without longest-match ordering.
+	const shortVal = "abc123"
+	const longVal = "abc123456"
+	if err := s.Set("aaa/token", shortVal); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("zzz/token", longVal); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewRedactor(s)
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+
+	got := r.Redact("leaked: " + longVal)
+	// Full longer value must be redacted under its own name; suffix "456" must not leak.
+	want := "leaked: [redacted:zzz/token]"
+	if got != want {
+		t.Errorf("Redact longer value = %q, want %q (suffix leak if shorter matched first)", got, want)
+	}
+	if strings.Contains(got, "456") {
+		t.Errorf("Redact leaked unredacted suffix of longer secret: %q", got)
+	}
+	if strings.Contains(got, longVal) {
+		t.Errorf("Redact still contains full longer secret value: %q", got)
+	}
+
+	// Shorter value alone still redacts under its name.
+	gotShort := r.Redact("only: " + shortVal)
+	wantShort := "only: [redacted:aaa/token]"
+	if gotShort != wantShort {
+		t.Errorf("Redact shorter value = %q, want %q", gotShort, wantShort)
+	}
+}
+
 func TestRedactorWithRuntimeSecrets(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Set("github/pat", "ghp_supersecrettoken"); err != nil {

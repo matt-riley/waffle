@@ -1,6 +1,9 @@
 package secret
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // minRedactLen guards against degenerate secrets ("1", "ok") turning the
 // redactor into a text shredder. Anything shorter isn't much of a secret.
@@ -29,24 +32,56 @@ type NamedValue struct {
 
 // NewRedactorWith builds a Redactor over every value currently in the store
 // plus any explicitly supplied runtime-only secret values.
+//
+// Replacement pairs are ordered longest-value-first so strings.Replacer
+// prefers the most specific match when one secret value is a prefix of
+// another (see #98). Replacer otherwise uses first-listed-wins, which can
+// leave a longer secret's suffix unredacted if a shorter prefix was listed
+// first (e.g. via alphabetical secret-name order from store.List).
 func NewRedactorWith(store Store, extras ...NamedValue) (*Redactor, error) {
-	pairs := make([]string, 0, len(extras)*2)
+	// Collect (name, value) candidates, then sort by value length descending
+	// before building the flat old/new pair list for strings.NewReplacer.
+	type candidate struct {
+		name  string
+		value string
+	}
+	var cands []candidate
+
 	if store != nil {
 		names, err := store.List()
 		if err != nil {
 			return nil, err
 		}
-		pairs = make([]string, 0, (len(names)+len(extras))*2)
+		cands = make([]candidate, 0, len(names)+len(extras))
 		for _, name := range names {
 			v, err := store.Get(name)
 			if err != nil {
 				return nil, err
 			}
-			pairs = appendRedactionPair(pairs, name, v)
+			if len(v) < minRedactLen {
+				continue
+			}
+			cands = append(cands, candidate{name: name, value: v})
 		}
+	} else {
+		cands = make([]candidate, 0, len(extras))
 	}
 	for _, extra := range extras {
-		pairs = appendRedactionPair(pairs, extra.Name, extra.Value)
+		if len(extra.Value) < minRedactLen {
+			continue
+		}
+		cands = append(cands, candidate{name: extra.Name, value: extra.Value})
+	}
+
+	// Longest value first so prefix secrets cannot partially redact a longer
+	// secret that contains them as a prefix.
+	sort.SliceStable(cands, func(i, j int) bool {
+		return len(cands[i].value) > len(cands[j].value)
+	})
+
+	pairs := make([]string, 0, len(cands)*2)
+	for _, c := range cands {
+		pairs = append(pairs, c.value, "[redacted:"+c.name+"]")
 	}
 	return &Redactor{replacer: strings.NewReplacer(pairs...)}, nil
 }
@@ -54,10 +89,3 @@ func NewRedactorWith(store Store, extras ...NamedValue) (*Redactor, error) {
 // Redact returns s with every known secret value replaced by its
 // [redacted:name] marker.
 func (r *Redactor) Redact(s string) string { return r.replacer.Replace(s) }
-
-func appendRedactionPair(pairs []string, name, value string) []string {
-	if len(value) < minRedactLen {
-		return pairs
-	}
-	return append(pairs, value, "[redacted:"+name+"]")
-}
