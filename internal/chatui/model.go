@@ -189,9 +189,9 @@ func New(backend chat.Backend, open chat.OpenOptions, options Options) *Model {
 		backend: backend, open: open, ctx: ctx,
 		viewport: vp, composer: composer, overlayList: overlayList,
 		width: width, height: height, theme: newTheme(true, noColor),
-		now:        time.Now,
-		events:     make(chan tea.Msg, 64), closed: &atomic.Bool{},
-		pumpStop:   make(chan struct{}), pumpStopOnce: &sync.Once{},
+		now:    time.Now,
+		events: make(chan tea.Msg, 64), closed: &atomic.Bool{},
+		pumpStop: make(chan struct{}), pumpStopOnce: &sync.Once{},
 		historyIdx: -1,
 	}
 	m.resize(width, height)
