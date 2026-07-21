@@ -64,6 +64,7 @@ type Client struct {
 	name          string
 	containerName string // docker --name when sandbox-wrapped; cleaned up on Close (#97)
 	cmd           *exec.Cmd
+	cancel        context.CancelFunc // kills the child process; tied to client lifetime, not the handshake ctx
 	in            io.WriteCloser
 	out           *bufio.Reader
 
@@ -202,7 +203,11 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	if opts.Mode == "" {
 		opts.Mode = "restricted"
 	}
-	cmd := exec.Command(s.Command, s.Args...)
+	// procCtx lives until Close, not until the caller's ctx ends: the caller's
+	// ctx only bounds the handshake, but the child must still be killable
+	// afterward (and must die if Close is invoked).
+	procCtx, procCancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(procCtx, s.Command, s.Args...)
 	cmd.Env = BuildProcessEnv(s.Env)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
@@ -211,19 +216,23 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	// inherited — ambient gateway FDs/secrets cannot leak via open descriptors.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		procCancel()
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		procCancel()
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		procCancel()
 		return nil, fmt.Errorf("mcp %s: start %q (mode=%s): %w", s.Name, s.Command, opts.Mode, err)
 	}
 	c := &Client{
 		name:          s.Name,
 		containerName: s.DockerContainer,
 		cmd:           cmd,
+		cancel:        procCancel,
 		in:            stdin,
 		out:           bufio.NewReader(stdout),
 		pending:       map[int]chan rpcResponse{},
@@ -263,6 +272,11 @@ func (c *Client) Close() error {
 	if err := c.in.Close(); err != nil {
 		first = err
 	}
+	// Cancelling procCtx kills the child even if Process.Kill below would be
+	// skipped (e.g. nil Process in edge cases) and releases cmd's resources.
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.cmd.Process != nil {
 		if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			if first == nil {
@@ -271,10 +285,11 @@ func (c *Client) Close() error {
 		}
 	}
 	if err := c.cmd.Wait(); err != nil {
-		// Kill makes Wait report *exec.ExitError (e.g. "signal: killed"); that
-		// is the expected outcome of an intentional shutdown, not a Close failure.
+		// Kill makes Wait report *exec.ExitError (e.g. "signal: killed"); with
+		// CommandContext it may instead wrap context.Canceled. Both are the
+		// expected outcome of an intentional shutdown, not a Close failure.
 		var ee *exec.ExitError
-		if !errors.As(err, &ee) && first == nil {
+		if !errors.As(err, &ee) && !errors.Is(err, context.Canceled) && first == nil {
 			first = err
 		}
 	}
