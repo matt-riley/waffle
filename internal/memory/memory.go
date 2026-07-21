@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -22,6 +23,24 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/spill"
 )
+
+// memoryFileMus serializes MEMORY.md read-modify-write across tools for the
+// same absolute path. Workspace is a value type, so a process-local map
+// keyed by path keeps concurrent remember/memory_update (and Gate apply)
+// from losing updates when tools share a Dir.
+var memoryFileMus sync.Map // abs path -> *sync.Mutex
+
+// lockMemoryFile locks MEMORY.md mutations for path and returns unlock.
+func lockMemoryFile(path string) func() {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	v, _ := memoryFileMus.LoadOrStore(abs, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
 
 // DefaultInjectBudget is the default byte budget for MEMORY.md notes in
 // SystemContext when [memory] inject_budget is unset or zero.
@@ -89,6 +108,8 @@ func (w Workspace) MatchingLines(query string) ([]string, error) {
 
 // RemoveLines removes exactly the supplied 1-based line numbers.
 func (w Workspace) RemoveLines(lines []int) error {
+	unlock := lockMemoryFile(w.MemoryPath())
+	defer unlock()
 	body, err := os.ReadFile(w.MemoryPath())
 	if err != nil {
 		return err
@@ -327,6 +348,8 @@ func (w Workspace) Append(note string) (string, error) {
 }
 
 func (w Workspace) appendCandidate(c Candidate) (string, error) {
+	unlock := lockMemoryFile(w.MemoryPath())
+	defer unlock()
 	noteID, err := newNoteID()
 	if err != nil {
 		return "", err
@@ -480,6 +503,8 @@ func (w Workspace) archiveLine(line string) error {
 // ForgetNote moves the note with id to MEMORY.archive.md and removes it
 // from MEMORY.md. Localized line edit only.
 func (w Workspace) ForgetNote(noteID string) error {
+	unlock := lockMemoryFile(w.MemoryPath())
+	defer unlock()
 	removed, err := w.removeNoteByID(noteID)
 	if err != nil {
 		return err
@@ -500,6 +525,8 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	if strings.TrimSpace(body) == "" {
 		return "", errors.New("note is required")
 	}
+	unlock := lockMemoryFile(w.MemoryPath())
+	defer unlock()
 	if _, err := w.findNoteByID(oldID); err != nil {
 		return "", err
 	}

@@ -3,10 +3,12 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -588,6 +590,228 @@ func TestNotesIndexSyncFromFiles(t *testing.T) {
 	}
 	if len(hits) != 1 || !strings.Contains(hits[0].Body, "widgets") {
 		t.Fatalf("hits = %+v", hits)
+	}
+}
+
+// TestConcurrentRememberAndMemoryUpdate ensures remember (append) and
+// memory_update (forget) serialize MEMORY.md RMW so neither update is lost.
+func TestConcurrentRememberAndMemoryUpdate(t *testing.T) {
+	ws := testWorkspace(t)
+	remember := RememberTool{WS: ws}
+	upd := MemoryUpdateTool{WS: ws, Provenance: Provenance{TrustClass: "owner_stated", SourceID: "test"}}
+
+	seedOut, err := remember.Run(context.Background(), json.RawMessage(`{"note":"seed note to forget"}`))
+	if err != nil {
+		t.Fatalf("seed remember: %v", err)
+	}
+	seedID := extractReportedID(t, seedOut)
+
+	const newNote = "concurrent remember note A"
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := remember.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"note":%q}`, newNote)))
+		errCh <- err
+	}()
+	go func() {
+		defer wg.Done()
+		in, _ := json.Marshal(map[string]string{"id": seedID, "action": "forget"})
+		_, err := upd.Run(context.Background(), in)
+		errCh <- err
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent tool: %v", err)
+		}
+	}
+
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, newNote) {
+		t.Fatalf("lost concurrent remember note %q:\n%s", newNote, text)
+	}
+	if strings.Contains(text, "[id="+seedID+"]") || strings.Contains(text, "seed note to forget") {
+		t.Fatalf("forget not applied (seed still live):\n%s", text)
+	}
+	arch, err := os.ReadFile(ws.ArchivePath())
+	if err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if !strings.Contains(string(arch), "[id="+seedID+"]") {
+		t.Fatalf("forgotten seed missing from archive:\n%s", arch)
+	}
+}
+
+// TestConcurrentRememberAndSupersede races append against supersede RMW.
+func TestConcurrentRememberAndSupersede(t *testing.T) {
+	ws := testWorkspace(t)
+	remember := RememberTool{WS: ws}
+	upd := MemoryUpdateTool{WS: ws, Provenance: Provenance{TrustClass: "owner_stated", SourceID: "test"}}
+
+	seedOut, err := remember.Run(context.Background(), json.RawMessage(`{"note":"seed note to supersede"}`))
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	seedID := extractReportedID(t, seedOut)
+
+	const (
+		newNote     = "concurrent remember alongside supersede"
+		replacement = "superseded replacement body"
+	)
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	var supOut string
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := remember.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"note":%q}`, newNote)))
+		errCh <- err
+	}()
+	go func() {
+		defer wg.Done()
+		in, _ := json.Marshal(map[string]string{
+			"id": seedID, "action": "supersede", "note": replacement,
+		})
+		out, err := upd.Run(context.Background(), in)
+		supOut = out
+		errCh <- err
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent tool: %v", err)
+		}
+	}
+	newID := extractReportedID(t, supOut)
+
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, newNote) {
+		t.Fatalf("lost concurrent remember:\n%s", text)
+	}
+	if strings.Contains(text, "[id="+seedID+"]") {
+		t.Fatalf("old id still live after supersede:\n%s", text)
+	}
+	if !strings.Contains(text, "[id="+newID+"]") || !strings.Contains(text, replacement) {
+		t.Fatalf("supersede replacement missing:\n%s", text)
+	}
+}
+
+// TestConcurrentRemembersStress runs N concurrent distinct remembers and
+// asserts all notes land without lost updates.
+func TestConcurrentRemembersStress(t *testing.T) {
+	ws := testWorkspace(t)
+	remember := RememberTool{WS: ws}
+	const n = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			note := fmt.Sprintf("stress note body %02d unique", i)
+			_, err := remember.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"note":%q}`, note)))
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("remember: %v", err)
+		}
+	}
+
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	notes := loadNotes(text)
+	if len(notes) != n {
+		t.Fatalf("note count = %d, want %d:\n%s", len(notes), n, text)
+	}
+	for i := 0; i < n; i++ {
+		want := fmt.Sprintf("stress note body %02d unique", i)
+		if !strings.Contains(text, want) {
+			t.Errorf("missing note body %q", want)
+		}
+	}
+}
+
+// TestConcurrentRememberAndForgetStress seeds N notes, then concurrently
+// remembers new ones while forgetting the seeds.
+func TestConcurrentRememberAndForgetStress(t *testing.T) {
+	ws := testWorkspace(t)
+	remember := RememberTool{WS: ws}
+	upd := MemoryUpdateTool{WS: ws, Provenance: Provenance{TrustClass: "owner_stated", SourceID: "test"}}
+
+	const n = 20
+	seedIDs := make([]string, n)
+	for i := 0; i < n; i++ {
+		out, err := remember.Run(context.Background(), json.RawMessage(
+			fmt.Sprintf(`{"note":%q}`, fmt.Sprintf("seed forget target %02d", i))))
+		if err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		seedIDs[i] = extractReportedID(t, out)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2*n)
+	wg.Add(2 * n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			note := fmt.Sprintf("post-stress remember %02d", i)
+			_, err := remember.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"note":%q}`, note)))
+			errCh <- err
+		}()
+		go func() {
+			defer wg.Done()
+			in, _ := json.Marshal(map[string]string{"id": seedIDs[i], "action": "forget"})
+			_, err := upd.Run(context.Background(), in)
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent: %v", err)
+		}
+	}
+
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	notes := loadNotes(text)
+	if len(notes) != n {
+		t.Fatalf("live note count = %d, want %d (only new remembers):\n%s", len(notes), n, text)
+	}
+	for i := 0; i < n; i++ {
+		if strings.Contains(text, fmt.Sprintf("seed forget target %02d", i)) {
+			t.Errorf("seed %02d still live", i)
+		}
+		want := fmt.Sprintf("post-stress remember %02d", i)
+		if !strings.Contains(text, want) {
+			t.Errorf("missing remember %q", want)
+		}
 	}
 }
 
