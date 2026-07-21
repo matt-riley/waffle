@@ -21,6 +21,12 @@ const (
 	defaultWidth  = 100
 	defaultHeight = 30
 	closeTimeout  = 10 * time.Second
+
+	// Throttle full transcript rebuilds while streaming text tokens.
+	// Sync when either at least viewportSyncTokenInterval deltas arrived or
+	// viewportSyncMinInterval has elapsed since the last full sync.
+	viewportSyncTokenInterval = 12
+	viewportSyncMinInterval   = 16 * time.Millisecond
 )
 
 // Options controls presentation without exposing backend configuration.
@@ -120,6 +126,12 @@ type Model struct {
 	activeTurnID     uint64
 	canceledTurnID   uint64
 	turnTerminalSeen bool
+
+	// Streaming viewport throttle state.
+	textDeltaSinceSync int
+	lastViewportSync   time.Time
+	// syncViewportCalls is a test-only counter of full transcript rebuilds.
+	syncViewportCalls int
 }
 
 // New constructs a Focused Conversation model. Backend.Open remains asynchronous

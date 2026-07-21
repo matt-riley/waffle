@@ -319,6 +319,44 @@ func TestModelAssociatesToolRowsWithCurrentAssistantCard(t *testing.T) {
 	}
 }
 
+func TestModelThrottlesViewportSyncDuringTextDeltas(t *testing.T) {
+	m := New(newFakeBackend(chat.State{}), chat.OpenOptions{}, Options{Width: 100, Height: 30})
+	// Substantial prior transcript so each full sync does real work.
+	for i := 0; i < 80; i++ {
+		m.messages = append(m.messages, messageCard{role: roleNotice, text: "prior transcript row " + strings.Repeat("x", 40)})
+	}
+	m.syncViewport(true)
+	baseline := m.syncViewportCalls
+
+	const deltas = 500
+	var built strings.Builder
+	for i := 0; i < deltas; i++ {
+		token := "t"
+		built.WriteString(token)
+		m.applyEvent(0, chat.Event{Kind: chat.EventTextDelta, Text: token})
+	}
+	streamCalls := m.syncViewportCalls - baseline
+	if streamCalls >= deltas {
+		t.Fatalf("stream syncViewport calls = %d for %d deltas; expected throttling", streamCalls, deltas)
+	}
+	if streamCalls >= 50 {
+		t.Fatalf("stream syncViewport calls = %d, want < 50 for %d deltas", streamCalls, deltas)
+	}
+	// Final non-delta event always fully syncs and shows complete text.
+	m.applyEvent(0, chat.Event{Kind: chat.EventTurnDone})
+	if got := m.messages[len(m.messages)-1].text; got != built.String() {
+		t.Fatalf("streamed text length = %d, want %d", len(got), built.Len())
+	}
+	// Non-delta events are not throttled: each tool/notice/turn_done syncs.
+	m.syncViewportCalls = 0
+	m.applyEvent(0, chat.Event{Kind: chat.EventToolStarted, ToolName: "read"})
+	m.applyEvent(0, chat.Event{Kind: chat.EventToolFinished, ToolName: "read", ByteCount: 10})
+	m.applyEvent(0, chat.Event{Kind: chat.EventNotice, Text: "note"})
+	if m.syncViewportCalls != 3 {
+		t.Fatalf("non-delta syncs = %d, want 3", m.syncViewportCalls)
+	}
+}
+
 func TestModelHeaderConnectionAndFooterLifecycle(t *testing.T) {
 	state := chat.State{SessionID: "01ABCDEFGHIJK", Title: "Deploy", ModelAlias: "gpt", Profile: "review", ConnectionMode: "unix"}
 	m := New(newFakeBackend(state), chat.OpenOptions{}, Options{Width: 100, Height: 30, NoColor: true})

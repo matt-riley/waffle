@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textarea"
@@ -474,12 +475,25 @@ func (m *Model) overlaySelection() (chat.ParsedCommand, bool) {
 }
 
 func (m *Model) applyEvent(operationID uint64, event chat.Event) {
+	fullSync := true
 	switch event.Kind {
 	case chat.EventTextDelta:
-		if len(m.messages) == 0 || m.messages[len(m.messages)-1].role != roleAssistant {
-			m.messages = append(m.messages, messageCard{role: roleAssistant})
+		if event.Text != "" {
+			if len(m.messages) == 0 || m.messages[len(m.messages)-1].role != roleAssistant {
+				m.messages = append(m.messages, messageCard{role: roleAssistant})
+			}
+			m.messages[len(m.messages)-1].text += event.Text
+			m.textDeltaSinceSync++
+			// Throttle full re-renders during dense token streams; message
+			// text is still updated every delta. Non-delta events and turn
+			// completion always force a full sync below.
+			now := time.Now()
+			if m.textDeltaSinceSync < viewportSyncTokenInterval &&
+				!m.lastViewportSync.IsZero() &&
+				now.Sub(m.lastViewportSync) < viewportSyncMinInterval {
+				fullSync = false
+			}
 		}
-		m.messages[len(m.messages)-1].text += event.Text
 	case chat.EventToolStarted:
 		m.tools = append(m.tools, toolRow{name: event.ToolName, messageIndex: m.currentAssistantIndex()})
 	case chat.EventToolFinished:
@@ -510,8 +524,13 @@ func (m *Model) applyEvent(operationID uint64, event chat.Event) {
 		}
 		m.inputTokens += event.Usage.InputTokens
 		m.outputTokens += event.Usage.OutputTokens
+		m.textDeltaSinceSync = 0
 	}
-	m.syncViewport(true)
+	if fullSync {
+		m.syncViewport(true)
+		m.textDeltaSinceSync = 0
+		m.lastViewportSync = time.Now()
+	}
 }
 
 func (m *Model) currentAssistantIndex() int {
@@ -681,6 +700,7 @@ func (m *Model) syncLayout() {
 }
 
 func (m *Model) syncViewport(follow bool) {
+	m.syncViewportCalls++
 	m.syncLayout()
 	m.viewport.SetContent(m.renderTranscript())
 	if follow {
