@@ -19,7 +19,7 @@ Every rewritten description must:
 - avoid promotional language, implementation summaries, and generic claims of quality;
 - remain valid single-line YAML.
 
-The aggregate description text should be less than half of the current 5,875-character baseline.
+The aggregate description text should be less than half of the current 5,856-byte baseline. This byte-based gate is conservative for Codex's documented character budget.
 
 ## Trigger Boundaries
 
@@ -35,7 +35,7 @@ Validation will enforce the metadata contract before accepting the rewrite:
 2. Rewrite the 19 descriptions only.
 3. Run the contract check again and require all descriptions to pass.
 4. Run the skill creator's `quick_validate.py` against every skill directory.
-5. Confirm the aggregate character count is below 2,938 characters.
+5. Confirm the aggregate size is below 2,928 bytes.
 6. Inspect the final diff to ensure no skill body or unrelated file changed.
 
 ## Expected Result
