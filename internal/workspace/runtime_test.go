@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -222,20 +224,21 @@ func TestDockerWorkspaceBrokerHostReachable(t *testing.T) {
 	}
 }
 
-// TestDockerEgressNoneBrokerOKExternalDenied is the gated #95 proof for
-// egress=none: host broker is reachable; raw (no-proxy) external probe fails
-// after route lockdown (same effect as the runner's netlock); proxy path
-// also denies with empty allowlist.
+// TestDockerEgressNoneUsesShippedNetlock is the gated #95 isolation proof for
+// workspace none egress: build a linux binary that calls the shipped
+// netlock.LockdownExceptHost (not a shell reimplementation), run it with the
+// same network/host-gateway/CAP_NET_ADMIN flags as workspaceRunArgs for none,
+// and assert broker OK + raw external blocked.
 //
-//	WAFFLE_TEST_DOCKER=1 go test ./internal/workspace -run TestDockerEgressNoneBrokerOKExternalDenied -count=1 -v
-func TestDockerEgressNoneBrokerOKExternalDenied(t *testing.T) {
+//	WAFFLE_TEST_DOCKER=1 go test ./internal/workspace -run TestDockerEgressNoneUsesShippedNetlock -count=1 -v
+func TestDockerEgressNoneUsesShippedNetlock(t *testing.T) {
 	if os.Getenv("WAFFLE_TEST_DOCKER") != "1" {
 		t.Skip("set WAFFLE_TEST_DOCKER=1 to run Docker workspace egress integration")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not on PATH")
 	}
-	// Mock host broker: direct GETs succeed; absolute proxy URLs are denied (none allowlist).
+
 	broker := startMockBroker(t, nil)
 	port := brokerPort(t, broker)
 	brokerURL := "http://waffle-host:" + port
@@ -245,71 +248,57 @@ func TestDockerEgressNoneBrokerOKExternalDenied(t *testing.T) {
 		t.Fatalf("ensure network: %v", err)
 	}
 
-	m := &Manager{
-		Egress:    "none",
-		BrokerURL: brokerURL,
-		ProxyURL:  brokerURL, // absolute-URL HTTP proxy face on same mock
-	}
-	ws := &Workspace{ID: "ws-none", Container: "waffle-ws-none-probe", Volume: "v", Image: "alpine:3.20"}
+	m := &Manager{Egress: "none", BrokerURL: brokerURL, ProxyURL: brokerURL}
+	ws := &Workspace{ID: "ws-none", Container: "waffle-ws-none-probe", Volume: "v", Image: "img"}
 	opts := m.containerOpts(ws, "wk_test")
-	if opts.Network != WorkspaceBrokerNetwork {
-		t.Fatalf("Network = %q, want %q", opts.Network, WorkspaceBrokerNetwork)
+	if opts.Network != WorkspaceBrokerNetwork || !opts.NetLockdown {
+		t.Fatalf("opts Network=%q NetLockdown=%v", opts.Network, opts.NetLockdown)
 	}
-	if !opts.NetLockdown {
-		t.Fatal("none egress must enable NetLockdown")
-	}
-	if opts.ProxyURL == "" {
-		t.Fatal("none egress must set ProxyURL for deny-all proxy path")
+	// Confirm production docker args include lockdown signals.
+	joined := strings.Join(workspaceRunArgs(opts), " ")
+	if !strings.Contains(joined, "NET_ADMIN") || !strings.Contains(joined, "WAFFLE_NET_LOCKDOWN=1") {
+		t.Fatalf("workspaceRunArgs missing lockdown flags:\n%s", joined)
 	}
 
-	// 1) Broker reachable without proxy env (NO_PROXY path), with route lockdown.
-	out, err := dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", brokerURL + "/",
-	}, false)
+	probe := buildLinuxNetlockProbe(t)
+	name := "waffle-ws-shipped-netlock"
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+
+	args := []string{
+		"run", "--rm", "--name", name,
+		"--network", opts.Network, // WorkspaceBrokerNetwork
+		"--cap-add", "NET_ADMIN",
+		"--add-host", "waffle-host:host-gateway",
+		"-v", probe + ":/probe:ro",
+		"-e", "BROKER_URL=" + brokerURL,
+		"-e", "EXTERNAL_URL=http://1.1.1.1/",
+		"debian:bookworm-slim",
+		"/probe",
+	}
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("broker probe failed after lockdown: %v\n%s", err, out)
+		t.Fatalf("shipped netlock probe failed (a no-op LockdownExceptHost must fail this test): %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "broker-ok") {
-		t.Fatalf("broker body = %q, want broker-ok", out)
+	if !strings.Contains(string(out), "broker=ok") {
+		t.Fatalf("want broker=ok:\n%s", out)
 	}
-
-	// 2) Raw external (no HTTP_PROXY) must fail — no default route.
-	out, err = dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", "http://1.1.1.1/",
-	}, false)
-	if err == nil {
-		t.Fatalf("raw external probe unexpectedly succeeded under lockdown:\n%s", out)
-	}
-	msg := strings.ToLower(string(out) + err.Error())
-	if !strings.Contains(msg, "network unreachable") && !strings.Contains(msg, "can't connect") && !strings.Contains(msg, "bad address") && !strings.Contains(msg, "timed out") && !strings.Contains(msg, "timeout") {
-		t.Fatalf("raw external error should be network isolation, got: %v\n%s", err, out)
-	}
-
-	// 3) External via proxy also denied under empty allowlist.
-	out, err = dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", "http://example.com/",
-	}, true)
-	if err == nil {
-		t.Fatalf("proxied external probe unexpectedly succeeded under none:\n%s", out)
-	}
-	msg = strings.ToLower(string(out) + err.Error())
-	if !strings.Contains(msg, "403") && !strings.Contains(msg, "denied") && !strings.Contains(msg, "forbidden") && !strings.Contains(msg, "network unreachable") {
-		t.Fatalf("proxied external error should be deny or isolation, got: %v\n%s", err, out)
+	if !strings.Contains(string(out), "external=blocked") {
+		t.Fatalf("want external=blocked:\n%s", out)
 	}
 }
 
-// TestDockerEgressAllowlistDeniesNonAllowlistedHost is the gated #95 proof for
-// allowlist: allowlisted host succeeds through the proxy; other hosts fail.
+// TestDockerEgressAllowlistProxyPolicy is the gated #95 proof for allowlist
+// HTTP proxy policy (broker face), independent of route lockdown.
 //
-//	WAFFLE_TEST_DOCKER=1 go test ./internal/workspace -run TestDockerEgressAllowlistDeniesNonAllowlistedHost -count=1 -v
-func TestDockerEgressAllowlistDeniesNonAllowlistedHost(t *testing.T) {
+//	WAFFLE_TEST_DOCKER=1 go test ./internal/workspace -run TestDockerEgressAllowlistProxyPolicy -count=1 -v
+func TestDockerEgressAllowlistProxyPolicy(t *testing.T) {
 	if os.Getenv("WAFFLE_TEST_DOCKER") != "1" {
 		t.Skip("set WAFFLE_TEST_DOCKER=1 to run Docker workspace egress integration")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not on PATH")
 	}
-	// Allow only example.com through the mock proxy.
 	broker := startMockBroker(t, map[string]bool{"example.com": true})
 	port := brokerPort(t, broker)
 	brokerURL := "http://waffle-host:" + port
@@ -319,43 +308,47 @@ func TestDockerEgressAllowlistDeniesNonAllowlistedHost(t *testing.T) {
 		t.Fatalf("ensure network: %v", err)
 	}
 
-	m := &Manager{
-		Egress:    "allowlist",
-		BrokerURL: brokerURL,
-		ProxyURL:  brokerURL,
-	}
-	ws := &Workspace{ID: "ws-al", Container: "waffle-ws-al-probe", Volume: "v", Image: "alpine:3.20"}
+	m := &Manager{Egress: "allowlist", BrokerURL: brokerURL, ProxyURL: brokerURL}
+	ws := &Workspace{ID: "ws-al", Container: "waffle-ws-al-probe", Volume: "v", Image: "img"}
 	opts := m.containerOpts(ws, "wk_test")
+	if opts.Network != WorkspaceBrokerNetwork || !opts.NetLockdown {
+		t.Fatalf("opts Network=%q NetLockdown=%v", opts.Network, opts.NetLockdown)
+	}
 
-	// Allowlisted host through proxy → 200 allowed-ok (lockdown keeps host route for proxy to waffle-host).
-	out, err := dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", "http://example.com/",
-	}, true)
+	// Proxy allow/deny without shell theater: busybox wget + HTTP_PROXY only.
+	name := "waffle-ws-proxy-policy"
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+
+	run := func(url string) ([]byte, error) {
+		args := []string{
+			"run", "--rm", "--name", name,
+			"--network", opts.Network,
+			"--add-host", "waffle-host:host-gateway",
+			"-e", "HTTP_PROXY=" + brokerURL,
+			"-e", "http_proxy=" + brokerURL,
+			"-e", "NO_PROXY=waffle-host",
+			"-e", "no_proxy=waffle-host",
+			"alpine:3.20",
+			"wget", "-q", "-O-", "--timeout=5", url,
+		}
+		return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	}
+
+	out, err := run("http://example.com/")
 	if err != nil {
 		t.Fatalf("allowlisted host should succeed: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), "allowed-ok") {
-		t.Fatalf("allowlisted body = %q, want allowed-ok", out)
+		t.Fatalf("body = %q, want allowed-ok", out)
 	}
-
-	// Non-allowlisted host → 403.
-	out, err = dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", "http://not-allowlisted.example/",
-	}, true)
+	out, err = run("http://not-allowlisted.example/")
 	if err == nil {
 		t.Fatalf("non-allowlisted host unexpectedly succeeded:\n%s", out)
 	}
 	msg := strings.ToLower(string(out) + err.Error())
 	if !strings.Contains(msg, "403") && !strings.Contains(msg, "denied") && !strings.Contains(msg, "forbidden") {
-		t.Fatalf("non-allowlisted error should be proxy deny, got: %v\n%s", err, out)
-	}
-
-	// Raw external without proxy fails after lockdown.
-	out, err = dockerRunProbeLockdown(ctx, t, opts, []string{
-		"wget", "-q", "-O-", "--timeout=5", "http://1.1.1.1/",
-	}, false)
-	if err == nil {
-		t.Fatalf("raw external should fail under allowlist lockdown:\n%s", out)
+		t.Fatalf("want proxy deny, got: %v\n%s", err, out)
 	}
 }
 
@@ -399,92 +392,23 @@ func brokerPort(t *testing.T, srv *httptest.Server) string {
 	return u.Port()
 }
 
-// dockerRunProbeLockdown runs a one-shot alpine container with the network /
-// host alias / proxy settings from shipped workspace opts, plus the same route
-// lockdown the in-container runner applies (CAP_NET_ADMIN + drop default route,
-// keep host). withProxy applies proxy env from opts.
-func dockerRunProbeLockdown(ctx context.Context, t *testing.T, opts ContainerOpts, command []string, withProxy bool) ([]byte, error) {
-	return dockerRunProbeOpts(ctx, t, opts, command, withProxy, true)
-}
-
-func dockerRunProbeOpts(ctx context.Context, t *testing.T, opts ContainerOpts, command []string, withProxy, lockdown bool) ([]byte, error) {
+// buildLinuxNetlockProbe compiles internal/netlock/probe (shipped LockdownExceptHost).
+func buildLinuxNetlockProbe(t *testing.T) string {
 	t.Helper()
-	name := opts.Name + "-probe"
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
-
-	probeOpts := opts
-	probeOpts.Name = name
-	probeOpts.Image = "alpine:3.20"
-	probeOpts.Volume = ""
-	probeOpts.QueueDir = ""
-	probeOpts.SelfPath = ""
-	probeOpts.Token = ""
-	if !withProxy {
-		probeOpts.ProxyURL = ""
-		probeOpts.ProxyToken = ""
+	dir := t.TempDir()
+	outBin := filepath.Join(dir, "probe")
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
 	}
-	args := []string{"run", "--rm", "--name", name, "--network", probeOpts.Network}
-	if lockdown || probeOpts.NetLockdown {
-		args = append(args, "--cap-add", "NET_ADMIN")
+	modRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "../.."))
+	cmd := exec.Command("go", "build", "-o", outBin, "./internal/netlock/probe")
+	cmd.Dir = modRoot
+	cmd.Env = append(os.Environ(), "GOOS=linux", "CGO_ENABLED=0", "GOARCH="+runtime.GOARCH)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./internal/netlock/probe: %v\n%s", err, out)
 	}
-	args = append(args, "--add-host", "waffle-host:host-gateway")
-	if withProxy && probeOpts.ProxyURL != "" {
-		proxyURL := probeOpts.ProxyURL
-		if probeOpts.ProxyToken != "" {
-			proxyURL = strings.Replace(proxyURL, "://", "://"+probeOpts.ProxyToken+"@", 1)
-		}
-		noProxy := "waffle-host,localhost,127.0.0.1"
-		for _, e := range []string{
-			"HTTP_PROXY=" + proxyURL,
-			"HTTPS_PROXY=" + proxyURL,
-			"ALL_PROXY=" + proxyURL,
-			"NO_PROXY=" + noProxy,
-			"http_proxy=" + proxyURL,
-			"https_proxy=" + proxyURL,
-			"all_proxy=" + proxyURL,
-			"no_proxy=" + noProxy,
-		} {
-			args = append(args, "-e", e)
-		}
-	}
-	args = append(args, "alpine:3.20")
-	if lockdown || probeOpts.NetLockdown {
-		// Mirror netlock.LockdownExceptHost using iproute2. Install without
-		// proxy env so apk can reach Alpine mirrors before routes are cut;
-		// re-export proxy from docker -e originals after lockdown for the probe.
-		script := `set -e
-# Preserve docker-injected proxy (if any) across temporary unset for apk.
-_SAVE_HTTP_PROXY=$HTTP_PROXY
-_SAVE_HTTPS_PROXY=$HTTPS_PROXY
-_SAVE_ALL_PROXY=$ALL_PROXY
-_SAVE_http_proxy=$http_proxy
-_SAVE_https_proxy=$https_proxy
-_SAVE_all_proxy=$all_proxy
-_SAVE_NO_PROXY=$NO_PROXY
-_SAVE_no_proxy=$no_proxy
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
-apk add --no-cache iproute2 >/dev/null
-HOSTIP=$(getent ahostsv4 waffle-host | awk '{print $1; exit}')
-GW=$(ip -4 route show default | awk '{print $3; exit}')
-ip route del default
-ip route add "$HOSTIP/32" via "$GW"
-# Restore proxy env for the probe command.
-[ -n "$_SAVE_HTTP_PROXY" ] && export HTTP_PROXY="$_SAVE_HTTP_PROXY"
-[ -n "$_SAVE_HTTPS_PROXY" ] && export HTTPS_PROXY="$_SAVE_HTTPS_PROXY"
-[ -n "$_SAVE_ALL_PROXY" ] && export ALL_PROXY="$_SAVE_ALL_PROXY"
-[ -n "$_SAVE_http_proxy" ] && export http_proxy="$_SAVE_http_proxy"
-[ -n "$_SAVE_https_proxy" ] && export https_proxy="$_SAVE_https_proxy"
-[ -n "$_SAVE_all_proxy" ] && export all_proxy="$_SAVE_all_proxy"
-[ -n "$_SAVE_NO_PROXY" ] && export NO_PROXY="$_SAVE_NO_PROXY"
-[ -n "$_SAVE_no_proxy" ] && export no_proxy="$_SAVE_no_proxy"
-exec "$@"`
-		args = append(args, "sh", "-c", script, "sh")
-		args = append(args, command...)
-	} else {
-		args = append(args, command...)
-	}
-	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	return outBin
 }
 
 func TestContainerOptsNetLockdown(t *testing.T) {

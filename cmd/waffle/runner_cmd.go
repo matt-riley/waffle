@@ -20,21 +20,14 @@ import (
 // pair. It has no access to config, secrets, or the database — only the
 // queue directory and whatever the container can see.
 func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
-	// Workspace none/allowlist containers set WAFFLE_NET_LOCKDOWN so the
-	// runner drops the default route (keeping waffle-host only) before
-	// serving tools — broker reachable, raw internet not (#95).
-	if v := strings.TrimSpace(os.Getenv("WAFFLE_NET_LOCKDOWN")); v == "1" || strings.EqualFold(v, "true") {
-		host := strings.TrimSpace(os.Getenv("WAFFLE_NET_LOCKDOWN_HOST"))
-		if host == "" {
-			host = "waffle-host"
-		}
-		if err := netlock.LockdownExceptHost(host); err != nil {
-			fmt.Fprintf(stderr, "waffle runner: net lockdown: %v\n", err)
-			// Continue: better a running runner than a dead workspace; tests
-			// assert lockdown on the probe path separately.
-		} else {
-			fmt.Fprintf(stderr, "waffle runner: network lockdown active (host=%s)\n", host)
-		}
+	// Workspace none/allowlist set WAFFLE_NET_LOCKDOWN so the runner must
+	// drop the default route (keep waffle-host only) before serving (#95).
+	// Fail closed: do not serve with an open default route.
+	if err := netlock.ApplyFromEnv(os.Getenv, netlock.LockdownExceptHost); err != nil {
+		return fmt.Errorf("waffle runner: %w", err)
+	}
+	if v := strings.TrimSpace(os.Getenv(netlock.EnvLockdown)); v == "1" || strings.EqualFold(v, "true") {
+		fmt.Fprintf(stderr, "waffle runner: network lockdown active\n")
 	}
 
 	dir, err := queueDirArg(args)
