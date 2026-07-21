@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -825,4 +827,75 @@ func extractReportedID(t *testing.T, out string) string {
 		t.Fatalf("no id= in tool result %q", out)
 	}
 	return matches[len(matches)-1][1]
+}
+
+// TestNotesUpsertFailureLogsWarnAndKeepsMEMORY ensures FTS index failures are
+// visible in logs (#113) while MEMORY.md remains the source of truth.
+func TestNotesUpsertFailureLogsWarnAndKeepsMEMORY(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := testWorkspace(t)
+	ws.Notes = &NotesIndex{DB: st.DB}
+
+	// Close the store so subsequent Upsert calls fail; file writes must still succeed.
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prevLogger)
+
+	const body = "fts upsert failure still lands in MEMORY.md"
+	noteID, err := ws.Append(body)
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if noteID == "" {
+		t.Fatal("Append returned empty note id")
+	}
+
+	mem, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mem), body) {
+		t.Fatalf("MEMORY.md missing note body after FTS failure:\n%s", mem)
+	}
+	if !strings.Contains(string(mem), "[id="+noteID+"]") {
+		t.Fatalf("MEMORY.md missing note id %s:\n%s", noteID, mem)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "memory notes FTS upsert failed") {
+		t.Fatalf("missing FTS upsert warning; logs:\n%s", out)
+	}
+	if !strings.Contains(out, "note_id="+noteID) {
+		t.Fatalf("warning missing note_id=%s; logs:\n%s", noteID, out)
+	}
+	// TextHandler quotes multi-word errs; accept either form.
+	if !strings.Contains(out, "err=") && !strings.Contains(out, "err=\"") {
+		t.Fatalf("warning missing err field; logs:\n%s", out)
+	}
+
+	// Forget path also routes through syncNote and must not fail the file write.
+	logs.Reset()
+	if err := ws.ForgetNote(noteID); err != nil {
+		t.Fatalf("ForgetNote: %v", err)
+	}
+	arch, err := os.ReadFile(ws.ArchivePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(arch), body) {
+		t.Fatalf("archive missing forgotten note after FTS failure:\n%s", arch)
+	}
+	if forgetLogs := logs.String(); !strings.Contains(forgetLogs, "memory notes FTS upsert failed") ||
+		!strings.Contains(forgetLogs, "note_id="+noteID) {
+		t.Fatalf("ForgetNote FTS warning missing note context; logs:\n%s", forgetLogs)
+	}
 }

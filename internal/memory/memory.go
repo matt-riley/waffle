@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,11 +70,16 @@ func (w Workspace) agentName() string {
 	return DefaultAgent
 }
 
+// syncNote updates the FTS index for a note. Primary MEMORY.md / archive
+// writes must already have succeeded; index failures are logged and ignored
+// so the file remains the source of truth (#113).
 func (w Workspace) syncNote(ctx context.Context, n note, archived bool) {
 	if w.Notes == nil {
 		return
 	}
-	_ = w.Notes.Upsert(ctx, w.agentName(), n, archived)
+	if err := w.Notes.Upsert(ctx, w.agentName(), n, archived); err != nil {
+		slog.Warn("memory notes FTS upsert failed", "note_id", n.id, "err", err)
+	}
 }
 
 // MatchingLines returns numbered memory lines containing all query terms.
@@ -512,10 +518,7 @@ func (w Workspace) ForgetNote(noteID string) error {
 	if err := w.archiveLine(removed); err != nil {
 		return err
 	}
-	if w.Notes != nil {
-		n := parseNote(removed, 0)
-		_ = w.Notes.Upsert(context.Background(), w.agentName(), n, true)
-	}
+	w.syncNote(context.Background(), parseNote(removed, 0), true)
 	return nil
 }
 
@@ -537,9 +540,7 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	if err := w.archiveLine(removed); err != nil {
 		return "", err
 	}
-	if w.Notes != nil {
-		_ = w.Notes.Upsert(context.Background(), w.agentName(), parseNote(removed, 0), true)
-	}
+	w.syncNote(context.Background(), parseNote(removed, 0), true)
 	newID, err := newNoteID()
 	if err != nil {
 		return "", err
