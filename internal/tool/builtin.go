@@ -73,7 +73,9 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "bash", "-c", in.Command).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "bash", "-c", in.Command)
+	configureProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
 	// Return up to HostReturnCap so Agent.runOne can spill before OutputLimit
 	// truncation (#69). Do not Truncate to OutputLimit here.
 	result := capHostReturn(string(out))
