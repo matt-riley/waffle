@@ -136,11 +136,18 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 		if opts.ProxyToken != "" {
 			proxyURL = strings.Replace(proxyURL, "://", "://"+opts.ProxyToken+"@", 1)
 		}
+		// Uppercase and lowercase: curl/git honor the former; busybox wget
+		// the latter. NO_PROXY keeps broker calls off the proxy path.
+		noProxy := "waffle-host,localhost,127.0.0.1"
 		args = append(args,
 			"-e", "HTTP_PROXY="+proxyURL,
 			"-e", "HTTPS_PROXY="+proxyURL,
 			"-e", "ALL_PROXY="+proxyURL,
-			"-e", "NO_PROXY=waffle-host,localhost,127.0.0.1",
+			"-e", "NO_PROXY="+noProxy,
+			"-e", "http_proxy="+proxyURL,
+			"-e", "https_proxy="+proxyURL,
+			"-e", "all_proxy="+proxyURL,
+			"-e", "no_proxy="+noProxy,
 		)
 	}
 	if opts.Disk != "" {
