@@ -58,6 +58,7 @@ type Watcher struct {
 
 	mu      sync.Mutex
 	running map[int]context.CancelFunc // issue number → cancel
+	wg      sync.WaitGroup             // in-flight dispatch goroutines
 }
 
 func (w *Watcher) log() *slog.Logger {
@@ -168,11 +169,16 @@ func (w *Watcher) start(ctx context.Context, iss Issue) error {
 		return fmt.Errorf("intake: no dispatcher")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	// Add before go so Wait cannot observe a zero counter for this dispatch.
+	// Holding mu groups the Add with the running-map update (Run serializes
+	// Tick vs Wait; concurrent Add/Wait is not expected on the serve path).
 	w.mu.Lock()
 	w.running[iss.Number] = cancel
+	w.wg.Add(1)
 	w.mu.Unlock()
 
 	go func() {
+		defer w.wg.Done()
 		defer func() {
 			cancel()
 			w.mu.Lock()
@@ -212,6 +218,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Do not wait on the cancelled ctx: in-flight dispatches may ignore
+			// cancel (or still need cleanup). Join via WaitGroup only.
+			w.wg.Wait()
 			return ctx.Err()
 		case <-t.C:
 			if err := w.Tick(ctx); err != nil {

@@ -2,6 +2,7 @@ package intake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -46,22 +47,41 @@ func (s *stubTracker) IsOpen(ctx context.Context, repo string, number int) (bool
 }
 
 type stubDispatcher struct {
-	mu        sync.Mutex
-	started   []int
-	cancelled []int
-	block     chan struct{} // if non-nil, Dispatch waits until closed
-	err       error
+	mu           sync.Mutex
+	started      []int
+	cancelled    []int
+	block        chan struct{} // if non-nil, Dispatch waits until closed
+	sleep        time.Duration // if > 0, sleep after start (see ignoreCancel)
+	ignoreCancel bool          // when true, sleep ignores ctx cancel
+	onStart      chan struct{} // closed once when first Dispatch starts
+	err          error
 }
 
 func (d *stubDispatcher) Dispatch(ctx context.Context, cfg WatchConfig, iss Issue) (string, error) {
 	d.mu.Lock()
 	d.started = append(d.started, iss.Number)
+	onStart := d.onStart
+	d.onStart = nil
 	d.mu.Unlock()
+	if onStart != nil {
+		close(onStart)
+	}
 	if d.block != nil {
 		select {
 		case <-d.block:
 		case <-ctx.Done():
 			return "", ctx.Err()
+		}
+	}
+	if d.sleep > 0 {
+		if d.ignoreCancel {
+			time.Sleep(d.sleep)
+		} else {
+			select {
+			case <-time.After(d.sleep):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
 		}
 	}
 	if d.err != nil {
@@ -288,6 +308,60 @@ func TestWatchConfigValidate(t *testing.T) {
 	}
 	if err := (WatchConfig{Repo: "o/r", MaxConcurrency: 1}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRunAwaitsInFlightDispatches ensures Run does not return on ctx cancel
+// until in-flight dispatch goroutines finish (issue #101).
+func TestRunAwaitsInFlightDispatches(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	claims := testStore(t)
+	tr := &stubTracker{issues: map[int]Issue{
+		1: {Number: 1, Title: "a", Body: "body", State: "open", Labels: []string{"agent-ok"}, CreatedAt: time.Now(), Priority: 1},
+	}}
+	const sleep = 200 * time.Millisecond
+	started := make(chan struct{})
+	disp := &stubDispatcher{
+		sleep:        sleep,
+		ignoreCancel: true,
+		onStart:      started,
+	}
+	w := &Watcher{
+		Config: WatchConfig{
+			Repo: "o/r", Label: "agent-ok", MaxConcurrency: 1,
+			// Long interval so only the initial Tick dispatches.
+			PollInterval: time.Hour,
+		},
+		Tracker:    tr,
+		Claims:     claims,
+		Dispatcher: disp,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("dispatch did not start")
+	}
+
+	cancelAt := time.Now()
+	cancel()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(cancelAt)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run err = %v, want context.Canceled", err)
+		}
+		// Must wait for the ~200ms sleep, not return immediately on cancel.
+		if elapsed < 150*time.Millisecond {
+			t.Fatalf("Run returned too quickly after cancel: %v (want ≥ ~%v for in-flight dispatch)", elapsed, sleep)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after dispatch completed")
 	}
 }
 
