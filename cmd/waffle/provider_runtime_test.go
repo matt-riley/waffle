@@ -566,7 +566,7 @@ func TestChatProviderlessConfigStopsWithSetupGuidance(t *testing.T) {
 	var stdout bytes.Buffer
 	err := chatCmd(context.Background(), nil, strings.NewReader("hey\n"), &stdout, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "no provider configured") ||
-		!strings.Contains(err.Error(), "sudo waffle provider add") {
+		!strings.Contains(err.Error(), "waffle setup") {
 		t.Fatalf("providerless chat error = %v, want provider setup guidance", err)
 	}
 	if strings.Contains(stdout.String(), "anthropic") {
@@ -583,7 +583,7 @@ func TestChatExplicitEmptyProviderRegistryOverridesLegacyFallback(t *testing.T) 
 	}
 	var stdout bytes.Buffer
 	err := chatCmd(context.Background(), nil, strings.NewReader("hey\n"), &stdout, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "sudo waffle provider add") {
+	if err == nil || !strings.Contains(err.Error(), "waffle setup") {
 		t.Fatalf("explicit-empty provider chat error = %v, want provider setup guidance", err)
 	}
 	if strings.Contains(stdout.String(), "anthropic") {

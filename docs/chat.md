@@ -5,6 +5,26 @@ interactive terminal gets the full-screen TUI. Redirected stdin or stdout, or
 an explicit `--plain`, gets stable plain text suitable for scripts, logs,
 accessibility tools, and tests.
 
+## First run
+
+On a new install (empty `$WAFFLE_HOME`), run setup once before chat:
+
+```sh
+waffle setup
+```
+
+`waffle setup` walks through secret-store identity creation (if needed), guided
+provider enrollment (credential + model aliases), and a minimal
+`[agent.profile.main]` block. Re-running setup is safe: completed steps print
+an "already configured" message and are skipped. After setup succeeds:
+
+```sh
+waffle chat
+```
+
+If chat is started with no providers configured, it exits with a message
+directing you to `waffle setup`.
+
 ## Managed-host quick start
 
 On an Infra-managed host in **Ready** state, run:

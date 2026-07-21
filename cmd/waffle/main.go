@@ -133,6 +133,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return errors.New("usage: waffle restore <absolute-dir>")
 		}
 		return backup.Restore(ctx, args[1])
+	case "setup":
+		return setupCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "chat":
 		return chatCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "session":
@@ -191,6 +193,7 @@ Usage:
   waffle <command> [arguments]
 
 Commands:
+  setup     first-run: secret init, provider add, starter profile
   chat      focused terminal chat (--continue, --profile, --socket, --plain)
   serve     run the gateway (channels from config.toml)
   status    show active and recent gateway runs

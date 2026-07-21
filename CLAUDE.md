@@ -14,7 +14,7 @@ See `mise.toml` for the full task list (`mise tasks`); `mise install` installs t
 
 Focused test iteration: `go test ./internal/<package> -run '^TestName$' -count=1`.
 
-Run locally: `go run ./cmd/waffle chat` (after `./waffle secret init` and configuring a provider secret, e.g. `printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key`).
+Run locally: `go run ./cmd/waffle setup` (first-run: secret identity, provider, and `[agent.profile.main]`), then `go run ./cmd/waffle chat`. Manual alternative: `./waffle secret init`, configure a provider (`waffle provider add` or `printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key`), then chat.
 
 Sandbox-specific tests are opt-in and documented in `docs/sandbox-queue.md`:
 `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1` (add `-tags=sandbox_docker` when Docker is available).
@@ -23,7 +23,7 @@ Live provider evals require `WAFFLE_EVAL_LIVE=1` and a configured provider; they
 
 ## Architecture
 
-`cmd/waffle` is a single binary with subcommands (`chat`, `serve`, sandbox runner, `ws`, `cron`, `session`, `secret`, `skills`, `learn`, `pair`, `usage`, `status`, etc.). `serve` is the sole owner of background processing, the gateway, and in-memory broker tokens — it holds the serve-owner lock (`~/.waffle/serve.lock`, PID + heartbeat) and starts lifecycle sweepers. A second `serve` refuses to start; a stale lock is reclaimed automatically once its PID is dead.
+`cmd/waffle` is a single binary with subcommands (`setup`, `chat`, `serve`, sandbox runner, `ws`, `cron`, `session`, `secret`, `skills`, `learn`, `pair`, `usage`, `status`, etc.). `serve` is the sole owner of background processing, the gateway, and in-memory broker tokens — it holds the serve-owner lock (`~/.waffle/serve.lock`, PID + heartbeat) and starts lifecycle sweepers. A second `serve` refuses to start; a stale lock is reclaimed automatically once its PID is dead.
 
 **Inbound path**: channel adapter → `internal/gateway` → `internal/entity` (`user → channel group → agent group → session`) → `internal/agent`. Gateway handlers run concurrently across conversations but are serialized per channel group.
 

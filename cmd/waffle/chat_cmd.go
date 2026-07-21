@@ -171,7 +171,7 @@ func openChatBackend(ctx context.Context, options chatOptions) (chatpkg.Backend,
 	}
 	if len(cfg.Providers) == 0 {
 		_ = st.Close()
-		return nil, func() error { return nil }, errors.New("no provider configured; run `sudo waffle provider add` on a managed host")
+		return nil, func() error { return nil }, errors.New("no provider configured; run `waffle setup` to get started")
 	}
 
 	backend, err := newChatRuntime(ctx, cfg, st)
