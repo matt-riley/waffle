@@ -37,7 +37,9 @@ type Gateway struct {
 	// (tests and partial wiring).
 	Profiles map[string]*agent.Agent
 	// GroupProfiles maps profiles built against the multiparty "group" tier
-	// so a bind cannot widen tools past group policy (#71 / #34).
+	// so a bind cannot widen tools past group policy (#71 / #34). Required
+	// (non-nil) when a multiparty group has a named profile bind; nil fails
+	// closed instead of falling back to main-tier Profiles (#108).
 	GroupProfiles map[string]*agent.Agent
 	Entities      *entity.Store
 	Sessions      *session.Store
@@ -79,7 +81,9 @@ func (g *Gateway) agentFor(group string) (*agent.Agent, error) {
 
 // agentForGroup resolves the agent for a channel group, applying a named
 // profile bind when set (#71). Multiparty groups use GroupProfiles so the
-// bound profile cannot widen tools past the restricted group tier (#34).
+// bound profile cannot widen tools past the restricted group tier (#34 / #108).
+// When GroupProfiles is nil for a multiparty group with a named profile bind,
+// resolution fails closed rather than falling back to main-tier Profiles.
 func (g *Gateway) agentForGroup(group *entity.Group) (*agent.Agent, error) {
 	if group == nil {
 		return nil, fmt.Errorf("gateway: nil group")
@@ -95,13 +99,17 @@ func (g *Gateway) agentForGroup(group *entity.Group) (*agent.Agent, error) {
 	var tier map[string]*agent.Agent
 	switch group.AgentGroup {
 	case config.GroupGroup:
-		tier = g.GroupProfiles
-		if tier == nil {
-			// Fall back to main-tier profiles only when group map is unset
-			// (tests); production always wires GroupProfiles.
-			tier = g.Profiles
+		// Fail closed: never substitute main-tier Profiles for multiparty
+		// group binds. Production wires GroupProfiles; a nil map is a
+		// misconfiguration, not a license to widen trust (#108).
+		if g.GroupProfiles == nil {
+			return nil, fmt.Errorf("gateway: group-tier profiles not configured (refusing main-tier profile for multiparty group)")
 		}
+		tier = g.GroupProfiles
 	default:
+		// main / cron / issue: named profiles come from Profiles. Cron and
+		// issue do not share the GroupProfiles nil→main fallthrough; when
+		// Profiles is nil the bind is ignored below and the group agent is used.
 		tier = g.Profiles
 	}
 	if tier == nil {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/channel"
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/observability"
@@ -258,6 +259,161 @@ func TestGatewayUnknownProfileErrors(t *testing.T) {
 	_, err = gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "chat-x", Text: "hi"})
 	if err == nil || !strings.Contains(err.Error(), `gateway: unknown profile "missing"`) {
 		t.Fatalf("err = %v, want unknown profile", err)
+	}
+}
+
+// TestAgentForGroupNilGroupProfilesFailsClosed covers #108: multiparty group
+// tier with a named profile bind must not resolve main-tier Profiles when
+// GroupProfiles is nil.
+func TestAgentForGroupNilGroupProfilesFailsClosed(t *testing.T) {
+	mainProfile := &agent.Agent{
+		Provider: &recordingProvider{},
+		Tools:    tool.NewRegistry(gwNamedTool("bash")),
+		System:   "main-tier-profile",
+		Model:    "main-model",
+	}
+	groupAgent := &agent.Agent{
+		Provider: &recordingProvider{},
+		Tools:    tool.NewRegistry(gwNamedTool("read_file")),
+		System:   "group-agent",
+		Model:    "group-model",
+	}
+	gw := &Gateway{
+		Agent: &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Agents: map[string]*agent.Agent{
+			config.GroupGroup: groupAgent,
+		},
+		// Profile exists only under main-tier Profiles — the old nil
+		// GroupProfiles path would select this and widen trust.
+		Profiles: map[string]*agent.Agent{
+			"reviewer": mainProfile,
+		},
+		GroupProfiles: nil,
+	}
+
+	group := &entity.Group{
+		Channel:    "telegram",
+		ChatID:     "-100group",
+		AgentGroup: config.GroupGroup,
+		Profile:    "reviewer",
+	}
+	got, err := gw.agentForGroup(group)
+	if err == nil {
+		t.Fatalf("agentForGroup: got agent system=%q, want fail-closed error (not main-tier)", got.System)
+	}
+	if !strings.Contains(err.Error(), "group-tier profiles not configured") {
+		t.Fatalf("err = %v, want group-tier profiles not configured", err)
+	}
+	if got != nil {
+		t.Fatalf("agent = %+v, want nil on fail-closed", got)
+	}
+	// Converse path must surface the same fail-closed error.
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	if _, err := entities.GroupFor(ctx, "fake", "multiparty", config.GroupGroup); err != nil {
+		t.Fatalf("GroupFor: %v", err)
+	}
+	if err := entities.SetProfile(ctx, "fake", "multiparty", "reviewer"); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	gw.Entities = entities
+	gw.Sessions = sessions
+	_, err = gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "multiparty", Text: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "group-tier profiles not configured") {
+		t.Fatalf("converse err = %v, want group-tier profiles not configured", err)
+	}
+}
+
+// TestAgentForGroupUsesGroupProfiles verifies multiparty binds use the
+// group-tier map when it is wired (happy path after #108 fail-closed).
+func TestAgentForGroupUsesGroupProfiles(t *testing.T) {
+	mainProfile := &agent.Agent{
+		Provider: &recordingProvider{},
+		Tools:    tool.NewRegistry(gwNamedTool("bash")),
+		System:   "main-tier-profile",
+		Model:    "main-model",
+	}
+	groupProfile := &agent.Agent{
+		Provider: &recordingProvider{},
+		Tools:    tool.NewRegistry(gwNamedTool("read_file")),
+		System:   "group-tier-profile",
+		Model:    "group-model",
+	}
+	gw := &Gateway{
+		Agents: map[string]*agent.Agent{
+			config.GroupGroup: {Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "g"},
+		},
+		Profiles: map[string]*agent.Agent{
+			"reviewer": mainProfile,
+		},
+		GroupProfiles: map[string]*agent.Agent{
+			"reviewer": groupProfile,
+		},
+	}
+	got, err := gw.agentForGroup(&entity.Group{
+		AgentGroup: config.GroupGroup,
+		Profile:    "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("agentForGroup: %v", err)
+	}
+	if got != groupProfile {
+		t.Fatalf("got system=%q, want group-tier profile", got.System)
+	}
+}
+
+// TestAgentForGroupRestrictedTiersDoNotUseGroupProfilesNilFallback checks
+// that cron/issue share no GroupProfiles→main widening: with Profiles set
+// they use that map; with Profiles nil they keep the restricted group agent.
+func TestAgentForGroupRestrictedTiersDoNotUseGroupProfilesNilFallback(t *testing.T) {
+	mainProfile := &agent.Agent{System: "main-profile", Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"}
+	cronAgent := &agent.Agent{System: "cron-agent", Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "c"}
+	issueAgent := &agent.Agent{System: "issue-agent", Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "i"}
+
+	// Profiles nil: named profile is ignored; restricted group agent is used.
+	gw := &Gateway{
+		Agents: map[string]*agent.Agent{
+			config.GroupCron:  cronAgent,
+			config.GroupIssue: issueAgent,
+		},
+		Profiles:      nil,
+		GroupProfiles: nil,
+	}
+	for _, tc := range []struct {
+		group string
+		want  *agent.Agent
+	}{
+		{config.GroupCron, cronAgent},
+		{config.GroupIssue, issueAgent},
+	} {
+		got, err := gw.agentForGroup(&entity.Group{AgentGroup: tc.group, Profile: "reviewer"})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.group, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: got system=%q, want restricted group agent", tc.group, got.System)
+		}
+	}
+
+	// Profiles set: cron/issue resolve named profiles from Profiles (no
+	// GroupProfiles involvement; production builds those against the right tier).
+	gw.Profiles = map[string]*agent.Agent{"reviewer": mainProfile}
+	got, err := gw.agentForGroup(&entity.Group{AgentGroup: config.GroupCron, Profile: "reviewer"})
+	if err != nil {
+		t.Fatalf("cron with Profiles: %v", err)
+	}
+	if got != mainProfile {
+		t.Fatalf("cron: got system=%q", got.System)
 	}
 }
 
