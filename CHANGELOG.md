@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0](https://github.com/matt-riley/waffle/compare/v0.3.0...v0.4.0) (2026-07-21)
+
+
+### Features
+
+* add focused conversation chat TUI ([23acf23](https://github.com/matt-riley/waffle/commit/23acf233f28d20a7a1507be5094bcd68652303d0))
+* add local chat wire protocol ([d5049fd](https://github.com/matt-riley/waffle/commit/d5049fd2f05d05623d626a5d3ff7daf6e586ed12))
+* add stateful chat runtime commands ([ea3e503](https://github.com/matt-riley/waffle/commit/ea3e50331d23745d20fb4c6ae2aabe944e32d87c))
+* define chat command contract ([b827e78](https://github.com/matt-riley/waffle/commit/b827e783af4ce1d607dfc547a2244ba4d744f33d))
+* persist chat model per session ([fdb3bee](https://github.com/matt-riley/waffle/commit/fdb3bee78991818ee22dea070a921f277ba5d4af))
+* serve chat over a local Unix socket ([b638cc4](https://github.com/matt-riley/waffle/commit/b638cc4a6722649d3053e47b451eef529fea0612))
+
+
+### Bug Fixes
+
+* bound chat runtime close ([ae18b68](https://github.com/matt-riley/waffle/commit/ae18b682ac972aaf6baffc179ca6d4c804aa8665))
+* bound local chat wire shutdown ([3f3a30f](https://github.com/matt-riley/waffle/commit/3f3a30f050c3d9b44fa2e63df3b43e75c98978ba))
+* clear command state before terminal response ([0d8ac07](https://github.com/matt-riley/waffle/commit/0d8ac07e89ec896c58b6cabf7cf9053b8649e2c6))
+* clear stale plain chat confirmations ([63777a9](https://github.com/matt-riley/waffle/commit/63777a98392584471b252e6aa0524d8d907ab5e1))
+* complete chat shutdown lifecycle ([a49d27c](https://github.com/matt-riley/waffle/commit/a49d27c639c26ce1f035ce9a5f1b927abef3a1df))
+* complete focused conversation lifecycle ([61c6fe9](https://github.com/matt-riley/waffle/commit/61c6fe95de07e047cf3a59f9ce14e3909d9b4eea))
+* document chat Enter key ([16f3025](https://github.com/matt-riley/waffle/commit/16f3025be5277625e93a3bd2ada58f62a0e79713))
+* harden focused conversation TUI ([acf4851](https://github.com/matt-riley/waffle/commit/acf4851825671511674dfc8f6af32f7203443efb))
+* harden local chat socket ownership ([f8c9e0e](https://github.com/matt-riley/waffle/commit/f8c9e0e6767075bccdb24b8e84b14e1ef3d49915))
+* harden local chat wire lifecycle ([c4dc227](https://github.com/matt-riley/waffle/commit/c4dc2272de718e3e6078addabbc52156f3c46403))
+* harden managed chat lifecycle ([4bbe050](https://github.com/matt-riley/waffle/commit/4bbe05099cc5bcefcdc9daa5b42d20574a7225a1))
+* harden plain chat lifecycle ([2b260a3](https://github.com/matt-riley/waffle/commit/2b260a317ff052c4a0dcb9135279b6b6669187f3))
+* isolate chat repo transitions ([e879e1f](https://github.com/matt-riley/waffle/commit/e879e1f5a1b4fb266361fc61ad8be00ca765cc2a))
+* preserve chat profile across repo switches ([5117e1d](https://github.com/matt-riley/waffle/commit/5117e1d8752edd596653157854b9cfc3e37fe0f1))
+* validate local socket ancestor chain ([a732b29](https://github.com/matt-riley/waffle/commit/a732b299916b37ba769f5c8271dedc4b71b567a9))
+
 ## [0.3.0](https://github.com/matt-riley/waffle/compare/v0.2.0...v0.3.0) (2026-07-20)
 
 
