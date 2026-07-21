@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +15,11 @@ import (
 	"strings"
 	"time"
 )
+
+// listOpenMaxPages caps GitHub ListOpen pagination to avoid unbounded API
+// usage. At per_page=100 this is 1000 issues. When the cap is hit and a
+// rel="next" Link remains, a warning is logged and partial results are returned.
+const listOpenMaxPages = 10
 
 // Issue is one tracker candidate.
 type Issue struct {
@@ -58,7 +64,8 @@ func (g *GitHubTracker) base() string {
 	return "https://api.github.com"
 }
 
-// ListOpen fetches open issues with the given label.
+// ListOpen fetches open issues with the given label, following GitHub Link
+// header pagination (rel="next") until exhausted or listOpenMaxPages is reached.
 func (g *GitHubTracker) ListOpen(ctx context.Context, repo, label string) ([]Issue, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -70,34 +77,68 @@ func (g *GitHubTracker) ListOpen(ctx context.Context, repo, label string) ([]Iss
 	if label != "" {
 		q.Set("labels", label)
 	}
-	u := fmt.Sprintf("%s/repos/%s/%s/issues?%s", g.base(), owner, name, q.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
+	nextURL := fmt.Sprintf("%s/repos/%s/%s/issues?%s", g.base(), owner, name, q.Encode())
+
+	var out []Issue
+	for page := 1; page <= listOpenMaxPages; page++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		g.auth(req)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		resp, err := g.client().Do(req)
+		if err != nil {
+			return nil, err
+		}
+		linkHeader := resp.Header.Get("Link")
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("github list issues: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		}
+		pageIssues, err := decodeIssuePage(resp.Body, label)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pageIssues...)
+
+		next, ok := nextLinkURL(linkHeader)
+		if !ok {
+			return out, nil
+		}
+		if page == listOpenMaxPages {
+			// Safety cap: stop after listOpenMaxPages even if more pages remain.
+			slog.Warn("intake: GitHub ListOpen page cap reached; older open issues may be omitted",
+				"repo", repo,
+				"label", label,
+				"pages", listOpenMaxPages,
+				"issues", len(out),
+			)
+			return out, nil
+		}
+		nextURL = next
 	}
-	g.auth(req)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := g.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
-		return nil, fmt.Errorf("github list issues: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	var raw []struct {
-		Number    int       `json:"number"`
-		Title     string    `json:"title"`
-		Body      string    `json:"body"`
-		State     string    `json:"state"`
-		CreatedAt time.Time `json:"created_at"`
-		PullReq   *struct{} `json:"pull_request"`
-		Labels    []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	return out, nil
+}
+
+type ghIssueRaw struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	State     string    `json:"state"`
+	CreatedAt time.Time `json:"created_at"`
+	PullReq   *struct{} `json:"pull_request"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// decodeIssuePage reads one GitHub /issues JSON page and applies PR/label filters.
+func decodeIssuePage(body io.Reader, label string) ([]Issue, error) {
+	var raw []ghIssueRaw
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
 		return nil, err
 	}
 	out := make([]Issue, 0, len(raw))
@@ -124,6 +165,31 @@ func (g *GitHubTracker) ListOpen(ctx context.Context, repo, label string) ([]Iss
 		})
 	}
 	return out, nil
+}
+
+// nextLinkURL extracts the URL for rel="next" from a GitHub Link response header.
+// Example: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"
+func nextLinkURL(linkHeader string) (string, bool) {
+	if linkHeader == "" {
+		return "", false
+	}
+	// Split on commas that separate link entries (URLs are angle-bracketed).
+	for _, part := range strings.Split(linkHeader, ",") {
+		part = strings.TrimSpace(part)
+		semi := strings.Index(part, ";")
+		if semi < 0 {
+			continue
+		}
+		target := strings.TrimSpace(part[:semi])
+		params := part[semi+1:]
+		if !strings.Contains(params, `rel="next"`) && !strings.Contains(params, `rel=next`) {
+			continue
+		}
+		if len(target) >= 2 && target[0] == '<' && target[len(target)-1] == '>' {
+			return target[1 : len(target)-1], true
+		}
+	}
+	return "", false
 }
 
 // IsOpen checks a single issue's state.
