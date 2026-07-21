@@ -47,16 +47,41 @@ func NewBytes(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// pairingAlphabet avoids ambiguous characters (0/O, 1/I). Length is 32.
+const pairingAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// maxUnbiasedPairingByte is the largest multiple of len(pairingAlphabet) that
+// fits in a byte. Bytes in [0, maxUnbiasedPairingByte) map uniformly onto the
+// alphabet via % len; larger values are discarded and re-sampled so that
+// NewPairingCode has no modulo bias even if the alphabet length changes to a
+// value that does not divide 256.
+const maxUnbiasedPairingByte = 256 - (256 % len(pairingAlphabet))
+
 // NewPairingCode returns a 6-character pairing code using an alphabet that
-// avoids ambiguous characters (0/O, 1/I).
+// avoids ambiguous characters (0/O, 1/I). Characters are drawn uniformly via
+// rejection sampling over crypto/rand bytes (no modulo bias).
 func NewPairingCode() (string, error) {
-	const pairingAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	var b [6]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("crypto/rand: %w", err)
+	const n = 6
+	var out [n]byte
+	// Batch-read a small buffer and refill as needed. When the alphabet length
+	// divides 256, every byte is accepted; otherwise the rejection rate is
+	// (256-maxUnbiased)/256 and we may need more than one draw.
+	var buf [n]byte
+	filled := 0
+	for filled < n {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return "", fmt.Errorf("crypto/rand: %w", err)
+		}
+		for _, b := range buf {
+			if int(b) >= maxUnbiasedPairingByte {
+				continue
+			}
+			out[filled] = pairingAlphabet[int(b)%len(pairingAlphabet)]
+			filled++
+			if filled == n {
+				break
+			}
+		}
 	}
-	for i := range b {
-		b[i] = pairingAlphabet[int(b[i])%len(pairingAlphabet)]
-	}
-	return string(b[:]), nil
+	return string(out[:]), nil
 }
