@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -22,6 +24,7 @@ import (
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/dashboard"
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/gateway"
 	"github.com/matt-riley/waffle/internal/intake"
@@ -112,9 +115,19 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		return fmt.Errorf("status listener cannot bind %s: %w", cfg.Gateway.StatusListen, err)
 	}
 	obs := observability.New(st, nil)
+	statusMux := http.NewServeMux()
+	observability.RegisterRoutes(statusMux, obs)
+	statusHandler := http.Handler(statusMux)
+	if cfg.Dashboard.Enabled {
+		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, rand.Reader)
+		if err != nil {
+			return fmt.Errorf("dashboard security: %w", err)
+		}
+		statusHandler = security.Wrap(statusHandler)
+	}
 	statusDone := make(chan error, 1)
 	go func() {
-		if err := observability.ServeListener(ctx, statusListener, obs); err != nil {
+		if err := observability.ServeHandler(ctx, statusListener, statusHandler); err != nil {
 			slog.New(slog.NewTextHandler(stderr, nil)).Error("status listener stopped", "err", err)
 			statusDone <- err
 			return

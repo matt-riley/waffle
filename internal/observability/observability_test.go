@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -53,6 +54,53 @@ func TestHealthHandlerReturns503ForStaleSubsystem(t *testing.T) {
 	}
 	if health.Healthy || !health.Scheduler.Stale || !health.Adapters["telegram"].Stale {
 		t.Fatalf("health = %+v", health)
+	}
+}
+
+func TestRegisterRoutesPreservesStatusAndHealthContracts(t *testing.T) {
+	ctx, svc, clock := testService(t)
+	svc.MarkSchedulerTick()
+	svc.MarkAdapter("telegram")
+	*clock = clock.Add(3 * time.Minute)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, svc)
+
+	for _, test := range []struct {
+		path string
+		want int
+	}{
+		{path: "/status", want: http.StatusOK},
+		{path: "/healthz", want: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.path, nil).WithContext(ctx))
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+		})
+	}
+}
+
+func TestServeHandlerStopsOnContextCancellation(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeHandler(ctx, listener, http.NotFoundHandler()) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeHandler() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ServeHandler did not stop after cancellation")
 	}
 }
 

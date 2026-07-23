@@ -188,6 +188,16 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	resp, err := client.Get("http://" + addr + "/desk/")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /desk/: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		cancel()
+		t.Fatalf("disabled dashboard GET /desk/ status = %d, want 404", resp.StatusCode)
+	}
 
 	cancel()
 	select {
@@ -204,6 +214,66 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 		t.Fatalf("status listener still bound after serve shutdown: %v", err)
 	}
 	_ = listener.Close()
+}
+
+func TestServeDashboardEnabledWrapsSharedListenerWithoutClaimingDeskRoute(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configBody := "[gateway]\nstatus_listen = \"" + addr + "\"\n[dashboard]\nenabled = true\n[provider]\napi_key = \"test-key\"\n[agent]\nsubagents = false\nlearn = false\n"
+	if err := os.WriteFile(filepath.Join(os.Getenv("WAFFLE_HOME"), "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := client.Get("http://" + addr + "/status")
+		if err == nil {
+			if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+				_ = resp.Body.Close()
+				t.Fatalf("X-Frame-Options = %q, want DENY", got)
+			}
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("dashboard listener did not start: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	resp, err := client.Get("http://" + addr + "/desk/")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /desk/: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		cancel()
+		t.Fatalf("GET /desk/ status = %d, want 404", resp.StatusCode)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveCmd() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveCmd did not return after cancellation")
+	}
 }
 
 func TestServeChatStartsConfiguredSocketAcceptsHandshakeAndRemovesOnShutdown(t *testing.T) {
