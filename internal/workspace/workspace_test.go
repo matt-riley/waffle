@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,13 +100,14 @@ func (s *scriptedBash) count(substr string) int {
 
 // fakeRuntime runs an in-process Runner per "container" instead of docker.
 type fakeRuntime struct {
-	mu       sync.Mutex
-	tools    *scriptedBash
-	cancels  map[string]context.CancelFunc
-	events   []string
-	opts     []ContainerOpts
-	startErr error
-	stopErr  error
+	mu           sync.Mutex
+	tools        *scriptedBash
+	cancels      map[string]context.CancelFunc
+	events       []string
+	opts         []ContainerOpts
+	startErr     error
+	stopErr      error
+	restartDelay time.Duration
 }
 
 type revocationTracker struct {
@@ -157,14 +159,25 @@ func (f *fakeRuntime) launch(name, queueDir string) {
 	rctx, cancel := context.WithCancel(context.Background())
 	f.mu.Lock()
 	f.cancels[name] = cancel
+	delay := f.restartDelay
 	f.mu.Unlock()
 	go func() {
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-rctx.Done():
+				return
+			}
+		}
 		r := &sandbox.Runner{Tools: tool.NewRegistry(f.tools)}
 		_ = r.Serve(rctx, queueDir)
 	}()
 }
 
 func (f *fakeRuntime) StopContainer(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.log("stop " + name)
 	f.mu.Lock()
 	err := f.stopErr
@@ -174,6 +187,19 @@ func (f *fakeRuntime) StopContainer(ctx context.Context, name string) error {
 	}
 	f.halt(name)
 	return nil
+}
+
+func writeStaleRunnerHeartbeat(t *testing.T, queueDir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(queueDir, "outbound.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(`INSERT OR REPLACE INTO results (request_id, content, is_error, created_at) VALUES (-1, 'alive', 0, ?)`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
@@ -929,6 +955,90 @@ func TestInspectCloseRestoresIdleWorkspaceWithoutRecreatingContainer(t *testing.
 	want := []string{"restart " + ws.Container, "stop " + ws.Container}
 	if strings.Join(events, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("idle inspection events = %v, want %v", events, want)
+	}
+}
+
+func TestInspectCloseWaitsForFreshIdleRunnerHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	writeStaleRunnerHeartbeat(t, mgr.queueDir(ws.ID))
+	rt.mu.Lock()
+	rt.restartDelay = 300 * time.Millisecond
+	rt.mu.Unlock()
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.InspectClose(ctx, ws.ID); err != nil {
+		t.Fatalf("InspectClose with stale heartbeat: %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestInspectCloseIdleRestoresWithCanceledCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tools := &scriptedBash{delays: map[string]time.Duration{"git status --porcelain": 10 * time.Second}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(context.Background(), ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+	result := make(chan error, 1)
+	go func() {
+		_, err := mgr.InspectClose(ctx, ws.ID)
+		result <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !tools.ran("git status --porcelain") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !tools.ran("git status --porcelain") {
+		t.Fatal("inspection command never started")
+	}
+	cancel()
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("InspectClose error = %v, want canceled inspection", err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("canceled inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+	events := rt.events[beforeEvents:]
+	want := []string{"restart " + ws.Container, "stop " + ws.Container}
+	if strings.Join(events, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("canceled inspection events = %v, want %v", events, want)
 	}
 }
 

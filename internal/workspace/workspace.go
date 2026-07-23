@@ -751,6 +751,48 @@ func (m *Manager) newInspectionClient(ws *Workspace) (*sandbox.Client, error) {
 	return sandbox.NewClient(m.queueDir(ws.ID))
 }
 
+const (
+	inspectionRunnerReadyTimeout  = 15 * time.Second
+	inspectionRunnerProbeInterval = 100 * time.Millisecond
+	inspectionRestoreTimeout      = 30 * time.Second
+)
+
+// waitForInspectionRunner waits for a heartbeat created after an idle
+// container restart. The queue persists across idle periods, so an old stale
+// heartbeat must not make the first inspection command declare the newly
+// started runner dead.
+func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, startedAt time.Time) error {
+	waitCtx, cancel := context.WithTimeout(ctx, inspectionRunnerReadyTimeout)
+	defer cancel()
+
+	db, err := sql.Open("sqlite", filepath.Join(m.queueDir(ws.ID), "outbound.db"))
+	if err != nil {
+		return fmt.Errorf("open inspection runner heartbeat: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ticker := time.NewTicker(inspectionRunnerProbeInterval)
+	defer ticker.Stop()
+	for {
+		var raw string
+		err := db.QueryRowContext(waitCtx,
+			`SELECT created_at FROM results WHERE request_id = ?`, -1).Scan(&raw)
+		if err == nil {
+			if heartbeat, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil && heartbeat.After(startedAt) {
+				return nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read inspection runner heartbeat: %w", err)
+		}
+
+		select {
+		case <-ticker.C:
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for restarted workspace runner heartbeat: %w", waitCtx.Err())
+		}
+	}
+}
+
 // CloseReport says what Close found before tearing down.
 type CloseReport struct {
 	Dirty    string // non-empty git status --porcelain output
@@ -772,18 +814,24 @@ func (m *Manager) InspectClose(ctx context.Context, id string) (report *CloseRep
 
 	wasIdle := ws.Status == StatusIdle
 	if wasIdle {
+		startedAt := time.Now().UTC()
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			return report, fmt.Errorf("start idle workspace for inspection: %w", err)
 		}
 		defer func() {
-			if restoreErr := m.Runtime.StopContainer(ctx, ws.Container); restoreErr != nil {
+			restoreCtx, cancel := context.WithTimeout(context.Background(), inspectionRestoreTimeout)
+			defer cancel()
+			if restoreErr := m.Runtime.StopContainer(restoreCtx, ws.Container); restoreErr != nil {
 				if err != nil {
-					err = fmt.Errorf("%w; also failed to restore idle workspace: %v", err, restoreErr)
+					err = errors.Join(err, fmt.Errorf("restore idle workspace: %w", restoreErr))
 					return
 				}
 				err = fmt.Errorf("restore idle workspace after inspection: %w", restoreErr)
 			}
 		}()
+		if err := m.waitForInspectionRunner(ctx, ws, startedAt); err != nil {
+			return report, err
+		}
 	}
 
 	client, err := m.newInspectionClient(ws)
