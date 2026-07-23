@@ -63,6 +63,24 @@ func TestSecurityRejectsInvalidRequestMetadata(t *testing.T) {
 	}
 }
 
+func TestSecurityRejectsCrossSiteMutation(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test", nil)
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+
+	security.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
+	}
+}
+
 func TestSecurityAllowsSameOriginGETAndAddsSecurityHeaders(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	rec := httptest.NewRecorder()

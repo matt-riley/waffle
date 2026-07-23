@@ -58,6 +58,7 @@ type adapterFactory func(config.Config) ([]channel.Adapter, error)
 
 var serveChat = chatwire.Serve
 var openChatListener = localsocket.Listener
+var dashboardRandom io.Reader = rand.Reader
 
 // serveCmdWithAdapterFactory runs the serve command with an explicit adapter
 // factory so command lifecycle tests can use an in-memory channel.
@@ -119,8 +120,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	observability.RegisterRoutes(statusMux, obs)
 	statusHandler := http.Handler(statusMux)
 	if cfg.Dashboard.Enabled {
-		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, rand.Reader)
+		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, dashboardRandom)
 		if err != nil {
+			_ = statusListener.Close()
 			return fmt.Errorf("dashboard security: %w", err)
 		}
 		statusHandler = security.Wrap(statusHandler)

@@ -276,6 +276,35 @@ func TestServeDashboardEnabledWrapsSharedListenerWithoutClaimingDeskRoute(t *tes
 	}
 }
 
+func TestServeDashboardSecurityFailureReleasesStatusListener(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	statusAddr := unusedTCPAddress(t)
+	configBody := fmt.Sprintf(
+		"[gateway]\nstatus_listen = %q\n\n[dashboard]\nenabled = true\n\n[provider]\napi_key = \"test-key\"\n\n[agent]\nsubagents = false\nlearn = false\n",
+		statusAddr,
+	)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalRandom := dashboardRandom
+	dashboardRandom = strings.NewReader("")
+	defer func() { dashboardRandom = originalRandom }()
+
+	err := serveCmdWithAdapterFactory(context.Background(), nil, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+		t.Fatal("adapter factory must not run after dashboard security failure")
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "dashboard security") {
+		t.Fatalf("serve security failure = %v, want dashboard security error", err)
+	}
+	listener, err := net.Listen("tcp", statusAddr)
+	if err != nil {
+		t.Fatalf("status listener remained bound after dashboard security failure: %v", err)
+	}
+	_ = listener.Close()
+}
+
 func TestServeChatStartsConfiguredSocketAcceptsHandshakeAndRemovesOnShutdown(t *testing.T) {
 	home := unixServeTempDir(t)
 	t.Setenv("WAFFLE_HOME", home)
