@@ -216,7 +216,7 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	_ = listener.Close()
 }
 
-func TestServeDashboardEnabledWrapsSharedListenerWithoutClaimingDeskRoute(t *testing.T) {
+func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 	t.Setenv("WAFFLE_HOME", t.TempDir())
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -260,10 +260,19 @@ func TestServeDashboardEnabledWrapsSharedListenerWithoutClaimingDeskRoute(t *tes
 		cancel()
 		t.Fatalf("GET /desk/: %v", err)
 	}
+	body, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
+	if readErr != nil {
 		cancel()
-		t.Fatalf("GET /desk/ status = %d, want 404", resp.StatusCode)
+		t.Fatalf("read /desk/: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("GET /desk/ status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Contains(body, []byte("Waffle Desk")) {
+		cancel()
+		t.Fatalf("GET /desk/ did not render Desk shell: %q", body)
 	}
 	cancel()
 	select {

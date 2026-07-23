@@ -1,0 +1,99 @@
+package dashboard
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/store"
+)
+
+func TestBootstrapSerializesStableContract(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 20, 0, 0, 0, time.FixedZone("BST", 3600))
+	obs := observability.New(nil, func() time.Time { return now })
+	hub := NewEventHub(2)
+	hub.Publish(Event{Type: "status.changed"})
+	security := mustSecurity(t, "127.0.0.1:8422")
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{
+		Observability: obs,
+		Security:      security,
+		Hub:           hub,
+		Version:       "test",
+		Now:           func() time.Time { return now },
+	})
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/desk/bootstrap", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	var bootstrap Bootstrap
+	if err := json.NewDecoder(recorder.Body).Decode(&bootstrap); err != nil {
+		t.Fatalf("decode bootstrap: %v", err)
+	}
+	if bootstrap.Version != "test" || !bootstrap.ServerTime.Equal(now.UTC()) || bootstrap.RequestToken != security.Token() || bootstrap.EventCursor != 1 {
+		t.Fatalf("bootstrap = %+v", bootstrap)
+	}
+	if bootstrap.Status.Active == nil || bootstrap.Status.Recent == nil || bootstrap.Status.RetryQueue == nil {
+		t.Fatalf("bootstrap status has null arrays: %+v", bootstrap.Status)
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte(`:null`)) {
+		t.Fatalf("bootstrap JSON contains null array: %s", recorder.Body.String())
+	}
+}
+
+func TestDashboardRoutesOnlyClaimExactAPIMethods(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, testAPIConfig(t))
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/v1/desk/bootstrap", nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/desk/chat/runs", nil),
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s status = %d, want 404 or 405", request.Method, request.URL.Path, recorder.Code)
+		}
+	}
+}
+
+func TestBootstrapSanitizesObservabilityFailures(t *testing.T) {
+	closedStore, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := closedStore.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	obs := observability.New(closedStore, time.Now)
+	mux := http.NewServeMux()
+	config := testAPIConfig(t)
+	config.Observability = obs
+	RegisterRoutes(mux, config)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/desk/bootstrap", nil))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	if got, want := recorder.Body.String(), "bootstrap_unavailable\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func testAPIConfig(t *testing.T) APIConfig {
+	t.Helper()
+	return APIConfig{
+		Observability: observability.New(nil, time.Now),
+		Security:      mustSecurity(t, "127.0.0.1:8422"),
+		Hub:           NewEventHub(256),
+		Version:       "test",
+	}
+}

@@ -125,6 +125,13 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			_ = statusListener.Close()
 			return fmt.Errorf("dashboard security: %w", err)
 		}
+		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
+			Observability: obs,
+			Security:      security,
+			Hub:           dashboard.NewEventHub(256),
+			Version:       version,
+			Now:           time.Now,
+		})
 		statusHandler = security.Wrap(statusHandler)
 	}
 	statusDone := make(chan error, 1)

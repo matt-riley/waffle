@@ -10,6 +10,14 @@ import (
 	"net/http"
 )
 
+// RegisterRoutes mounts the Desk shell and exact live-state APIs on the
+// caller-owned mux. Security.Wrap remains the caller's single outer boundary.
+func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
+	mux.Handle("/desk/", ShellHandler(config.Security))
+	mux.Handle("GET /api/v1/desk/bootstrap", newBootstrapHandler(config))
+	mux.Handle("GET /api/v1/desk/events", newEventsHandler(config))
+}
+
 // NewMutationHandler adds request-bound idempotency to one exact dashboard
 // mutation endpoint. Callers register its returned handler on that endpoint;
 // it intentionally does not claim a route prefix.
