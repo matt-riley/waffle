@@ -52,15 +52,34 @@ func TestBootstrapSerializesStableContract(t *testing.T) {
 func TestDashboardRoutesOnlyClaimExactAPIMethods(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, testAPIConfig(t))
-	for _, request := range []*http.Request{
-		httptest.NewRequest(http.MethodPost, "/api/v1/desk/bootstrap", nil),
-		httptest.NewRequest(http.MethodGet, "/api/v1/desk/chat/runs", nil),
-	} {
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s %s status = %d, want 404 or 405", request.Method, request.URL.Path, recorder.Code)
-		}
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		want   int
+	}{
+		{
+			name:   "known path with unsupported method",
+			method: http.MethodPost,
+			path:   "/api/v1/desk/bootstrap",
+			want:   http.StatusMethodNotAllowed,
+		},
+		{
+			name:   "unknown API path",
+			method: http.MethodGet,
+			path:   "/api/v1/desk/chat/runs",
+			want:   http.StatusNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.want {
+				t.Errorf("%s %s status = %d, want %d", test.method, test.path, recorder.Code, test.want)
+			}
+		})
 	}
 }
 
