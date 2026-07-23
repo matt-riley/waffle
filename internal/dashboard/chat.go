@@ -223,6 +223,8 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 	for _, client := range clients {
 		client.backend.Cancel()
 	}
+	closeCtx, closeCancel := cleanupContext(ctx)
+	defer closeCancel()
 	var first error
 	for _, client := range clients {
 		if client.done != nil {
@@ -234,9 +236,7 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
-		closeCtx, cancel := cleanupContext(ctx)
 		err := client.backend.Close(closeCtx)
-		cancel()
 		if err != nil && first == nil {
 			first = err
 		}
