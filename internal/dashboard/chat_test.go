@@ -241,6 +241,43 @@ func TestChatClientCloseFinalizesAfterCallerCancellation(t *testing.T) {
 	}
 }
 
+func TestChatClientRejectsConcurrentCommandAndPropagatesCancel(t *testing.T) {
+	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{})}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{10}, 32)))
+	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = clients.Turn(context.Background(), client, "hold") }()
+	<-backend.turnStarted
+	if _, err := clients.Command(context.Background(), client, chat.ParsedCommand{Name: chat.CommandStatus}); !errors.Is(err, errChatTurnActive) {
+		t.Fatalf("Command error = %v", err)
+	}
+	if err := clients.Cancel(client); err != nil {
+		t.Fatal(err)
+	}
+	if backend.cancelCount() != 1 {
+		t.Fatalf("cancel calls = %d", backend.cancelCount())
+	}
+	close(backend.releaseTurn)
+}
+
+func TestChatClientEnforces64ClientCap(t *testing.T) {
+	created := 0
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { created++; return &fakeChatBackend{}, nil }, nil)
+	for i := 0; i < defaultChatClientLimit; i++ {
+		if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); !errors.Is(err, errChatUnavailable) {
+		t.Fatalf("65th open = %v", err)
+	}
+	if created != defaultChatClientLimit {
+		t.Fatalf("backends = %d", created)
+	}
+}
+
 type fakeChatBackend struct {
 	mu          sync.Mutex
 	openCalls   int
@@ -252,6 +289,7 @@ type fakeChatBackend struct {
 	turnEvent   chat.Event
 	turnEvents  []chat.Event
 	closeErr    error
+	cancels     int
 }
 
 func (f *fakeChatBackend) Open(context.Context, chat.OpenOptions) (chat.State, error) {
@@ -283,7 +321,7 @@ func (f *fakeChatBackend) Command(context.Context, chat.ParsedCommand, func(chat
 	return chat.Result{}, nil
 }
 
-func (f *fakeChatBackend) Cancel() {}
+func (f *fakeChatBackend) Cancel() { f.mu.Lock(); f.cancels++; f.mu.Unlock() }
 
 func (f *fakeChatBackend) Close(context.Context) error {
 	f.mu.Lock()
@@ -312,3 +350,5 @@ func (f *fakeChatBackend) closeCount() int {
 	defer f.mu.Unlock()
 	return f.closeCalls
 }
+
+func (f *fakeChatBackend) cancelCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cancels }

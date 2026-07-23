@@ -128,3 +128,59 @@ func TestChatOpenRouteUsesMutationProtectionAndIdempotency(t *testing.T) {
 		t.Fatalf("backend opens = %d, want 1", backend.openCount())
 	}
 }
+
+func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	factoryCalls := 0
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { factoryCalls++; return &fakeChatBackend{}, nil }, bytes.NewReader(bytes.Repeat([]byte{9}, 128)))
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{Security: security, Hub: NewEventHub(4), ChatClients: clients, Idempotency: NewIdempotencyStore(nil, 8, time.Minute)})
+	routes := []string{"open", "turn", "command", "cancel", "close"}
+	for _, route := range routes {
+		t.Run(route+" missing token", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewBufferString(`{}`))
+			req.Host = "127.0.0.1:8422"
+			req.Header.Set("Idempotency-Key", route)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d", rec.Code)
+			}
+		})
+		t.Run(route+" wrong token", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewBufferString(`{}`))
+			req.Host = "127.0.0.1:8422"
+			req.Header.Set("X-Waffle-Desk-Token", "wrong")
+			req.Header.Set("Idempotency-Key", route+"-wrong")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d", rec.Code)
+			}
+		})
+		t.Run(route+" missing key", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewBufferString(`{}`))
+			req.Host = "127.0.0.1:8422"
+			req.Header.Set("X-Waffle-Desk-Token", security.Token())
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d", rec.Code)
+			}
+		})
+		t.Run(route+" oversized", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(bytes.Repeat([]byte("x"), dashboardChatMaxBodyBytes+1)))
+			req.Host = "127.0.0.1:8422"
+			req.Header.Set("X-Waffle-Desk-Token", security.Token())
+			req.Header.Set("Idempotency-Key", route+"-large")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d", rec.Code)
+			}
+		})
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("factory calls = %d", factoryCalls)
+	}
+}
