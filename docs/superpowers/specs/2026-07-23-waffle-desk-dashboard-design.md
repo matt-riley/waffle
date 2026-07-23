@@ -16,10 +16,11 @@ detail only where it supports a decision. It is intentionally different from
 the public Astro site in `website/`: the public site explains Waffle, while
 Waffle Desk operates the private local agent.
 
-Waffle Desk is served by `waffle serve` on the existing loopback-only admin
-listener. The UI and its JSON/event endpoints are embedded in the Go binary.
-Existing domain operations remain authoritative and are shared with the CLI and
-chat socket rather than reimplemented in HTTP handlers.
+Waffle Desk is served at `/desk/` by `waffle serve` on the existing
+loopback-only admin listener. The HTML is rendered with `templ`; its generated
+Go, CSS, JavaScript modules, icons, and JSON/event endpoints ship in the Waffle
+binary. Existing domain operations remain authoritative and are shared with the
+CLI and chat socket rather than reimplemented in HTTP handlers.
 
 ## Goals
 
@@ -292,19 +293,43 @@ cmd/waffle
 internal/dashboard
   handler, application service, mutation validation, event hub
 internal/dashboard/ui
-  embedded HTML, CSS, ES modules, icons
+  templ components, generated Go, embedded CSS, ES modules, icons
 existing internal packages
   sessions, chat backend, observability, schedule, workspace,
   memory, skills, providers, usage, configuration, secrets
 ```
 
-The dashboard frontend uses semantic HTML, CSS, and small ES modules with no
-runtime framework or separate Node service. `go:embed` makes assets part of the
-single Waffle binary. Asset hashes provide immutable caching; the HTML shell and
-all operational JSON responses use `Cache-Control: no-store`.
+The dashboard frontend uses `templ` components for the document shell, shared
+layout, section views, cards, forms, dialogs, empty states, and error states.
+Components render semantic HTML on the server and receive typed view models;
+they do not query stores or perform mutations. Small ES modules own client-side
+routing, the composer, server-sent events, and canonical state reconciliation.
+There is no JavaScript runtime framework or separate Node service.
+
+Generated `*_templ.go` files are committed so normal source builds need only the
+Go toolchain. The `templ` generator is pinned with the Go module's `tool`
+directive and invoked as `go tool templ`; a `mise.toml` repository task
+regenerates components and fails when the result differs from the committed
+files. CSS, ES modules, and icons use `go:embed`, so the released binary has no
+adjacent asset directory. Asset hashes provide immutable caching; the HTML shell
+and all operational JSON responses use `Cache-Control: no-store`.
 
 The existing public `website/` remains independent and is neither built into
 nor served by Waffle Desk.
+
+### Deployment and access
+
+Waffle Desk has no independent deployment artifact. Local development and
+personal installations run `waffle serve` and open
+`http://127.0.0.1:8422/desk/` at the default listener address.
+
+Managed installations receive the dashboard when the normal Waffle binary is
+released and rolled out to the existing service. The service continues to bind
+the dashboard to loopback. An operator reaches a remote managed host through an
+explicit SSH or Tailscale SSH local port forward and then opens the same local
+URL. The first release does not add a reverse proxy, public hostname, Tailscale
+Serve rule, second container, static-site deployment, or background Node
+process.
 
 ### Application service
 
@@ -348,12 +373,13 @@ those values are written to browser storage.
 
 ## HTTP and Event Contract
 
-All new endpoints are versioned below `/api/v1/desk`. JSON uses stable string
-error codes and sanitized user-facing messages.
+The HTML shell is served below `/desk/`. All new operational endpoints are
+versioned below `/api/v1/desk`. JSON uses stable string error codes and
+sanitized user-facing messages.
 
 | Area | Read operations | Mutations |
 | --- | --- | --- |
-| Bootstrap | `GET /bootstrap`, `GET /events` | none |
+| Bootstrap | `GET /desk/`, `GET /bootstrap`, `GET /events` | none |
 | Today | sessions, transcript, current context | open/resume, turn, cancel, model, skills, workspace |
 | Tasks | runs, schedules, attention | add/edit/enable schedule |
 | Workspaces | list and close preview | open, select, idle, resume, close-confirm |
@@ -445,7 +471,8 @@ proxy support, and bearer-token authentication are intentionally absent.
 
 - Handler tests cover methods, content types, schema, limits, cancellation,
   no-store behavior, security headers, Host/Origin/fetch-metadata rejection,
-  request-token validation, idempotency, and preview-token expiry/replay.
+  request-token validation, idempotency, preview-token expiry/replay, and the
+  embedded `templ` shell and asset routes.
 - Service tests cover aggregation, partial failures, scope labeling, model-role
   changes, session model persistence, session skill attachment, schedule
   validation, workspace guards, memory provenance, and canonical refresh.
@@ -489,8 +516,9 @@ mise run build
 ```
 
 A deterministic dashboard asset/browser test task is added to `mise.toml` and
-included by `mise run test`. Tests use fixtures and local fakes; they do not
-require provider, Git, or other network access.
+included by `mise run test`. It runs pinned `templ` generation, fails on a
+generated-code diff, and verifies embedded asset references. Tests use fixtures
+and local fakes; they do not require provider, Git, or other network access.
 
 ## Rollout and Compatibility
 
