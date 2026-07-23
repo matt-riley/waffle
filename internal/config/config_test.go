@@ -18,6 +18,24 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestDashboardDefaultsDisabled(t *testing.T) {
+	if Default().Dashboard.Enabled {
+		t.Fatal("dashboard must default disabled")
+	}
+}
+
+func TestDashboardEnabledLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[dashboard]\nenabled = true\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Dashboard.Enabled {
+		t.Fatal("dashboard.enabled = false, want true")
+	}
+}
+
 func TestLoadChatSocketRequiresAbsoluteCleanPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[chat]\nsocket = \"relative.sock\"\n")

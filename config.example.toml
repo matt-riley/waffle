@@ -56,6 +56,10 @@
 # [chat]
 # socket = "/absolute/path/to/waffle/chat.sock"
 
+# Optional Waffle Desk web interface. It is disabled by default.
+[dashboard]
+enabled = false
+
 [agent]
 default_profile = "main"
 
