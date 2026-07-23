@@ -2,11 +2,14 @@ package dashboard
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/chat"
 )
 
 func TestMutationHandlerReplaysExactEndpointAndBodyOnce(t *testing.T) {
@@ -95,5 +98,33 @@ func TestMutationHandlerCachesTheFirstStatusWhenHandlerWritesTwice(t *testing.T)
 		if rec.Code != http.StatusOK || rec.Body.String() != "first status" {
 			t.Fatalf("request %d = %d %q, want 200 first status", i, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestChatOpenRouteUsesMutationProtectionAndIdempotency(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	backend := &fakeChatBackend{}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{5}, 32)))
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{
+		Security:    security,
+		Hub:         NewEventHub(4),
+		ChatClients: clients,
+		Idempotency: NewIdempotencyStore(nil, 4, time.Minute),
+	})
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/open", bytes.NewBufferString(`{"session_id":"one"}`))
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", "open-once")
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, body = %q", i, rec.Code, rec.Body.String())
+		}
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("backend opens = %d, want 1", backend.openCount())
 	}
 }

@@ -110,6 +110,14 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			err = cerr
 		}
 	}()
+	sessionOwners := newChatSessionOwners()
+	runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
+		runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
+		if runtimeErr == nil {
+			runtime.sessionOwners = sessionOwners
+		}
+		return runtime, runtimeErr
+	}
 
 	statusListener, err := net.Listen("tcp", cfg.Gateway.StatusListen)
 	if err != nil {
@@ -119,16 +127,22 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	statusMux := http.NewServeMux()
 	observability.RegisterRoutes(statusMux, obs)
 	statusHandler := http.Handler(statusMux)
+	var dashboardClients *dashboard.ChatClients
 	if cfg.Dashboard.Enabled {
 		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, dashboardRandom)
 		if err != nil {
 			_ = statusListener.Close()
 			return fmt.Errorf("dashboard security: %w", err)
 		}
+		hub := dashboard.NewEventHub(256)
+		dashboardClients = dashboard.NewChatClients(runtimeFactory, rand.Reader)
+		dashboardClients.SetEventHub(hub)
 		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
 			Observability: obs,
 			Security:      security,
-			Hub:           dashboard.NewEventHub(256),
+			Hub:           hub,
+			ChatClients:   dashboardClients,
+			Idempotency:   dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
 			Version:       version,
 			Now:           time.Now,
 		})
@@ -147,6 +161,15 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		stop()
 		<-statusDone
 	}()
+	if dashboardClients != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if shutdownErr := dashboardClients.Shutdown(shutdownCtx); err == nil && shutdownErr != nil {
+				err = fmt.Errorf("dashboard chat shutdown: %w", shutdownErr)
+			}
+		}()
+	}
 
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
@@ -215,14 +238,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	if chatListener == nil {
 		chatDone <- nil
 	} else {
-		sessionOwners := newChatSessionOwners()
-		runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
-			runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
-			if runtimeErr == nil {
-				runtime.sessionOwners = sessionOwners
-			}
-			return runtime, runtimeErr
-		}
 		audit := newChatAudit(log, localsocket.PeerCredentials)
 		go func() {
 			serveErr := serveChat(ctx, chatListener, runtimeFactory, audit)

@@ -19,6 +19,8 @@ type APIConfig struct {
 	Observability *observability.Service
 	Security      *Security
 	Hub           *EventHub
+	ChatClients   *ChatClients
+	Idempotency   *IdempotencyStore
 	Version       string
 	Now           func() time.Time
 	Heartbeat     func(time.Duration) (<-chan time.Time, func())

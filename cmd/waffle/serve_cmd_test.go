@@ -285,6 +285,95 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 	}
 }
 
+func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	statusAddr := unusedTCPAddress(t)
+	socketPath := filepath.Join(home, "chat.sock")
+	writeServeTestConfig(t, home, statusAddr, socketPath)
+	configPath := filepath.Join(home, "config.toml")
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configBody, []byte("\n[dashboard]\nenabled = true\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+
+	socket := dialChatUntilReady(t, socketPath)
+	state, err := socket.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer func() { _ = socket.Close(context.Background()) }()
+
+	client := &http.Client{Timeout: time.Second}
+	var token string
+	deadline := time.Now().Add(2 * time.Second)
+	for token == "" {
+		response, requestErr := client.Get("http://" + statusAddr + "/desk/")
+		if requestErr == nil {
+			body, readErr := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if readErr == nil {
+				const marker = `data-request-token="`
+				if start := strings.Index(string(body), marker); start >= 0 {
+					rest := string(body)[start+len(marker):]
+					if end := strings.Index(rest, `"`); end >= 0 {
+						token = rest[:end]
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("dashboard token was not available")
+		}
+		if token == "" {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+statusAddr+"/api/v1/desk/chat/open", strings.NewReader(`{"session_id":"`+state.SessionID+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Waffle-Desk-Token", token)
+	request.Header.Set("Idempotency-Key", "second-owner")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"session_active"`)) {
+		t.Fatalf("dashboard second open = %d %q, want session_active conflict", response.StatusCode, body)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve shutdown = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after cancellation")
+	}
+}
+
 func TestServeDashboardSecurityFailureReleasesStatusListener(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WAFFLE_HOME", home)

@@ -5,10 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+
+	"github.com/matt-riley/waffle/internal/chat"
 )
+
+const dashboardChatMaxBodyBytes = 64 << 10
 
 // RegisterRoutes mounts the Desk shell and exact live-state APIs on the
 // caller-owned mux. Security.Wrap remains the caller's single outer boundary.
@@ -16,6 +21,122 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 	mux.Handle("/desk/", ShellHandler(config.Security))
 	mux.Handle("GET /api/v1/desk/bootstrap", newBootstrapHandler(config))
 	mux.Handle("GET /api/v1/desk/events", newEventsHandler(config))
+	if config.ChatClients != nil && config.Idempotency != nil {
+		registerChatRoutes(mux, config)
+	}
+}
+
+func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
+	mutation := func(next http.Handler) http.Handler {
+		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatMaxBodyBytes, next)
+	}
+	mux.Handle("POST /api/v1/desk/chat/open", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var options chat.OpenOptions
+		if !decodeChatRequest(w, r, &options) {
+			return
+		}
+		clientID, state, err := config.ChatClients.Open(r.Context(), options)
+		if err != nil {
+			writeChatError(w, err, "open_failed")
+			return
+		}
+		writeChatJSON(w, http.StatusOK, struct {
+			ClientID string     `json:"client_id"`
+			State    chat.State `json:"state"`
+		}{ClientID: clientID, State: safeChatState(state)})
+	})))
+	mux.Handle("POST /api/v1/desk/chat/turn", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ClientID string `json:"client_id"`
+			Text     string `json:"text"`
+		}
+		if !decodeChatRequest(w, r, &request) {
+			return
+		}
+		if err := config.ChatClients.Turn(r.Context(), request.ClientID, request.Text); err != nil {
+			writeChatError(w, err, "turn_failed")
+			return
+		}
+		writeChatJSON(w, http.StatusOK, struct{}{})
+	})))
+	mux.Handle("POST /api/v1/desk/chat/command", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ClientID string             `json:"client_id"`
+			Command  chat.ParsedCommand `json:"command"`
+		}
+		if !decodeChatRequest(w, r, &request) {
+			return
+		}
+		result, err := config.ChatClients.Command(r.Context(), request.ClientID, request.Command)
+		if err != nil {
+			writeChatError(w, err, "command_failed")
+			return
+		}
+		writeChatJSON(w, http.StatusOK, safeChatResult(result))
+	})))
+	for _, route := range []struct {
+		path string
+		run  func(context.Context, string) error
+	}{
+		{path: "POST /api/v1/desk/chat/cancel", run: func(_ context.Context, clientID string) error { return config.ChatClients.Cancel(clientID) }},
+		{path: "POST /api/v1/desk/chat/close", run: config.ChatClients.Close},
+	} {
+		route := route
+		mux.Handle(route.path, mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				ClientID string `json:"client_id"`
+			}
+			if !decodeChatRequest(w, r, &request) {
+				return
+			}
+			if err := route.run(r.Context(), request.ClientID); err != nil {
+				writeChatError(w, err, "chat_failed")
+				return
+			}
+			writeChatJSON(w, http.StatusOK, struct{}{})
+		})))
+	}
+}
+
+func decodeChatRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		http.Error(w, "invalid_request", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeChatJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeChatError(w http.ResponseWriter, err error, fallback string) {
+	status := http.StatusBadRequest
+	code, message := fallback, "chat request could not be completed"
+	switch {
+	case errors.Is(err, errChatClientNotFound):
+		status, code, message = http.StatusNotFound, "chat_client_not_found", "chat client was not found"
+	case errors.Is(err, errChatTurnActive):
+		status, code, message = http.StatusConflict, "turn_active", "a chat turn is already active"
+	case errors.Is(err, errChatUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "chat_unavailable", "chat service is unavailable"
+	default:
+		var safe interface {
+			ErrorCode() string
+			SafeMessage() string
+		}
+		if errors.As(err, &safe) {
+			status, code, message = http.StatusConflict, safe.ErrorCode(), sanitizeDashboardString(safe.SafeMessage())
+		}
+	}
+	writeChatJSON(w, status, struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}{Code: code, Message: message})
 }
 
 // NewMutationHandler adds request-bound idempotency to one exact dashboard
