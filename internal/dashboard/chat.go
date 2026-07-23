@@ -19,6 +19,7 @@ import (
 const (
 	defaultChatClientLimit = 64
 	defaultChatIdleTTL     = 30 * time.Minute
+	chatIDAttempts         = 8
 )
 
 var (
@@ -99,14 +100,26 @@ func (c *ChatClients) Open(ctx context.Context, options chat.OpenOptions) (strin
 		closeBackend(ctx, backend)
 		return "", chat.State{}, err
 	}
-	clientID, err := c.newClientID()
-	if err != nil {
+	c.mu.Lock()
+	if c.shutting || len(c.clients) >= c.maxClients {
+		c.mu.Unlock()
 		closeBackend(ctx, backend)
 		return "", chat.State{}, errChatUnavailable
 	}
-
-	c.mu.Lock()
-	if c.shutting || len(c.clients) >= c.maxClients {
+	var clientID string
+	for attempts := 0; attempts < chatIDAttempts; attempts++ {
+		candidate, idErr := c.newClientID()
+		if idErr != nil {
+			c.mu.Unlock()
+			closeBackend(ctx, backend)
+			return "", chat.State{}, errChatUnavailable
+		}
+		if _, exists := c.clients[candidate]; !exists {
+			clientID = candidate
+			break
+		}
+	}
+	if clientID == "" {
 		c.mu.Unlock()
 		closeBackend(ctx, backend)
 		return "", chat.State{}, errChatUnavailable
@@ -177,6 +190,10 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 		select {
 		case <-done:
 		case <-ctx.Done():
+			go func() {
+				<-done
+				closeBackend(context.Background(), client.backend)
+			}()
 			return ctx.Err()
 		}
 	}
@@ -266,16 +283,17 @@ func (c *ChatClients) reap(ctx context.Context) error {
 		}
 	}
 	c.mu.Unlock()
+	var first error
 	for _, backend := range stale {
 		backend.Cancel()
 		closeCtx, cancel := cleanupContext(ctx)
 		err := backend.Close(closeCtx)
 		cancel()
-		if err != nil {
-			return err
+		if err != nil && first == nil {
+			first = err
 		}
 	}
-	return nil
+	return first
 }
 
 func (c *ChatClients) newClientID() (string, error) {
@@ -294,12 +312,22 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 		if !dashboardEventKind(event.Kind) {
 			return
 		}
+		text := sanitizeDashboardString(event.Text)
+		if event.IsError {
+			text = "chat operation failed"
+		}
+		var state *chat.State
+		if event.State != nil {
+			safe := safeChatState(*event.State)
+			state = &safe
+		}
 		data, err := json.Marshal(dashboardChatEvent{
 			Kind:      event.Kind,
-			Text:      sanitizeDashboardString(event.Text),
+			Text:      text,
 			ToolName:  sanitizeDashboardString(event.ToolName),
 			IsError:   event.IsError,
 			ByteCount: event.ByteCount,
+			State:     state,
 			Usage: dashboardUsage{
 				InputTokens:  event.Usage.InputTokens,
 				OutputTokens: event.Usage.OutputTokens,
@@ -319,6 +347,7 @@ type dashboardChatEvent struct {
 	IsError   bool           `json:"is_error,omitempty"`
 	ByteCount int            `json:"byte_count,omitempty"`
 	Usage     dashboardUsage `json:"usage,omitempty"`
+	State     *chat.State    `json:"state,omitempty"`
 }
 
 type chatShutdownClient struct {

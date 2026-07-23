@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/llm"
 )
 
 func TestChatClientDoesNotRetryTurnAfterDisconnect(t *testing.T) {
@@ -112,6 +113,33 @@ func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 	}
 }
 
+func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
+	canary := "provider failed sk-event-secret /var/lib/waffle/private prompt: ship it"
+	backend := &fakeChatBackend{turnEvents: []chat.Event{
+		{Kind: chat.EventNotice, IsError: true, Text: canary},
+		{Kind: chat.EventState, State: &chat.State{Title: "ready", Workspace: "/var/lib/waffle/work", History: []llm.Message{{}}}},
+	}}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{7}, 32)))
+	hub := NewEventHub(4)
+	clients.SetEventHub(hub)
+	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clients.Turn(context.Background(), client, "ship it"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := hub.Subscribe(0)
+	defer hub.Unsubscribe(events)
+	first, second := <-events, <-events
+	if strings.Contains(string(first.Data), canary) || !strings.Contains(string(first.Data), "chat operation failed") {
+		t.Fatalf("error event = %s", first.Data)
+	}
+	if !strings.Contains(string(second.Data), `"state"`) || strings.Contains(string(second.Data), "History") || strings.Contains(string(second.Data), "/var/lib/waffle") {
+		t.Fatalf("state event = %s", second.Data)
+	}
+}
+
 func TestChatClientsShutdownWaitsForActiveTurn(t *testing.T) {
 	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{}), closeCalled: make(chan struct{})}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{6}, 32)))
@@ -141,6 +169,78 @@ func TestChatClientsShutdownWaitsForActiveTurn(t *testing.T) {
 	}
 }
 
+func TestChatClientRetriesIDCollisionWithoutReplacingExistingBackend(t *testing.T) {
+	first, second := &fakeChatBackend{}, &fakeChatBackend{}
+	backends := []chat.Backend{first, second, &fakeChatBackend{}}
+	index := 0
+	ids := append(bytes.Repeat([]byte{0}, 16), append(bytes.Repeat([]byte{0}, 16), bytes.Repeat([]byte{1}, 16)...)...)
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { backend := backends[index]; index++; return backend, nil }, bytes.NewReader(ids))
+	firstID, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID == secondID {
+		t.Fatalf("client ID collision was reused: %q", firstID)
+	}
+	if err := clients.Close(context.Background(), firstID); err != nil {
+		t.Fatal(err)
+	}
+	if first.closeCount() != 1 || second.closeCount() != 0 {
+		t.Fatalf("close counts = %d, %d", first.closeCount(), second.closeCount())
+	}
+}
+
+func TestChatClientReapClosesEveryExpiredBackendAfterErrors(t *testing.T) {
+	now := time.Now()
+	first, second := &fakeChatBackend{closeErr: errors.New("first close")}, &fakeChatBackend{closeErr: errors.New("second close")}
+	backends := []chat.Backend{first, second, &fakeChatBackend{}}
+	i := 0
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { b := backends[i]; i++; return b, nil }, bytes.NewReader(append(bytes.Repeat([]byte{2}, 16), bytes.Repeat([]byte{3}, 16)...)))
+	clients.now = func() time.Time { return now }
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err == nil {
+		t.Fatal("Open succeeded despite reap close error")
+	}
+	if first.closeCount() != 1 || second.closeCount() != 1 {
+		t.Fatalf("reap close counts = %d, %d", first.closeCount(), second.closeCount())
+	}
+}
+
+func TestChatClientCloseFinalizesAfterCallerCancellation(t *testing.T) {
+	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{}), closeCalled: make(chan struct{})}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{8}, 32)))
+	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = clients.Turn(context.Background(), client, "hold") }()
+	<-backend.turnStarted
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := clients.Close(ctx, client); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close error = %v", err)
+	}
+	close(backend.releaseTurn)
+	select {
+	case <-backend.closeCalled:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Close did not finalize backend")
+	}
+	if err := clients.Cancel(client); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("Cancel after close = %v", err)
+	}
+}
+
 type fakeChatBackend struct {
 	mu          sync.Mutex
 	openCalls   int
@@ -150,6 +250,8 @@ type fakeChatBackend struct {
 	releaseTurn chan struct{}
 	closeCalled chan struct{}
 	turnEvent   chat.Event
+	turnEvents  []chat.Event
+	closeErr    error
 }
 
 func (f *fakeChatBackend) Open(context.Context, chat.OpenOptions) (chat.State, error) {
@@ -170,8 +272,11 @@ func (f *fakeChatBackend) Turn(_ context.Context, _ string, emit func(chat.Event
 	if f.turnEvent.Kind != "" {
 		emit(f.turnEvent)
 	}
+	for _, event := range f.turnEvents {
+		emit(event)
+	}
 	emit(chat.Event{Kind: chat.EventTurnDone})
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeChatBackend) Command(context.Context, chat.ParsedCommand, func(chat.Event)) (chat.Result, error) {
@@ -187,7 +292,7 @@ func (f *fakeChatBackend) Close(context.Context) error {
 	if f.closeCalled != nil {
 		close(f.closeCalled)
 	}
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeChatBackend) turnCount() int {
