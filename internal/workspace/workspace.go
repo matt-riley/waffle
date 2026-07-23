@@ -752,7 +752,9 @@ func (m *Manager) newInspectionClient(ws *Workspace) (*sandbox.Client, error) {
 }
 
 const (
-	inspectionRunnerReadyTimeout  = 15 * time.Second
+	// inspectionRunnerReadyTimeout matches sandbox's supported 60-second
+	// cold-start allowance for the first runner heartbeat.
+	inspectionRunnerReadyTimeout  = time.Minute
 	inspectionRunnerProbeInterval = 100 * time.Millisecond
 	inspectionRestoreTimeout      = 30 * time.Second
 )
@@ -762,9 +764,6 @@ const (
 // heartbeat must not make the first inspection command declare the newly
 // started runner dead.
 func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, startedAt time.Time) error {
-	waitCtx, cancel := context.WithTimeout(ctx, inspectionRunnerReadyTimeout)
-	defer cancel()
-
 	db, err := sql.Open("sqlite", filepath.Join(m.queueDir(ws.ID), "outbound.db"))
 	if err != nil {
 		return fmt.Errorf("open inspection runner heartbeat: %w", err)
@@ -773,20 +772,42 @@ func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, st
 
 	ticker := time.NewTicker(inspectionRunnerProbeInterval)
 	defer ticker.Stop()
-	for {
-		var raw string
-		err := db.QueryRowContext(waitCtx,
-			`SELECT created_at FROM results WHERE request_id = ?`, -1).Scan(&raw)
-		if err == nil {
-			if heartbeat, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil && heartbeat.After(startedAt) {
-				return nil
+	return waitForInspectionHeartbeat(ctx, startedAt, inspectionRunnerReadyTimeout,
+		func(ctx context.Context) (time.Time, error) {
+			var raw string
+			err := db.QueryRowContext(ctx,
+				`SELECT created_at FROM results WHERE request_id = ?`, -1).Scan(&raw)
+			if errors.Is(err, sql.ErrNoRows) {
+				return time.Time{}, nil
 			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
+			if err != nil {
+				return time.Time{}, err
+			}
+			heartbeat, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				return time.Time{}, nil
+			}
+			return heartbeat, nil
+		}, ticker.C)
+}
+
+// waitForInspectionHeartbeat contains the bounded wait independently of the
+// queue read. Keeping those seams separate makes the supported cold-start
+// window deterministic to test without delaying the suite.
+func waitForInspectionHeartbeat(ctx context.Context, startedAt time.Time, timeout time.Duration, heartbeat func(context.Context) (time.Time, error), ticks <-chan time.Time) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		heartbeatAt, err := heartbeat(waitCtx)
+		if err != nil {
 			return fmt.Errorf("read inspection runner heartbeat: %w", err)
+		}
+		if heartbeatAt.After(startedAt) {
+			return nil
 		}
 
 		select {
-		case <-ticker.C:
+		case <-ticks:
 		case <-waitCtx.Done():
 			return fmt.Errorf("wait for restarted workspace runner heartbeat: %w", waitCtx.Err())
 		}

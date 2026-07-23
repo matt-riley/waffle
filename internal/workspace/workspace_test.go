@@ -992,6 +992,27 @@ func TestInspectCloseWaitsForFreshIdleRunnerHeartbeat(t *testing.T) {
 	}
 }
 
+func TestWaitForInspectionHeartbeatAllowsSupportedColdStart(t *testing.T) {
+	if inspectionRunnerReadyTimeout != time.Minute {
+		t.Fatalf("inspection runner readiness timeout = %s, want sandbox cold-start allowance %s", inspectionRunnerReadyTimeout, time.Minute)
+	}
+	startedAt := time.Date(2026, time.July, 23, 22, 30, 0, 0, time.UTC)
+	ticks := make(chan time.Time, 1)
+	ticks <- startedAt.Add(16 * time.Second)
+	queries := 0
+	err := waitForInspectionHeartbeat(context.Background(), startedAt, inspectionRunnerReadyTimeout,
+		func(context.Context) (time.Time, error) {
+			queries++
+			if queries == 1 {
+				return time.Time{}, nil
+			}
+			return startedAt.Add(16 * time.Second), nil
+		}, ticks)
+	if err != nil {
+		t.Fatalf("wait for heartbeat arriving inside the supported window: %v", err)
+	}
+}
+
 func TestInspectCloseIdleRestoresWithCanceledCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
