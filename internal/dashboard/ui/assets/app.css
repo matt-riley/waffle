@@ -57,7 +57,8 @@ h2 { font-size: 1rem; margin-top: 0; }
 @media (max-width: 768px) {
   .desk-shell { display: block; padding-bottom: 4.75rem; }
   .desk-navigation { bottom: 0; display: block; left: 0; padding: .35rem .5rem; position: fixed; right: 0; z-index: 2; }
-  .brand, .rail-status { position: absolute; height: 1px; overflow: hidden; width: 1px; clip: rect(0 0 0 0); white-space: nowrap; }
+  .brand { display: none; }
+  .rail-status { position: absolute; height: 1px; overflow: hidden; width: 1px; clip: rect(0 0 0 0); white-space: nowrap; }
   .section-links { display: grid; gap: 0; grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .section-links a { font-size: .68rem; overflow-wrap: anywhere; padding: .55rem .25rem; text-align: center; }
   .today-columns { grid-template-columns: minmax(0, 1fr); }

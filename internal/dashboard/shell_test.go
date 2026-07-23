@@ -16,13 +16,31 @@ func TestShellRendersApprovedFiveSectionNavigation(t *testing.T) {
 	newTestShellHandler(t, ui.ShellView{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
 
 	body := rec.Body.String()
-	for _, text := range []string{"Today", "Tasks", "Workspaces", "Memory", "Capabilities"} {
-		if !strings.Contains(body, ">"+text+"<") {
-			t.Errorf("missing navigation %q", text)
+	for section, label := range map[string]string{
+		"today":        "Today",
+		"tasks":        "Tasks",
+		"workspaces":   "Workspaces",
+		"memory":       "Memory",
+		"capabilities": "Capabilities",
+	} {
+		link := regexp.MustCompile(`<a href="/desk/\?section=` + section + `"[^>]*>` + label + `</a>`)
+		if !link.MatchString(body) {
+			t.Errorf("missing navigation destination link for %q", label)
 		}
 	}
 	if strings.Contains(body, "https://") {
 		t.Fatal("shell must not load external assets")
+	}
+}
+
+func TestShellMobileNavigationRemovesRedundantBrandFromTabOrder(t *testing.T) {
+	handler := newTestShellHandler(t, ui.ShellView{})
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/desk/assets/app.css", nil))
+
+	mobileBrandDisplay := regexp.MustCompile(`(?s)@media \(max-width: 768px\) \{.*?\.brand \{[^}]*display:\s*none;`)
+	if !mobileBrandDisplay.Match(asset.Body.Bytes()) {
+		t.Fatal("mobile navigation must remove the redundant brand link from the tab order")
 	}
 }
 
