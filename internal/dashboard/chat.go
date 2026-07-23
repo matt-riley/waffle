@@ -42,19 +42,55 @@ type chatClient struct {
 	lastActive time.Time
 	busy       bool
 	done       chan struct{}
+	lifecycle  sync.Mutex
+	cancelDone chan struct{}
+	cancelled  bool
+	closed     bool
+}
+
+func (c *chatClient) cancel() {
+	c.lifecycle.Lock()
+	if c.closed {
+		c.lifecycle.Unlock()
+		return
+	}
+	if c.cancelled {
+		done := c.cancelDone
+		c.lifecycle.Unlock()
+		<-done
+		return
+	}
+	c.cancelled, c.cancelDone = true, make(chan struct{})
+	done := c.cancelDone
+	c.lifecycle.Unlock()
+	c.backend.Cancel()
+	close(done)
+}
+
+func (c *chatClient) close(ctx context.Context) error {
+	c.cancel()
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	if c.closed {
+		return nil
+	}
+	err := c.backend.Close(ctx)
+	c.closed = true
+	return err
 }
 
 // ChatClients adapts browser client IDs to isolated chat backends.
 type ChatClients struct {
-	mu         sync.Mutex
-	clients    map[string]*chatClient
-	factory    BackendFactory
-	ids        io.Reader
-	now        func() time.Time
-	maxClients int
-	idleTTL    time.Duration
-	events     *EventHub
-	shutting   bool
+	mu          sync.Mutex
+	clients     map[string]*chatClient
+	factory     BackendFactory
+	ids         io.Reader
+	now         func() time.Time
+	maxClients  int
+	idleTTL     time.Duration
+	shutdownTTL time.Duration
+	events      *EventHub
+	shutting    bool
 }
 
 // NewChatClients returns a bounded manager with production lifecycle limits.
@@ -63,12 +99,13 @@ func NewChatClients(factory BackendFactory, ids io.Reader) *ChatClients {
 		ids = rand.Reader
 	}
 	return &ChatClients{
-		clients:    make(map[string]*chatClient),
-		factory:    factory,
-		ids:        ids,
-		now:        time.Now,
-		maxClients: defaultChatClientLimit,
-		idleTTL:    defaultChatIdleTTL,
+		clients:     make(map[string]*chatClient),
+		factory:     factory,
+		ids:         ids,
+		now:         time.Now,
+		maxClients:  defaultChatClientLimit,
+		idleTTL:     defaultChatIdleTTL,
+		shutdownTTL: 5 * time.Second,
 	}
 }
 
@@ -166,7 +203,7 @@ func (c *ChatClients) Cancel(clientID string) error {
 	if !ok {
 		return errChatClientNotFound
 	}
-	client.backend.Cancel()
+	client.cancel()
 	return nil
 }
 
@@ -185,7 +222,7 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 	if !ok {
 		return errChatClientNotFound
 	}
-	client.backend.Cancel()
+	client.cancel()
 	if done != nil {
 		select {
 		case <-done:
@@ -199,7 +236,7 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 	}
 	closeCtx, cancel := cleanupContext(ctx)
 	defer cancel()
-	return client.backend.Close(closeCtx)
+	return client.close(closeCtx)
 }
 
 // Shutdown stops future opens and closes all live backends exactly once.
@@ -216,14 +253,14 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 		if client.busy {
 			done = client.done
 		}
-		clients = append(clients, chatShutdownClient{backend: client.backend, done: done})
+		clients = append(clients, chatShutdownClient{client: client, done: done})
 	}
 	c.clients = make(map[string]*chatClient)
 	c.mu.Unlock()
 	for _, client := range clients {
-		client.backend.Cancel()
+		client.client.cancel()
 	}
-	closeCtx, closeCancel := cleanupContext(ctx)
+	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), c.shutdownTTL)
 	defer closeCancel()
 	var first error
 	for _, client := range clients {
@@ -236,7 +273,7 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
-		err := client.backend.Close(closeCtx)
+		err := client.client.close(closeCtx)
 		if err != nil && first == nil {
 			first = err
 		}
@@ -275,19 +312,19 @@ func (c *ChatClients) end(clientID string, client *chatClient) {
 
 func (c *ChatClients) reap(ctx context.Context) error {
 	c.mu.Lock()
-	var stale []chat.Backend
+	var stale []*chatClient
 	for id, client := range c.clients {
 		if !client.busy && c.now().Sub(client.lastActive) >= c.idleTTL {
 			delete(c.clients, id)
-			stale = append(stale, client.backend)
+			stale = append(stale, client)
 		}
 	}
 	c.mu.Unlock()
 	var first error
-	for _, backend := range stale {
-		backend.Cancel()
+	for _, client := range stale {
+		client.cancel()
 		closeCtx, cancel := cleanupContext(ctx)
-		err := backend.Close(closeCtx)
+		err := client.close(closeCtx)
 		cancel()
 		if err != nil && first == nil {
 			first = err
@@ -351,8 +388,8 @@ type dashboardChatEvent struct {
 }
 
 type chatShutdownClient struct {
-	backend chat.Backend
-	done    <-chan struct{}
+	client *chatClient
+	done   <-chan struct{}
 }
 
 type dashboardUsage struct {

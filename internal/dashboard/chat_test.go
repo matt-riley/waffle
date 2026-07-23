@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -117,7 +118,7 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 	canary := "provider failed sk-event-secret /var/lib/waffle/private prompt: ship it"
 	backend := &fakeChatBackend{turnEvents: []chat.Event{
 		{Kind: chat.EventNotice, IsError: true, Text: canary},
-		{Kind: chat.EventState, State: &chat.State{Title: "ready", Workspace: "/var/lib/waffle/work", History: []llm.Message{{}}}},
+		{Kind: chat.EventState, State: &chat.State{Title: "ready", Workspace: "/var/lib/waffle/work", History: []llm.Message{{Role: llm.RoleUser, Blocks: []llm.Block{{Text: canary}}}}}},
 	}}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{7}, 32)))
 	hub := NewEventHub(4)
@@ -135,7 +136,13 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 	if strings.Contains(string(first.Data), canary) || !strings.Contains(string(first.Data), "chat operation failed") {
 		t.Fatalf("error event = %s", first.Data)
 	}
-	if !strings.Contains(string(second.Data), `"state"`) || strings.Contains(string(second.Data), "History") || strings.Contains(string(second.Data), "/var/lib/waffle") {
+	var projected struct {
+		State chat.State `json:"state"`
+	}
+	if err := json.Unmarshal(second.Data, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.State.History) != 0 || strings.Contains(string(second.Data), canary) || strings.Contains(string(second.Data), `"history":[`) || strings.Contains(string(second.Data), "/var/lib/waffle") {
 		t.Fatalf("state event = %s", second.Data)
 	}
 }
@@ -278,18 +285,89 @@ func TestChatClientEnforces64ClientCap(t *testing.T) {
 	}
 }
 
+func TestChatClientCancelRacingCloseWaitsAndRunsExactlyOnce(t *testing.T) {
+	backend := &fakeChatBackend{cancelStarted: make(chan struct{}), releaseCancel: make(chan struct{}), closeCalled: make(chan struct{})}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{12}, 32)))
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = clients.Cancel(id) }()
+	<-backend.cancelStarted
+	done := make(chan error, 1)
+	go func() { done <- clients.Close(context.Background(), id) }()
+	select {
+	case <-backend.closeCalled:
+		t.Fatal("close ran before cancel returned")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.releaseCancel)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if backend.cancelCount() != 1 || backend.closeCount() != 1 {
+		t.Fatalf("counts cancel=%d close=%d", backend.cancelCount(), backend.closeCount())
+	}
+}
+
+func TestChatClientCancelRacingShutdownWaitsAndRunsExactlyOnce(t *testing.T) {
+	backend := &fakeChatBackend{cancelStarted: make(chan struct{}), releaseCancel: make(chan struct{}), closeCalled: make(chan struct{})}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{13}, 32)))
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = clients.Cancel(id) }()
+	<-backend.cancelStarted
+	done := make(chan error, 1)
+	go func() { done <- clients.Shutdown(context.Background()) }()
+	select {
+	case <-backend.closeCalled:
+		t.Fatal("shutdown close ran before cancel returned")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.releaseCancel)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if backend.cancelCount() != 1 || backend.closeCount() != 1 {
+		t.Fatalf("counts cancel=%d close=%d", backend.cancelCount(), backend.closeCount())
+	}
+}
+
+func TestChatClientsShutdownUsesOneGlobalDeadline(t *testing.T) {
+	backends := []chat.Backend{&fakeChatBackend{closeWaitContext: true}, &fakeChatBackend{closeWaitContext: true}}
+	i := 0
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { b := backends[i]; i++; return b, nil }, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	for range 2 {
+		if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	_ = clients.Shutdown(context.Background())
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("shutdown used per-backend deadlines: %s", elapsed)
+	}
+}
+
 type fakeChatBackend struct {
-	mu          sync.Mutex
-	openCalls   int
-	turnCalls   int
-	closeCalls  int
-	turnStarted chan struct{}
-	releaseTurn chan struct{}
-	closeCalled chan struct{}
-	turnEvent   chat.Event
-	turnEvents  []chat.Event
-	closeErr    error
-	cancels     int
+	mu               sync.Mutex
+	openCalls        int
+	turnCalls        int
+	commandCalls     int
+	closeCalls       int
+	turnStarted      chan struct{}
+	releaseTurn      chan struct{}
+	closeCalled      chan struct{}
+	turnEvent        chat.Event
+	turnEvents       []chat.Event
+	closeErr         error
+	cancels          int
+	cancelStarted    chan struct{}
+	releaseCancel    chan struct{}
+	closeWaitContext bool
 }
 
 func (f *fakeChatBackend) Open(context.Context, chat.OpenOptions) (chat.State, error) {
@@ -314,21 +392,36 @@ func (f *fakeChatBackend) Turn(_ context.Context, _ string, emit func(chat.Event
 		emit(event)
 	}
 	emit(chat.Event{Kind: chat.EventTurnDone})
-	return f.closeErr
+	return nil
 }
 
 func (f *fakeChatBackend) Command(context.Context, chat.ParsedCommand, func(chat.Event)) (chat.Result, error) {
+	f.mu.Lock()
+	f.commandCalls++
+	f.mu.Unlock()
 	return chat.Result{}, nil
 }
 
-func (f *fakeChatBackend) Cancel() { f.mu.Lock(); f.cancels++; f.mu.Unlock() }
+func (f *fakeChatBackend) Cancel() {
+	f.mu.Lock()
+	f.cancels++
+	f.mu.Unlock()
+	if f.cancelStarted != nil {
+		close(f.cancelStarted)
+		<-f.releaseCancel
+	}
+}
 
-func (f *fakeChatBackend) Close(context.Context) error {
+func (f *fakeChatBackend) Close(ctx context.Context) error {
 	f.mu.Lock()
 	f.closeCalls++
 	f.mu.Unlock()
 	if f.closeCalled != nil {
 		close(f.closeCalled)
+	}
+	if f.closeWaitContext {
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	return f.closeErr
 }
@@ -351,4 +444,5 @@ func (f *fakeChatBackend) closeCount() int {
 	return f.closeCalls
 }
 
-func (f *fakeChatBackend) cancelCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cancels }
+func (f *fakeChatBackend) cancelCount() int  { f.mu.Lock(); defer f.mu.Unlock(); return f.cancels }
+func (f *fakeChatBackend) commandCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.commandCalls }

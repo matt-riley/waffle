@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,56 @@ func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) 
 	}
 	if factoryCalls != 0 {
 		t.Fatalf("factory calls = %d", factoryCalls)
+	}
+}
+
+func TestChatRoutesReplayWithoutReinvocationAndRejectConflicts(t *testing.T) {
+	for _, route := range []string{"open", "turn", "command", "cancel", "close"} {
+		t.Run(route, func(t *testing.T) {
+			security := mustSecurity(t, "127.0.0.1:8422")
+			backend := &fakeChatBackend{}
+			clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+			id := ""
+			if route != "open" {
+				var err error
+				id, _, err = clients.Open(context.Background(), chat.OpenOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			mux := http.NewServeMux()
+			RegisterRoutes(mux, APIConfig{Security: security, Hub: NewEventHub(8), ChatClients: clients, Idempotency: NewIdempotencyStore(nil, 16, time.Minute)})
+			body := `{}`
+			switch route {
+			case "turn":
+				body = `{"client_id":"` + id + `","text":"hi"}`
+			case "command":
+				body = `{"client_id":"` + id + `","command":{"name":"status"}}`
+			case "cancel", "close":
+				body = `{"client_id":"` + id + `"}`
+			}
+			do := func(path, payload string) int {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+path, strings.NewReader(payload))
+				req.Host = "127.0.0.1:8422"
+				req.Header.Set("X-Waffle-Desk-Token", security.Token())
+				req.Header.Set("Idempotency-Key", "same")
+				mux.ServeHTTP(rec, req)
+				return rec.Code
+			}
+			if a, b := do(route, body), do(route, body); a != b || a != http.StatusOK {
+				t.Fatalf("replay statuses %d %d", a, b)
+			}
+			if got := do(route, body+" "); got != http.StatusConflict {
+				t.Fatalf("body conflict %d", got)
+			}
+			if route != "open" && do("open", `{}`) != http.StatusConflict {
+				t.Fatal("operation conflict missing")
+			}
+			calls := map[string]int{"open": backend.openCount(), "turn": backend.turnCount(), "command": backend.commandCount(), "cancel": backend.cancelCount(), "close": backend.closeCount()}[route]
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
 	}
 }
