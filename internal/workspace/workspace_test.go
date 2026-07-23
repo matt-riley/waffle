@@ -85,6 +85,18 @@ func (s *scriptedBash) ran(substr string) bool {
 	return false
 }
 
+func (s *scriptedBash) count(substr string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var count int
+	for _, c := range s.commands {
+		if strings.Contains(c, substr) {
+			count++
+		}
+	}
+	return count
+}
+
 // fakeRuntime runs an in-process Runner per "container" instead of docker.
 type fakeRuntime struct {
 	mu       sync.Mutex
@@ -93,6 +105,7 @@ type fakeRuntime struct {
 	events   []string
 	opts     []ContainerOpts
 	startErr error
+	stopErr  error
 }
 
 type revocationTracker struct {
@@ -153,6 +166,12 @@ func (f *fakeRuntime) launch(name, queueDir string) {
 
 func (f *fakeRuntime) StopContainer(ctx context.Context, name string) error {
 	f.log("stop " + name)
+	f.mu.Lock()
+	err := f.stopErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	f.halt(name)
 	return nil
 }
@@ -783,6 +802,218 @@ func TestCloseRefusesUnpushedWork(t *testing.T) {
 	}
 	if got, _ := mgr.Get(ctx, ws.ID); got.Status != StatusClosed {
 		t.Errorf("status = %s", got.Status)
+	}
+}
+
+func TestInspectCloseReportsDirtyAndUnpushedWithoutTeardown(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	var minted, revoked int
+	mgr.MintToken = func(context.Context, string) (string, error) {
+		minted++
+		return "wk_test", nil
+	}
+	mgr.RevokeSession = func(string) { revoked++ }
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+	beforeMinted := minted
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	if minted != beforeMinted || revoked != 0 {
+		t.Fatalf("inspection changed credentials: minted=%d revoked=%d", minted, revoked)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("inspection tore down workspace: %s", events)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil || got.Status != StatusOpen {
+		t.Fatalf("workspace after inspection = %+v, %v", got, err)
+	}
+}
+
+func TestInspectCloseOpenWorkspaceDoesNotTouchLifecycleState(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+
+	if _, err := mgr.InspectClose(ctx, ws.ID); err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != before.Status || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed lifecycle state: before=%+v after=%+v", before, got)
+	}
+	if events := rt.events[beforeEvents:]; len(events) != 0 {
+		t.Fatalf("open inspection changed runtime state: %v", events)
+	}
+}
+
+func TestInspectCloseRestoresIdleWorkspaceWithoutRecreatingContainer(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	var minted, revoked int
+	mgr.MintToken = func(context.Context, string) (string, error) {
+		minted++
+		return "wk_test", nil
+	}
+	mgr.RevokeSession = func(string) { revoked++ }
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents, beforeMinted, beforeRevoked := len(rt.events), minted, revoked
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+	if minted != beforeMinted || revoked != beforeRevoked {
+		t.Fatalf("inspection changed credentials: minted=%d revoked=%d", minted, revoked)
+	}
+	events := rt.events[beforeEvents:]
+	want := []string{"restart " + ws.Container, "stop " + ws.Container}
+	if strings.Join(events, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("idle inspection events = %v, want %v", events, want)
+	}
+}
+
+func TestInspectCloseIdleRestorationFailureRefusesWithoutTeardown(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{"git status --porcelain": " M main.go"}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	rt.stopErr = errors.New("restore failed")
+	rt.mu.Unlock()
+	beforeEvents := len(rt.events)
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err == nil || !strings.Contains(err.Error(), "restore idle") {
+		t.Fatalf("InspectClose error = %v, want restoration failure", err)
+	}
+	if report == nil || report.Dirty != "M main.go" {
+		t.Fatalf("inspection evidence lost: %+v", report)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("restoration failure tore down workspace: %s", events)
+	}
+	got, getErr := mgr.Get(ctx, ws.ID)
+	if getErr != nil || got.Status == StatusClosed {
+		t.Fatalf("workspace after failed inspection = %+v, %v", got, getErr)
+	}
+}
+
+func TestCloseWithoutForceReusesInspectClose(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+
+	report, err := mgr.Close(ctx, ws.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "unsaved work") {
+		t.Fatalf("Close error = %v, want refusal", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	if tools.count("git status --porcelain") != 1 || tools.count("git log --oneline") != 1 {
+		t.Fatalf("Close did not perform one shared inspection: commands=%v", tools.commands)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("refused close tore down workspace: %s", events)
+	}
+}
+
+func TestInspectCloseClosedWorkspaceIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Close(ctx, ws.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err != nil || report == nil || report.Dirty != "" || report.Unpushed != "" {
+		t.Fatalf("InspectClose(closed) = %+v, %v", report, err)
 	}
 }
 

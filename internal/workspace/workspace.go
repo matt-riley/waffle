@@ -745,10 +745,62 @@ func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
 	return client, nil
 }
 
+// newInspectionClient connects to a workspace without recording activity.
+// Inspection must not make an open or idle workspace look recently used.
+func (m *Manager) newInspectionClient(ws *Workspace) (*sandbox.Client, error) {
+	return sandbox.NewClient(m.queueDir(ws.ID))
+}
+
 // CloseReport says what Close found before tearing down.
 type CloseReport struct {
 	Dirty    string // non-empty git status --porcelain output
 	Unpushed string // non-empty log of commits ahead of upstream
+}
+
+// InspectClose gathers the evidence Close needs without changing workspace
+// lifecycle state. Idle workspaces are temporarily started and restored to
+// their stopped state without refreshing credentials or timestamps.
+func (m *Manager) InspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	report = &CloseReport{}
+	if ws.Status == StatusClosed {
+		return report, nil
+	}
+
+	wasIdle := ws.Status == StatusIdle
+	if wasIdle {
+		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
+			return report, fmt.Errorf("start idle workspace for inspection: %w", err)
+		}
+		defer func() {
+			if restoreErr := m.Runtime.StopContainer(ctx, ws.Container); restoreErr != nil {
+				if err != nil {
+					err = fmt.Errorf("%w; also failed to restore idle workspace: %v", err, restoreErr)
+					return
+				}
+				err = fmt.Errorf("restore idle workspace after inspection: %w", restoreErr)
+			}
+		}()
+	}
+
+	client, err := m.newInspectionClient(ws)
+	if err != nil {
+		return report, fmt.Errorf("connect workspace for inspection: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
+	if err != nil {
+		return report, fmt.Errorf("inspect workspace before close: %w", err)
+	}
+	report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
+	if err != nil {
+		return report, fmt.Errorf("inspect workspace before close: %w", err)
+	}
+	return report, nil
 }
 
 // Close tears the workspace down. When force is false and the tree is
@@ -764,6 +816,16 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 	}
 
 	report := &CloseReport{}
+	if !force {
+		report, err = m.InspectClose(ctx, id)
+		if err != nil {
+			return report, err
+		}
+		if report.Dirty != "" || report.Unpushed != "" {
+			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
+		}
+	}
+
 	wasIdle := ws.Status == StatusIdle
 	var client *sandbox.Client
 	if wasIdle {
@@ -791,33 +853,6 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 			_ = client.Close()
 		}
 	}()
-
-	if !force {
-		report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
-		if err == nil {
-			report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
-		}
-		if err != nil {
-			if wasIdle {
-				_ = client.Close()
-				client = nil
-				if idleErr := m.Idle(ctx, id); idleErr != nil {
-					return report, fmt.Errorf("inspect workspace before close: %w (also failed to restore idle: %v)", err, idleErr)
-				}
-			}
-			return report, fmt.Errorf("inspect workspace before close: %w", err)
-		}
-		if report.Dirty != "" || report.Unpushed != "" {
-			if wasIdle {
-				_ = client.Close()
-				client = nil
-				if idleErr := m.Idle(ctx, id); idleErr != nil {
-					return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard; also failed to restore idle: %v)", id, idleErr)
-				}
-			}
-			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
-		}
-	}
 
 	// before_remove is best-effort and must not block teardown (#54).
 	if client != nil {
