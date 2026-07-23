@@ -1,0 +1,29 @@
+package ui
+
+templ Navigation(view ShellView) {
+	<nav class="desk-navigation" aria-label="Waffle Desk sections">
+		<a class="brand" href="/desk/" aria-label="Waffle Desk home">Waffle Desk</a>
+		<ul class="section-links">
+			@NavigationItem("today", "Today", view.ActiveSection)
+			@NavigationItem("tasks", "Tasks", view.ActiveSection)
+			@NavigationItem("workspaces", "Workspaces", view.ActiveSection)
+			@NavigationItem("memory", "Memory", view.ActiveSection)
+			@NavigationItem("capabilities", "Capabilities", view.ActiveSection)
+		</ul>
+		<div class="rail-status" aria-label="Connection and model">
+			<span class="status-dot" aria-hidden="true"></span>
+			<span>{ view.Connection }</span>
+			<code>{ view.ModelAlias }</code>
+		</div>
+	</nav>
+}
+
+templ NavigationItem(section string, label string, active string) {
+	<li>
+		if section == active {
+			<a href={ "/desk/?section=" + section } aria-current="page">{ label }</a>
+		} else {
+			<a href={ "/desk/?section=" + section }>{ label }</a>
+		}
+	</li>
+}

@@ -1,0 +1,37 @@
+package ui
+
+templ Today(view ShellView) {
+	<section class="today" aria-labelledby="today-title">
+		<header class="today-header">
+			<div>
+				<p class="eyebrow">Today</p>
+				<h1 id="today-title">{ view.Title }</h1>
+			</div>
+			<p class="connection"><span aria-hidden="true">●</span> { view.Connection }</p>
+		</header>
+		<div class="today-columns">
+			<section class="conversation" aria-labelledby="conversation-title">
+				<h2 id="conversation-title">Conversation</h2>
+				<div class="message-list" aria-live="polite">
+					<p class="message waffle-message">The desk is ready. What are we working on?</p>
+				</div>
+				<form class="composer" action="/desk/" method="post">
+					<label for="desk-message">Message Waffle</label>
+					<textarea id="desk-message" name="message" rows="3" placeholder="Ask Waffle to help…"></textarea>
+					<div class="composer-actions">
+						<button type="button">Attach skill</button>
+						<button type="submit">Send message</button>
+					</div>
+				</form>
+			</section>
+			<aside class="task-context" aria-labelledby="context-title">
+				<h2 id="context-title">Task context</h2>
+				<dl>
+					<div><dt>Model</dt><dd><code>{ view.ModelAlias }</code></dd></div>
+					<div><dt>Status</dt><dd>{ view.Connection }</dd></div>
+				</dl>
+				<button type="button">Open task details</button>
+			</aside>
+		</div>
+	</section>
+}
