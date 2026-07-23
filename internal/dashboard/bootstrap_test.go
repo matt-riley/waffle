@@ -34,8 +34,12 @@ func TestBootstrapSerializesStableContract(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
+	raw := append([]byte(nil), recorder.Body.Bytes()...)
+	if bytes.Contains(raw, []byte(`:null`)) {
+		t.Fatalf("bootstrap JSON contains null array: %s", raw)
+	}
 	var bootstrap Bootstrap
-	if err := json.NewDecoder(recorder.Body).Decode(&bootstrap); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&bootstrap); err != nil {
 		t.Fatalf("decode bootstrap: %v", err)
 	}
 	if bootstrap.Version != "test" || !bootstrap.ServerTime.Equal(now.UTC()) || bootstrap.RequestToken != security.Token() || bootstrap.EventCursor != 1 {
@@ -43,9 +47,6 @@ func TestBootstrapSerializesStableContract(t *testing.T) {
 	}
 	if bootstrap.Status.Active == nil || bootstrap.Status.Recent == nil || bootstrap.Status.RetryQueue == nil {
 		t.Fatalf("bootstrap status has null arrays: %+v", bootstrap.Status)
-	}
-	if bytes.Contains(recorder.Body.Bytes(), []byte(`:null`)) {
-		t.Fatalf("bootstrap JSON contains null array: %s", recorder.Body.String())
 	}
 }
 
