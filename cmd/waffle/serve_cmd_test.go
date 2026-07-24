@@ -222,6 +222,7 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 
 func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 	t.Setenv("WAFFLE_HOME", t.TempDir())
+	t.Setenv("INVOCATION_ID", "")
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
