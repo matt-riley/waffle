@@ -81,7 +81,17 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-function createHarness({ snapshotOverrides = {} } = {}) {
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createHarness({ snapshotOverrides = {}, fetchOverride } = {}) {
   const selectors = [
     ".tasks",
     "#tasks-attention-count",
@@ -158,6 +168,9 @@ function createHarness({ snapshotOverrides = {} } = {}) {
   };
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
+    if (fetchOverride) {
+      return fetchOverride(path, options);
+    }
     if (options.method === "POST") {
       return jsonResponse({ task: { id: "job-new" } });
     }
@@ -174,6 +187,7 @@ function createHarness({ snapshotOverrides = {} } = {}) {
   const context = vm.createContext({
     console,
     crypto: { randomUUID: () => `intent-${++key}` },
+    AbortController,
     document,
     fetch,
     URL,
@@ -269,5 +283,104 @@ test("redacted editable fields require re-entry and are never posted as placehol
   assert.doesNotMatch(
     JSON.stringify(harness.calls),
     /\[redacted\]/,
+  );
+});
+
+test("newer task filters abort and supersede late responses", async () => {
+  const all = deferred();
+  const attention = deferred();
+  const harness = createHarness({
+    fetchOverride(path) {
+      const filter = new URL(path, "http://desk.test").searchParams.get("filter");
+      return filter === "attention" ? attention.promise : all.promise;
+    },
+  });
+  await settle();
+  const attentionButton = harness.filters
+    .find((button) => button.dataset.taskFilter === "attention");
+  const click = attentionButton.emit("click");
+  await settle();
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0].options.signal.aborted, true);
+  attention.resolve(jsonResponse({
+    filter: "attention",
+    attention_count: 1,
+    errors: [],
+    tasks: [{
+      id: "new-filter-result",
+      kind: "recent",
+      source: "cron",
+      outcome: "failed",
+      attention: true,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      retry: {},
+      evidence_label: "Needs attention",
+    }],
+  }));
+  await click;
+  assert.equal(harness.elements["#tasks-list"].children[0].dataset.taskId, "new-filter-result");
+
+  all.resolve(jsonResponse({
+    filter: "all",
+    attention_count: 0,
+    errors: [],
+    tasks: [{
+      id: "stale-all-result",
+      kind: "recent",
+      source: "cron",
+      outcome: "ok",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      retry: {},
+      evidence_label: "Completed",
+    }],
+  }));
+  await settle();
+  assert.equal(harness.elements["#tasks-list"].children[0].dataset.taskId, "new-filter-result");
+  assert.equal(attentionButton.getAttribute("aria-pressed"), "true");
+});
+
+test("a failed replacement filter clears cards from the prior filter", async () => {
+  const attention = deferred();
+  const harness = createHarness({
+    fetchOverride(path) {
+      const filter = new URL(path, "http://desk.test").searchParams.get("filter");
+      if (filter === "attention") {
+        return attention.promise;
+      }
+      return jsonResponse({
+        filter: "all",
+        attention_count: 0,
+        errors: [],
+        tasks: [{
+          id: "old-all-result",
+          kind: "recent",
+          source: "cron",
+          outcome: "ok",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          retry: {},
+          evidence_label: "Completed",
+        }],
+      });
+    },
+  });
+  await settle();
+  assert.equal(harness.elements["#tasks-list"].children.length, 1);
+
+  const attentionButton = harness.filters
+    .find((button) => button.dataset.taskFilter === "attention");
+  const click = attentionButton.emit("click");
+  await settle();
+  assert.equal(harness.elements["#tasks-list"].children.length, 0);
+  const failure = new Error("request_failed");
+  failure.safeMessage = "Attention evidence is unavailable.";
+  attention.reject(failure);
+  await click;
+
+  assert.equal(harness.elements["#tasks-list"].children.length, 0);
+  assert.equal(harness.elements["#tasks-errors"].hidden, false);
+  assert.equal(
+    harness.elements["#tasks-errors"].textContent,
+    "Attention evidence is unavailable.",
   );
 });

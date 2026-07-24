@@ -27,6 +27,8 @@ if (root) {
     requestToken: document.body.dataset.requestToken || "",
     pendingIntent: null,
     redactedEditFields: new Set(),
+    loadGeneration: 0,
+    loadController: null,
   };
 
   async function readJSON(response) {
@@ -159,24 +161,50 @@ if (root) {
   }
 
   async function loadTasks() {
+    const generation = ++state.loadGeneration;
+    state.loadController?.abort();
+    const controller = new AbortController();
+    state.loadController = controller;
+    const filter = state.filter;
+    state.tasks = [];
+    elements.list.replaceChildren();
+    elements.errors.hidden = true;
+    elements.errors.textContent = "";
     elements.empty.hidden = false;
     elements.empty.textContent = "Loading task evidence…";
+    for (const button of elements.filters) {
+      button.setAttribute("aria-pressed", String(button.dataset.taskFilter === filter));
+    }
     try {
       const response = await fetch(
-        `/api/v1/desk/tasks?filter=${encodeURIComponent(state.filter)}`,
+        `/api/v1/desk/tasks?filter=${encodeURIComponent(filter)}`,
         {
           method: "GET",
           credentials: "same-origin",
           cache: "no-store",
           headers: { Accept: "application/json" },
+          signal: controller.signal,
         },
       );
-      render(await readJSON(response));
+      const snapshot = await readJSON(response);
+      if (generation !== state.loadGeneration) {
+        return;
+      }
+      render(snapshot);
     } catch (error) {
+      if (generation !== state.loadGeneration || error?.name === "AbortError") {
+        return;
+      }
+      state.tasks = [];
+      elements.list.replaceChildren();
       elements.errors.hidden = false;
       elements.errors.textContent =
         error.safeMessage || "Task evidence could not be loaded.";
       elements.empty.hidden = true;
+    } finally {
+      if (generation === state.loadGeneration) {
+        state.loadController = null;
+      }
     }
   }
 
