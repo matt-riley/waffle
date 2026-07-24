@@ -78,9 +78,11 @@ type WorkspaceCloseLifecycle interface {
 }
 
 var (
-	_ RunReader               = (*observability.Service)(nil)
-	_ JobStore                = (*schedule.Store)(nil)
-	_ SessionStore            = (*session.Store)(nil)
+	_ RunReader    = (*observability.Service)(nil)
+	_ JobStore     = (*schedule.Store)(nil)
+	_ SessionStore = (*session.Store)(nil)
+	// session.Store must keep ExistIDs so Tasks uses the batched path (#150).
+	_ sessionExistenceReader  = (*session.Store)(nil)
 	_ NotesSearcher           = (*memory.NotesIndex)(nil)
 	_ WorksetStore            = (*workset.Store)(nil)
 	_ UsageReader             = (*usage.Store)(nil)
