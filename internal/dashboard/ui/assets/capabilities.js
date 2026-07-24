@@ -6,6 +6,7 @@ if (root) {
     restart: document.querySelector("#capability-restart-status"),
     models: document.querySelector("#capability-models"),
     skills: document.querySelector("#capability-skills"),
+    connections: document.querySelector("#capability-connections"),
     providerForm: document.querySelector("#capability-provider-form"),
     providerName: document.querySelector("#capability-provider-name"),
     providerType: document.querySelector("#capability-provider-type"),
@@ -68,6 +69,16 @@ if (root) {
 
   async function getCapabilities() {
     const response = await fetch("/api/v1/desk/capabilities", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    return readJSON(response);
+  }
+
+  async function getConnections() {
+    const response = await fetch("/api/v1/desk/connections", {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store",
@@ -174,6 +185,66 @@ if (root) {
     }
   }
 
+  function renderConnections(connections) {
+    clearNode(elements.connections);
+    elements.connections.textContent = "";
+    const records = Array.isArray(connections) ? connections : [];
+    const kindLabels = {
+      provider: "Provider",
+      adapter: "Adapter",
+      mcp: "MCP",
+      profile: "Profile",
+    };
+    const statusLabels = {
+      configured: "Configured",
+      healthy: "Healthy",
+      stale: "Stale",
+    };
+    const sandboxLabels = {
+      host: "Host tools",
+      docker: "Docker sandbox",
+    };
+    const egressLabels = {
+      disabled: "Egress disabled",
+      restricted: "Restricted egress",
+      enabled: "Open egress",
+    };
+    for (const item of records) {
+      const card = document.createElement("article");
+      card.className = "capability-card connection-card";
+      const title = document.createElement("strong");
+      title.textContent = typeof item?.name === "string" ? item.name : "Unnamed connection";
+      const details = document.createElement("p");
+      details.className = "connection-detail";
+      const summary = [
+        kindLabels[item?.kind] || "Connection",
+        statusLabels[item?.status] || "Status unavailable",
+      ];
+      if (typeof item?.profile === "string" && item.profile) {
+        summary.push(`Profile ${item.profile}`);
+      }
+      if (sandboxLabels[item?.sandbox_mode]) {
+        summary.push(sandboxLabels[item.sandbox_mode]);
+      }
+      if (egressLabels[item?.egress]) {
+        summary.push(egressLabels[item.egress]);
+      }
+      details.textContent = summary.join(" · ");
+      card.appendChild(title);
+      card.appendChild(details);
+      if (typeof item?.guidance === "string" && item.guidance) {
+        const guidance = document.createElement("p");
+        guidance.className = "connection-guidance";
+        guidance.textContent = item.guidance;
+        card.appendChild(guidance);
+      }
+      elements.connections.appendChild(card);
+    }
+    if (!records.length) {
+      elements.connections.textContent = "No tools or connections are configured.";
+    }
+  }
+
   function renderCatalogue() {
     clearNode(elements.catalogueResults);
     const query = elements.catalogueSearch.value.trim().toLowerCase();
@@ -206,9 +277,13 @@ if (root) {
   }
 
   async function loadCapabilities() {
-    const snapshot = await getCapabilities();
+    const [snapshot, connections] = await Promise.all([
+      getCapabilities(),
+      getConnections(),
+    ]);
     renderModels(snapshot.providers);
     renderSkills(snapshot.skills);
+    renderConnections(connections);
     setStatus("Capabilities are current.");
   }
 

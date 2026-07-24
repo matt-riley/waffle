@@ -16,6 +16,10 @@ class FakeElement {
     this.childNodes = [];
   }
 
+  set innerHTML(_value) {
+    throw new Error("capabilities client must not use innerHTML");
+  }
+
   addEventListener(type, callback) {
     this.listeners.set(type, callback);
   }
@@ -47,6 +51,7 @@ function response(body, ok = true, status = 200) {
 function createHarness({
   providerResponse = response({}, true, 202),
   catalogueResponse = response({ connection: "primary", models: [] }),
+  connectionResponse = response([]),
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
 } = {}) {
   const selectors = [
@@ -55,6 +60,7 @@ function createHarness({
     "#capability-restart-status",
     "#capability-models",
     "#capability-skills",
+    "#capability-connections",
     "#capability-provider-form",
     "#capability-provider-name",
     "#capability-provider-type",
@@ -89,6 +95,9 @@ function createHarness({
         },
         skills: [],
       });
+    }
+    if (path === "/api/v1/desk/connections") {
+      return connectionResponse;
     }
     if (path === "/api/v1/desk/providers") {
       return providerResponse;
@@ -223,5 +232,54 @@ test("catalogue refresh renders results and search filters without another reque
   assert.equal(
     harness.calls.filter((call) => call.path === "/api/v1/desk/models/catalogue/refresh").length,
     1,
+  );
+});
+
+test("connections load read-only and render every allowlisted field as text", async () => {
+  const hostileName = `<img src=x onerror="steal()">`;
+  const harness = createHarness({
+    connectionResponse: response([
+      {
+        name: hostileName,
+        kind: "mcp",
+        status: "configured",
+        profile: "review",
+        sandbox_mode: "docker",
+        egress: "restricted",
+        guidance: "Runs in a sandbox.",
+        ignored_private_field: "sk-never-render",
+      },
+    ]),
+  });
+  await flush();
+
+  const requests = harness.calls.filter((call) => call.path === "/api/v1/desk/connections");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.method, "GET");
+  assert.equal(requests[0].options.credentials, "same-origin");
+  assert.equal(requests[0].options.cache, "no-store");
+
+  const list = harness.elements["#capability-connections"];
+  assert.equal(list.childNodes.length, 1);
+  const card = list.childNodes[0];
+  assert.equal(card.childNodes[0].textContent, hostileName);
+  assert.equal(
+    card.childNodes[1].textContent,
+    "MCP · Configured · Profile review · Docker sandbox · Restricted egress",
+  );
+  assert.equal(card.childNodes[2].textContent, "Runs in a sandbox.");
+  assert.equal(
+    card.childNodes.some((node) => node.textContent.includes("sk-never-render")),
+    false,
+  );
+});
+
+test("connections use a stable accessible empty state", async () => {
+  const harness = createHarness({ connectionResponse: response(null) });
+  await flush();
+
+  assert.equal(
+    harness.elements["#capability-connections"].textContent,
+    "No tools or connections are configured.",
   );
 });

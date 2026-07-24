@@ -97,6 +97,20 @@
   margin: 0;
 }
 
+.connection-list {
+  border-top: 1px solid var(--rule);
+  margin-top: 0.8rem;
+}
+
+.connection-detail {
+  overflow-wrap: anywhere;
+}
+
+.connection-guidance {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
 .capability-catalogue-search {
   display: grid;
   gap: 0.55rem;

@@ -93,9 +93,14 @@ templ Capabilities(view CapabilitiesView) {
 			<section class="capability-panel" id="capability-connections-panel" aria-labelledby="capability-connections-title">
 				<header>
 					<p class="panel-index">03 / tools &amp; connections</p>
-					<h2 id="capability-connections-title">Enroll a provider</h2>
+					<h2 id="capability-connections-title">Tools &amp; connections</h2>
 				</header>
+				<p class="scope-note"><strong>Connection health only.</strong> Credentials, endpoints, commands, environment, and tool policy details stay private.</p>
+				<div id="capability-connections" class="capability-list connection-list" aria-live="polite">
+					Loading tools and connections…
+				</div>
 				<form id="capability-provider-form" autocomplete="off">
+					<h3>Enroll a provider</h3>
 					<label for="capability-provider-name">Connection name</label>
 					<input id="capability-provider-name" required autocomplete="off"/>
 					<label for="capability-provider-type">Provider type</label>
