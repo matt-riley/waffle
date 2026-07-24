@@ -178,6 +178,9 @@ is intentionally not a remote monitoring API.
 ### Waffle Desk
 
 Waffle Desk is the local browser companion included in the Waffle binary.
+See the [Waffle Desk rollout guide](waffle-desk.md) for access boundaries,
+release checks, and rollback.
+
 Enable it in the service configuration:
 
 ```toml

@@ -106,6 +106,9 @@ workspaces, sessions, and memory used by the CLI. It is not a second task
 database. Open the **Tasks**, **Workspaces**, or **Memory** destination from
 the Desk navigation.
 
+See the [Waffle Desk rollout guide](waffle-desk.md) for enablement, access,
+security, release checks, and rollback.
+
 ### Tasks and schedules
 
 Tasks combines scheduled jobs with active and recent cron runs. The available

@@ -1,5 +1,7 @@
 [tools]
 go = "1.25.12"
+node = "26.1.0"
+pnpm = "11.9.0"
 
 [tasks.build]
 description = "Build bin/waffle with a git-stamped version"
@@ -35,6 +37,22 @@ node --test \
   internal/dashboard/ui/workspaces_client_test.mjs \
   internal/dashboard/ui/memory_client_test.mjs \
   internal/dashboard/ui/capabilities_client_test.mjs
+"""
+
+[tasks.dashboard-install]
+description = "Install Waffle Desk browser-test dependencies"
+env = { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1" }
+run = "pnpm --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts"
+
+[tasks.dashboard-test]
+description = "Run Waffle Desk browser tests with system Chrome"
+run = "pnpm --dir tools/dashboard-tests test"
+
+[tasks.dashboard-check]
+description = "Run the complete Waffle Desk browser rollout gate"
+run = """
+mise run dashboard-install
+mise run dashboard-test
 """
 
 [tasks.fmt]

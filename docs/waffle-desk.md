@@ -77,8 +77,7 @@ suite requires system Chrome and the pinned Node/pnpm versions.
 Run:
 
 ```sh
-pnpm --dir tools/dashboard-tests install --frozen-lockfile
-pnpm --dir tools/dashboard-tests test
+mise run dashboard-check
 mise run fmt
 mise run vet
 mise run lint

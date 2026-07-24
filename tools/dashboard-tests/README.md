@@ -15,8 +15,7 @@ Prerequisites:
 Run from the repository root:
 
 ```sh
-pnpm --dir tools/dashboard-tests install --frozen-lockfile
-pnpm --dir tools/dashboard-tests test
+mise run dashboard-check
 ```
 
 The suite uses Chrome rather than Playwright's bundled Chromium. It verifies the

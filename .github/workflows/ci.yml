@@ -14,9 +14,35 @@ jobs:
     name: deterministic agent evals
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
       - run: go run ./cmd/waffle eval
+
+  dashboard-browser:
+    name: dashboard browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
+      - name: Verify browser runtime
+        run: |
+          node --version
+          pnpm --version
+          google-chrome --version
+      - name: Run Waffle Desk browser gate
+        env:
+          CI: "true"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: mise run dashboard-check
 
   ci:
     uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@main
@@ -42,7 +68,7 @@ jobs:
   build-linux-artifact:
     name: build linux artifact
     runs-on: ubuntu-latest
-    needs: [deterministic-eval, ci, lint, security, linux-artifact-repro]
+    needs: [deterministic-eval, dashboard-browser, ci, lint, security, linux-artifact-repro]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
