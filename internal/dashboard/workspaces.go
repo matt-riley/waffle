@@ -31,6 +31,8 @@ const (
 
 var workspaceRepositoryPart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+var ErrWorkspaceStateConflict = errors.New("workspace state conflict")
+
 // WorkspaceView is the stable, sanitized workspace shape shared by reads,
 // mutations, events, and the section client.
 type WorkspaceView struct {
@@ -137,7 +139,7 @@ func (s *WorkspacesService) Select(ctx context.Context, id string) (WorkspaceMut
 		return WorkspaceMutationResponse{}, err
 	}
 	if ws.Status == workspace.StatusClosed {
-		return WorkspaceMutationResponse{}, fmt.Errorf("workspace is closed")
+		return WorkspaceMutationResponse{}, ErrWorkspaceStateConflict
 	}
 	if s.operations.Sessions == nil {
 		return WorkspaceMutationResponse{}, ErrOperationsDependencyUnavailable
@@ -197,6 +199,9 @@ func (s *WorkspacesService) PreviewClose(ctx context.Context, id string) (Worksp
 	if err != nil {
 		return WorkspaceClosePreview{}, err
 	}
+	if ws.Status == workspace.StatusClosed {
+		return WorkspaceClosePreview{}, ErrWorkspaceStateConflict
+	}
 	if s.operations.Previews == nil {
 		return WorkspaceClosePreview{}, ErrOperationsDependencyUnavailable
 	}
@@ -222,11 +227,14 @@ func (s *WorkspacesService) ConfirmClose(ctx context.Context, id, previewToken s
 	if s == nil || s.operations == nil || s.operations.Workspaces == nil || s.operations.Previews == nil {
 		return WorkspaceMutationResponse{}, ErrOperationsDependencyUnavailable
 	}
-	if err := s.operations.Previews.Consume(previewToken, workspaceCloseOperation, id); err != nil {
-		return WorkspaceMutationResponse{}, err
-	}
 	ws, err := s.get(ctx, id)
 	if err != nil {
+		return WorkspaceMutationResponse{}, err
+	}
+	if ws.Status == workspace.StatusClosed {
+		return WorkspaceMutationResponse{}, ErrWorkspaceStateConflict
+	}
+	if err := s.operations.Previews.Consume(previewToken, workspaceCloseOperation, id); err != nil {
 		return WorkspaceMutationResponse{}, err
 	}
 	report, err := s.operations.Workspaces.Close(ctx, id, false)
@@ -239,8 +247,14 @@ func (s *WorkspacesService) ConfirmClose(ctx context.Context, id, previewToken s
 		}
 		return WorkspaceMutationResponse{}, err
 	}
-	ws.Status = workspace.StatusClosed
-	response := WorkspaceMutationResponse{Workspace: s.view(*ws)}
+	closed, err := s.get(ctx, id)
+	if err != nil {
+		return WorkspaceMutationResponse{}, err
+	}
+	if closed.Status != workspace.StatusClosed {
+		return WorkspaceMutationResponse{}, ErrWorkspaceStateConflict
+	}
+	response := WorkspaceMutationResponse{Workspace: s.view(*closed)}
 	s.publish(WorkspaceClosedEvent, response.Workspace)
 	return response, nil
 }
@@ -483,6 +497,8 @@ func writeWorkspaceServiceError(w http.ResponseWriter, err error, stateConflict 
 	switch {
 	case errors.Is(err, workspace.ErrWorkspaceNotFound), errors.Is(err, session.ErrNotFound):
 		writeWorkspaceError(w, http.StatusNotFound, "workspace_not_found", "workspace or session was not found")
+	case errors.Is(err, ErrWorkspaceStateConflict):
+		writeWorkspaceError(w, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action")
 	case errors.Is(err, ErrPreviewExpired),
 		errors.Is(err, ErrPreviewEvicted),
 		errors.Is(err, ErrPreviewMismatch),

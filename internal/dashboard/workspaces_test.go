@@ -349,6 +349,140 @@ func TestWorkspaceClosePublishesOnlyCanonicalSuccessfulDeletion(t *testing.T) {
 	}
 }
 
+func TestWorkspacesServiceRejectsClosedRowBeforePreviewOrConfirm(t *testing.T) {
+	harness := newWorkspaceRouteHarness(t)
+	harness.manager.addWorkspace(workspace.Workspace{
+		ID: "ws-closed", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+		Status: workspace.StatusClosed, Image: "bookworm",
+	})
+	service := NewWorkspacesService(&Operations{
+		Workspaces: harness.manager,
+		Sessions:   harness.sessions,
+		Previews:   harness.previews,
+		Events:     harness.events,
+	}, "none")
+
+	if _, err := service.PreviewClose(context.Background(), "ws-closed"); !errors.Is(err, ErrWorkspaceStateConflict) {
+		t.Fatalf("PreviewClose(closed) error = %v, want ErrWorkspaceStateConflict", err)
+	}
+	token := harness.previews.Issue(workspaceCloseOperation, "ws-closed", time.Minute)
+	if _, err := service.ConfirmClose(context.Background(), "ws-closed", token); !errors.Is(err, ErrWorkspaceStateConflict) {
+		t.Fatalf("ConfirmClose(closed) error = %v, want ErrWorkspaceStateConflict", err)
+	}
+	if harness.manager.inspectCalls != 0 || harness.manager.closeCalls != 0 {
+		t.Fatalf("closed row reached inspect=%d close=%d", harness.manager.inspectCalls, harness.manager.closeCalls)
+	}
+	if harness.events.Cursor() != 0 {
+		t.Fatalf("closed row published %d events", harness.events.Cursor())
+	}
+
+	harness.manager.workspaces["ws-closed"] = workspace.Workspace{
+		ID: "ws-closed", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+		Status: workspace.StatusOpen, Image: "bookworm",
+	}
+	if _, err := service.ConfirmClose(context.Background(), "ws-closed", token); err != nil {
+		t.Fatalf("closed-state rejection consumed preview token: %v", err)
+	}
+	if harness.manager.closeCalls != 1 || harness.events.Cursor() != 1 {
+		t.Fatalf("eligible transition close=%d events=%d", harness.manager.closeCalls, harness.events.Cursor())
+	}
+}
+
+func TestWorkspaceClosedRowHTTPConflictIsIdempotentAndPublishesNothing(t *testing.T) {
+	harness := newWorkspaceRouteHarness(t)
+	harness.manager.addWorkspace(workspace.Workspace{
+		ID: "ws-closed", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+		Status: workspace.StatusClosed, Image: "bookworm",
+	})
+
+	firstPreview := harness.request(
+		http.MethodPost,
+		"/api/v1/desk/workspaces/ws-closed/close-preview",
+		`{}`,
+		"closed-preview",
+		true,
+	)
+	replayedPreview := harness.request(
+		http.MethodPost,
+		"/api/v1/desk/workspaces/ws-closed/close-preview",
+		`{}`,
+		"closed-preview",
+		true,
+	)
+	if firstPreview.Code != http.StatusConflict || replayedPreview.Code != http.StatusConflict {
+		t.Fatalf("closed preview status = %d/%d: %s / %s",
+			firstPreview.Code, replayedPreview.Code, firstPreview.Body.String(), replayedPreview.Body.String())
+	}
+	if firstPreview.Body.String() != replayedPreview.Body.String() {
+		t.Fatalf("closed preview replay changed body: %q / %q", firstPreview.Body.String(), replayedPreview.Body.String())
+	}
+	assertWorkspaceError(t, firstPreview.Body.Bytes(), "workspace_state_conflict")
+
+	token := harness.previews.Issue(workspaceCloseOperation, "ws-closed", time.Minute)
+	firstConfirm := harness.request(
+		http.MethodPost,
+		"/api/v1/desk/workspaces/ws-closed/close",
+		`{"preview_token":"`+token+`"}`,
+		"closed-confirm",
+		true,
+	)
+	replayedConfirm := harness.request(
+		http.MethodPost,
+		"/api/v1/desk/workspaces/ws-closed/close",
+		`{"preview_token":"`+token+`"}`,
+		"closed-confirm",
+		true,
+	)
+	freshConfirm := harness.request(
+		http.MethodPost,
+		"/api/v1/desk/workspaces/ws-closed/close",
+		`{"preview_token":"`+token+`"}`,
+		"closed-confirm-fresh",
+		true,
+	)
+	for _, rec := range []*httptest.ResponseRecorder{firstConfirm, replayedConfirm, freshConfirm} {
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("closed confirm status = %d: %s", rec.Code, rec.Body.String())
+		}
+		assertWorkspaceError(t, rec.Body.Bytes(), "workspace_state_conflict")
+	}
+	if firstConfirm.Body.String() != replayedConfirm.Body.String() {
+		t.Fatalf("closed confirm replay changed body: %q / %q", firstConfirm.Body.String(), replayedConfirm.Body.String())
+	}
+	if harness.manager.inspectCalls != 0 || harness.manager.closeCalls != 0 {
+		t.Fatalf("closed HTTP row reached inspect=%d close=%d", harness.manager.inspectCalls, harness.manager.closeCalls)
+	}
+	if harness.events.Cursor() != 0 {
+		t.Fatalf("closed HTTP row published %d events", harness.events.Cursor())
+	}
+}
+
+func TestWorkspacesServicePublishesCloseOnlyAfterCanonicalTransition(t *testing.T) {
+	harness := newWorkspaceRouteHarness(t)
+	harness.manager.addWorkspace(workspace.Workspace{
+		ID: "ws-1", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+		Status: workspace.StatusOpen, Image: "bookworm",
+	})
+	harness.manager.closeNoTransition = true
+	token := harness.previews.Issue(workspaceCloseOperation, "ws-1", time.Minute)
+	service := NewWorkspacesService(&Operations{
+		Workspaces: harness.manager,
+		Sessions:   harness.sessions,
+		Previews:   harness.previews,
+		Events:     harness.events,
+	}, "none")
+
+	if _, err := service.ConfirmClose(context.Background(), "ws-1", token); !errors.Is(err, ErrWorkspaceStateConflict) {
+		t.Fatalf("ConfirmClose(no transition) error = %v, want ErrWorkspaceStateConflict", err)
+	}
+	if harness.manager.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want one guarded attempt", harness.manager.closeCalls)
+	}
+	if harness.events.Cursor() != 0 {
+		t.Fatalf("no-op close published %d events", harness.events.Cursor())
+	}
+}
+
 func issueWorkspacePreview(t *testing.T, harness *workspaceRouteHarness, id, key string) WorkspaceClosePreview {
 	t.Helper()
 	rec := harness.request(
@@ -480,20 +614,21 @@ func (h *workspaceRouteHarness) request(method, path, body, key string, token bo
 }
 
 type recordingWorkspaceManager struct {
-	t             *testing.T
-	workspaces    map[string]workspace.Workspace
-	openCalls     int
-	openRepo      string
-	openProfile   string
-	openClient    *sandbox.Client
-	resumeClient  *sandbox.Client
-	inspectReport *workspace.CloseReport
-	inspectErr    error
-	inspectCalls  int
-	closeReport   *workspace.CloseReport
-	closeErr      error
-	closeCalls    int
-	lastForce     bool
+	t                 *testing.T
+	workspaces        map[string]workspace.Workspace
+	openCalls         int
+	openRepo          string
+	openProfile       string
+	openClient        *sandbox.Client
+	resumeClient      *sandbox.Client
+	inspectReport     *workspace.CloseReport
+	inspectErr        error
+	inspectCalls      int
+	closeReport       *workspace.CloseReport
+	closeErr          error
+	closeCalls        int
+	lastForce         bool
+	closeNoTransition bool
 }
 
 func (m *recordingWorkspaceManager) addWorkspace(ws workspace.Workspace) {
@@ -583,6 +718,9 @@ func (m *recordingWorkspaceManager) Close(_ context.Context, id string, force bo
 	}
 	if m.closeErr != nil {
 		return report, m.closeErr
+	}
+	if m.closeNoTransition {
+		return report, nil
 	}
 	ws, ok := m.workspaces[id]
 	if !ok {
