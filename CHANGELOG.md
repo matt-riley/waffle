@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/matt-riley/waffle/compare/v0.6.0...v0.7.0) (2026-07-21)
+
+
+### Features
+
+* add Waffle project website ([#139](https://github.com/matt-riley/waffle/issues/139)) ([ebdef40](https://github.com/matt-riley/waffle/commit/ebdef40abfb2d0fcdb2a88ef66f009763714e50d))
+
+
+### Bug Fixes
+
+* kill bash tool process group on timeout ([177fc08](https://github.com/matt-riley/waffle/commit/177fc0880197540da48ad31fd98f84c836578424))
+* kill bash tool process group on timeout ([97aaa54](https://github.com/matt-riley/waffle/commit/97aaa54df87baaa5a7b3b25852d35e0c37ff8302))
+* tie MCP child process lifetime to client, not handshake context ([849bf2b](https://github.com/matt-riley/waffle/commit/849bf2bf6d52b34910d31cacaf0003e1e09e6017))
+
 ## [0.6.0](https://github.com/matt-riley/waffle/compare/v0.5.0...v0.6.0) (2026-07-21)
 
 
