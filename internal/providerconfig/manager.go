@@ -1799,8 +1799,7 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 		return m.rollbackJournal(ctx, &journal)
 	}
 
-	configBytes, err := m.deferredConfigBytes(journal)
-	if err != nil {
+	if _, err := m.deferredConfigBytes(journal); err != nil {
 		rollbackErr := m.rollbackJournal(ctx, &journal)
 		return errors.Join(err, rollbackErr)
 	}
@@ -1809,8 +1808,7 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 		rollbackErr := m.rollbackJournal(ctx, &journal)
 		return errors.Join(err, rollbackErr)
 	}
-	configBytes, err = m.deferredConfigBytes(journal)
-	if err != nil {
+	if _, err := m.deferredConfigBytes(journal); err != nil {
 		rollbackErr := m.rollbackJournal(ctx, &journal)
 		return errors.Join(err, rollbackErr)
 	}
@@ -1819,7 +1817,7 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 			rollbackErr := m.rollbackJournal(ctx, &journal)
 			return errors.Join(ErrDeferredHealth, rollbackErr)
 		}
-		configBytes, err = m.deferredConfigBytes(journal)
+		configBytes, err := m.deferredConfigBytes(journal)
 		if err != nil {
 			rollbackErr := m.rollbackJournal(ctx, &journal)
 			return errors.Join(err, rollbackErr)
