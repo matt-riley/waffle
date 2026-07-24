@@ -3,6 +3,7 @@ package filecommit
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,9 +50,29 @@ func TestWriteIsDurableAndReplacesExisting(t *testing.T) {
 }
 
 func TestWriteCleansUpStagingOnFailure(t *testing.T) {
-	// Destination directory does not exist → CreateTemp fails cleanly.
+	// CreateTemp fails when the parent is missing (no staging file created).
 	err := Write(filepath.Join(t.TempDir(), "missing", "x.json"), []byte("x"), 0o600)
 	if err == nil {
 		t.Fatal("expected error for missing parent")
+	}
+
+	// CreateTemp succeeds but rename fails when the destination is a directory;
+	// the !committed cleanup branch must remove the staging temp (#156 review).
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "journal.json")
+	if err := os.Mkdir(dest, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(dest, []byte("payload\n"), 0o600); err == nil {
+		t.Fatal("expected rename failure when destination is a directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".filecommit-") {
+			t.Fatalf("staging file left behind after failure: %s", entry.Name())
+		}
 	}
 }

@@ -328,6 +328,8 @@ func newMutationHandler(
 }
 
 // auditDeskMutation writes one policy_audit row for an executed Desk mutation.
+// The audit write is detached from the request context so a client disconnect
+// after the response is written cannot cancel the policy_audit insert (#152 review).
 func auditDeskMutation(ctx context.Context, security *Security, operation string, status int) {
 	if security == nil {
 		return
@@ -337,7 +339,7 @@ func auditDeskMutation(ctx context.Context, security *Security, operation string
 		return
 	}
 	detail := "status=" + strconv.Itoa(status)
-	_ = policy.LogMutation(ctx, db, "", "desk.mutation", operation, detail)
+	_ = policy.LogMutation(context.WithoutCancel(ctx), db, "", "desk.mutation", operation, detail)
 }
 
 func copyResponseHeader(destination, source http.Header) {
