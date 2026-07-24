@@ -9,13 +9,27 @@ templ Shell(view ShellView) {
 			<title>{ view.Title }</title>
 			<link rel="stylesheet" href={ AssetURL("app.css", view.AssetVersion) }/>
 			<script type="module" src={ AssetURL("app.js", view.AssetVersion) }></script>
+			if view.ActiveSection == "workspaces" {
+				@WorkspaceAssets(view)
+			}
 		</head>
 		<body data-request-token={ view.RequestToken }>
 			<a class="skip-link" href="#main-content">Skip to main content</a>
 			<div class="desk-shell" data-active-section={ view.ActiveSection }>
 				@Navigation(view)
 				<main id="main-content" tabindex="-1">
-					@Today(view)
+					switch view.ActiveSection {
+						case "tasks":
+							@Tasks(view)
+						case "workspaces":
+							@Workspaces(view)
+						case "memory":
+							@Memory(view)
+						case "capabilities":
+							@Capabilities(CapabilitiesView{AssetVersion: CapabilitiesAssetVersion()})
+						default:
+							@Today(view)
+					}
 				</main>
 			</div>
 		</body>

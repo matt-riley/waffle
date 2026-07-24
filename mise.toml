@@ -28,7 +28,14 @@ run = "go tool templ generate -path internal/dashboard/ui"
 
 [tasks.dashboard-client-test]
 description = "Test the dependency-free Waffle Desk browser client"
-run = "node --test internal/dashboard/ui/today_client_test.mjs"
+run = """
+node --test \
+  internal/dashboard/ui/today_client_test.mjs \
+  internal/dashboard/ui/tasks_client_test.mjs \
+  internal/dashboard/ui/workspaces_client_test.mjs \
+  internal/dashboard/ui/memory_client_test.mjs \
+  internal/dashboard/ui/capabilities_client_test.mjs
+"""
 
 [tasks.fmt]
 run = "gofmt -l . && test -z \"$(gofmt -l .)\""

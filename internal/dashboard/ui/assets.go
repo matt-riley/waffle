@@ -33,6 +33,16 @@ func ServeAsset(w http.ResponseWriter, r *http.Request, name string) bool {
 		return true
 	}
 	if name != "app.css" && name != "app.js" && name != "today.js" {
+		for _, serve := range []func(http.ResponseWriter, *http.Request, string) bool{
+			ServeTaskAsset,
+			ServeWorkspaceAsset,
+			ServeMemoryAsset,
+			ServeCapabilitiesAsset,
+		} {
+			if serve(w, r, name) {
+				return true
+			}
+		}
 		return false
 	}
 	contents, err := assetFiles.ReadFile(path.Join("assets", name))

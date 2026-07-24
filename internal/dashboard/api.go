@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 )
 
@@ -17,12 +18,19 @@ const eventHeartbeatInterval = 15 * time.Second
 // The serve command owns these dependencies so the routes never create a
 // second security token, mux, listener, or event hub.
 type APIConfig struct {
-	Observability *observability.Service
-	Security      *Security
-	Hub           *EventHub
-	ChatClients   *ChatClients
-	Idempotency   *IdempotencyStore
-	Version       string
+	Observability   *observability.Service
+	Security        *Security
+	Hub             *EventHub
+	ChatClients     *ChatClients
+	Idempotency     *IdempotencyStore
+	Operations      *Operations
+	Schedules       TaskScheduleStore
+	Memory          memory.Workspace
+	WorkspaceEgress string
+	Capabilities    *Capabilities
+	Restart         RestartScheduler
+	RestartOutcome  MutationOutcomeObserver
+	Version         string
 	// ProcessGeneration is a coordinator-created opaque identity that changes
 	// for every serving process. Restart-aware clients use it to reject the
 	// still-running process while waiting for deferred activation.

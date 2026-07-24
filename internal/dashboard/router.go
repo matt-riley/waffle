@@ -15,6 +15,16 @@ import (
 
 const dashboardChatMaxBodyBytes = 64 << 10
 
+const mutationResponseEnvelopeVersion = "waffle-desk-mutation-v1"
+
+type MutationOutcomeObserver func(RestartScheduleOutcome)
+
+type mutationResponseEnvelope struct {
+	Version string      `json:"version"`
+	Header  http.Header `json:"header"`
+	Body    []byte      `json:"body"`
+}
+
 // RegisterRoutes mounts the Desk shell and exact live-state APIs on the
 // caller-owned mux. Security.Wrap remains the caller's single outer boundary.
 func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
@@ -23,6 +33,38 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 	mux.Handle("GET /api/v1/desk/events", newEventsHandler(config))
 	if config.ChatClients != nil && config.Idempotency != nil {
 		registerChatRoutes(mux, config)
+	}
+	if config.Operations != nil {
+		RegisterTaskRoutes(mux, TaskRouteConfig{
+			Operations:  config.Operations,
+			Schedules:   config.Schedules,
+			Security:    config.Security,
+			Idempotency: config.Idempotency,
+			Events:      config.Hub,
+		})
+		RegisterWorkspaceRoutes(mux, WorkspaceRouteConfig{
+			Operations:  config.Operations,
+			Security:    config.Security,
+			Idempotency: config.Idempotency,
+			Events:      config.Hub,
+			Egress:      config.WorkspaceEgress,
+		})
+		RegisterMemoryRoutes(mux, MemoryRouteConfig{
+			Operations:  config.Operations,
+			Workspace:   config.Memory,
+			Security:    config.Security,
+			Idempotency: config.Idempotency,
+			Events:      config.Hub,
+		})
+	}
+	if config.Capabilities != nil && config.Idempotency != nil {
+		RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+			Service: config.Capabilities,
+			Mutation: func(limit int64, next http.Handler) http.Handler {
+				return NewMutationHandler(config.Security, config.Idempotency, limit, next, config.RestartOutcome)
+			},
+			Restart: config.Restart,
+		})
 	}
 }
 
@@ -141,7 +183,13 @@ func writeChatError(w http.ResponseWriter, err error, fallback string) {
 // NewMutationHandler adds request-bound idempotency to one exact dashboard
 // mutation endpoint. Callers register its returned handler on that endpoint;
 // it intentionally does not claim a route prefix.
-func NewMutationHandler(security *Security, store *IdempotencyStore, maxBodyBytes int64, next http.Handler) http.Handler {
+func NewMutationHandler(
+	security *Security,
+	store *IdempotencyStore,
+	maxBodyBytes int64,
+	next http.Handler,
+	observers ...MutationOutcomeObserver,
+) http.Handler {
 	return security.RequireMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 		if err != nil {
@@ -153,28 +201,74 @@ func NewMutationHandler(security *Security, store *IdempotencyStore, maxBodyByte
 			http.Error(w, "invalid_request_body", http.StatusBadRequest)
 			return
 		}
+		defer clear(body)
 		digest := sha256.Sum256(body)
 		operation := r.Method + " " + r.URL.Path
+		var capture *responseCapture
+		executed := false
 		status, responseBody, doErr := store.Do(r.Context(), r.Header.Get("Idempotency-Key"), operation, hex.EncodeToString(digest[:]), func(ctx context.Context) (int, []byte) {
+			executed = true
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			recorder := newResponseCapture()
-			next.ServeHTTP(recorder, r.WithContext(ctx))
-			return recorder.status, recorder.body.Bytes()
+			capture = newResponseCapture()
+			next.ServeHTTP(capture, r.WithContext(ctx))
+			header := capture.committedHeader
+			if header == nil {
+				header = capture.header.Clone()
+			}
+			envelope, marshalErr := json.Marshal(mutationResponseEnvelope{
+				Version: mutationResponseEnvelopeVersion,
+				Header:  header,
+				Body:    append([]byte(nil), capture.body.Bytes()...),
+			})
+			if marshalErr != nil {
+				return http.StatusInternalServerError, []byte("mutation_response_unavailable")
+			}
+			return capture.status, envelope
 		})
 		if doErr != nil && status == 0 {
 			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		var envelope mutationResponseEnvelope
+		if err := json.Unmarshal(responseBody, &envelope); err == nil && envelope.Version == mutationResponseEnvelopeVersion {
+			copyResponseHeader(w.Header(), envelope.Header)
+			responseBody = envelope.Body
+		}
 		w.WriteHeader(status)
 		_, _ = w.Write(responseBody)
+		if !executed || capture == nil || len(capture.afterResponse) == 0 {
+			return
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		for _, callback := range capture.afterResponse {
+			outcome := callback()
+			for _, observe := range observers {
+				if observe != nil {
+					observe(outcome)
+				}
+			}
+		}
 	}))
 }
 
+func copyResponseHeader(destination, source http.Header) {
+	for name := range destination {
+		destination.Del(name)
+	}
+	for name, values := range source {
+		destination[name] = append([]string(nil), values...)
+	}
+}
+
 type responseCapture struct {
-	header      http.Header
-	body        bytes.Buffer
-	status      int
-	wroteHeader bool
+	header          http.Header
+	committedHeader http.Header
+	body            bytes.Buffer
+	status          int
+	wroteHeader     bool
+	afterResponse   []func() RestartScheduleOutcome
 }
 
 func newResponseCapture() *responseCapture {
@@ -191,11 +285,19 @@ func (w *responseCapture) WriteHeader(status int) {
 	}
 	w.status = status
 	w.wroteHeader = true
+	w.committedHeader = w.header.Clone()
 }
 
 func (w *responseCapture) Write(body []byte) (int, error) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
+		w.committedHeader = w.header.Clone()
 	}
 	return w.body.Write(body)
+}
+
+func (w *responseCapture) AfterResponse(callback func() RestartScheduleOutcome) {
+	if callback != nil {
+		w.afterResponse = append(w.afterResponse, callback)
+	}
 }

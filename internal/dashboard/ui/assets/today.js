@@ -7,6 +7,17 @@ const phase = Object.freeze({
   disconnected: "disconnected",
 });
 
+function requestedSessionID() {
+  const href = globalThis.location?.href || "http://127.0.0.1/desk/";
+  const values = new URL(href).searchParams.getAll("session_id");
+  if (values.length !== 1) {
+    return "";
+  }
+  return values[0].trim();
+}
+
+const initialSessionID = requestedSessionID();
+
 const elements = {
   shell: document.querySelector(".desk-shell"),
   title: document.querySelector("#desk-session-title"),
@@ -436,9 +447,10 @@ async function openDesk() {
       }
       state.clientID = "";
     }
+    const sessionID = state.sessionID || initialSessionID;
     const opened = await postMutation("/api/v1/desk/chat/open", {
-      continue: true,
-      session_id: "",
+      continue: sessionID === "",
+      session_id: sessionID,
       profile: "",
       capabilities: [],
     });

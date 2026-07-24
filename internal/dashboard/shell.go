@@ -24,7 +24,9 @@ func shellHandler(security *Security, view ui.ShellView) http.Handler {
 		switch {
 		case r.URL.Path == "/desk/":
 			w.Header().Set("Cache-Control", "no-store")
-			if err := ui.Shell(view).Render(r.Context(), w); err != nil {
+			requestView := view
+			requestView.ActiveSection = deskSection(r.URL.Query()["section"])
+			if err := ui.Shell(requestView).Render(r.Context(), w); err != nil {
 				http.Error(w, "render Waffle Desk shell", http.StatusInternalServerError)
 			}
 		case strings.HasPrefix(r.URL.Path, "/desk/assets/"):
@@ -35,6 +37,18 @@ func shellHandler(security *Security, view ui.ShellView) http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func deskSection(values []string) string {
+	if len(values) != 1 {
+		return "today"
+	}
+	switch values[0] {
+	case "today", "tasks", "workspaces", "memory", "capabilities":
+		return values[0]
+	default:
+		return "today"
+	}
 }
 
 func withShellDefaults(view ui.ShellView, requestToken string) ui.ShellView {

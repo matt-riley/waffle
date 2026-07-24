@@ -68,6 +68,28 @@ func TestShellHandlerProvidesDefaultShellView(t *testing.T) {
 	}
 }
 
+func TestShellRendersOnlyTheRequestedSection(t *testing.T) {
+	handler := newTestShellHandler(t, ui.ShellView{})
+	for section, marker := range map[string]string{
+		"today":        `id="desk-session-title"`,
+		"tasks":        `id="tasks-title"`,
+		"workspaces":   `id="workspaces-title"`,
+		"memory":       `id="memory-title"`,
+		"capabilities": `id="capabilities-title"`,
+	} {
+		t.Run(section, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/?section="+section, nil))
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), marker) {
+				t.Fatalf("section %q = %d %q", section, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `data-active-section="`+section+`"`) {
+				t.Fatalf("section %q does not expose its active state", section)
+			}
+		})
+	}
+}
+
 func TestShellEscapesDynamicViewStrings(t *testing.T) {
 	view := ui.ShellView{
 		Title:         `Today <script>alert("title")</script>`,
@@ -174,7 +196,8 @@ func TestShellServesVersionedEmbeddedAssets(t *testing.T) {
 		t.Fatalf("app module status = %d, want %d", appModule.Code, http.StatusOK)
 	}
 	for _, required := range []string{
-		`new URL("./today.js", import.meta.url)`,
+		`today: "today.js"`,
+		`tasks: "tasks.js"`,
 		`moduleURL.searchParams.set("v", version)`,
 	} {
 		if !strings.Contains(appModule.Body.String(), required) {

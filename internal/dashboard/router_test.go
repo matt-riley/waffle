@@ -104,6 +104,69 @@ func TestMutationHandlerCachesTheFirstStatusWhenHandlerWritesTwice(t *testing.T)
 	}
 }
 
+func TestMutationHandlerPreservesHeadersAndRunsAfterResponseOnceAfterFlush(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	store := NewIdempotencyStore(nil, 512, time.Minute)
+	callbacks := 0
+	observed := make([]RestartScheduleOutcome, 0, 1)
+	var recorder *httptest.ResponseRecorder
+	handler := NewMutationHandler(
+		security,
+		store,
+		1024,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			after, ok := w.(AfterResponseWriter)
+			if !ok {
+				t.Fatal("mutation response does not implement AfterResponseWriter")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Waffle-Result", "committed")
+			after.AfterResponse(func() RestartScheduleOutcome {
+				callbacks++
+				if recorder == nil || recorder.Body.String() != `{"ok":true}` {
+					t.Fatalf("callback ran before response copy: %q", recorder.Body.String())
+				}
+				return RestartScheduleOutcome{Scheduled: true, Code: "restart_scheduled", Message: "scheduled"}
+			})
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}),
+		func(outcome RestartScheduleOutcome) {
+			observed = append(observed, outcome)
+		},
+	)
+
+	request := func() *httptest.ResponseRecorder {
+		recorder = httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test", strings.NewReader(`{"intent":"same"}`))
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", "after-response")
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	first := request()
+	replay := request()
+	for index, response := range []*httptest.ResponseRecorder{first, replay} {
+		if response.Code != http.StatusAccepted || response.Body.String() != `{"ok":true}` {
+			t.Fatalf("response %d = %d %q", index, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Content-Type"); got != "application/json" {
+			t.Fatalf("response %d content type = %q", index, got)
+		}
+		if got := response.Header().Get("X-Waffle-Result"); got != "committed" {
+			t.Fatalf("response %d result header = %q", index, got)
+		}
+	}
+	if callbacks != 1 {
+		t.Fatalf("after-response callbacks = %d, want 1", callbacks)
+	}
+	if len(observed) != 1 || observed[0].Code != "restart_scheduled" {
+		t.Fatalf("observed outcomes = %#v", observed)
+	}
+}
+
 func TestChatOpenRouteUsesMutationProtectionAndIdempotency(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	backend := &fakeChatBackend{}

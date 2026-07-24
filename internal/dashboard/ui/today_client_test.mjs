@@ -128,6 +128,7 @@ function jsonResponse(body, ok = true) {
 }
 
 function createHarness({
+  href = "http://127.0.0.1/desk/?section=today",
   bootstrap = {
     version: "test-version",
     request_token: "fresh-token",
@@ -255,6 +256,7 @@ function createHarness({
     document,
     EventSource: FakeEventSource,
     fetch,
+    location: { href },
     URL,
   });
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
@@ -285,6 +287,21 @@ test("bootstrap replaces stale in-memory authority and seeds the native event cu
   assert.equal(open.options.headers["X-Waffle-Desk-Token"], "fresh-token");
   assert.equal(harness.EventSource.instances.length, 1);
   assert.equal(harness.EventSource.instances[0].url, "/api/v1/desk/events?after=42");
+});
+
+test("open at desk selects exactly one requested persisted session", async () => {
+  const harness = createHarness({
+    href: "http://127.0.0.1/desk/?section=today&session_id=session-live",
+  });
+  await flush();
+
+  const [open] = mutationCalls(harness, "/api/v1/desk/chat/open");
+  assert.deepEqual(JSON.parse(open.options.body), {
+    capabilities: [],
+    continue: false,
+    profile: "",
+    session_id: "session-live",
+  });
 });
 
 test("invalid bootstrap request token prevents authenticated mutations", async () => {
