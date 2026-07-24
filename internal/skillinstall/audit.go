@@ -1,15 +1,17 @@
 package skillinstall
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -26,104 +28,268 @@ func readReviewedTree(root string) (reviewedTree, error) {
 }
 
 func readReviewedTreeBound(root string, byteLimit int64) (reviewedTree, error) {
-	info, err := os.Lstat(root)
-	if err != nil {
-		return reviewedTree{}, fmt.Errorf("%w: inspect source root: %v", ErrUnsafeTree, err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return reviewedTree{}, fmt.Errorf("%w: source root is not a real directory", ErrUnsafeTree)
-	}
-	confined, err := os.OpenRoot(root)
-	if err != nil {
-		return reviewedTree{}, fmt.Errorf("%w: open source root: %v", ErrUnsafeTree, err)
-	}
-	defer func() { _ = confined.Close() }()
-
-	files := make([]reviewedFile, 0)
-	entriesSeen := 0
-	var totalBytes int64
-	skillFiles := 0
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return fmt.Errorf("%w: walk source: %v", ErrUnsafeTree, walkErr)
-		}
-		if path == root {
-			return nil
-		}
-		entriesSeen++
-		if entriesSeen > maxReviewEntries {
-			return fmt.Errorf("%w: more than %d filesystem entries", ErrTreeTooLarge, maxReviewEntries)
-		}
-
-		relative, err := filepath.Rel(root, path)
-		if err != nil || !safeRelativePath(relative) {
-			return fmt.Errorf("%w: invalid relative path", ErrUnsafeTree)
-		}
-		slashPath := filepath.ToSlash(relative)
-		if hasVCSComponent(slashPath) {
-			return fmt.Errorf("%w: hidden VCS state %q", ErrUnsafeTree, slashPath)
-		}
-
-		current, err := os.Lstat(path)
-		if err != nil {
-			return fmt.Errorf("%w: inspect %q: %v", ErrUnsafeTree, slashPath, err)
-		}
-		if current.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: symlink %q", ErrUnsafeTree, slashPath)
-		}
-		if current.IsDir() {
-			return nil
-		}
-		if !current.Mode().IsRegular() {
-			return fmt.Errorf("%w: special file %q", ErrUnsafeTree, slashPath)
-		}
-		if current.Mode().Perm()&0o111 != 0 {
-			return fmt.Errorf("%w: executable file %q", ErrUnsafeTree, slashPath)
-		}
-		if len(files)+1 > maxReviewFiles {
-			return fmt.Errorf("%w: more than %d files", ErrTreeTooLarge, maxReviewFiles)
-		}
-		if current.Size() < 0 || current.Size() > byteLimit-totalBytes {
-			return fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, byteLimit)
-		}
-
-		data, err := confined.ReadFile(relative)
-		if err != nil {
-			return fmt.Errorf("%w: read %q: %v", ErrUnsafeTree, slashPath, err)
-		}
-		after, err := confined.Lstat(relative)
-		if err != nil || !after.Mode().IsRegular() || after.Mode()&os.ModeSymlink != 0 || after.Size() != int64(len(data)) {
-			return fmt.Errorf("%w: %q changed while reading", ErrUnsafeTree, slashPath)
-		}
-		if int64(len(data)) > byteLimit-totalBytes {
-			return fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, byteLimit)
-		}
-		totalBytes += int64(len(data))
-		if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
-			return fmt.Errorf("%w: binary or NUL content in %q", ErrUnsafeTree, slashPath)
-		}
-
-		sum := sha256.Sum256(data)
-		files = append(files, reviewedFile{
-			entry: FileEntry{
-				Path:    slashPath,
-				Size:    int64(len(data)),
-				SHA256:  hex.EncodeToString(sum[:]),
-				Preview: string(data),
-			},
-			data: append([]byte(nil), data...),
-		})
-		if filepath.Base(relative) == "SKILL.md" {
-			skillFiles++
-		}
-		return nil
-	})
+	confined, err := openVerifiedPathRoot(root, nil)
 	if err != nil {
 		return reviewedTree{}, err
 	}
+	defer func() { _ = confined.Close() }()
+	return readReviewedRoot(confined, byteLimit, nil)
+}
+
+type reviewWalk struct {
+	byteLimit   int64
+	totalBytes  int64
+	entriesSeen int
+	files       []reviewedFile
+	beforeEntry func(string)
+}
+
+func readReviewedRoot(root *os.Root, byteLimit int64, beforeEntry func(string)) (reviewedTree, error) {
+	if root == nil {
+		return reviewedTree{}, fmt.Errorf("%w: source root required", ErrUnsafeTree)
+	}
+	walk := &reviewWalk{
+		byteLimit:   byteLimit,
+		files:       make([]reviewedFile, 0),
+		beforeEntry: beforeEntry,
+	}
+	if err := walk.directory(root, ""); err != nil {
+		return reviewedTree{}, err
+	}
+	return reviewedTreeFromFiles(walk.files)
+}
+
+func (w *reviewWalk) directory(root *os.Root, prefix string) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("%w: open source directory", ErrUnsafeTree)
+	}
+	defer func() { _ = directory.Close() }()
+	for {
+		entries, readErr := directory.ReadDir(32)
+		for _, entry := range entries {
+			name := entry.Name()
+			slashPath := name
+			if prefix != "" {
+				slashPath = prefix + "/" + name
+			}
+			if !safeArchivePath(slashPath) || len(slashPath) > maxReviewPathBytes || !utf8.ValidString(slashPath) {
+				return fmt.Errorf("%w: invalid relative path", ErrUnsafeTree)
+			}
+			w.entriesSeen++
+			if w.entriesSeen > maxReviewEntries {
+				return fmt.Errorf("%w: more than %d filesystem entries", ErrTreeTooLarge, maxReviewEntries)
+			}
+			if hasVCSComponent(slashPath) {
+				return fmt.Errorf("%w: hidden VCS state %q", ErrUnsafeTree, slashPath)
+			}
+			if w.beforeEntry != nil {
+				w.beforeEntry(slashPath)
+			}
+			before, err := root.Lstat(name)
+			if err != nil || before.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%w: inspect %q", ErrUnsafeTree, slashPath)
+			}
+			if before.IsDir() {
+				child, err := openVerifiedChildRoot(root, name, before)
+				if err != nil {
+					return fmt.Errorf("%w: directory %q changed while reading", ErrUnsafeTree, slashPath)
+				}
+				childErr := w.directory(child, slashPath)
+				closeErr := child.Close()
+				if childErr != nil {
+					return childErr
+				}
+				if closeErr != nil {
+					return fmt.Errorf("%w: close source directory %q", ErrUnsafeTree, slashPath)
+				}
+				continue
+			}
+			if err := w.file(root, name, slashPath, before); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("%w: enumerate source directory", ErrUnsafeTree)
+		}
+	}
+}
+
+func (w *reviewWalk) file(root *os.Root, name, slashPath string, before os.FileInfo) error {
+	if !before.Mode().IsRegular() {
+		return fmt.Errorf("%w: special file %q", ErrUnsafeTree, slashPath)
+	}
+	if before.Mode().Perm()&0o111 != 0 {
+		return fmt.Errorf("%w: executable file %q", ErrUnsafeTree, slashPath)
+	}
+	if len(w.files)+1 > maxReviewFiles {
+		return fmt.Errorf("%w: more than %d files", ErrTreeTooLarge, maxReviewFiles)
+	}
+	remaining := w.byteLimit - w.totalBytes
+	if before.Size() < 0 || before.Size() > remaining {
+		return fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, w.byteLimit)
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return fmt.Errorf("%w: open %q", ErrUnsafeTree, slashPath)
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, opened) {
+		return fmt.Errorf("%w: %q changed before reading", ErrUnsafeTree, slashPath)
+	}
+	afterOpen, err := root.Lstat(name)
+	if err != nil || afterOpen.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, afterOpen) {
+		return fmt.Errorf("%w: %q changed before reading", ErrUnsafeTree, slashPath)
+	}
+	if opened.Mode().Perm()&0o111 != 0 {
+		return fmt.Errorf("%w: executable file %q", ErrUnsafeTree, slashPath)
+	}
+	if opened.Size() < 0 || opened.Size() > remaining {
+		return fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, w.byteLimit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, remaining+1))
+	if err != nil {
+		return fmt.Errorf("%w: read %q", ErrUnsafeTree, slashPath)
+	}
+	if int64(len(data)) > remaining {
+		return fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, w.byteLimit)
+	}
+	final, err := file.Stat()
+	if err != nil || !os.SameFile(opened, final) || final.Size() != int64(len(data)) {
+		return fmt.Errorf("%w: %q changed while reading", ErrUnsafeTree, slashPath)
+	}
+	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+		return fmt.Errorf("%w: binary or NUL content in %q", ErrUnsafeTree, slashPath)
+	}
+	w.totalBytes += int64(len(data))
+	w.files = append(w.files, newReviewedFile(slashPath, data))
+	return nil
+}
+
+func openLocalSource(source localSourceSpec) (*os.Root, error) {
+	importRoot, err := openVerifiedPathRoot(source.rootPath, source.rootInfo)
+	if err != nil {
+		return nil, err
+	}
+	if source.relative == "." {
+		opened, err := importRoot.Stat(".")
+		if err != nil || !os.SameFile(opened, source.sourceInfo) {
+			_ = importRoot.Close()
+			return nil, fmt.Errorf("%w: local source changed", ErrUnsafeTree)
+		}
+		return importRoot, nil
+	}
+	sourceRoot, err := openRelativeRoot(importRoot, source.relative)
+	_ = importRoot.Close()
+	if err != nil {
+		return nil, err
+	}
+	opened, err := sourceRoot.Stat(".")
+	if err != nil || !os.SameFile(opened, source.sourceInfo) {
+		_ = sourceRoot.Close()
+		return nil, fmt.Errorf("%w: local source changed", ErrUnsafeTree)
+	}
+	return sourceRoot, nil
+}
+
+func openVerifiedPathRoot(path string, expected os.FileInfo) (*os.Root, error) {
+	before, err := os.Lstat(path)
+	if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 ||
+		(expected != nil && !os.SameFile(before, expected)) {
+		return nil, fmt.Errorf("%w: source root is not a stable real directory", ErrUnsafeTree)
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open source root", ErrUnsafeTree)
+	}
+	opened, openErr := root.Stat(".")
+	after, afterErr := os.Lstat(path)
+	if openErr != nil || afterErr != nil || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, opened) || !os.SameFile(opened, after) {
+		_ = root.Close()
+		return nil, fmt.Errorf("%w: source root changed while opening", ErrUnsafeTree)
+	}
+	return root, nil
+}
+
+func openRelativeRoot(root *os.Root, relative string) (*os.Root, error) {
+	current := root
+	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+		before, err := current.Lstat(component)
+		if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+			if current != root {
+				_ = current.Close()
+			}
+			return nil, fmt.Errorf("%w: local source contains an unsafe path component", ErrUnsafeTree)
+		}
+		next, err := openVerifiedChildRoot(current, component, before)
+		if err != nil {
+			if current != root {
+				_ = current.Close()
+			}
+			return nil, err
+		}
+		if current != root {
+			_ = current.Close()
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func openVerifiedChildRoot(parent *os.Root, name string, before os.FileInfo) (*os.Root, error) {
+	child, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open source directory", ErrUnsafeTree)
+	}
+	opened, openErr := child.Stat(".")
+	after, afterErr := parent.Lstat(name)
+	if openErr != nil || afterErr != nil || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, opened) || !os.SameFile(opened, after) {
+		_ = child.Close()
+		return nil, fmt.Errorf("%w: source directory changed while opening", ErrUnsafeTree)
+	}
+	return child, nil
+}
+
+func verifyLocalSourcePath(source localSourceSpec, opened *os.Root) error {
+	current, err := os.Lstat(source.sourcePath)
+	openedInfo, openedErr := opened.Stat(".")
+	if err != nil || openedErr != nil || current.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(current, source.sourceInfo) || !os.SameFile(openedInfo, source.sourceInfo) {
+		return fmt.Errorf("%w: local source changed after opening", ErrUnsafeTree)
+	}
+	return nil
+}
+
+func newReviewedFile(path string, data []byte) reviewedFile {
+	sum := sha256.Sum256(data)
+	return reviewedFile{
+		entry: FileEntry{
+			Path:    path,
+			Size:    int64(len(data)),
+			SHA256:  hex.EncodeToString(sum[:]),
+			Preview: string(data),
+		},
+		data: append([]byte(nil), data...),
+	}
+}
+
+func reviewedTreeFromFiles(files []reviewedFile) (reviewedTree, error) {
 	sort.Slice(files, func(left, right int) bool {
 		return files[left].entry.Path < files[right].entry.Path
 	})
+	skillFiles := 0
+	for index := range files {
+		if files[index].entry.Path == "SKILL.md" || filepath.Base(filepath.FromSlash(files[index].entry.Path)) == "SKILL.md" {
+			skillFiles++
+		}
+	}
 	if skillFiles != 1 {
 		return reviewedTree{}, fmt.Errorf("%w: require exactly one SKILL.md, found %d", ErrAuditFailed, skillFiles)
 	}
@@ -162,7 +328,7 @@ func safeRelativePath(relative string) bool {
 
 func hasVCSComponent(path string) bool {
 	for _, component := range strings.Split(path, "/") {
-		switch component {
+		switch strings.ToLower(component) {
 		case ".git", ".hg", ".svn":
 			return true
 		}
@@ -229,15 +395,36 @@ func unquoteFrontmatterValue(value string) (string, error) {
 	}
 	first := value[0]
 	if first != '"' && first != '\'' {
-		if strings.HasSuffix(value, `"`) || strings.HasSuffix(value, `'`) {
-			return "", errors.New("unmatched frontmatter quote")
+		if strings.ContainsAny(value[:1], "-?:,[]{}#&*!|>'\"%@`") ||
+			strings.Contains(value, ": ") || strings.Contains(value, " #") ||
+			strings.HasSuffix(value, `"`) || strings.HasSuffix(value, `'`) {
+			return "", errors.New("invalid plain frontmatter scalar")
 		}
 		return value, nil
 	}
 	if len(value) < 2 || value[len(value)-1] != first {
 		return "", errors.New("unmatched frontmatter quote")
 	}
-	return value[1 : len(value)-1], nil
+	if first == '"' {
+		parsed, err := strconv.Unquote(value)
+		if err != nil {
+			return "", errors.New("invalid double-quoted frontmatter scalar")
+		}
+		return parsed, nil
+	}
+	var parsed strings.Builder
+	for index := 1; index < len(value)-1; index++ {
+		if value[index] != '\'' {
+			parsed.WriteByte(value[index])
+			continue
+		}
+		if index+1 >= len(value)-1 || value[index+1] != '\'' {
+			return "", errors.New("invalid single-quoted frontmatter scalar")
+		}
+		parsed.WriteByte('\'')
+		index++
+	}
+	return parsed.String(), nil
 }
 
 func auditFlags(files []reviewedFile) []string {

@@ -10,29 +10,33 @@ import (
 )
 
 const (
-	maxReviewFiles    = 64
-	maxReviewBytes    = 1 << 20
-	maxReviewEntries  = 256
-	maxStageRecord    = 8 * maxReviewBytes
-	maxInactiveGrowth = 64
-	stageLifetime     = 10 * time.Minute
-	stageIDBytes      = 16
+	maxReviewFiles     = 64
+	maxReviewBytes     = 1 << 20
+	maxReviewEntries   = 256
+	maxReviewPathBytes = 1024
+	maxGitArchiveBytes = maxReviewBytes + maxReviewEntries*(maxReviewPathBytes+1536) + 1024
+	maxStageRecord     = 8 * maxReviewBytes
+	maxInactiveGrowth  = 64
+	stageLifetime      = 10 * time.Minute
+	stageIDBytes       = 16
 )
 
 var (
-	ErrInvalidRequest    = errors.New("invalid skill stage request")
-	ErrSourceNotAllowed  = errors.New("skill source not allowed")
-	ErrCommitRequired    = errors.New("exact pinned Git commit required")
-	ErrGitHostNotAllowed = errors.New("git host not allowed")
-	ErrCommitMismatch    = errors.New("fetched git commit does not match requested commit")
-	ErrUnsafeTree        = errors.New("unsafe skill source tree")
-	ErrTreeTooLarge      = errors.New("skill source exceeds review bounds")
-	ErrAuditFailed       = errors.New("skill audit failed")
-	ErrSkillExists       = errors.New("skill already installed")
-	ErrStageNotFound     = errors.New("skill install stage not found")
-	ErrStageExpired      = errors.New("skill install stage expired")
-	ErrDigestMismatch    = errors.New("review digest mismatch")
-	ErrStageChanged      = errors.New("staged skill changed after review")
+	ErrInvalidRequest          = errors.New("invalid skill stage request")
+	ErrSourceNotAllowed        = errors.New("skill source not allowed")
+	ErrCommitRequired          = errors.New("exact pinned Git commit required")
+	ErrGitHostNotAllowed       = errors.New("git host not allowed")
+	ErrBoundedGitUnsupported   = errors.New("bounded exact-commit Git archive unsupported")
+	ErrCommitMismatch          = errors.New("fetched git commit does not match requested commit")
+	ErrUnsafeTree              = errors.New("unsafe skill source tree")
+	ErrTreeTooLarge            = errors.New("skill source exceeds review bounds")
+	ErrAuditFailed             = errors.New("skill audit failed")
+	ErrSkillExists             = errors.New("skill already installed")
+	ErrStageNotFound           = errors.New("skill install stage not found")
+	ErrStageExpired            = errors.New("skill install stage expired")
+	ErrDigestMismatch          = errors.New("review digest mismatch")
+	ErrStageChanged            = errors.New("staged skill changed after review")
+	ErrAtomicRenameUnsupported = errors.New("atomic no-replace skill installation unsupported on this platform")
 )
 
 type StageRequest struct {

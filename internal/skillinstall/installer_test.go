@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -225,6 +226,67 @@ func TestStageRejectsInvalidRequestAndLocalEscape(t *testing.T) {
 	}
 }
 
+func TestStageRejectsLocalRootSwapAfterOpening(t *testing.T) {
+	f := newInstallerFixture(t)
+	original := f.source + "-original"
+	outside := filepath.Join(filepath.Dir(f.imports), "outside-swap")
+	writeFile(t, filepath.Join(outside, "SKILL.md"), "---\nname: escaped\ndescription: Must not be imported.\n---\n", 0o600)
+	f.installer.afterLocalSourceOpen = func() {
+		if err := os.Rename(f.source, original); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, f.source); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := f.installer.Stage(context.Background(), StageRequest{LocalPath: f.source}); !errors.Is(err, ErrUnsafeTree) {
+		t.Fatalf("error = %v, want ErrUnsafeTree", err)
+	}
+	assertNoStages(t, f.stages)
+}
+
+func TestStageBoundsFileThatGrowsBeforeOpen(t *testing.T) {
+	f := newInstallerFixture(t)
+	f.installer.beforeLocalEntry = func(relative string) {
+		if relative != "guide.txt" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(f.source, relative), bytes.Repeat([]byte{'x'}, maxReviewBytes), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := f.installer.Stage(context.Background(), StageRequest{LocalPath: f.source}); !errors.Is(err, ErrTreeTooLarge) {
+		t.Fatalf("error = %v, want ErrTreeTooLarge", err)
+	}
+	assertNoStages(t, f.stages)
+}
+
+func TestStageRejectsDirectoryComponentSwap(t *testing.T) {
+	f := newInstallerFixture(t)
+	writeFile(t, filepath.Join(f.source, "docs", "inside.txt"), "inside\n", 0o600)
+	outside := filepath.Join(filepath.Dir(f.imports), "outside-component")
+	writeFile(t, filepath.Join(outside, "outside.txt"), "outside\n", 0o600)
+	original := filepath.Join(f.source, "docs-original")
+	f.installer.beforeLocalEntry = func(relative string) {
+		if relative != "docs" {
+			return
+		}
+		if err := os.Rename(filepath.Join(f.source, "docs"), original); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(f.source, "docs")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := f.installer.Stage(context.Background(), StageRequest{LocalPath: f.source}); !errors.Is(err, ErrUnsafeTree) {
+		t.Fatalf("error = %v, want ErrUnsafeTree", err)
+	}
+	assertNoStages(t, f.stages)
+}
+
 func TestStageRejectsSymlinksSpecialFilesAndUnsafeContent(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -254,6 +316,9 @@ func TestStageRejectsSymlinksSpecialFilesAndUnsafeContent(t *testing.T) {
 		}},
 		{name: "hidden git state", build: func(t *testing.T, f *fixture) {
 			writeFile(t, filepath.Join(f.source, ".git", "config"), "[core]\n", 0o600)
+		}},
+		{name: "case folded hidden git state", build: func(t *testing.T, f *fixture) {
+			writeFile(t, filepath.Join(f.source, ".GIT", "config"), "[core]\n", 0o600)
 		}},
 		{name: "NUL byte", build: func(t *testing.T, f *fixture) {
 			if err := os.WriteFile(filepath.Join(f.source, "nul.txt"), []byte{'a', 0, 'b'}, 0o600); err != nil {
@@ -329,6 +394,15 @@ func TestStageRequiresStrictRootSkillFrontmatter(t *testing.T) {
 		}},
 		{name: "duplicate status", build: func(t *testing.T, f *fixture) {
 			writeFile(t, filepath.Join(f.source, "SKILL.md"), "---\nname: reviewed-skill\ndescription: Duplicate status.\nstatus: active\nstatus: inactive\n---\n", 0o600)
+		}},
+		{name: "collection description", build: func(t *testing.T, f *fixture) {
+			writeFile(t, filepath.Join(f.source, "SKILL.md"), "---\nname: reviewed-skill\ndescription: [not, a, scalar]\n---\n", 0o600)
+		}},
+		{name: "malformed quoted description", build: func(t *testing.T, f *fixture) {
+			writeFile(t, filepath.Join(f.source, "SKILL.md"), "---\nname: reviewed-skill\ndescription: \"closed\" trailing\"\n---\n", 0o600)
+		}},
+		{name: "mapping-like plain description", build: func(t *testing.T, f *fixture) {
+			writeFile(t, filepath.Join(f.source, "SKILL.md"), "---\nname: reviewed-skill\ndescription: invalid: mapping\n---\n", 0o600)
 		}},
 	}
 	for _, test := range tests {
@@ -433,13 +507,16 @@ func TestStageRejectsUnsafeGitRequestsBeforeFetch(t *testing.T) {
 }
 
 func TestGitEnvironmentDisablesCredentialAndRewriteConfiguration(t *testing.T) {
+	t.Setenv("HOME", "/tmp/untrusted-home")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/untrusted-xdg")
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "url.ssh://example.invalid/.insteadOf")
 	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/untrusted-gitconfig")
 	t.Setenv("GIT_ASKPASS", "/tmp/untrusted-askpass")
 
-	environment := gitEnvironment()
+	privateHome := filepath.Join(t.TempDir(), "private-git-home")
+	environment := gitEnvironment(privateHome)
 	values := make(map[string]string)
 	for _, item := range environment {
 		key, value, found := strings.Cut(item, "=")
@@ -459,6 +536,9 @@ func TestGitEnvironmentDisablesCredentialAndRewriteConfiguration(t *testing.T) {
 		values["SSH_ASKPASS"] != os.DevNull {
 		t.Fatalf("Git prompt controls = (%q, %q, %q)",
 			values["GIT_TERMINAL_PROMPT"], values["GIT_ASKPASS"], values["SSH_ASKPASS"])
+	}
+	if values["HOME"] != privateHome || values["XDG_CONFIG_HOME"] != privateHome {
+		t.Fatalf("Git homes = (%q, %q), want private %q", values["HOME"], values["XDG_CONFIG_HOME"], privateHome)
 	}
 }
 
@@ -551,6 +631,115 @@ func TestStageGitMismatchAndAuditFailureCleanUp(t *testing.T) {
 	})
 }
 
+func TestCommandGitFetcherEnforcesBoundsBeforeMaterialization(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*testing.T, string)
+	}{
+		{
+			name: "too many files",
+			build: func(t *testing.T, repo string) {
+				t.Helper()
+				for index := 0; index < maxReviewFiles; index++ {
+					writeFile(t, filepath.Join(repo, fmt.Sprintf("extra-%02d.txt", index)), "x\n", 0o600)
+				}
+			},
+		},
+		{
+			name: "oversize content",
+			build: func(t *testing.T, repo string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(repo, "large.txt"), bytes.Repeat([]byte{'x'}, maxReviewBytes), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo, commit := newLocalGitSkill(t, test.build)
+			destination := filepath.Join(t.TempDir(), "fetched")
+
+			err := (commandGitFetcher{}).Fetch(context.Background(), "file://"+repo, commit, destination)
+			if !errors.Is(err, ErrTreeTooLarge) {
+				t.Fatalf("error = %v, want ErrTreeTooLarge", err)
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("bounded fetch materialized destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommandGitFetcherMaterializesExactLocalCommitWithoutNetwork(t *testing.T) {
+	repo, commit := newLocalGitSkill(t, nil)
+	destination := filepath.Join(t.TempDir(), "fetched")
+
+	if err := (commandGitFetcher{}).Fetch(context.Background(), "file://"+repo, commit, destination); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(destination, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "name: reviewed-skill") {
+		t.Fatalf("materialized SKILL.md = %q", body)
+	}
+	if _, err := os.Lstat(filepath.Join(destination, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("materialized Git metadata: %v", err)
+	}
+}
+
+func TestCommandGitFetcherFailsClosedWhenRemoteArchiveCannotServeExactCommit(t *testing.T) {
+	repo, commit := newLocalGitSkill(t, nil)
+	command := exec.Command("git", "-C", repo, "config", "--unset", "uploadarchive.allowUnreachable")
+	command.Env = gitEnvironment(t.TempDir())
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("disable exact remote archive support: %v\n%s", err, output)
+	}
+	destination := filepath.Join(t.TempDir(), "fetched")
+
+	err := (commandGitFetcher{}).Fetch(context.Background(), "file://"+repo, commit, destination)
+	if !errors.Is(err, ErrBoundedGitUnsupported) {
+		t.Fatalf("error = %v, want ErrBoundedGitUnsupported", err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported remote materialized destination: %v", err)
+	}
+}
+
+func newLocalGitSkill(t *testing.T, build func(*testing.T, string)) (string, string) {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFile(t, filepath.Join("testdata", "valid", "SKILL.md"), filepath.Join(repo, "SKILL.md"))
+	if build != nil {
+		build(t, repo)
+	}
+	runGit := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repo}, arguments...)...)
+		command.Env = gitEnvironment(t.TempDir())
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("init", "--quiet")
+	runGit("config", "uploadarchive.allowUnreachable", "true")
+	runGit("-c", "core.hooksPath=/dev/null", "add", "--all")
+	runGit(
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "user.name=Waffle Test",
+		"-c", "user.email=waffle@example.invalid",
+		"commit", "--quiet", "-m", "fixture",
+	)
+	return repo, runGit("rev-parse", "HEAD")
+}
+
 func TestInstallInjectsInactiveAndConsumesStage(t *testing.T) {
 	f := newInstallerFixture(t)
 	writeFile(t, filepath.Join(f.source, "SKILL.md"), "---\nname: reviewed-skill\ndescription: Reviews changes carefully.\nstatus: active\nowner: matt\n---\n\n# Reviewed skill\n\nKeep this body exact.\n", 0o600)
@@ -606,6 +795,83 @@ func TestInstallInjectsInactiveAndConsumesStage(t *testing.T) {
 	if _, err := f.installer.Install(context.Background(), manifest.StageID, manifest.ContentDigest); !errors.Is(err, ErrStageNotFound) {
 		t.Fatalf("stage reuse error = %v, want ErrStageNotFound", err)
 	}
+}
+
+func TestInstallDoesNotRediscoverUnrelatedSkillsAfterCommit(t *testing.T) {
+	f := newInstallerFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.skills, "unrelated", "SKILL.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := stageLocal(t, f)
+
+	installed, err := f.installer.Install(context.Background(), manifest.StageID, manifest.ContentDigest)
+	if err != nil {
+		t.Fatalf("Install returned a post-commit error: %v", err)
+	}
+	if installed.Name != manifest.Name {
+		t.Fatalf("installed = %+v, want %q", installed, manifest.Name)
+	}
+}
+
+func TestInstallRollsBackParentSyncFailure(t *testing.T) {
+	f := newInstallerFixture(t)
+	manifest := stageLocal(t, f)
+	syncFailure := errors.New("injected parent sync failure")
+	f.installer.syncDirectory = func(path string) error {
+		if path == f.skills {
+			return syncFailure
+		}
+		return syncDirectory(path)
+	}
+
+	result, err := f.installer.InstallReviewed(context.Background(), manifest.StageID, manifest.ContentDigest)
+	if !errors.Is(err, syncFailure) {
+		t.Fatalf("error = %v, want sync failure", err)
+	}
+	if result.Committed {
+		t.Fatalf("result = %+v, want rolled back", result)
+	}
+	if _, err := os.Lstat(filepath.Join(f.skills, manifest.Name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target remains after successful rollback: %v", err)
+	}
+	assertNoStages(t, f.stages)
+}
+
+func TestInstallReportsIrreversibleCommitAfterRollbackFailure(t *testing.T) {
+	f := newInstallerFixture(t)
+	manifest := stageLocal(t, f)
+	syncFailure := errors.New("injected parent sync failure")
+	rollbackFailure := errors.New("injected rollback failure")
+	f.installer.syncDirectory = func(path string) error {
+		if path == f.skills {
+			return syncFailure
+		}
+		return syncDirectory(path)
+	}
+	renames := 0
+	f.installer.rename = func(oldPath, newPath string) error {
+		renames++
+		if renames == 2 {
+			return rollbackFailure
+		}
+		return atomicRenameNoReplace(oldPath, newPath)
+	}
+
+	result, err := f.installer.InstallReviewed(context.Background(), manifest.StageID, manifest.ContentDigest)
+	if err != nil {
+		t.Fatalf("InstallReviewed returned ordinary error after commit: %v", err)
+	}
+	if !result.Committed || result.Skill.Name != manifest.Name {
+		t.Fatalf("result = %+v, want explicit committed skill", result)
+	}
+	if !errors.Is(errors.Join(result.Warnings...), syncFailure) ||
+		!errors.Is(errors.Join(result.Warnings...), rollbackFailure) {
+		t.Fatalf("warnings = %v, want sync and rollback failures", result.Warnings)
+	}
+	if _, err := os.Lstat(filepath.Join(f.skills, manifest.Name, "SKILL.md")); err != nil {
+		t.Fatalf("committed target missing: %v", err)
+	}
+	assertNoStages(t, f.stages)
 }
 
 func TestInstallRejectsExpiryDigestMismatchAndTampering(t *testing.T) {
@@ -748,6 +1014,39 @@ func TestInstallCollisionAndRenameFailureNeverOverwrite(t *testing.T) {
 		}
 		if want := []string{"unrelated"}; !slices.Equal(entryNames(entries), want) {
 			t.Fatalf("skills root after rename failure = %v, want %v", entryNames(entries), want)
+		}
+		assertNoStages(t, f.stages)
+	})
+
+	t.Run("target symlink appears at atomic commit", func(t *testing.T) {
+		f := newInstallerFixture(t)
+		manifest := stageLocal(t, f)
+		outside := filepath.Join(filepath.Dir(f.skills), "outside-target")
+		writeFile(t, filepath.Join(outside, "sentinel"), "keep\n", 0o600)
+		target := filepath.Join(f.skills, manifest.Name)
+		f.installer.rename = func(oldPath, newPath string) error {
+			if err := os.Symlink(outside, target); err != nil {
+				return err
+			}
+			return atomicRenameNoReplace(oldPath, newPath)
+		}
+
+		if _, err := f.installer.Install(context.Background(), manifest.StageID, manifest.ContentDigest); !errors.Is(err, ErrSkillExists) {
+			t.Fatalf("error = %v, want ErrSkillExists", err)
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("target mode = %v, want original symlink", info.Mode())
+		}
+		body, err := os.ReadFile(filepath.Join(outside, "sentinel"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "keep\n" {
+			t.Fatalf("outside sentinel changed: %q", body)
 		}
 		assertNoStages(t, f.stages)
 	})

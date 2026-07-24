@@ -35,21 +35,32 @@ type Installer struct {
 	Now         func() time.Time
 	Random      io.Reader
 
-	mu     sync.Mutex
-	rename func(string, string) error
+	mu            sync.Mutex
+	rename        func(string, string) error
+	syncDirectory func(string) error
+
+	afterLocalSourceOpen func()
+	beforeLocalEntry     func(string)
 }
 
 func New(skillsRoot, stageRoot string, importRoots, gitHosts []string) *Installer {
 	return &Installer{
-		SkillsRoot:  skillsRoot,
-		StageRoot:   stageRoot,
-		ImportRoots: append([]string(nil), importRoots...),
-		GitHosts:    append([]string(nil), gitHosts...),
-		Fetcher:     commandGitFetcher{},
-		Now:         func() time.Time { return time.Now().UTC() },
-		Random:      rand.Reader,
-		rename:      os.Rename,
+		SkillsRoot:    skillsRoot,
+		StageRoot:     stageRoot,
+		ImportRoots:   append([]string(nil), importRoots...),
+		GitHosts:      append([]string(nil), gitHosts...),
+		Fetcher:       commandGitFetcher{},
+		Now:           func() time.Time { return time.Now().UTC() },
+		Random:        rand.Reader,
+		rename:        atomicRenameNoReplace,
+		syncDirectory: syncDirectory,
 	}
+}
+
+type InstallResult struct {
+	Skill     skill.Skill
+	Committed bool
+	Warnings  []error
 }
 
 func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest Manifest, retErr error) {
@@ -80,8 +91,19 @@ func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest M
 		}
 	}()
 
-	if source.localPath != "" {
-		tree, err = readReviewedTree(source.localPath)
+	if source.local != nil {
+		localRoot, openErr := openLocalSource(*source.local)
+		if openErr != nil {
+			return Manifest{}, openErr
+		}
+		defer func() { _ = localRoot.Close() }()
+		if i.afterLocalSourceOpen != nil {
+			i.afterLocalSourceOpen()
+		}
+		if err := verifyLocalSourcePath(*source.local, localRoot); err != nil {
+			return Manifest{}, err
+		}
+		tree, err = readReviewedRoot(localRoot, maxReviewBytes, i.beforeLocalEntry)
 		if err != nil {
 			return Manifest{}, err
 		}
@@ -150,115 +172,141 @@ func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest M
 	return manifest, nil
 }
 
-func (i *Installer) Install(ctx context.Context, stageID, digest string) (installed skill.Skill, retErr error) {
+func (i *Installer) Install(ctx context.Context, stageID, digest string) (skill.Skill, error) {
+	result, err := i.InstallReviewed(ctx, stageID, digest)
+	if result.Committed {
+		return result.Skill, nil
+	}
+	return result.Skill, err
+}
+
+func (i *Installer) InstallReviewed(ctx context.Context, stageID, digest string) (result InstallResult, retErr error) {
 	if i == nil {
-		return skill.Skill{}, errors.New("skill installer required")
+		return InstallResult{}, errors.New("skill installer required")
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if !stageIDPattern.MatchString(stageID) {
-		return skill.Skill{}, ErrStageNotFound
+		return InstallResult{}, ErrStageNotFound
 	}
 	if err := validateExistingRoot(i.StageRoot); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return skill.Skill{}, ErrStageNotFound
+			return InstallResult{}, ErrStageNotFound
 		}
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 	stagePath := filepath.Join(i.StageRoot, stageID)
 	defer func() {
-		retErr = errors.Join(retErr, removeOwnedStage(i.StageRoot, stageID))
+		cleanupErr := removeOwnedStage(i.StageRoot, stageID)
+		if cleanupErr == nil {
+			return
+		}
+		if result.Committed {
+			result.Warnings = append(result.Warnings, cleanupErr)
+			return
+		}
+		retErr = errors.Join(retErr, cleanupErr)
 	}()
 	stageInfo, err := os.Lstat(stagePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return skill.Skill{}, ErrStageNotFound
+		return InstallResult{}, ErrStageNotFound
 	}
 	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
-		return skill.Skill{}, ErrStageNotFound
+		return InstallResult{}, ErrStageNotFound
 	}
 	if err := ctx.Err(); err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 
 	record, err := readStageRecord(filepath.Join(stagePath, stageRecordName))
 	if err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 	if record.Version != 1 || record.Manifest.StageID != stageID {
-		return skill.Skill{}, ErrStageChanged
+		return InstallResult{}, ErrStageChanged
 	}
 	if !i.clock().Before(record.Manifest.ExpiresAt) {
-		return skill.Skill{}, ErrStageExpired
+		return InstallResult{}, ErrStageExpired
 	}
 	if digest == "" || digest != record.Manifest.ContentDigest {
-		return skill.Skill{}, ErrDigestMismatch
+		return InstallResult{}, ErrDigestMismatch
 	}
 	tree, err := readReviewedTree(filepath.Join(stagePath, "content"))
 	if err != nil {
-		return skill.Skill{}, fmt.Errorf("%w: %v", ErrStageChanged, err)
+		return InstallResult{}, fmt.Errorf("%w: %v", ErrStageChanged, err)
 	}
 	if !treeMatchesManifest(tree, record.Manifest) {
-		return skill.Skill{}, ErrStageChanged
+		return InstallResult{}, ErrStageChanged
 	}
 	if err := ensureSkillsRoot(i.SkillsRoot); err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 	if err := ensureSkillAbsent(i.SkillsRoot, tree.name); err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 
 	finalFiles, err := filesWithInactiveStatus(tree.files)
 	if err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 	temporaryPath := filepath.Join(i.SkillsRoot, ".waffle-install-"+stageID)
 	if _, err := os.Lstat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
 		if err == nil {
-			return skill.Skill{}, errors.New("private install staging path already exists")
+			return InstallResult{}, errors.New("private install staging path already exists")
 		}
-		return skill.Skill{}, fmt.Errorf("inspect private install staging path: %w", err)
+		return InstallResult{}, fmt.Errorf("inspect private install staging path: %w", err)
 	}
 	temporaryOwned := false
-	committed := false
 	defer func() {
-		if temporaryOwned && !committed {
+		if temporaryOwned && !result.Committed {
 			retErr = errors.Join(retErr, removeOwnedPath(i.SkillsRoot, temporaryPath))
 		}
 	}()
 	if err := writeReviewedTree(temporaryPath, finalFiles); err != nil {
-		return skill.Skill{}, fmt.Errorf("write atomic skill install stage: %w", err)
+		return InstallResult{}, fmt.Errorf("write atomic skill install stage: %w", err)
 	}
 	temporaryOwned = true
 	finalTree, err := readReviewedTreeBound(temporaryPath, maxReviewBytes+maxInactiveGrowth)
 	if err != nil || !reviewedFilesEqual(finalTree.files, finalFiles) {
-		return skill.Skill{}, fmt.Errorf("verify atomic skill install stage: %w", ErrStageChanged)
+		return InstallResult{}, fmt.Errorf("verify atomic skill install stage: %w", ErrStageChanged)
 	}
 	if err := ensureSkillAbsent(i.SkillsRoot, tree.name); err != nil {
-		return skill.Skill{}, err
+		return InstallResult{}, err
 	}
 
 	targetPath := filepath.Join(i.SkillsRoot, tree.name)
+	installed := skill.Skill{
+		Name:        finalTree.name,
+		Description: finalTree.description,
+		Path:        filepath.Join(targetPath, "SKILL.md"),
+	}
 	rename := i.rename
 	if rename == nil {
-		rename = os.Rename
+		rename = atomicRenameNoReplace
 	}
 	if err := rename(temporaryPath, targetPath); err != nil {
-		return skill.Skill{}, fmt.Errorf("atomically install reviewed skill: %w", err)
+		return InstallResult{}, fmt.Errorf("atomically install reviewed skill: %w", err)
 	}
-	committed = true
-	if err := syncDirectory(i.SkillsRoot); err != nil {
-		return skill.Skill{}, fmt.Errorf("sync installed skill directory: %w", err)
+	temporaryOwned = false
+	result = InstallResult{Skill: installed, Committed: true}
+	syncParent := i.syncDirectory
+	if syncParent == nil {
+		syncParent = syncDirectory
 	}
-
-	discovered, err := skill.Discover(i.SkillsRoot)
-	if err != nil {
-		return skill.Skill{}, fmt.Errorf("discover installed skill: %w", err)
+	if syncErr := syncParent(i.SkillsRoot); syncErr != nil {
+		rollbackErr := rename(targetPath, temporaryPath)
+		if rollbackErr == nil {
+			result = InstallResult{}
+			temporaryOwned = true
+			return InstallResult{}, fmt.Errorf("sync installed skill directory: %w", syncErr)
+		}
+		result.Warnings = append(result.Warnings,
+			fmt.Errorf("sync installed skill directory: %w", syncErr),
+			fmt.Errorf("roll back installed skill after sync failure: %w", rollbackErr),
+		)
+		return result, nil
 	}
-	installed, found := skill.Find(discovered, tree.name)
-	if !found {
-		return skill.Skill{}, errors.New("installed skill was not discoverable")
-	}
-	return installed, nil
+	return result, nil
 }
 
 func (i *Installer) clock() time.Time {

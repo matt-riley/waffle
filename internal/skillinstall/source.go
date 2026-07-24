@@ -1,9 +1,12 @@
 package skillinstall
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -11,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var pinnedCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -20,10 +24,18 @@ type GitFetcher interface {
 }
 
 type sourceSpec struct {
-	localPath string
+	local     *localSourceSpec
 	gitURL    string
 	commit    string
 	sourceRef string
+}
+
+type localSourceSpec struct {
+	rootPath   string
+	relative   string
+	sourcePath string
+	rootInfo   os.FileInfo
+	sourceInfo os.FileInfo
 }
 
 func validateStageRequest(request StageRequest, importRoots, gitHosts []string) (sourceSpec, error) {
@@ -33,16 +45,16 @@ func validateStageRequest(request StageRequest, importRoots, gitHosts []string) 
 		return sourceSpec{}, ErrInvalidRequest
 	}
 	if hasLocal {
-		canonical, err := validateLocalSource(request.LocalPath, importRoots)
+		local, err := validateLocalSource(request.LocalPath, importRoots)
 		if err != nil {
 			return sourceSpec{}, err
 		}
-		label := filepath.Base(canonical)
+		label := filepath.Base(local.sourcePath)
 		if !skillNamePattern.MatchString(label) {
 			return sourceSpec{}, fmt.Errorf("%w: local source directory name is not a safe label", ErrSourceNotAllowed)
 		}
 		return sourceSpec{
-			localPath: canonical,
+			local:     &local,
 			sourceRef: "local:" + label,
 		}, nil
 	}
@@ -57,17 +69,17 @@ func validateStageRequest(request StageRequest, importRoots, gitHosts []string) 
 	}, nil
 }
 
-func validateLocalSource(source string, importRoots []string) (string, error) {
+func validateLocalSource(source string, importRoots []string) (localSourceSpec, error) {
 	if !cleanAbsolutePath(source) {
-		return "", fmt.Errorf("%w: local source must be an absolute clean path", ErrSourceNotAllowed)
+		return localSourceSpec{}, fmt.Errorf("%w: local source must be an absolute clean path", ErrSourceNotAllowed)
 	}
 	canonicalSource, err := filepath.EvalSymlinks(source)
 	if err != nil {
-		return "", fmt.Errorf("%w: resolve local source", ErrSourceNotAllowed)
+		return localSourceSpec{}, fmt.Errorf("%w: resolve local source", ErrSourceNotAllowed)
 	}
 	sourceInfo, err := os.Lstat(canonicalSource)
 	if err != nil || !sourceInfo.IsDir() || sourceInfo.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: local source is not a real directory", ErrSourceNotAllowed)
+		return localSourceSpec{}, fmt.Errorf("%w: local source is not a real directory", ErrSourceNotAllowed)
 	}
 	for _, root := range importRoots {
 		if !cleanAbsolutePath(root) {
@@ -86,10 +98,16 @@ func validateLocalSource(source string, importRoots []string) (string, error) {
 			continue
 		}
 		if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return canonicalSource, nil
+			return localSourceSpec{
+				rootPath:   canonicalRoot,
+				relative:   relative,
+				sourcePath: canonicalSource,
+				rootInfo:   rootInfo,
+				sourceInfo: sourceInfo,
+			}, nil
 		}
 	}
-	return "", fmt.Errorf("%w: local source is outside configured import roots", ErrSourceNotAllowed)
+	return localSourceSpec{}, fmt.Errorf("%w: local source is outside configured import roots", ErrSourceNotAllowed)
 }
 
 func cleanAbsolutePath(value string) bool {
@@ -133,52 +151,149 @@ func (commandGitFetcher) Fetch(ctx context.Context, gitURL, commit, destination 
 		}
 		return fmt.Errorf("inspect Git fetch destination: %w", err)
 	}
-	commands := [][]string{
-		{
-			"-c", "credential.helper=", "clone", "--no-checkout", "--filter=blob:none",
-			"--depth=1", "--no-tags", "--recurse-submodules=no", gitURL, destination,
-		},
-		{
-			"-C", destination, "-c", "credential.helper=", "fetch", "--depth=1",
-			"--no-tags", "origin", commit,
-		},
-		{
-			"-C", destination, "-c", "advice.detachedHead=false", "checkout",
-			"--detach", "--force", commit,
-		},
+	privateHome := filepath.Join(filepath.Dir(destination), ".git-home")
+	if err := os.Mkdir(privateHome, 0o700); err != nil {
+		return fmt.Errorf("create private Git home: %w", err)
 	}
-	for _, arguments := range commands {
-		command := exec.CommandContext(ctx, "git", arguments...)
-		command.Env = gitEnvironment()
-		if err := command.Run(); err != nil {
-			return fmt.Errorf("fetch pinned Git skill: %w", err)
-		}
-	}
-	headCommand := exec.CommandContext(ctx, "git", "-C", destination, "rev-parse", "--verify", "HEAD")
-	headCommand.Env = gitEnvironment()
-	head, err := headCommand.Output()
+	defer func() { _ = os.RemoveAll(privateHome) }()
+
+	command := exec.CommandContext(ctx, "git",
+		"-c", "credential.helper=",
+		"-c", "credential.interactive=false",
+		"archive", "--format=tar", "--remote="+gitURL, commit,
+	)
+	command.Env = gitEnvironment(privateHome)
+	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("verify fetched Git skill: %w", err)
+		return fmt.Errorf("open bounded Git archive: %w", err)
 	}
-	if strings.TrimSpace(string(head)) != commit {
-		return fmt.Errorf("%w: got %q", ErrCommitMismatch, strings.TrimSpace(string(head)))
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("%w: start Git archive: %v", ErrBoundedGitUnsupported, err)
 	}
-	if err := os.RemoveAll(filepath.Join(destination, ".git")); err != nil {
-		return fmt.Errorf("remove private Git metadata: %w", err)
+	archive, readErr := io.ReadAll(io.LimitReader(stdout, maxGitArchiveBytes+1))
+	if int64(len(archive)) > maxGitArchiveBytes {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return ErrTreeTooLarge
+	}
+	waitErr := command.Wait()
+	if readErr != nil {
+		return fmt.Errorf("read bounded Git archive: %w", readErr)
+	}
+	if waitErr != nil {
+		return fmt.Errorf("%w: fetch exact commit: %v", ErrBoundedGitUnsupported, waitErr)
+	}
+	fetchedCommit, err := gitArchiveCommit(ctx, archive, privateHome)
+	if err != nil {
+		return err
+	}
+	if fetchedCommit != commit {
+		return fmt.Errorf("%w: got %q", ErrCommitMismatch, fetchedCommit)
+	}
+	tree, err := reviewedTreeFromArchive(archive)
+	if err != nil {
+		return err
+	}
+	if err := writeReviewedTree(destination, tree.files); err != nil {
+		return fmt.Errorf("materialize bounded Git archive: %w", err)
 	}
 	return nil
 }
 
-func gitEnvironment() []string {
+func gitArchiveCommit(ctx context.Context, archive []byte, privateHome string) (string, error) {
+	command := exec.CommandContext(ctx, "git", "get-tar-commit-id")
+	command.Env = gitEnvironment(privateHome)
+	command.Stdin = bytes.NewReader(archive)
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("%w: Git archive omitted exact commit identity", ErrCommitMismatch)
+	}
+	commit := strings.TrimSpace(string(output))
+	if !pinnedCommitPattern.MatchString(commit) {
+		return "", fmt.Errorf("%w: invalid archive commit identity", ErrCommitMismatch)
+	}
+	return commit, nil
+}
+
+func reviewedTreeFromArchive(archive []byte) (reviewedTree, error) {
+	reader := tar.NewReader(bytes.NewReader(archive))
+	files := make([]reviewedFile, 0)
+	seen := make(map[string]struct{})
+	entriesSeen := 0
+	var totalBytes int64
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return reviewedTree{}, fmt.Errorf("%w: read Git archive", ErrUnsafeTree)
+		}
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			continue
+		}
+		entriesSeen++
+		if entriesSeen > maxReviewEntries {
+			return reviewedTree{}, fmt.Errorf("%w: more than %d filesystem entries", ErrTreeTooLarge, maxReviewEntries)
+		}
+		name := strings.TrimSuffix(header.Name, "/")
+		if !safeArchivePath(name) || len(name) > maxReviewPathBytes {
+			return reviewedTree{}, fmt.Errorf("%w: invalid archive path", ErrUnsafeTree)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return reviewedTree{}, fmt.Errorf("%w: duplicate archive path %q", ErrUnsafeTree, name)
+		}
+		seen[name] = struct{}{}
+		if hasVCSComponent(name) {
+			return reviewedTree{}, fmt.Errorf("%w: hidden VCS state %q", ErrUnsafeTree, name)
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			continue
+		case tar.TypeReg:
+		default:
+			return reviewedTree{}, fmt.Errorf("%w: special archive entry %q", ErrUnsafeTree, name)
+		}
+		if header.Mode&0o111 != 0 {
+			return reviewedTree{}, fmt.Errorf("%w: executable file %q", ErrUnsafeTree, name)
+		}
+		if len(files)+1 > maxReviewFiles {
+			return reviewedTree{}, fmt.Errorf("%w: more than %d files", ErrTreeTooLarge, maxReviewFiles)
+		}
+		if header.Size < 0 || header.Size > maxReviewBytes-totalBytes {
+			return reviewedTree{}, fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, maxReviewBytes)
+		}
+		data, err := io.ReadAll(io.LimitReader(reader, header.Size+1))
+		if err != nil || int64(len(data)) != header.Size {
+			return reviewedTree{}, fmt.Errorf("%w: truncated archive file %q", ErrUnsafeTree, name)
+		}
+		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+			return reviewedTree{}, fmt.Errorf("%w: binary or NUL content in %q", ErrUnsafeTree, name)
+		}
+		totalBytes += int64(len(data))
+		files = append(files, newReviewedFile(name, data))
+	}
+	return reviewedTreeFromFiles(files)
+}
+
+func safeArchivePath(name string) bool {
+	return name != "" && name != "." && !path.IsAbs(name) && path.Clean(name) == name &&
+		name != ".." && !strings.HasPrefix(name, "../") && !strings.ContainsRune(name, 0)
+}
+
+func gitEnvironment(privateHome string) []string {
 	environment := make([]string, 0, len(os.Environ())+6)
 	for _, item := range os.Environ() {
 		key, _, found := strings.Cut(item, "=")
-		if !found || strings.HasPrefix(key, "GIT_") || key == "SSH_ASKPASS" {
+		if !found || strings.HasPrefix(key, "GIT_") || key == "SSH_ASKPASS" ||
+			key == "HOME" || key == "XDG_CONFIG_HOME" {
 			continue
 		}
 		environment = append(environment, item)
 	}
 	return append(environment,
+		"HOME="+privateHome,
+		"XDG_CONFIG_HOME="+privateHome,
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_CONFIG_SYSTEM="+os.DevNull,
 		"GIT_CONFIG_NOSYSTEM=1",
