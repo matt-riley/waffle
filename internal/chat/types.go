@@ -61,6 +61,15 @@ type WorkItem struct {
 	Text string `json:"text"`
 }
 
+// SkillRef describes a skill's availability and attachment state without
+// exposing its filesystem path or instruction body.
+type SkillRef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Attached    bool   `json:"attached"`
+	Missing     bool   `json:"missing"`
+}
+
 // State is the complete presentation-neutral chat state.
 type State struct {
 	SessionID      string        `json:"session_id"`
@@ -74,6 +83,7 @@ type State struct {
 	Workspace      string        `json:"workspace"`
 	History        []llm.Message `json:"history"`
 	Models         []Model       `json:"models"`
+	Skills         []SkillRef    `json:"skills"`
 	Capabilities   []string      `json:"capabilities"`
 }
 

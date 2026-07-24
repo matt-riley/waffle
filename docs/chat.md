@@ -165,11 +165,18 @@ the model.
 | `/usage` | Show current and persisted request/token usage. |
 | `/permissions` | Show the effective sandbox and tool allow/deny policy. |
 | `/skill <name> [args]` | Invoke a configured skill. |
+| `/skills [attach <name>\|detach <name>]` | List active/session skills, attach an active skill to this session, or detach it without deactivating it. |
 | `/repo <owner/repo>` | Open and bind a repository workspace. |
 | `/workset [list\|replace <id> <text>\|drop <id>\|clear]` | Inspect or correct the session working set. |
 
 Outside the table's Markdown escaping, the exact working-set syntax is
 `/workset [list|replace <id> <text>|drop <id>|clear]`.
+The exact session-skill syntax is
+`/skills [attach <name>|detach <name>]`. Attached active skills are restored
+with the session and forced into its system context, with a 256 KiB combined
+attachment-block limit. An attachment that was removed or deactivated remains
+visible as unavailable until it is restored or detached; unavailable skills
+are never injected.
 
 The selected `/model` alias is stored on the current session. `/resume
 [session]` and `waffle chat --continue` restore that session's model instead

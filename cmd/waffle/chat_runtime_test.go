@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,6 +55,444 @@ func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
 	resumed, err := second.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID})
 	if err != nil || resumed.ModelAlias != "gpt" {
 		t.Fatalf("resumed = %+v, %v", resumed, err)
+	}
+}
+
+func TestSkillsCommandAttachesIdempotentlyAndDetachesWithoutDeactivation(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	reviewerPath := writeRuntimeSkill(t, "reviewer", "review every change", skill.StatusActive, "Review every changed file.")
+	writeRuntimeSkill(t, "alpha", "first skill", skill.StatusActive, "Start with the smallest risk.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	if got := skillRefNames(state.Skills); !reflect.DeepEqual(got, []string{"alpha", "reviewer"}) {
+		t.Fatalf("open skills = %v", got)
+	}
+
+	listed, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.State == nil || listed.Title != "Session skills" || !strings.Contains(listed.Text, "reviewer") {
+		t.Fatalf("list result = %+v", listed)
+	}
+
+	var events []chatpkg.Event
+	attached, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, func(event chatpkg.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBlock := "\n<attached_skills>\n<attached_skill name=\"reviewer\">\nReview every changed file.\n</attached_skill>\n</attached_skills>"
+	if runtime.agent.System != baseSystem+wantBlock {
+		t.Fatalf("system = %q, want clean base plus exact block", runtime.agent.System)
+	}
+	if attached.State == nil || !attachedSkillRef(attached.State.Skills, "reviewer").Attached {
+		t.Fatalf("attach state = %+v", attached.State)
+	}
+	if len(events) != 1 || events[0].Kind != chatpkg.EventState || events[0].State == nil {
+		t.Fatalf("attach events = %+v", events)
+	}
+
+	firstSystem := runtime.agent.System
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != firstSystem {
+		t.Fatal("idempotent attach accumulated another system block")
+	}
+
+	before, err := os.ReadFile(reviewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(reviewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != baseSystem || detached.State == nil || attachedSkillRef(detached.State.Skills, "reviewer").Attached {
+		t.Fatalf("detach state=%+v system=%q", detached.State, runtime.agent.System)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("detach rewrote or deactivated SKILL.md")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil); err != nil {
+		t.Fatalf("idempotent detach: %v", err)
+	}
+}
+
+func TestSkillsCommandRejectsInactiveMissingAndOversizeAtomically(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	writeRuntimeSkill(t, "draft", "not ready", skill.StatusInactive, "Do not load.")
+	writeRuntimeSkill(t, "huge", "too large", skill.StatusActive, strings.Repeat("x", maxAttachedSkillContextBytes+1))
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	attachments := &skill.Attachments{DB: runtime.st.DB}
+	for _, name := range []string{"draft", "missing", "huge"} {
+		_, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach " + name}, nil)
+		if err == nil {
+			t.Fatalf("attach %q succeeded", name)
+		}
+		if runtime.agent.System != baseSystem {
+			t.Fatalf("attach %q mutated prompt", name)
+		}
+		got, listErr := attachments.List(ctx, state.SessionID)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(got) != 0 {
+			t.Fatalf("attach %q persisted rows %v", name, got)
+		}
+	}
+}
+
+func TestSkillsCommandPersistenceFailuresLeavePromptAndStateUnchanged(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	if _, err := runtime.st.DB.ExecContext(ctx, `
+		CREATE TRIGGER reject_session_skill_insert
+		BEFORE INSERT ON session_skills
+		BEGIN SELECT RAISE(ABORT, 'attachment write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err == nil {
+		t.Fatal("attach succeeded despite database trigger")
+	}
+	if runtime.agent.System != baseSystem || attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("failed attach mutated runtime state")
+	}
+	if _, err := runtime.st.DB.ExecContext(ctx, `DROP TRIGGER reject_session_skill_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	attachedSystem := runtime.agent.System
+	if _, err := runtime.st.DB.ExecContext(ctx, `
+		CREATE TRIGGER reject_session_skill_delete
+		BEFORE DELETE ON session_skills
+		BEGIN SELECT RAISE(ABORT, 'attachment delete failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil); err == nil {
+		t.Fatal("detach succeeded despite database trigger")
+	}
+	if runtime.agent.System != attachedSystem || !attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("failed detach mutated runtime state")
+	}
+	names, err := (&skill.Attachments{DB: runtime.st.DB}).List(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"reviewer"}) {
+		t.Fatalf("persisted attachments = %v", names)
+	}
+}
+
+func TestAttachedSkillOpenResumeAndMissingState(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	current, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := sessions.Create(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &skill.Attachments{DB: runtime.st.DB}
+	if err := attachments.Attach(ctx, target.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+
+	resumed, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State == nil || !attachedSkillRef(resumed.State.Skills, "reviewer").Attached ||
+		strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 {
+		t.Fatalf("resumed state=%+v system=%q", resumed.State, runtime.agent.System)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: current.SessionID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != baseSystem || attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("resuming original session retained target attachments")
+	}
+
+	reopened := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	state, err := reopened.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attachedSkillRef(state.Skills, "reviewer").Attached || !strings.Contains(reopened.agent.System, "Review every changed file.") {
+		t.Fatalf("reopened state=%+v system=%q", state, reopened.agent.System)
+	}
+	if err := skill.SetSkillStatus(ctx, runtime.st.DB, "reviewer", skill.StatusInactive, "test"); err != nil {
+		t.Fatal(err)
+	}
+	missing := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	missingState, err := missing.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := attachedSkillRef(missingState.Skills, "reviewer")
+	if !ref.Attached || !ref.Missing || strings.Contains(missing.agent.System, "Review every changed file.") {
+		t.Fatalf("missing state=%+v system=%q", missingState, missing.agent.System)
+	}
+	listed, err := missing.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.Text, "unavailable") || !strings.Contains(listed.Text, "/skills detach reviewer") {
+		t.Fatalf("missing guidance = %q", listed.Text)
+	}
+}
+
+func TestAttachedSkillTransitionsReplacePromptAtomically(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	skillPath := writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	opened, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request new = %+v, %v", result, err)
+	}
+	created, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State == nil || attachedSkillRef(created.State.Skills, "reviewer").Attached ||
+		strings.Contains(runtime.agent.System, "<attached_skills>") {
+		t.Fatalf("new state=%+v system=%q", created.State, runtime.agent.System)
+	}
+
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&skill.Attachments{DB: runtime.st.DB}).Attach(ctx, target.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider, Tools: tool.NewRegistry(runtimeNamedTool("host")),
+			System: "clean repo profile", Model: "claude", Profile: "main",
+		}, func() {}, nil
+	}
+	repoResult, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "repo", Repo: "owner/repo", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace")), client: &runtimeTestCloser{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoResult.State == nil || !attachedSkillRef(repoResult.State.Skills, "reviewer").Attached ||
+		strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 ||
+		!strings.HasPrefix(runtime.agent.System, "clean repo profile") {
+		t.Fatalf("repo state=%+v system=%q", repoResult.State, runtime.agent.System)
+	}
+
+	oldSession, oldSystem := runtime.current, runtime.agent.System
+	failedTarget, err := sessions.Create(ctx, "unreadable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&skill.Attachments{DB: runtime.st.DB}).Attach(ctx, failedTarget.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(skillPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: failedTarget.ID}, nil); err == nil {
+		t.Fatal("resume with unreadable attached skill succeeded")
+	}
+	if runtime.current != oldSession || runtime.agent.System != oldSystem || runtime.current.ID == opened.SessionID {
+		t.Fatal("failed resume mutated session or prompt")
+	}
+}
+
+func TestSkillsCommandSocketParity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+
+	socketDir, err := os.MkdirTemp("/tmp", "waffle-chat-skills-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	listener, err := net.Listen("unix", filepath.Join(socketDir, "chat.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- chatwire.Serve(ctx, listener, func(context.Context) (chatpkg.Backend, error) { return runtime, nil }, nil)
+	}()
+	client, err := chatwire.Dial(ctx, filepath.Join(socketDir, "chat.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := client.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref := attachedSkillRef(ready.Skills, "reviewer"); ref.Name == "" || ref.Attached {
+		t.Fatalf("ready skills = %+v", ready.Skills)
+	}
+	var events []chatpkg.Event
+	result, err := client.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, func(event chatpkg.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || !attachedSkillRef(result.State.Skills, "reviewer").Attached {
+		t.Fatalf("socket result = %+v", result)
+	}
+	if len(events) != 1 || events[0].State == nil || !attachedSkillRef(events[0].State.Skills, "reviewer").Attached {
+		t.Fatalf("socket events = %+v", events)
+	}
+	if strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 {
+		t.Fatalf("socket runtime system = %q", runtime.agent.System)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	_ = listener.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chatwire serve did not stop")
+	}
+}
+
+func TestAttachedSkillOpenDoesNotHoldRuntimeLockDuringSkillRead(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	path := filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main", "skills", "slow", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Open(context.Background(), chatpkg.OpenOptions{})
+		openDone <- err
+	}()
+	select {
+	case err := <-openDone:
+		t.Fatalf("Open returned before blocked skill read: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	closeDone := make(chan error, 1)
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), time.Second)
+	defer cancelClose()
+	go func() { closeDone <- runtime.Close(closeCtx) }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close during skill read: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err == nil {
+			_, _ = writer.WriteString("---\nname: slow\nstatus: active\n---\n\nslow\n")
+			_ = writer.Close()
+		}
+		<-openDone
+		<-closeDone
+		t.Fatal("Close blocked on runtime mutex during skill body read")
+	}
+
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString("---\nname: slow\nstatus: active\n---\n\nslow\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-openDone; err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Open after concurrent Close error = %v", err)
+	}
+}
+
+func TestAttachedSkillNewDoesNotHoldRuntimeLockDuringPersistence(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := runtime.st.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.resetSession(context.Background())
+		resetDone <- err
+	}()
+	select {
+	case err := <-resetDone:
+		_ = tx.Rollback()
+		t.Fatalf("reset returned before blocked persistence: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancelDone := make(chan struct{})
+	go func() {
+		runtime.Cancel()
+		close(cancelDone)
+	}()
+	select {
+	case <-cancelDone:
+	case <-time.After(250 * time.Millisecond):
+		_ = tx.Rollback()
+		<-resetDone
+		<-cancelDone
+		t.Fatal("Cancel blocked on runtime mutex during new-session persistence")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1058,6 +1498,20 @@ func TestRedactChatStateDoesNotMutateHistoryAndCoversToolPayloads(t *testing.T) 
 	}
 }
 
+func TestAttachedSkillStateRedactionDoesNotMutateRuntimeRefs(t *testing.T) {
+	const secret = "opaque-skill-description-canary-8264"
+	state := chatpkg.State{Skills: []chatpkg.SkillRef{{Name: "reviewer", Description: secret, Attached: true}}}
+	redacted := redactChatState(state, func(value string) string {
+		return strings.ReplaceAll(value, secret, "[redacted:test]")
+	})
+	if redacted.Skills[0].Description != "[redacted:test]" {
+		t.Fatalf("redacted skills = %+v", redacted.Skills)
+	}
+	if state.Skills[0].Description != secret {
+		t.Fatalf("redaction mutated source skills = %+v", state.Skills)
+	}
+}
+
 func TestChatRuntimeRedactsReflectionWarning(t *testing.T) {
 	ctx := context.Background()
 	runtime, _ := newRuntimeFixture(t, configuredChatModels())
@@ -1935,4 +2389,34 @@ func newRuntimeAgainstSameStore(t *testing.T, cfg config.Config, sessions *sessi
 	}
 	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	return runtime
+}
+
+func writeRuntimeSkill(t *testing.T, name, description, status, body string) string {
+	t.Helper()
+	path := filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main", "skills", name, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: %s\n---\n\n%s\n", name, description, status, body)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func skillRefNames(refs []chatpkg.SkillRef) []string {
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = ref.Name
+	}
+	return names
+}
+
+func attachedSkillRef(refs []chatpkg.SkillRef, name string) chatpkg.SkillRef {
+	for _, ref := range refs {
+		if ref.Name == name {
+			return ref
+		}
+	}
+	return chatpkg.SkillRef{Name: name}
 }
