@@ -473,7 +473,7 @@ func (c *ChatClients) reap(ctx context.Context) error {
 	c.mu.Lock()
 	var cleanups []*chatCleanup
 	for id, client := range c.clients {
-		if !client.busy && c.now().Sub(client.lastActive) >= c.idleTTL {
+		if !client.busy && !c.now().Before(idleDeadline(client.lastActive, c.idleTTL)) {
 			client.markRetiring()
 			cleanups = append(cleanups, c.startCleanupLocked(id, client, nil, nil, ctx))
 		}

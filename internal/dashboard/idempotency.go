@@ -10,29 +10,33 @@ import (
 
 var errIdempotencyCapacity = errors.New("idempotency store is full")
 
-type idempotencyEntry struct {
+type idempotencyValue struct {
 	operation string
 	digest    string
 	status    int
 	body      []byte
-	expiresAt time.Time
 	ready     chan struct{}
 }
 
 // IdempotencyStore retains completed mutation responses for a bounded period.
+// Capacity and TTL eviction use the shared ttlMap helper (#154).
 type IdempotencyStore struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	capacity int
-	ttl      time.Duration
-	entries  map[string]*idempotencyEntry
+	mu  sync.Mutex
+	now func() time.Time
+	ttl time.Duration
+	// entries uses Sticky=true while a mutation is in flight (ready != nil).
+	entries ttlMap[idempotencyValue]
 }
 
 func NewIdempotencyStore(now func() time.Time, capacity int, ttl time.Duration) *IdempotencyStore {
 	if now == nil {
 		now = time.Now
 	}
-	return &IdempotencyStore{now: now, capacity: capacity, ttl: ttl, entries: make(map[string]*idempotencyEntry)}
+	return &IdempotencyStore{
+		now:     now,
+		ttl:     ttl,
+		entries: newTTLMap[idempotencyValue](capacity),
+	}
 }
 
 // Do runs a mutation once for an idempotency key, replaying its completed
@@ -78,8 +82,9 @@ func (s *IdempotencyStore) do(
 	}
 
 	s.mu.Lock()
-	s.pruneExpiredLocked()
-	if entry, ok := s.entries[key]; ok {
+	s.entries.pruneExpired(s.now(), nil)
+	if rec, ok := s.entries.get(key); ok {
+		entry := rec.Value
 		if entry.operation != operation || entry.digest != requestDigest {
 			s.mu.Unlock()
 			return http.StatusConflict, []byte("idempotency_conflict"), nil
@@ -94,9 +99,9 @@ func (s *IdempotencyStore) do(
 		select {
 		case <-ready:
 			s.mu.Lock()
-			completed, ok := s.entries[key]
-			if ok && completed.ready == nil {
-				status, body = completed.status, append([]byte(nil), completed.body...)
+			completed, ok := s.entries.get(key)
+			if ok && completed.Value.ready == nil {
+				status, body = completed.Value.status, append([]byte(nil), completed.Value.body...)
 				s.mu.Unlock()
 				return status, body, nil
 			}
@@ -106,20 +111,24 @@ func (s *IdempotencyStore) do(
 			return 0, nil, ctx.Err()
 		}
 	}
-	if !s.makeSpaceLocked() {
+	if !s.entries.makeSpace(nil) {
 		s.mu.Unlock()
 		return http.StatusServiceUnavailable, []byte("idempotency_unavailable"), errIdempotencyCapacity
 	}
-	entry := &idempotencyEntry{operation: operation, digest: requestDigest, ready: make(chan struct{})}
-	s.entries[key] = entry
+	ready := make(chan struct{})
+	entry := idempotencyValue{operation: operation, digest: requestDigest, ready: ready}
+	s.entries.put(key, ttlRecord[idempotencyValue]{
+		Value:  entry,
+		Sticky: true, // in-flight: never capacity-evict or TTL-prune
+	})
 	s.mu.Unlock()
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			s.mu.Lock()
-			if s.entries[key] == entry {
-				delete(s.entries, key)
-				close(entry.ready)
+			if rec, ok := s.entries.get(key); ok && rec.Value.ready == ready {
+				s.entries.delete(key)
+				close(ready)
 			}
 			s.mu.Unlock()
 			panic(recovered)
@@ -129,9 +138,9 @@ func (s *IdempotencyStore) do(
 	if discardOnRunCancel {
 		if err := runCtx.Err(); err != nil {
 			s.mu.Lock()
-			if s.entries[key] == entry {
-				delete(s.entries, key)
-				close(entry.ready)
+			if rec, ok := s.entries.get(key); ok && rec.Value.ready == ready {
+				s.entries.delete(key)
+				close(ready)
 			}
 			s.mu.Unlock()
 			return 0, nil, err
@@ -139,44 +148,18 @@ func (s *IdempotencyStore) do(
 	}
 
 	s.mu.Lock()
-	if s.entries[key] == entry {
-		ready := entry.ready
-		entry.status = status
-		entry.body = append([]byte(nil), body...)
-		entry.expiresAt = s.now().Add(s.ttl)
-		entry.ready = nil
+	if rec, ok := s.entries.get(key); ok && rec.Value.ready == ready {
+		completed := rec.Value
+		completed.status = status
+		completed.body = append([]byte(nil), body...)
+		completed.ready = nil
+		s.entries.put(key, ttlRecord[idempotencyValue]{
+			Value:     completed,
+			ExpiresAt: s.now().Add(s.ttl),
+			Sticky:    false,
+		})
 		close(ready)
 	}
 	s.mu.Unlock()
 	return status, append([]byte(nil), body...), nil
-}
-
-func (s *IdempotencyStore) pruneExpiredLocked() {
-	now := s.now()
-	for key, entry := range s.entries {
-		if entry.ready == nil && !entry.expiresAt.After(now) {
-			delete(s.entries, key)
-		}
-	}
-}
-
-func (s *IdempotencyStore) makeSpaceLocked() bool {
-	if s.capacity <= 0 || len(s.entries) < s.capacity {
-		return true
-	}
-	var victimKey string
-	var victim *idempotencyEntry
-	for key, entry := range s.entries {
-		if entry.ready != nil {
-			continue
-		}
-		if victim == nil || entry.expiresAt.Before(victim.expiresAt) {
-			victimKey, victim = key, entry
-		}
-	}
-	if victim == nil {
-		return false
-	}
-	delete(s.entries, victimKey)
-	return true
 }
