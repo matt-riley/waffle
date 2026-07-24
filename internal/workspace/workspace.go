@@ -923,6 +923,16 @@ func (m *Manager) InspectCloseGuarded(
 }
 
 func (m *Manager) inspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
+	// Preview and standalone inspection always restore idle workspaces so a
+	// read-only check cannot leave containers running.
+	return m.inspectCloseOpt(ctx, id, true)
+}
+
+// inspectCloseOpt gathers close evidence. When restoreIdle is false and the
+// workspace was idle, a clean inspection leaves the container running so a
+// subsequent close can reuse that single start (#148). Dirty/error outcomes
+// always restore idle when this call started the container.
+func (m *Manager) inspectCloseOpt(ctx context.Context, id string, restoreIdle bool) (report *CloseReport, err error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -933,12 +943,28 @@ func (m *Manager) inspectClose(ctx context.Context, id string) (report *CloseRep
 	}
 
 	wasIdle := ws.Status == StatusIdle
+	startedForInspection := false
 	if wasIdle {
 		startedAt := time.Now().UTC()
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			return report, fmt.Errorf("start idle workspace for inspection: %w", err)
 		}
+		startedForInspection = true
 		defer func() {
+			if !startedForInspection {
+				return
+			}
+			// Restore stopped state when the caller asked, or when this
+			// inspection cannot hand a live container to teardown.
+			shouldRestore := restoreIdle
+			if !restoreIdle {
+				if err != nil || report.Dirty != "" || report.Unpushed != "" {
+					shouldRestore = true
+				}
+			}
+			if !shouldRestore {
+				return
+			}
 			restoreCtx, cancel := context.WithTimeout(context.Background(), inspectionRestoreTimeout)
 			defer cancel()
 			if restoreErr := m.Runtime.StopContainer(restoreCtx, ws.Container); restoreErr != nil {
@@ -996,19 +1022,30 @@ func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*
 	}
 
 	report := &CloseReport{}
+	wasIdle := ws.Status == StatusIdle
+	// Idle close reuses the single container start from inspection so we do
+	// not StartContainer (or MintToken resume) a second time (#148).
+	idleKeptRunning := false
 	if !force {
-		report, err = m.inspectClose(ctx, id)
+		report, err = m.inspectCloseOpt(ctx, id, !wasIdle)
 		if err != nil {
 			return report, false, err
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
 			return report, false, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}
+		idleKeptRunning = wasIdle
 	}
 
-	wasIdle := ws.Status == StatusIdle
 	var client *sandbox.Client
-	if wasIdle {
+	switch {
+	case idleKeptRunning:
+		// Inspection already started the idle container and left it running.
+		client, err = m.newInspectionClient(ws)
+		if err != nil {
+			return report, false, fmt.Errorf("connect workspace for safety check: %w", err)
+		}
+	case wasIdle:
 		resumed, resumedClient, err := m.resume(ctx, id)
 		if err != nil {
 			if force {
@@ -1019,7 +1056,7 @@ func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*
 		}
 		ws = resumed
 		client = resumedClient
-	} else {
+	default:
 		client, err = m.newClient(ws)
 		if err != nil {
 			if force {
