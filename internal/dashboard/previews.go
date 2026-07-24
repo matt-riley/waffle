@@ -13,10 +13,12 @@ const (
 	previewStoreCapacity   = 128
 	previewHistoryCapacity = 128
 	previewTokenBytes      = 32
+	previewTokenAttempts   = 8
 )
 
 var (
 	ErrPreviewExpired  = errors.New("preview token expired")
+	ErrPreviewEvicted  = errors.New("preview token was evicted")
 	ErrPreviewMismatch = errors.New("preview token does not match operation or resource")
 	ErrPreviewUnknown  = errors.New("preview token is unknown")
 	ErrPreviewUsed     = errors.New("preview token was already used")
@@ -60,32 +62,42 @@ func NewPreviewStore(now func() time.Time, entropy io.Reader) *PreviewStore {
 // Entropy failure is fatal because issuing a predictable confirmation token is
 // less safe than refusing to continue.
 func (s *PreviewStore) Issue(operation, resourceID string, ttl time.Duration) string {
+	if ttl <= 0 {
+		panic("dashboard: preview token TTL must be positive")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := s.now()
-	s.pruneExpiredLocked(now)
-	s.makeSpaceLocked()
-
-	for {
+	var token string
+	for attempt := 0; attempt < previewTokenAttempts; attempt++ {
 		random := make([]byte, previewTokenBytes)
 		if _, err := io.ReadFull(s.entropy, random); err != nil {
 			panic("dashboard: preview token entropy unavailable")
 		}
-		token := base64.RawURLEncoding.EncodeToString(random)
-		if _, exists := s.entries[token]; exists {
+		candidate := base64.RawURLEncoding.EncodeToString(random)
+		if _, exists := s.entries[candidate]; exists {
 			continue
 		}
-		if _, exists := s.outcomes[token]; exists {
+		if _, exists := s.outcomes[candidate]; exists {
 			continue
 		}
-		s.entries[token] = previewEntry{
-			operation:  operation,
-			resourceID: resourceID,
-			expiresAt:  now.Add(ttl),
-		}
-		return token
+		token = candidate
+		break
 	}
+	if token == "" {
+		panic("dashboard: preview token entropy exhausted")
+	}
+
+	now := s.now()
+	s.pruneExpiredLocked(now)
+	s.makeSpaceLocked()
+	s.entries[token] = previewEntry{
+		operation:  operation,
+		resourceID: resourceID,
+		expiresAt:  now.Add(ttl),
+	}
+	return token
 }
 
 // Consume atomically spends a token. Both successful and mismatched attempts
@@ -143,7 +155,7 @@ func (s *PreviewStore) makeSpaceLocked() {
 		}
 	}
 	delete(s.entries, victimToken)
-	s.recordOutcomeLocked(victimToken, ErrPreviewUsed)
+	s.recordOutcomeLocked(victimToken, ErrPreviewEvicted)
 }
 
 func (s *PreviewStore) recordOutcomeLocked(token string, outcome error) {

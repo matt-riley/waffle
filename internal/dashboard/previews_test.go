@@ -69,11 +69,102 @@ func TestPreviewStoreEvictsEarliestExpiryAtCapacity(t *testing.T) {
 
 	newest := store.Issue("workspace-close", "ws-newest", 2*time.Hour)
 
-	if err := store.Consume(earliest, "workspace-close", "ws-earliest"); !errors.Is(err, ErrPreviewUsed) {
+	if err := store.Consume(earliest, "workspace-close", "ws-earliest"); !errors.Is(err, ErrPreviewEvicted) {
 		t.Fatalf("evicted token error = %v", err)
 	}
 	if err := store.Consume(newest, "workspace-close", "ws-newest"); err != nil {
 		t.Fatalf("new token error = %v", err)
+	}
+}
+
+func TestPreviewIssueRejectsNonPositiveTTLWithoutChangingCapacity(t *testing.T) {
+	tests := map[string]time.Duration{
+		"zero":     0,
+		"negative": -time.Second,
+	}
+	for name, ttl := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := NewPreviewStore(
+				fixedPreviewClock(time.Unix(3_500, 0)),
+				previewEntropy(previewStoreCapacity+1),
+			)
+			tokens := make([]string, 0, previewStoreCapacity)
+			for i := 0; i < previewStoreCapacity; i++ {
+				tokens = append(tokens, store.Issue("workspace-close", "ws-existing", time.Hour))
+			}
+
+			requirePreviewIssuePanic(t, func() {
+				store.Issue("workspace-close", "ws-invalid", ttl)
+			})
+
+			if got := len(store.entries); got != previewStoreCapacity {
+				t.Fatalf("live entries after invalid TTL = %d, want %d", got, previewStoreCapacity)
+			}
+			if got := len(store.outcomes); got != 0 {
+				t.Fatalf("terminal outcomes after invalid TTL = %d, want 0", got)
+			}
+			for _, token := range tokens {
+				if _, exists := store.entries[token]; !exists {
+					t.Fatalf("invalid TTL removed existing token %q", token)
+				}
+			}
+		})
+	}
+}
+
+func TestPreviewIssueEntropyFailureAtCapacityPreservesExistingTokens(t *testing.T) {
+	store := NewPreviewStore(
+		fixedPreviewClock(time.Unix(3_600, 0)),
+		previewEntropy(previewStoreCapacity),
+	)
+	tokens := make([]string, 0, previewStoreCapacity)
+	for i := 0; i < previewStoreCapacity; i++ {
+		tokens = append(tokens, store.Issue("workspace-close", "ws-existing", time.Hour))
+	}
+
+	requirePreviewIssuePanic(t, func() {
+		store.Issue("workspace-close", "ws-new", time.Hour)
+	})
+
+	if got := len(store.entries); got != previewStoreCapacity {
+		t.Fatalf("live entries after entropy failure = %d, want %d", got, previewStoreCapacity)
+	}
+	if got := len(store.outcomes); got != 0 {
+		t.Fatalf("terminal outcomes after entropy failure = %d, want 0", got)
+	}
+	for _, token := range tokens {
+		if err := store.Consume(token, "workspace-close", "ws-existing"); err != nil {
+			t.Fatalf("existing token after entropy failure: %v", err)
+		}
+	}
+}
+
+func TestPreviewIssueBoundsRepeatedEntropyCollisionsAndUnlocksStore(t *testing.T) {
+	store := NewPreviewStore(
+		fixedPreviewClock(time.Unix(3_700, 0)),
+		repeatingPreviewEntropy{value: 42},
+	)
+	token := store.Issue("workspace-close", "ws-existing", time.Hour)
+
+	panicResult := make(chan any, 1)
+	go func() {
+		defer func() {
+			panicResult <- recover()
+		}()
+		store.Issue("workspace-close", "ws-collision", time.Hour)
+	}()
+
+	select {
+	case recovered := <-panicResult:
+		if recovered == nil {
+			t.Fatal("repeated entropy collisions did not panic")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("repeated entropy collisions did not finish within the bounded interval")
+	}
+
+	if err := store.Consume(token, "workspace-close", "ws-existing"); err != nil {
+		t.Fatalf("store remained unusable after collision exhaustion: %v", err)
 	}
 }
 
@@ -148,4 +239,29 @@ func previewEntropy(tokens int) *bytes.Reader {
 		}
 	}
 	return bytes.NewReader(data)
+}
+
+type repeatingPreviewEntropy struct {
+	value byte
+}
+
+func (r repeatingPreviewEntropy) Read(buffer []byte) (int, error) {
+	for i := range buffer {
+		buffer[i] = r.value
+	}
+	return len(buffer), nil
+}
+
+func requirePreviewIssuePanic(t *testing.T, issue func()) {
+	t.Helper()
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		issue()
+	}()
+	if recovered == nil {
+		t.Fatal("preview issuance did not panic")
+	}
 }
