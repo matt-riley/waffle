@@ -27,19 +27,18 @@ var (
 type previewEntry struct {
 	operation  string
 	resourceID string
-	expiresAt  time.Time
 }
 
 // PreviewStore retains short-lived, resource-bound confirmation tokens in
 // process memory. Tokens and their recent terminal outcomes are bounded.
+// Live tokens and outcome history use the shared TTL/bounded helpers (#154).
 type PreviewStore struct {
-	mu           sync.Mutex
-	entropyMu    sync.Mutex
-	now          func() time.Time
-	entropy      io.Reader
-	entries      map[string]previewEntry
-	outcomes     map[string]error
-	outcomeOrder []string
+	mu        sync.Mutex
+	entropyMu sync.Mutex
+	now       func() time.Time
+	entropy   io.Reader
+	live      ttlMap[previewEntry]
+	outcomes  boundedRing
 }
 
 // NewPreviewStore returns a process-local confirmation store. Nil dependencies
@@ -54,8 +53,8 @@ func NewPreviewStore(now func() time.Time, entropy io.Reader) *PreviewStore {
 	return &PreviewStore{
 		now:      now,
 		entropy:  entropy,
-		entries:  make(map[string]previewEntry),
-		outcomes: make(map[string]error),
+		live:     newTTLMap[previewEntry](previewStoreCapacity),
+		outcomes: newBoundedRing(previewHistoryCapacity),
 	}
 }
 
@@ -80,21 +79,27 @@ func (s *PreviewStore) Issue(operation, resourceID string, ttl time.Duration) st
 		s.mu.Lock()
 		registered := func() bool {
 			defer s.mu.Unlock()
-			if _, exists := s.entries[candidate]; exists {
+			if _, exists := s.live.get(candidate); exists {
 				return false
 			}
-			if _, exists := s.outcomes[candidate]; exists {
+			if _, exists := s.outcomes.get(candidate); exists {
 				return false
 			}
 
 			now := s.now()
-			s.pruneExpiredLocked(now)
-			s.makeSpaceLocked()
-			s.entries[candidate] = previewEntry{
-				operation:  operation,
-				resourceID: resourceID,
-				expiresAt:  now.Add(ttl),
-			}
+			s.live.pruneExpired(now, func(token string, _ ttlRecord[previewEntry]) {
+				s.outcomes.put(token, ErrPreviewExpired)
+			})
+			s.live.makeSpace(func(token string, _ ttlRecord[previewEntry]) {
+				s.outcomes.put(token, ErrPreviewEvicted)
+			})
+			s.live.put(candidate, ttlRecord[previewEntry]{
+				Value: previewEntry{
+					operation:  operation,
+					resourceID: resourceID,
+				},
+				ExpiresAt: now.Add(ttl),
+			})
 			return true
 		}()
 		if registered {
@@ -111,68 +116,26 @@ func (s *PreviewStore) Consume(token, operation, resourceID string) error {
 	defer s.mu.Unlock()
 
 	now := s.now()
-	s.pruneExpiredLocked(now)
-	entry, ok := s.entries[token]
+	s.live.pruneExpired(now, func(token string, _ ttlRecord[previewEntry]) {
+		s.outcomes.put(token, ErrPreviewExpired)
+	})
+	entry, ok := s.live.get(token)
 	if !ok {
-		if outcome, known := s.outcomes[token]; known {
+		if outcome, known := s.outcomes.get(token); known {
 			return outcome
 		}
 		return ErrPreviewUnknown
 	}
 
-	delete(s.entries, token)
-	if !entry.expiresAt.After(now) {
-		s.recordOutcomeLocked(token, ErrPreviewExpired)
+	s.live.delete(token)
+	if !entry.ExpiresAt.After(now) {
+		s.outcomes.put(token, ErrPreviewExpired)
 		return ErrPreviewExpired
 	}
 
-	s.recordOutcomeLocked(token, ErrPreviewUsed)
-	if entry.operation != operation || entry.resourceID != resourceID {
+	s.outcomes.put(token, ErrPreviewUsed)
+	if entry.Value.operation != operation || entry.Value.resourceID != resourceID {
 		return ErrPreviewMismatch
 	}
 	return nil
-}
-
-func (s *PreviewStore) pruneExpiredLocked(now time.Time) {
-	for token, entry := range s.entries {
-		if entry.expiresAt.After(now) {
-			continue
-		}
-		delete(s.entries, token)
-		s.recordOutcomeLocked(token, ErrPreviewExpired)
-	}
-}
-
-func (s *PreviewStore) makeSpaceLocked() {
-	if len(s.entries) < previewStoreCapacity {
-		return
-	}
-
-	var victimToken string
-	var victim previewEntry
-	for token, entry := range s.entries {
-		if victimToken == "" ||
-			entry.expiresAt.Before(victim.expiresAt) ||
-			(entry.expiresAt.Equal(victim.expiresAt) && token < victimToken) {
-			victimToken = token
-			victim = entry
-		}
-	}
-	delete(s.entries, victimToken)
-	s.recordOutcomeLocked(victimToken, ErrPreviewEvicted)
-}
-
-func (s *PreviewStore) recordOutcomeLocked(token string, outcome error) {
-	if _, exists := s.outcomes[token]; exists {
-		s.outcomes[token] = outcome
-		return
-	}
-	s.outcomes[token] = outcome
-	s.outcomeOrder = append(s.outcomeOrder, token)
-	if len(s.outcomeOrder) <= previewHistoryCapacity {
-		return
-	}
-	oldest := s.outcomeOrder[0]
-	s.outcomeOrder = s.outcomeOrder[1:]
-	delete(s.outcomes, oldest)
 }

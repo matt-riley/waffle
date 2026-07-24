@@ -98,14 +98,14 @@ func TestPreviewIssueRejectsNonPositiveTTLWithoutChangingCapacity(t *testing.T) 
 				store.Issue("workspace-close", "ws-invalid", ttl)
 			})
 
-			if got := len(store.entries); got != previewStoreCapacity {
+			if got := store.live.len(); got != previewStoreCapacity {
 				t.Fatalf("live entries after invalid TTL = %d, want %d", got, previewStoreCapacity)
 			}
-			if got := len(store.outcomes); got != 0 {
+			if got := len(store.outcomes.values); got != 0 {
 				t.Fatalf("terminal outcomes after invalid TTL = %d, want 0", got)
 			}
 			for _, token := range tokens {
-				if _, exists := store.entries[token]; !exists {
+				if _, exists := store.live.get(token); !exists {
 					t.Fatalf("invalid TTL removed existing token %q", token)
 				}
 			}
@@ -127,10 +127,10 @@ func TestPreviewIssueEntropyFailureAtCapacityPreservesExistingTokens(t *testing.
 		store.Issue("workspace-close", "ws-new", time.Hour)
 	})
 
-	if got := len(store.entries); got != previewStoreCapacity {
+	if got := store.live.len(); got != previewStoreCapacity {
 		t.Fatalf("live entries after entropy failure = %d, want %d", got, previewStoreCapacity)
 	}
-	if got := len(store.outcomes); got != 0 {
+	if got := len(store.outcomes.values); got != 0 {
 		t.Fatalf("terminal outcomes after entropy failure = %d, want 0", got)
 	}
 	for _, token := range tokens {
@@ -301,7 +301,7 @@ func TestPreviewConcurrentIssueSerializesEntropyThroughRegistration(t *testing.T
 	if got := entropy.maximumConcurrentReads.Load(); got != 1 {
 		t.Fatalf("maximum concurrent entropy reads = %d, want 1", got)
 	}
-	if got := len(store.entries); got != issuers {
+	if got := store.live.len(); got != issuers {
 		t.Fatalf("live entries = %d, want %d", got, issuers)
 	}
 }
