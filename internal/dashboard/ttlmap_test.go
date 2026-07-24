@@ -67,6 +67,16 @@ func TestBoundedRingDropsOldest(t *testing.T) {
 	if err, ok := r.get("t3"); !ok || err != ErrPreviewEvicted {
 		t.Fatalf("newest outcome = %v ok=%v", err, ok)
 	}
+	// Many over-capacity puts must not leave a large resliced backing array.
+	for i := 0; i < 64; i++ {
+		r.put("x"+string(rune('a'+i%26))+string(rune('0'+i/26)), ErrPreviewUsed)
+	}
+	if cap(r.order) > 4 {
+		t.Fatalf("order backing cap = %d after copy-on-evict, want tight (<=4)", cap(r.order))
+	}
+	if len(r.order) != 2 {
+		t.Fatalf("order len = %d, want 2", len(r.order))
+	}
 }
 
 func TestTokenStoresShareTTLHelpers(t *testing.T) {
