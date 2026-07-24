@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/matt-riley/waffle/compare/v0.8.1...v0.8.2) (2026-07-24)
+
+
+### Bug Fixes
+
+* **#148:** start idle workspace once during clean close ([#160](https://github.com/matt-riley/waffle/issues/160)) ([4ca9145](https://github.com/matt-riley/waffle/commit/4ca914595d8aff9e1c786c7f04a56e019754000a))
+* **#150:** batch tasks session existence for OpenAtDesk ([#162](https://github.com/matt-riley/waffle/issues/162)) ([f211dd8](https://github.com/matt-riley/waffle/commit/f211dd84cd22c33ecd3856df310d5f9eb21150c1))
+
 ## [0.8.1](https://github.com/matt-riley/waffle/compare/v0.8.0...v0.8.1) (2026-07-24)
 
 
