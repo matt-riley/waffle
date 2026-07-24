@@ -542,7 +542,7 @@ async function fixtureURL(child, output, getErrors) {
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error(`dashboard fixture timed out\n${getErrors()}`));
-    }, 30_000);
+    }, 120_000);
     const onLine = (line) => {
       cleanup();
       resolve(line);

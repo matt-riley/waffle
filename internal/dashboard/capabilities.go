@@ -21,6 +21,8 @@ import (
 const (
 	CapabilityProviderMaxBodyBytes = 64 << 10
 	capabilityMutationMaxBodyBytes = 16 << 10
+	capabilitySnapshotLockWait     = time.Second
+	capabilitySnapshotRetryDelay   = 10 * time.Millisecond
 	restartScheduleTimeout         = 5 * time.Second
 )
 
@@ -310,12 +312,27 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 
 func capabilitiesSnapshotHandler(service *Capabilities) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		snapshot, err := service.Snapshot(r.Context(), r.URL.Query().Get("session_id"))
-		if err != nil {
-			writeCapabilityError(w, err)
-			return
+		ctx, cancel := context.WithTimeout(r.Context(), capabilitySnapshotLockWait)
+		defer cancel()
+		for {
+			snapshot, err := service.Snapshot(ctx, r.URL.Query().Get("session_id"))
+			if !errors.Is(err, providerconfig.ErrLocked) {
+				if err != nil {
+					writeCapabilityError(w, err)
+					return
+				}
+				writeCapabilityJSON(w, http.StatusOK, snapshot)
+				return
+			}
+			timer := time.NewTimer(capabilitySnapshotRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				writeCapabilityError(w, errors.Join(ErrCapabilitiesUnavailable, ctx.Err()))
+				return
+			case <-timer.C:
+			}
 		}
-		writeCapabilityJSON(w, http.StatusOK, snapshot)
 	})
 }
 

@@ -97,6 +97,31 @@ func TestCapabilitiesSnapshotCombinesModelsAndSessionSkills(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesSnapshotRetriesTransientProviderLock(t *testing.T) {
+	providers := &fakeCapabilityProviders{
+		snapshot: providerconfig.Listing{
+			State:     "ready",
+			Providers: map[string]providerconfig.ProviderSummary{},
+			Models:    map[string]providerconfig.ModelSummary{},
+		},
+		snapshotErrs: []error{providerconfig.ErrLocked},
+	}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service: &Capabilities{Providers: providers},
+	})
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/desk/capabilities", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", response.Code, response.Body.String())
+	}
+	if providers.snapshotCalls != 2 {
+		t.Fatalf("snapshot calls = %d, want 2", providers.snapshotCalls)
+	}
+}
+
 func TestCapabilitiesSkillsStageInstallInactiveThenExplicitActivate(t *testing.T) {
 	skills := &fakeCapabilitySkills{
 		manifest: skillinstall.Manifest{
@@ -547,14 +572,22 @@ func TestRegisterCapabilitiesRoutesHasNoRemovalEndpoints(t *testing.T) {
 }
 
 type fakeCapabilityProviders struct {
-	snapshot    providerconfig.Listing
-	result      providerconfig.MutationResult
-	mutationErr error
-	mutations   int
-	lastAPIKey  string
+	snapshot      providerconfig.Listing
+	snapshotErrs  []error
+	snapshotCalls int
+	result        providerconfig.MutationResult
+	mutationErr   error
+	mutations     int
+	lastAPIKey    string
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
+	f.snapshotCalls++
+	if len(f.snapshotErrs) > 0 {
+		err := f.snapshotErrs[0]
+		f.snapshotErrs = f.snapshotErrs[1:]
+		return providerconfig.Listing{}, err
+	}
 	return f.snapshot, nil
 }
 
