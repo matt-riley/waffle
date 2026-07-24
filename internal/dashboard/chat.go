@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/matt-riley/waffle/internal/chat"
 )
@@ -27,12 +27,6 @@ var (
 	errChatTurnActive     = errors.New("turn_active")
 	errChatUnavailable    = errors.New("chat_unavailable")
 )
-
-var dashboardSensitivePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AGE-SECRET-KEY-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`/var/lib/waffle(?:/[A-Za-z0-9._/-]+)?`),
-}
 
 // BackendFactory builds one isolated chat backend for each browser client.
 type BackendFactory func(context.Context) (chat.Backend, error)
@@ -168,15 +162,21 @@ func (c *chatClient) beginOperation() bool {
 
 // ChatClients adapts browser client IDs to isolated chat backends.
 type ChatClients struct {
-	mu               sync.Mutex
-	clients          map[string]*chatClient
-	factory          BackendFactory
-	ids              io.Reader
-	now              func() time.Time
-	maxClients       int
-	idleTTL          time.Duration
-	shutdownTTL      time.Duration
-	events           *EventHub
+	mu          sync.Mutex
+	clients     map[string]*chatClient
+	factory     BackendFactory
+	ids         io.Reader
+	now         func() time.Time
+	maxClients  int
+	idleTTL     time.Duration
+	shutdownTTL time.Duration
+	events      *EventHub
+	// redact replaces known secret values with placeholders. Production wiring
+	// supplies secret.Redactor.Redact via SetRedactor so free-form chat text
+	// never relies on format-guessing regexes at the Desk boundary (#153).
+	// Unexported so concurrent event reads always go through redactExact under
+	// the mutex rather than a racy direct field write.
+	redact           func(string) string
 	shutting         bool
 	shutdownDone     chan struct{}
 	shutdownErr      error
@@ -207,6 +207,14 @@ func (c *ChatClients) SetEventHub(events *EventHub) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = events
+}
+
+// SetRedactor installs the exact-value secret redactor used on chat projections.
+// The sole write path for the redactor; callers must not assign a field.
+func (c *ChatClients) SetRedactor(redact func(string) string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.redact = redact
 }
 
 // Open creates and opens one isolated backend for a browser client.
@@ -542,19 +550,19 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 		if !dashboardEventKind(event.Kind) {
 			return
 		}
-		text := sanitizeDashboardString(event.Text)
-		if event.IsError {
-			text = "chat operation failed"
-		}
+		// Structural guarantees (#153): error events never carry free-form
+		// provider text; tool names must be identifiers; free-form text is
+		// exact-value redacted rather than pattern-guessed.
+		text := c.projectChatText(event)
 		var state *dashboardChatState
 		if event.State != nil {
-			safe := safeDashboardChatState(*event.State)
+			safe := c.safeDashboardChatState(*event.State)
 			state = &safe
 		}
 		data, err := json.Marshal(dashboardChatEvent{
 			Kind:      event.Kind,
 			Text:      text,
-			ToolName:  sanitizeDashboardString(event.ToolName),
+			ToolName:  projectChatToolName(event.ToolName),
 			IsError:   event.IsError,
 			ByteCount: event.ByteCount,
 			State:     state,
@@ -568,6 +576,58 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 		}
 		c.events.Publish(Event{Type: string(event.Kind), Resource: "chat", ResourceID: clientID, Data: data})
 	}
+}
+
+func (c *ChatClients) projectChatText(event chat.Event) string {
+	if event.IsError {
+		return "chat operation failed"
+	}
+	return c.redactExact(event.Text)
+}
+
+func (c *ChatClients) redactExact(value string) string {
+	if value == "" {
+		return value
+	}
+	var redact func(string) string
+	if c != nil {
+		c.mu.Lock()
+		redact = c.redact
+		c.mu.Unlock()
+	}
+	if redact != nil {
+		value = redact(value)
+	}
+	// Identity env name is configuration surface, not a secret-format guess.
+	return strings.ReplaceAll(value, "WAFFLE_AGE_IDENTITY", "[redacted]")
+}
+
+// projectChatToolName admits tool identifiers only. Paths and free-form
+// material never qualify, so host paths cannot arrive as tool names.
+func projectChatToolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return "[redacted]"
+	}
+	return name
+}
+
+// projectChatWorkspaceLabel drops absolute host paths so waffle data roots
+// never appear in browser-facing state.
+func projectChatWorkspaceLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "/") || strings.ContainsAny(value, `:\`) {
+		return ""
+	}
+	return value
 }
 
 type dashboardChatEvent struct {
@@ -614,31 +674,23 @@ func dashboardEventKind(kind chat.EventKind) bool {
 	}
 }
 
-func sanitizeDashboardString(value string) string {
-	clean := strings.ReplaceAll(value, "WAFFLE_AGE_IDENTITY", "[redacted]")
-	for _, pattern := range dashboardSensitivePatterns {
-		clean = pattern.ReplaceAllString(clean, "[redacted]")
-	}
-	return clean
-}
-
-func safeChatState(state chat.State) chat.State {
-	state.Title = sanitizeDashboardString(state.Title)
-	state.ModelAlias = sanitizeDashboardString(state.ModelAlias)
-	state.ModelError = sanitizeDashboardString(state.ModelError)
-	state.ProviderLabel = sanitizeDashboardString(state.ProviderLabel)
-	state.Profile = sanitizeDashboardString(state.Profile)
-	state.Workspace = sanitizeDashboardString(state.Workspace)
+func (c *ChatClients) safeChatState(state chat.State) chat.State {
+	state.Title = c.redactExact(state.Title)
+	state.ModelAlias = c.redactExact(state.ModelAlias)
+	state.ModelError = c.redactExact(state.ModelError)
+	state.ProviderLabel = c.redactExact(state.ProviderLabel)
+	state.Profile = c.redactExact(state.Profile)
+	state.Workspace = projectChatWorkspaceLabel(c.redactExact(state.Workspace))
 	for i := range state.Models {
-		state.Models[i].Alias = sanitizeDashboardString(state.Models[i].Alias)
-		state.Models[i].Provider = sanitizeDashboardString(state.Models[i].Provider)
-		state.Models[i].Upstream = sanitizeDashboardString(state.Models[i].Upstream)
+		state.Models[i].Alias = c.redactExact(state.Models[i].Alias)
+		state.Models[i].Provider = c.redactExact(state.Models[i].Provider)
+		state.Models[i].Upstream = c.redactExact(state.Models[i].Upstream)
 	}
 	return state
 }
 
-func safeDashboardChatState(state chat.State) dashboardChatState {
-	state = safeChatState(state)
+func (c *ChatClients) safeDashboardChatState(state chat.State) dashboardChatState {
+	state = c.safeChatState(state)
 	return dashboardChatState{
 		SessionID:      state.SessionID,
 		Title:          state.Title,
@@ -654,24 +706,24 @@ func safeDashboardChatState(state chat.State) dashboardChatState {
 	}
 }
 
-func safeChatResult(result chat.Result) chat.Result {
-	result.Title = sanitizeDashboardString(result.Title)
-	result.Text = sanitizeDashboardString(result.Text)
+func (c *ChatClients) safeChatResult(result chat.Result) chat.Result {
+	result.Title = c.redactExact(result.Title)
+	result.Text = c.redactExact(result.Text)
 	for i := range result.Models {
-		result.Models[i].Alias = sanitizeDashboardString(result.Models[i].Alias)
-		result.Models[i].Provider = sanitizeDashboardString(result.Models[i].Provider)
-		result.Models[i].Upstream = sanitizeDashboardString(result.Models[i].Upstream)
+		result.Models[i].Alias = c.redactExact(result.Models[i].Alias)
+		result.Models[i].Provider = c.redactExact(result.Models[i].Provider)
+		result.Models[i].Upstream = c.redactExact(result.Models[i].Upstream)
 	}
 	for i := range result.Sessions {
-		result.Sessions[i].Title = sanitizeDashboardString(result.Sessions[i].Title)
-		result.Sessions[i].Summary = sanitizeDashboardString(result.Sessions[i].Summary)
-		result.Sessions[i].ModelAlias = sanitizeDashboardString(result.Sessions[i].ModelAlias)
+		result.Sessions[i].Title = c.redactExact(result.Sessions[i].Title)
+		result.Sessions[i].Summary = c.redactExact(result.Sessions[i].Summary)
+		result.Sessions[i].ModelAlias = c.redactExact(result.Sessions[i].ModelAlias)
 	}
 	for i := range result.Workset {
-		result.Workset[i].Text = sanitizeDashboardString(result.Workset[i].Text)
+		result.Workset[i].Text = c.redactExact(result.Workset[i].Text)
 	}
 	if result.State != nil {
-		state := safeChatState(*result.State)
+		state := c.safeChatState(*result.State)
 		result.State = &state
 	}
 	return result
