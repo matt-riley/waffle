@@ -279,6 +279,7 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		"/api/v1/desk/workspaces",
 		"/api/v1/desk/memory?query=anything",
 		"/api/v1/desk/capabilities",
+		"/api/v1/desk/connections",
 	} {
 		response, requestErr := client.Get("http://" + addr + endpoint)
 		if requestErr != nil {

@@ -294,6 +294,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			ProcessGeneration: dashboardGeneration,
 			Now:               time.Now,
 		})
+		dashboard.RegisterConnectionsRoutes(statusMux, dashboard.NewConnectionSource(cfg, obs))
 		statusHandler = dashboardSecurity.Wrap(statusHandler)
 	}
 	statusDone := make(chan error, 1)
