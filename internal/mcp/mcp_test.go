@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -651,6 +652,92 @@ func TestCloseContextPreservesCallerDeadlineForContainerCleanup(t *testing.T) {
 	}
 }
 
+func TestCloseContextRetainsFailedContainerCleanupForRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake docker is unix-only")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "docker.log")
+	releasePath := filepath.Join(dir, "release")
+	fakeDocker := filepath.Join(dir, "docker")
+	script := `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$WAFFLE_TEST_DOCKER_LOG"
+if [ ! -f "$WAFFLE_TEST_DOCKER_RELEASE" ]; then
+  echo "docker cleanup unavailable" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("WAFFLE_TEST_DOCKER_LOG", logPath)
+	t.Setenv("WAFFLE_TEST_DOCKER_RELEASE", releasePath)
+
+	const containerName = "waffle-mcp-retry"
+	path := writeFakeServer(t)
+	client, err := ConnectRestricted(context.Background(), Server{
+		Name:            "fake",
+		Command:         "bash",
+		Args:            []string{path},
+		DockerContainer: containerName,
+	}, RestrictOpts{Mode: "sandbox"})
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.WriteFile(releasePath, []byte("release"), 0o600)
+		_ = client.Close()
+	})
+
+	if err := client.CloseContext(context.Background()); err == nil {
+		t.Fatal("CloseContext succeeded after docker stop/rm failures")
+	}
+	if client.containerName != containerName {
+		t.Fatalf("failed cleanup containerName = %q, want retained %q", client.containerName, containerName)
+	}
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseContext(context.Background()); err != nil {
+		t.Fatalf("CloseContext retry: %v", err)
+	}
+	if client.containerName != "" {
+		t.Fatalf("successful retry retained containerName %q", client.containerName)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stops := strings.Count(string(raw), "stop -t 1 "+containerName); stops != 2 {
+		t.Fatalf("docker stop attempts = %d, want 2\n%s", stops, raw)
+	}
+	if removals := strings.Count(string(raw), "rm -f "+containerName); removals != 2 {
+		t.Fatalf("docker rm attempts = %d, want 2\n%s", removals, raw)
+	}
+}
+
+func TestCloseContextDoesNotReplayCompletedProcessErrorForever(t *testing.T) {
+	path := writeFakeServer(t)
+	client, err := Connect(context.Background(), Server{Name: "fake", Command: "bash", Args: []string{path}})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	closeErr := errors.New("stdin close warning")
+	client.in = &errorWriteCloser{WriteCloser: client.in, err: closeErr}
+
+	if err := client.CloseContext(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("first CloseContext error = %v, want %v", err, closeErr)
+	}
+	if !client.processClosed {
+		t.Fatal("first CloseContext did not finish local process teardown")
+	}
+	if err := client.CloseContext(context.Background()); err != nil {
+		t.Fatalf("completed process error was replayed on retry: %v", err)
+	}
+}
+
 // TestCloseWithoutContainerSkipsDocker ensures host MCP Close does not
 // invoke docker when no container was named.
 func TestCloseWithoutContainerSkipsDocker(t *testing.T) {
@@ -680,4 +767,13 @@ func TestCloseWithoutContainerSkipsDocker(t *testing.T) {
 	if raw, err := os.ReadFile(logPath); err == nil && len(raw) > 0 {
 		t.Fatalf("host MCP Close must not invoke docker; log:\n%s", raw)
 	}
+}
+
+type errorWriteCloser struct {
+	io.WriteCloser
+	err error
+}
+
+func (c *errorWriteCloser) Close() error {
+	return errors.Join(c.WriteCloser.Close(), c.err)
 }

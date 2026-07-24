@@ -76,6 +76,7 @@ type chatRuntime struct {
 	repoOpener          func(context.Context, string, string) (repoInstall, error)
 	sessionOwners       *chatSessionOwners
 	ownedSessionID      string
+	retiredCleanup      []*chatRuntimeCleanup
 }
 
 type repoInstall struct {
@@ -83,6 +84,47 @@ type repoInstall struct {
 	policy    *repopolicy.Policy
 	tools     tool.Toolbox
 	client    io.Closer
+}
+
+type chatRuntimeCleanup struct {
+	mu     sync.Mutex
+	client io.Closer
+	agent  agentCleanupContext
+}
+
+func newChatRuntimeCleanup(client io.Closer, agentCleanup agentCleanupContext) *chatRuntimeCleanup {
+	if client == nil && agentCleanup == nil {
+		return nil
+	}
+	return &chatRuntimeCleanup{client: client, agent: agentCleanup}
+}
+
+func (c *chatRuntimeCleanup) close(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var cleanupErr error
+	if c.client != nil {
+		if err := closeRuntimeResource(ctx, c.client); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			c.client = nil
+		}
+	}
+	if c.agent != nil {
+		if err := c.agent(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			c.agent = nil
+		}
+	}
+	return cleanupErr
+}
+
+func (c *chatRuntimeCleanup) complete() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.client == nil && c.agent == nil
 }
 
 type contextCloser interface {
@@ -820,8 +862,10 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		r.mu.Unlock()
 		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
 	}
-	oldClient := r.wsClient
-	oldCleanup := r.agentCleanupContext
+	retired := newChatRuntimeCleanup(r.wsClient, r.agentCleanupContext)
+	if retired != nil {
+		r.retiredCleanup = append(r.retiredCleanup, retired)
+	}
 	r.wsClient = install.client
 	adopted = true
 	r.agent = workspaceAgent
@@ -836,12 +880,7 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	r.workspace = fmt.Sprintf("%s at /work/repo", install.workspace.Repo)
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
-	if oldClient != nil {
-		_ = closeRuntimeResource(ctx, oldClient)
-	}
-	if oldCleanup != nil {
-		_ = oldCleanup(ctx)
-	}
+	_ = r.cleanupRetiredResources(ctx)
 	if emit != nil {
 		emit(chatpkg.Event{Kind: chatpkg.EventState, State: &state})
 	}
@@ -1377,6 +1416,7 @@ func (r *chatRuntime) cleanup(ctx context.Context) error {
 			r.mu.Unlock()
 		}
 	}
+	teardownErr = errors.Join(teardownErr, r.cleanupRetiredResources(ctx))
 	if teardownErr != nil {
 		return errors.Join(reflectionErr, teardownErr)
 	}
@@ -1399,6 +1439,31 @@ func (r *chatRuntime) cleanup(ctx context.Context) error {
 		return completedChatCleanupError{err: reflectionErr}
 	}
 	return nil
+}
+
+func (r *chatRuntime) cleanupRetiredResources(ctx context.Context) error {
+	r.mu.Lock()
+	retired := append([]*chatRuntimeCleanup(nil), r.retiredCleanup...)
+	r.mu.Unlock()
+
+	var cleanupErr error
+	for _, cleanup := range retired {
+		cleanupErr = errors.Join(cleanupErr, cleanup.close(ctx))
+	}
+
+	r.mu.Lock()
+	remaining := r.retiredCleanup[:0]
+	for _, cleanup := range r.retiredCleanup {
+		if !cleanup.complete() {
+			remaining = append(remaining, cleanup)
+		}
+	}
+	for i := len(remaining); i < len(r.retiredCleanup); i++ {
+		r.retiredCleanup[i] = nil
+	}
+	r.retiredCleanup = remaining
+	r.mu.Unlock()
+	return cleanupErr
 }
 
 type completedChatCleanupError struct{ err error }

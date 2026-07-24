@@ -163,6 +163,166 @@ func TestChatRuntimeConsecutiveRepoInstallsUseCleanProfileBaselines(t *testing.T
 	}
 }
 
+func TestChatRuntimeRepoSwapCancellationRetainsOldResourcesUntilCloseRetry(t *testing.T) {
+	ctx := context.Background()
+	owners := newChatSessionOwners()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	runtime.sessionOwners = owners
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	originalCleanup := runtime.agentCleanupContext
+	oldAgentCalls := 0
+	liveCleanupAttempts := 0
+	retryErr := errors.New("old agent cleanup needs retry")
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
+		oldAgentCalls++
+		if err := cleanupCtx.Err(); err != nil {
+			return err
+		}
+		liveCleanupAttempts++
+		if liveCleanupAttempts == 1 {
+			return retryErr
+		}
+		return originalCleanup(cleanupCtx)
+	}
+	swapCtx, cancelSwap := context.WithCancel(ctx)
+	oldClient := &runtimeContextTestCloser{beforeClose: cancelSwap}
+	runtime.wsClient = oldClient
+
+	replacementCleanupCalls := 0
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools:    tool.NewRegistry(runtimeNamedTool("replacement")),
+			System:   "replacement",
+			Model:    "claude",
+			Profile:  "main",
+		}, func() { replacementCleanupCalls++ }, nil
+	}
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newClient := &runtimeTestCloser{}
+	if _, err := runtime.installRepo(swapCtx, repoInstall{
+		workspace: &workspace.Workspace{ID: "target", Repo: "owner/target", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_target")),
+		client:    newClient,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldClient.calls != 1 || oldClient.closed {
+		t.Fatalf("cancelled immediate client cleanup calls=%d closed=%t, want 1 false", oldClient.calls, oldClient.closed)
+	}
+	if oldAgentCalls != 1 {
+		t.Fatalf("cancelled immediate agent cleanup calls = %d, want 1", oldAgentCalls)
+	}
+
+	if err := runtime.Close(ctx); !errors.Is(err, retryErr) {
+		t.Fatalf("first final Close error = %v, want retryable old cleanup error", err)
+	}
+	if oldClient.calls != 2 || !oldClient.closed {
+		t.Fatalf("first final client cleanup calls=%d closed=%t, want 2 true", oldClient.calls, oldClient.closed)
+	}
+	if oldAgentCalls != 2 {
+		t.Fatalf("first final agent cleanup calls = %d, want 2", oldAgentCalls)
+	}
+	if newClient.closed != 1 || replacementCleanupCalls != 1 {
+		t.Fatalf("active replacement cleanup client=%d agent=%d, want 1 1", newClient.closed, replacementCleanupCalls)
+	}
+
+	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	contender.sessionOwners = owners
+	if _, err := contender.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("session ownership released before retired cleanup succeeded: %v", err)
+	}
+
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatalf("explicit final cleanup retry: %v", err)
+	}
+	if oldClient.calls != 2 {
+		t.Fatalf("successful old client cleanup repeated: calls = %d, want 2", oldClient.calls)
+	}
+	if oldAgentCalls != 3 {
+		t.Fatalf("old agent cleanup calls after retry = %d, want 3", oldAgentCalls)
+	}
+	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	reacquired.sessionOwners = owners
+	if _, err := reacquired.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatalf("reacquire after retired cleanup succeeded: %v", err)
+	}
+}
+
+func TestChatRuntimeRepoSwapPartialRetiredCleanupDoesNotRepeatSuccess(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldClientCloses := 0
+	runtime.wsClient = runtimeNonComparableCloser{&oldClientCloses}
+	originalCleanup := runtime.agentCleanupContext
+	oldAgentCalls := 0
+	retryErr := errors.New("retry old agent cleanup")
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
+		oldAgentCalls++
+		if oldAgentCalls == 1 {
+			return retryErr
+		}
+		return originalCleanup(cleanupCtx)
+	}
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools:    tool.NewRegistry(runtimeNamedTool("replacement")),
+			System:   "replacement",
+			Model:    "claude",
+			Profile:  "main",
+		}, func() {}, nil
+	}
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "target", Repo: "owner/target", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_target")),
+		client:    &runtimeTestCloser{},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldClientCloses != 1 || oldAgentCalls != 1 {
+		t.Fatalf("immediate retired cleanup client=%d agent=%d, want 1 1", oldClientCloses, oldAgentCalls)
+	}
+
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatalf("final Close retry: %v", err)
+	}
+	if oldClientCloses != 1 {
+		t.Fatalf("completed retired client cleanup repeated: %d", oldClientCloses)
+	}
+	if oldAgentCalls != 2 {
+		t.Fatalf("retired agent cleanup calls = %d, want 2", oldAgentCalls)
+	}
+	runtime.mu.Lock()
+	if len(runtime.retiredCleanup) != 0 {
+		retiredCount := len(runtime.retiredCleanup)
+		runtime.mu.Unlock()
+		t.Fatalf("completed retired cleanup entries = %d, want 0", retiredCount)
+	}
+	backing := runtime.retiredCleanup[:cap(runtime.retiredCleanup)]
+	for i, cleanup := range backing {
+		if cleanup != nil {
+			runtime.mu.Unlock()
+			t.Fatalf("completed retired cleanup retained in backing slot %d", i)
+		}
+	}
+	runtime.mu.Unlock()
+}
+
 func TestChatRuntimeUnboundRepoUsesOriginalChatProfileAfterBoundRepo(t *testing.T) {
 	ctx := context.Background()
 	cfg := configuredChatModels()
@@ -1675,6 +1835,37 @@ type runtimeTestCloser struct{ closed int }
 
 func (c *runtimeTestCloser) Close() error {
 	c.closed++
+	return nil
+}
+
+type runtimeContextTestCloser struct {
+	beforeClose func()
+	calls       int
+	closed      bool
+}
+
+func (c *runtimeContextTestCloser) Close() error {
+	return c.CloseContext(context.Background())
+}
+
+func (c *runtimeContextTestCloser) CloseContext(ctx context.Context) error {
+	c.calls++
+	if c.beforeClose != nil {
+		beforeClose := c.beforeClose
+		c.beforeClose = nil
+		beforeClose()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.closed = true
+	return nil
+}
+
+type runtimeNonComparableCloser []*int
+
+func (c runtimeNonComparableCloser) Close() error {
+	*c[0]++
 	return nil
 }
 

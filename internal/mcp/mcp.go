@@ -77,7 +77,6 @@ type Client struct {
 
 	closeMu       sync.Mutex
 	processClosed bool
-	processErr    error
 }
 
 // BuildProcessEnv constructs the restricted environment for an MCP child
@@ -275,18 +274,17 @@ func (c *Client) CloseContext(ctx context.Context) error {
 	c.closeMu.Lock()
 	defer c.closeMu.Unlock()
 
-	var contextErr error
+	var containerErr error
 	if c.containerName != "" {
-		_ = exec.CommandContext(ctx, "docker", "stop", "-t", "1", c.containerName).Run()
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", c.containerName).Run()
-		if err := ctx.Err(); err != nil {
-			contextErr = err
-		} else {
+		stopErr := runDockerCleanup(ctx, "stop", "-t", "1", c.containerName)
+		removeErr := runDockerCleanup(ctx, "rm", "-f", c.containerName)
+		containerErr = errors.Join(stopErr, removeErr)
+		if removeErr == nil {
 			c.containerName = ""
 		}
 	}
 	if c.processClosed {
-		return errors.Join(contextErr, c.processErr)
+		return containerErr
 	}
 
 	var first error
@@ -315,8 +313,15 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		}
 	}
 	c.processClosed = true
-	c.processErr = first
-	return errors.Join(contextErr, first)
+	return errors.Join(containerErr, first)
+}
+
+func runDockerCleanup(ctx context.Context, args ...string) error {
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "No such container:") {
+		return nil
+	}
+	return fmt.Errorf("mcp: docker %s: %w\n%s", args[0], err, strings.TrimSpace(string(out)))
 }
 
 // readLoop is the sole reader of the server's stdout. It routes each
