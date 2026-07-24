@@ -175,7 +175,9 @@ type Result struct {
 }
 
 // Backend is the shared lifecycle implemented by direct and managed chat
-// connections.
+// connections. Cancel is a synchronous best-effort interruption. Close owns
+// final cancellation and active-work drain, must return when its context ends,
+// and must not leave an untracked finalizer running after it returns.
 type Backend interface {
 	Open(context.Context, OpenOptions) (State, error)
 	Turn(context.Context, string, func(Event)) error

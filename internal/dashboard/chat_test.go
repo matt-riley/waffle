@@ -481,63 +481,6 @@ func TestChatClientsShutdownUsesOneGlobalDeadline(t *testing.T) {
 	}
 }
 
-func TestChatClientsShutdownBoundsBlockingCancel(t *testing.T) {
-	releaseCancel := make(chan struct{})
-	backend := &fakeChatBackend{
-		cancelStarted: make(chan struct{}),
-		releaseCancel: releaseCancel,
-	}
-	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
-	clients.shutdownTTL = 30 * time.Millisecond
-	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
-		t.Fatal(err)
-	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
-	<-backend.cancelStarted
-	select {
-	case err := <-shutdownDone:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
-		}
-	case <-time.After(150 * time.Millisecond):
-		close(releaseCancel)
-		<-shutdownDone
-		t.Fatal("Shutdown stalled on blocking Backend.Cancel")
-	}
-	close(releaseCancel)
-}
-
-func TestChatClientCancelBoundsBlockingBackend(t *testing.T) {
-	releaseCancel := make(chan struct{})
-	backend := &fakeChatBackend{
-		cancelStarted: make(chan struct{}),
-		releaseCancel: releaseCancel,
-	}
-	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
-	clients.shutdownTTL = 30 * time.Millisecond
-	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cancelDone := make(chan error, 1)
-	go func() { cancelDone <- clients.Cancel(id) }()
-	<-backend.cancelStarted
-	select {
-	case err := <-cancelDone:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Cancel error = %v, want deadline exceeded", err)
-		}
-	case <-time.After(150 * time.Millisecond):
-		close(releaseCancel)
-		<-cancelDone
-		t.Fatal("Cancel stalled on blocking backend")
-	}
-	close(releaseCancel)
-}
-
 func TestChatClientsShutdownWithCancelledCallerDrainsActiveWork(t *testing.T) {
 	backend := &fakeChatBackend{
 		turnStarted: make(chan struct{}),
@@ -579,17 +522,124 @@ func TestChatClientsShutdownWithCancelledCallerDrainsActiveWork(t *testing.T) {
 	}
 }
 
-func TestChatClientsShutdownUsesGlobalDeadlineAcrossBlockingBackends(t *testing.T) {
-	releaseCancel := make(chan struct{})
-	first := &fakeChatBackend{
-		cancelStarted:    make(chan struct{}),
-		releaseCancel:    releaseCancel,
-		closeWaitContext: true,
+func TestChatClientsShutdownNeverStartsUntrackedBackendCancel(t *testing.T) {
+	backend := &cleanupContractBackend{
+		cancelStarted:  make(chan struct{}),
+		cancelReturned: make(chan struct{}),
+		releaseCancel:  make(chan struct{}),
+		closeStarted:   make(chan struct{}),
+		closeReturned:  make(chan struct{}),
 	}
-	second := &fakeChatBackend{
-		cancelStarted:    make(chan struct{}),
-		releaseCancel:    releaseCancel,
-		closeWaitContext: true,
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
+	select {
+	case <-backend.cancelStarted:
+		var shutdownErr error
+		select {
+		case shutdownErr = <-shutdownDone:
+		case <-time.After(150 * time.Millisecond):
+			close(backend.releaseCancel)
+			<-backend.cancelReturned
+			t.Fatal("Shutdown remained joined to an uninterruptible Backend.Cancel")
+		}
+		select {
+		case <-backend.cancelReturned:
+			t.Fatal("blocking Backend.Cancel unexpectedly returned")
+		default:
+		}
+		close(backend.releaseCancel)
+		<-backend.cancelReturned
+		t.Fatalf("Shutdown launched Backend.Cancel and returned with it outstanding: %v", shutdownErr)
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown error = %v", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("Shutdown neither completed nor exposed a backend cancellation")
+	}
+	if backend.cancelCount() != 0 {
+		t.Fatalf("cancel calls = %d, want 0; Close owns cleanup cancellation", backend.cancelCount())
+	}
+	if backend.closeCount() != 1 {
+		t.Fatalf("close calls = %d, want 1", backend.closeCount())
+	}
+	select {
+	case <-backend.closeReturned:
+	default:
+		t.Fatal("backend Close remained outstanding after Shutdown")
+	}
+}
+
+func TestChatClientsShutdownCancelsAndDrainsActiveOperationBeforeClose(t *testing.T) {
+	for _, operation := range []string{"turn", "command"} {
+		t.Run(operation, func(t *testing.T) {
+			backend := &cleanupContractBackend{
+				operation:        operation,
+				operationStarted: make(chan struct{}),
+				operationExited:  make(chan struct{}),
+				rescueOperation:  make(chan struct{}),
+				closeStarted:     make(chan struct{}),
+				closeReturned:    make(chan struct{}),
+			}
+			clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+			clients.shutdownTTL = 80 * time.Millisecond
+			id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			operationDone := make(chan error, 1)
+			if operation == "turn" {
+				go func() { operationDone <- clients.Turn(context.Background(), id, "hold") }()
+			} else {
+				go func() {
+					_, commandErr := clients.Command(context.Background(), id, chat.ParsedCommand{Name: chat.CommandStatus})
+					operationDone <- commandErr
+				}()
+			}
+			<-backend.operationStarted
+
+			shutdownErr := clients.Shutdown(context.Background())
+			backend.releaseOperation()
+			operationErr := <-operationDone
+			if shutdownErr != nil {
+				t.Fatalf("Shutdown error = %v", shutdownErr)
+			}
+			if !errors.Is(operationErr, context.Canceled) {
+				t.Fatalf("%s error = %v, want context canceled", operation, operationErr)
+			}
+			select {
+			case <-backend.operationExited:
+			default:
+				t.Fatalf("%s remained outstanding after Shutdown", operation)
+			}
+			select {
+			case <-backend.closeReturned:
+			default:
+				t.Fatal("backend Close remained outstanding after Shutdown")
+			}
+			if backend.cancelCount() != 0 || backend.closeCount() != 1 {
+				t.Fatalf("cleanup calls cancel=%d close=%d, want 0 and 1", backend.cancelCount(), backend.closeCount())
+			}
+		})
+	}
+}
+
+func TestChatClientsShutdownPreservesEarlierCallerDeadlineAcrossClients(t *testing.T) {
+	first := &cleanupContractBackend{
+		closeStarted:        make(chan struct{}),
+		closeReturned:       make(chan struct{}),
+		closeWaitForContext: true,
+	}
+	second := &cleanupContractBackend{
+		closeStarted:        make(chan struct{}),
+		closeReturned:       make(chan struct{}),
+		closeWaitForContext: true,
 	}
 	backends := []chat.Backend{first, second}
 	index := 0
@@ -598,43 +648,194 @@ func TestChatClientsShutdownUsesGlobalDeadlineAcrossBlockingBackends(t *testing.
 		index++
 		return backend, nil
 	}, nil)
-	clients.shutdownTTL = 30 * time.Millisecond
-	for range 2 {
+	clients.shutdownTTL = 300 * time.Millisecond
+	for range backends {
 		if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
-	select {
-	case <-first.cancelStarted:
-	case <-second.cancelStarted:
-	case <-time.After(100 * time.Millisecond):
-		close(releaseCancel)
-		t.Fatal("no backend cancellation started")
-	}
-	select {
-	case <-first.cancelStarted:
-	case <-time.After(100 * time.Millisecond):
-		close(releaseCancel)
-		<-shutdownDone
-		t.Fatal("first backend cancellation did not share the global deadline")
-	}
-	select {
-	case <-second.cancelStarted:
-	case <-time.After(100 * time.Millisecond):
-		close(releaseCancel)
-		<-shutdownDone
-		t.Fatal("second backend cancellation did not share the global deadline")
-	}
-	if err := <-shutdownDone; !errors.Is(err, context.DeadlineExceeded) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	callerDeadline, _ := ctx.Deadline()
+	started := time.Now()
+	err := clients.Shutdown(ctx)
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
 	}
-	close(releaseCancel)
-	if first.cancelCount() != 1 || second.cancelCount() != 1 {
-		t.Fatalf("cancel counts = %d, %d; want 1, 1", first.cancelCount(), second.cancelCount())
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("Shutdown discarded earlier caller deadline: %v", elapsed)
 	}
+	for i, backend := range []*cleanupContractBackend{first, second} {
+		select {
+		case <-backend.closeReturned:
+		default:
+			t.Fatalf("backend %d Close remained outstanding after Shutdown", i+1)
+		}
+		if calls := backend.closeCount(); calls != 1 {
+			t.Fatalf("backend %d close calls = %d, want 1", i+1, calls)
+		}
+		if delta := backend.observedCloseDeadline().Sub(callerDeadline); delta < -10*time.Millisecond || delta > 10*time.Millisecond {
+			t.Fatalf("backend %d close deadline differs from caller by %v", i+1, delta)
+		}
+	}
+	clients.mu.Lock()
+	pending := len(clients.pending)
+	clients.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending cleanups after Shutdown = %d, want 0", pending)
+	}
+}
+
+func TestChatClientsShutdownShortensPendingCloseToGlobalDeadlineAndJoins(t *testing.T) {
+	backend := &cleanupContractBackend{
+		closeStarted:        make(chan struct{}),
+		closeReturned:       make(chan struct{}),
+		closeWaitForContext: true,
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = 300 * time.Millisecond
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeCtx, closeCancel := context.WithCancel(context.Background())
+	closeCancel()
+	if err := clients.Close(closeCtx, id); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close error = %v, want context canceled", err)
+	}
+	<-backend.closeStarted
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer shutdownCancel()
+	started := time.Now()
+	err = clients.Shutdown(shutdownCtx)
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("Shutdown waited for pending Close's later deadline: %v", elapsed)
+	}
+	select {
+	case <-backend.closeReturned:
+	default:
+		t.Fatal("pending backend Close remained outstanding after Shutdown")
+	}
+	if calls := backend.closeCount(); calls != 1 {
+		t.Fatalf("close calls = %d, want 1", calls)
+	}
+	clients.mu.Lock()
+	pending := len(clients.pending)
+	clients.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending cleanups after Shutdown = %d, want 0", pending)
+	}
+}
+
+type cleanupContractBackend struct {
+	mu                  sync.Mutex
+	operation           string
+	operationStarted    chan struct{}
+	operationExited     chan struct{}
+	rescueOperation     chan struct{}
+	rescueOnce          sync.Once
+	cancelStarted       chan struct{}
+	cancelReturned      chan struct{}
+	releaseCancel       chan struct{}
+	closeStarted        chan struct{}
+	closeReturned       chan struct{}
+	closeWaitForContext bool
+	cancelCalls         int
+	closeCalls          int
+	closeDeadline       time.Time
+}
+
+func (b *cleanupContractBackend) Open(context.Context, chat.OpenOptions) (chat.State, error) {
+	return chat.State{SessionID: "session"}, nil
+}
+
+func (b *cleanupContractBackend) Turn(ctx context.Context, _ string, _ func(chat.Event)) error {
+	if b.operation != "turn" {
+		return nil
+	}
+	return b.runOperation(ctx)
+}
+
+func (b *cleanupContractBackend) Command(ctx context.Context, _ chat.ParsedCommand, _ func(chat.Event)) (chat.Result, error) {
+	if b.operation != "command" {
+		return chat.Result{}, nil
+	}
+	return chat.Result{}, b.runOperation(ctx)
+}
+
+func (b *cleanupContractBackend) runOperation(ctx context.Context) error {
+	close(b.operationStarted)
+	select {
+	case <-ctx.Done():
+		close(b.operationExited)
+		return ctx.Err()
+	case <-b.rescueOperation:
+		close(b.operationExited)
+		return context.Canceled
+	}
+}
+
+func (b *cleanupContractBackend) releaseOperation() {
+	b.rescueOnce.Do(func() {
+		if b.rescueOperation != nil {
+			close(b.rescueOperation)
+		}
+	})
+}
+
+func (b *cleanupContractBackend) Cancel() {
+	b.mu.Lock()
+	b.cancelCalls++
+	b.mu.Unlock()
+	if b.cancelStarted != nil {
+		close(b.cancelStarted)
+		<-b.releaseCancel
+		close(b.cancelReturned)
+	}
+}
+
+func (b *cleanupContractBackend) Close(ctx context.Context) error {
+	b.mu.Lock()
+	b.closeCalls++
+	b.closeDeadline, _ = ctx.Deadline()
+	b.mu.Unlock()
+	if b.closeStarted != nil {
+		close(b.closeStarted)
+	}
+	var err error
+	if b.closeWaitForContext {
+		<-ctx.Done()
+		err = ctx.Err()
+	}
+	if b.closeReturned != nil {
+		close(b.closeReturned)
+	}
+	return err
+}
+
+func (b *cleanupContractBackend) cancelCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cancelCalls
+}
+
+func (b *cleanupContractBackend) closeCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closeCalls
+}
+
+func (b *cleanupContractBackend) observedCloseDeadline() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closeDeadline
 }
 
 type fakeChatBackend struct {

@@ -1185,7 +1185,7 @@ func TestChatRuntimeRepoCommandCancelAndCloseOwnCommandContext(t *testing.T) {
 	}
 }
 
-func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testing.T) {
+func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndRequiresExplicitCleanupRetry(t *testing.T) {
 	ctx := context.Background()
 	owners := newChatSessionOwners()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
@@ -1247,31 +1247,10 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
 	contender.sessionOwners = owners
 	if _, err := contender.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID}); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("contender Open while cleanup deferred error = %v", err)
+		t.Fatalf("contender Open before cleanup retry error = %v", err)
 	}
 
 	close(release)
-	select {
-	case <-cleanupStarted:
-	case <-time.After(time.Second):
-		t.Fatal("deferred cleanup did not start after repo command returned")
-	}
-	lateCloseDone := make([]chan error, 2)
-	for i := range lateCloseDone {
-		lateCloseDone[i] = make(chan error, 1)
-		go func(done chan<- error) { done <- runtime.Close(ctx) }(lateCloseDone[i])
-	}
-	close(allowCleanup)
-	for i, done := range lateCloseDone {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("concurrent Close %d after command exit = %v", i+1, err)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("concurrent Close %d did not observe deferred cleanup", i+1)
-		}
-	}
 	select {
 	case commandErr := <-commandDone:
 		if !errors.Is(commandErr, context.Canceled) {
@@ -1281,12 +1260,38 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 		t.Fatal("released repo command did not return")
 	}
 	select {
+	case <-cleanupStarted:
+		t.Fatal("timed-out Close started an untracked background finalizer")
+	case <-time.After(50 * time.Millisecond):
+	}
+	lateCloseDone := make([]chan error, 2)
+	for i := range lateCloseDone {
+		lateCloseDone[i] = make(chan error, 1)
+		go func(done chan<- error) { done <- runtime.Close(ctx) }(lateCloseDone[i])
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("explicit Close retry did not start cleanup")
+	}
+	close(allowCleanup)
+	for i, done := range lateCloseDone {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("concurrent Close %d after command exit = %v", i+1, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("concurrent Close %d did not observe explicit cleanup", i+1)
+		}
+	}
+	select {
 	case <-resourceDone:
 	case <-time.After(time.Second):
-		t.Fatal("deferred cleanup did not cancel shared resources")
+		t.Fatal("explicit cleanup did not cancel shared resources")
 	}
 	if err := runtime.Close(ctx); err != nil {
-		t.Fatalf("Close after deferred cleanup = %v", err)
+		t.Fatalf("Close after explicit cleanup = %v", err)
 	}
 	if cleanupCalls.Load() != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls.Load())
@@ -1295,7 +1300,75 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
 	reacquired.sessionOwners = owners
 	if _, err := reacquired.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID}); err != nil {
-		t.Fatalf("reacquire after deferred cleanup: %v", err)
+		t.Fatalf("reacquire after explicit cleanup: %v", err)
+	}
+}
+
+func TestChatRuntimeClosePreservesEarlierDeadlineWithoutBackgroundFinalizer(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	runtime.closeTimeout = 250 * time.Millisecond
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var cleanupCalls atomic.Int32
+	originalCleanup := runtime.agentCleanup
+	cleanupStarted := make(chan struct{}, 1)
+	runtime.agentCleanup = func() {
+		cleanupCalls.Add(1)
+		cleanupStarted <- struct{}{}
+		originalCleanup()
+	}
+	commandStarted := make(chan struct{})
+	releaseCommand := make(chan struct{})
+	runtime.repoOpener = func(context.Context, string, string) (repoInstall, error) {
+		close(commandStarted)
+		<-releaseCommand
+		return repoInstall{}, context.Canceled
+	}
+	commandDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandRepo, Args: "owner/repo"}, nil)
+		commandDone <- err
+	}()
+	<-commandStarted
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	started := time.Now()
+	closeErr := runtime.Close(closeCtx)
+	elapsed := time.Since(started)
+	close(releaseCommand)
+	if err := <-commandDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("command error = %v, want context canceled", err)
+	}
+
+	backgroundCleanup := false
+	select {
+	case <-cleanupStarted:
+		backgroundCleanup = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	if closeErr == nil || !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("Close error = %v, want deadline exceeded", closeErr)
+	}
+	if elapsed > 120*time.Millisecond {
+		t.Fatalf("Close discarded earlier caller deadline: %v", elapsed)
+	}
+	if backgroundCleanup {
+		t.Fatal("timed-out Close launched an untracked background finalizer")
+	}
+
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("explicit cleanup retry: %v", err)
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("explicit cleanup retry did not finalize runtime")
+	}
+	if cleanupCalls.Load() != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls.Load())
 	}
 }
 

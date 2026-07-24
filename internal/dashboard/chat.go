@@ -38,65 +38,91 @@ var dashboardSensitivePatterns = []*regexp.Regexp{
 type BackendFactory func(context.Context) (chat.Backend, error)
 
 type chatClient struct {
-	backend    chat.Backend
-	lastActive time.Time
-	busy       bool
-	done       chan struct{}
-	lifecycle  sync.Mutex
-	cancelDone chan struct{}
-	cancelled  bool
-	closeErr   error
-	closed     bool
+	backend         chat.Backend
+	lastActive      time.Time
+	busy            bool
+	done            chan struct{}
+	operationCancel context.CancelFunc
+	lifecycle       sync.Mutex
+	cancelDone      chan struct{}
+	cancelled       bool
+	closeDone       chan struct{}
+	closeErr        error
+	closing         bool
+	closed          bool
 }
 
-func (c *chatClient) cancel(ctx context.Context) error {
+func (c *chatClient) prepareCancel() (chan struct{}, bool) {
 	c.lifecycle.Lock()
-	if c.closed {
-		c.lifecycle.Unlock()
-		return nil
+	defer c.lifecycle.Unlock()
+	if c.closed || c.closing {
+		return nil, false
 	}
-	var done chan struct{}
 	if c.cancelled {
-		done = c.cancelDone
-		c.lifecycle.Unlock()
-	} else {
-		c.cancelled, c.cancelDone = true, make(chan struct{})
-		done = c.cancelDone
-		c.lifecycle.Unlock()
-		go func() {
-			c.backend.Cancel()
-			close(done)
-		}()
+		return c.cancelDone, false
 	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	c.cancelled = true
+	c.cancelDone = make(chan struct{})
+	return c.cancelDone, true
+}
+
+func (c *chatClient) finishCancel(done chan struct{}) {
+	c.backend.Cancel()
+	close(done)
 }
 
 func (c *chatClient) close(ctx context.Context) error {
-	if err := c.cancel(ctx); err != nil {
-		return err
-	}
-	c.lifecycle.Lock()
-	if c.closed {
-		err := c.closeErr
+	for {
+		c.lifecycle.Lock()
+		if c.closed {
+			err := c.closeErr
+			c.lifecycle.Unlock()
+			return err
+		}
+		if c.closing {
+			done := c.closeDone
+			c.lifecycle.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if c.cancelDone != nil {
+			select {
+			case <-c.cancelDone:
+			default:
+				done := c.cancelDone
+				c.lifecycle.Unlock()
+				select {
+				case <-done:
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
+		c.closing = true
+		c.closeDone = make(chan struct{})
+		done := c.closeDone
+		c.lifecycle.Unlock()
+
+		err := c.backend.Close(ctx)
+		c.lifecycle.Lock()
+		c.closeErr = err
+		c.closed = true
+		c.closing = false
+		close(done)
 		c.lifecycle.Unlock()
 		return err
 	}
-	c.closeErr = c.backend.Close(ctx)
-	c.closed = true
-	err := c.closeErr
-	c.lifecycle.Unlock()
-	return err
 }
 
 func (c *chatClient) beginOperation() bool {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
-	if c.closed {
+	if c.closed || c.closing {
 		return false
 	}
 	if c.cancelDone != nil {
@@ -207,12 +233,12 @@ func (c *ChatClients) Turn(ctx context.Context, clientID, input string) error {
 	if err := c.reap(ctx); err != nil {
 		return err
 	}
-	client, err := c.begin(clientID)
+	client, operationCtx, err := c.begin(ctx, clientID)
 	if err != nil {
 		return err
 	}
 	defer c.end(clientID, client)
-	return client.backend.Turn(ctx, input, c.emit(clientID))
+	return client.backend.Turn(operationCtx, input, c.emit(clientID))
 }
 
 // Command forwards one command while preserving the one-active-operation invariant.
@@ -220,12 +246,12 @@ func (c *ChatClients) Command(ctx context.Context, clientID string, command chat
 	if err := c.reap(ctx); err != nil {
 		return chat.Result{}, err
 	}
-	client, err := c.begin(clientID)
+	client, operationCtx, err := c.begin(ctx, clientID)
 	if err != nil {
 		return chat.Result{}, err
 	}
 	defer c.end(clientID, client)
-	return client.backend.Command(ctx, command, c.emit(clientID))
+	return client.backend.Command(operationCtx, command, c.emit(clientID))
 }
 
 // Cancel cancels a client backend without holding the manager lock.
@@ -234,14 +260,24 @@ func (c *ChatClients) Cancel(clientID string) error {
 	client, ok := c.clients[clientID]
 	if ok {
 		client.lastActive = c.now()
+		if client.operationCancel != nil {
+			client.operationCancel()
+		}
 	}
-	c.mu.Unlock()
 	if !ok {
+		c.mu.Unlock()
 		return errChatClientNotFound
 	}
-	cancelCtx, cancel := context.WithTimeout(context.Background(), c.shutdownTTL)
-	defer cancel()
-	return client.cancel(cancelCtx)
+	done, run := client.prepareCancel()
+	c.mu.Unlock()
+	if run {
+		client.finishCancel(done)
+		return nil
+	}
+	if done != nil {
+		<-done
+	}
+	return nil
 }
 
 // Close removes a client and closes its backend once active work has settled.
@@ -249,17 +285,19 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 	c.mu.Lock()
 	client, ok := c.clients[clientID]
 	var done <-chan struct{}
+	var operationCancel context.CancelFunc
 	if ok {
 		delete(c.clients, clientID)
 		if client.busy {
 			done = client.done
+			operationCancel = client.operationCancel
 		}
 	}
 	if !ok {
 		c.mu.Unlock()
 		return errChatClientNotFound
 	}
-	cleanup := c.startCleanupLocked(client, done, nil)
+	cleanup := c.startCleanupLocked(client, done, operationCancel, ctx)
 	c.mu.Unlock()
 	select {
 	case <-cleanup.done:
@@ -271,7 +309,7 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 
 // Shutdown stops future opens and closes all live backends exactly once.
 func (c *ChatClients) Shutdown(ctx context.Context) error {
-	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), c.shutdownTTL)
+	closeCtx, closeCancel := detachedTimeoutContext(ctx, c.shutdownTTL)
 	defer closeCancel()
 	c.mu.Lock()
 	if c.shutting {
@@ -295,15 +333,18 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 	}
 	for _, client := range c.clients {
 		var done <-chan struct{}
+		var operationCancel context.CancelFunc
 		if client.busy {
 			done = client.done
+			operationCancel = client.operationCancel
 		}
-		cleanups = append(cleanups, c.startCleanupLocked(client, done, closeCtx))
+		cleanups = append(cleanups, c.startCleanupLocked(client, done, operationCancel, closeCtx))
 	}
 	c.clients = make(map[string]*chatClient)
 	c.mu.Unlock()
 
 	var first error
+	deadlineReached := false
 	for _, cleanup := range cleanups {
 		select {
 		case <-cleanup.done:
@@ -314,11 +355,21 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 			if first == nil {
 				first = closeCtx.Err()
 			}
+			for _, pending := range cleanups {
+				pending.cancel()
+			}
+			deadlineReached = true
+		}
+		if deadlineReached {
+			break
 		}
 	}
-	if closeCtx.Err() != nil {
+	if deadlineReached {
 		for _, cleanup := range cleanups {
 			<-cleanup.done
+			if cleanup.err != nil && first == nil {
+				first = cleanup.err
+			}
 		}
 	}
 	c.mu.Lock()
@@ -328,23 +379,25 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 	return first
 }
 
-func (c *ChatClients) begin(clientID string) (*chatClient, error) {
+func (c *ChatClients) begin(ctx context.Context, clientID string) (*chatClient, context.Context, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	client, ok := c.clients[clientID]
 	if !ok {
-		return nil, errChatClientNotFound
+		return nil, nil, errChatClientNotFound
 	}
 	if client.busy {
-		return nil, errChatTurnActive
+		return nil, nil, errChatTurnActive
 	}
 	if !client.beginOperation() {
-		return nil, errChatTurnActive
+		return nil, nil, errChatTurnActive
 	}
+	operationCtx, operationCancel := context.WithCancel(ctx)
 	client.busy = true
 	client.done = make(chan struct{})
+	client.operationCancel = operationCancel
 	client.lastActive = c.now()
-	return client, nil
+	return client, operationCtx, nil
 }
 
 func (c *ChatClients) end(clientID string, client *chatClient) {
@@ -353,6 +406,10 @@ func (c *ChatClients) end(clientID string, client *chatClient) {
 	if client.done != nil {
 		close(client.done)
 		client.done = nil
+	}
+	if client.operationCancel != nil {
+		client.operationCancel()
+		client.operationCancel = nil
 	}
 	if c.clients[clientID] == client {
 		client.busy = false
@@ -366,7 +423,7 @@ func (c *ChatClients) reap(ctx context.Context) error {
 	for id, client := range c.clients {
 		if !client.busy && c.now().Sub(client.lastActive) >= c.idleTTL {
 			delete(c.clients, id)
-			cleanups = append(cleanups, c.startCleanupLocked(client, nil, nil))
+			cleanups = append(cleanups, c.startCleanupLocked(client, nil, nil, ctx))
 		}
 	}
 	c.mu.Unlock()
@@ -386,22 +443,24 @@ func (c *ChatClients) reap(ctx context.Context) error {
 	return first
 }
 
-func (c *ChatClients) startCleanupLocked(client *chatClient, activeDone <-chan struct{}, cleanupCtx context.Context) *chatCleanup {
+func (c *ChatClients) startCleanupLocked(
+	client *chatClient,
+	activeDone <-chan struct{},
+	operationCancel context.CancelFunc,
+	parent context.Context,
+) *chatCleanup {
 	if cleanup, ok := c.pending[client]; ok {
 		return cleanup
 	}
-	var cancel context.CancelFunc
-	if cleanupCtx == nil {
-		cleanupCtx, cancel = context.WithTimeout(context.Background(), c.shutdownTTL)
-	} else {
-		cleanupCtx, cancel = context.WithCancel(cleanupCtx)
-	}
-	cleanup := &chatCleanup{done: make(chan struct{})}
+	cleanupCtx, cancel := detachedTimeoutContext(parent, c.shutdownTTL)
+	cleanup := &chatCleanup{done: make(chan struct{}), cancel: cancel}
 	c.pending[client] = cleanup
 	go func() {
 		defer cancel()
-		cleanup.err = client.cancel(cleanupCtx)
-		if cleanup.err == nil && activeDone != nil {
+		if operationCancel != nil {
+			operationCancel()
+		}
+		if activeDone != nil {
 			select {
 			case <-activeDone:
 			case <-cleanupCtx.Done():
@@ -411,10 +470,10 @@ func (c *ChatClients) startCleanupLocked(client *chatClient, activeDone <-chan s
 		if cleanup.err == nil {
 			cleanup.err = client.close(cleanupCtx)
 		}
-		close(cleanup.done)
 		c.mu.Lock()
 		delete(c.pending, client)
 		c.mu.Unlock()
+		close(cleanup.done)
 	}()
 	return cleanup
 }
@@ -488,8 +547,9 @@ type dashboardChatState struct {
 }
 
 type chatCleanup struct {
-	done chan struct{}
-	err  error
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error
 }
 
 type dashboardUsage struct {
@@ -569,12 +629,16 @@ func safeChatResult(result chat.Result) chat.Result {
 	return result
 }
 
-func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+func detachedTimeoutContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if existing, ok := ctx.Deadline(); ok && existing.Before(deadline) {
+		deadline = existing
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 func closeBackend(ctx context.Context, backend chat.Backend) {
-	closeCtx, cancel := cleanupContext(ctx)
+	closeCtx, cancel := detachedTimeoutContext(ctx, 5*time.Second)
 	defer cancel()
 	_ = backend.Close(closeCtx)
 }

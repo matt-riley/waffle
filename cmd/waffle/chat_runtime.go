@@ -1039,7 +1039,6 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 			close(turnDone)
 		}
 		r.mu.Unlock()
-		r.finishCloseIfIdle()
 	}()
 
 	var emitMu sync.Mutex
@@ -1226,7 +1225,7 @@ func (r *chatRuntime) Close(ctx context.Context) error {
 }
 
 func (r *chatRuntime) close(ctx context.Context) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.runtimeCloseTimeout())
+	cleanupCtx, cancel := detachedRuntimeCloseContext(ctx, r.runtimeCloseTimeout())
 	defer cancel()
 
 	r.mu.Lock()
@@ -1278,19 +1277,14 @@ func (r *chatRuntime) finishCommand(commandCancel context.CancelFunc, commandDon
 	}
 	close(commandDone)
 	r.mu.Unlock()
-	r.finishCloseIfIdle()
 }
 
-func (r *chatRuntime) finishCloseIfIdle() {
-	r.mu.Lock()
-	idle := r.closed && r.commandDone == nil && r.turnDone == nil
-	r.mu.Unlock()
-	if !idle {
-		return
+func detachedRuntimeCloseContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if existing, ok := ctx.Deadline(); ok && existing.Before(deadline) {
+		deadline = existing
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.runtimeCloseTimeout())
-	defer cancel()
-	_ = r.finishClose(cleanupCtx)
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 func (r *chatRuntime) finishClose(ctx context.Context) error {
