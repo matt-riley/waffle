@@ -148,21 +148,38 @@ func (s *TasksService) Read(ctx context.Context, filter TaskFilter) (TasksSnapsh
 		view := scheduleTaskView(job)
 		result.Tasks = append(result.Tasks, view)
 	}
+
+	cronViews := make([]TaskView, 0)
+	sessionIDs := make([]string, 0)
 	for _, run := range runs.Active {
 		if run.Source != "cron" {
 			continue
 		}
 		view := activeTaskView(run, usageBySession)
-		s.setOpenAtDesk(ctx, &result, &view)
-		result.Tasks = append(result.Tasks, view)
+		if view.SessionID != "" {
+			sessionIDs = append(sessionIDs, view.SessionID)
+		}
+		cronViews = append(cronViews, view)
 	}
 	for _, run := range runs.Recent {
 		if run.Source != "cron" {
 			continue
 		}
 		view := recentTaskView(run, usageBySession)
-		s.setOpenAtDesk(ctx, &result, &view)
-		result.Tasks = append(result.Tasks, view)
+		if view.SessionID != "" {
+			sessionIDs = append(sessionIDs, view.SessionID)
+		}
+		cronViews = append(cronViews, view)
+	}
+	openSessions, openErr := s.sessionExistence(ctx, sessionIDs)
+	if openErr != nil {
+		appendTaskSectionError(&result, OperationsSectionSessions, openErr)
+	}
+	for i := range cronViews {
+		if openSessions[cronViews[i].SessionID] {
+			cronViews[i].OpenAtDesk = true
+		}
+		result.Tasks = append(result.Tasks, cronViews[i])
 	}
 
 	for _, task := range result.Tasks {
@@ -174,23 +191,40 @@ func (s *TasksService) Read(ctx context.Context, filter TaskFilter) (TasksSnapsh
 	return result, nil
 }
 
-func (s *TasksService) setOpenAtDesk(ctx context.Context, result *TasksSnapshot, view *TaskView) {
-	if view.SessionID == "" {
-		return
+// sessionExistence resolves which cron session IDs can open at Desk. Prefer a
+// single batched ExistIDs lookup when the session store supports it (#150).
+func (s *TasksService) sessionExistence(ctx context.Context, ids []string) (map[string]bool, error) {
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
 	}
 	if s.operations == nil || s.operations.Sessions == nil {
-		appendTaskSectionError(result, OperationsSectionSessions, ErrOperationsDependencyUnavailable)
-		return
+		return nil, ErrOperationsDependencyUnavailable
 	}
-	persisted, err := s.operations.Sessions.Get(ctx, view.SessionID)
-	switch {
-	case err == nil && persisted != nil && persisted.ID == view.SessionID:
-		view.OpenAtDesk = true
-	case errors.Is(err, session.ErrNotFound):
-		return
-	case err != nil:
-		appendTaskSectionError(result, OperationsSectionSessions, err)
+	if batch, ok := s.operations.Sessions.(sessionExistenceReader); ok {
+		return batch.ExistIDs(ctx, ids)
 	}
+	// Fallback for test doubles that only implement Get.
+	out := make(map[string]bool, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		persisted, err := s.operations.Sessions.Get(ctx, id)
+		switch {
+		case err == nil && persisted != nil && persisted.ID == id:
+			out[id] = true
+		case errors.Is(err, session.ErrNotFound):
+			continue
+		case err != nil:
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func appendTaskSectionError(result *TasksSnapshot, section string, cause error) {

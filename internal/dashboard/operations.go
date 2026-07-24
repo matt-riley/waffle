@@ -41,6 +41,12 @@ type SessionStore interface {
 	SearchSummaries(context.Context, string, int) ([]session.Hit, error)
 }
 
+// sessionExistenceReader is an optional SessionStore capability used by Tasks
+// to resolve OpenAtDesk without one Get per cron run (#150).
+type sessionExistenceReader interface {
+	ExistIDs(context.Context, []string) (map[string]bool, error)
+}
+
 type NotesSearcher interface {
 	Search(context.Context, string, int) ([]memory.NoteHit, error)
 }
@@ -72,9 +78,11 @@ type WorkspaceCloseLifecycle interface {
 }
 
 var (
-	_ RunReader               = (*observability.Service)(nil)
-	_ JobStore                = (*schedule.Store)(nil)
-	_ SessionStore            = (*session.Store)(nil)
+	_ RunReader    = (*observability.Service)(nil)
+	_ JobStore     = (*schedule.Store)(nil)
+	_ SessionStore = (*session.Store)(nil)
+	// session.Store must keep ExistIDs so Tasks uses the batched path (#150).
+	_ sessionExistenceReader  = (*session.Store)(nil)
 	_ NotesSearcher           = (*memory.NotesIndex)(nil)
 	_ WorksetStore            = (*workset.Store)(nil)
 	_ UsageReader             = (*usage.Store)(nil)

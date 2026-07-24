@@ -142,6 +142,53 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	return &sess, nil
 }
 
+// ExistIDs reports which of the given session IDs currently exist. Missing IDs
+// are simply absent from the result map. Empty input returns an empty map.
+func (s *Store) ExistIDs(ctx context.Context, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(unique))
+	args := make([]any, len(unique))
+	for i, id := range unique {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id FROM sessions WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("exist sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("exist sessions: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("exist sessions: %w", err)
+	}
+	return out, nil
+}
+
 // Latest returns the most recently updated session, or ErrNotFound.
 func (s *Store) Latest(ctx context.Context) (*Session, error) {
 	rows, err := s.list(ctx, 1)
