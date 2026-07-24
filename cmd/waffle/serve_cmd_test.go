@@ -17,12 +17,16 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/matt-riley/waffle/internal/channel"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/instance"
 	"github.com/matt-riley/waffle/internal/localsocket"
+	"github.com/matt-riley/waffle/internal/providerconfig"
+	"github.com/matt-riley/waffle/internal/secret"
 )
 
 // TestServeHelpPrintsUsageWithoutStartingDaemon verifies -h/--help return
@@ -234,7 +238,7 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
-			return []channel.Adapter{blockingAdapter{}}, nil
+			return nil, nil
 		})
 	}()
 	client := &http.Client{Timeout: 100 * time.Millisecond}
@@ -275,6 +279,7 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		t.Fatalf("GET /desk/ did not render Desk shell: %q", body)
 	}
 	for _, endpoint := range []string{
+		"/healthz",
 		"/api/v1/desk/tasks",
 		"/api/v1/desk/workspaces",
 		"/api/v1/desk/memory?query=anything",
@@ -305,6 +310,118 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("serveCmd did not return after cancellation")
+	}
+}
+
+func TestServeDashboardFinalizesDeferredProviderTransactionAfterHealthStarts(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	t.Setenv("INVOCATION_ID", "")
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(secret.EnvIdentity, identity.String())
+
+	statusAddr := unusedTCPAddress(t)
+	configBody := fmt.Sprintf(`[gateway]
+status_listen = %q
+
+[dashboard]
+enabled = true
+
+[providers.primary]
+type = "openai"
+
+[models.test]
+provider = "primary"
+model = "test-model"
+
+[agent]
+subagents = false
+learn = false
+`, statusAddr)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := providerconfig.New(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Probe = func(context.Context, config.ResolvedModel, string) error { return nil }
+	manager.Restart = func(context.Context) error { return nil }
+	manager.Stop = func(context.Context) error { return nil }
+	manager.Health = func(context.Context) error { return nil }
+	manager.ServiceActive = func(context.Context) (bool, error) { return false, nil }
+	manager.RestoreService = func(context.Context, bool) error { return nil }
+	result, err := manager.ActivateModelWithMode(t.Context(), "test", providerconfig.CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || result.TransactionID == "" {
+		t.Fatalf("deferred result = %#v", result)
+	}
+	journalPath := filepath.Join(home, "provider-config.lock.transaction.json")
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("deferred journal missing before serve: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+			return nil, nil
+		})
+	}()
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		response, requestErr := client.Get("http://" + statusAddr + "/healthz")
+		if requestErr == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatalf("serve stopped before health: %v", serveErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("dashboard health did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		if _, err := os.Stat(journalPath); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if err != nil {
+			cancel()
+			t.Fatalf("inspect deferred journal after healthy startup: %v", err)
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatalf("serve stopped before deferred finalization: %v", serveErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("deferred journal still present after healthy startup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case serveErr := <-done:
+		if serveErr != nil {
+			t.Fatalf("serve shutdown: %v", serveErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after deferred finalization test")
 	}
 }
 
@@ -384,6 +501,10 @@ func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"session_active"`)) {
 		t.Fatalf("dashboard second open = %d %q, want session_active conflict", response.StatusCode, body)
+	}
+	if response.Header.Get("X-Frame-Options") != "DENY" ||
+		response.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("dashboard mutation security headers = %#v", response.Header)
 	}
 
 	cancel()

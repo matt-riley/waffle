@@ -138,6 +138,7 @@ func TestMutationHandlerPreservesHeadersAndRunsAfterResponseOnceAfterFlush(t *te
 
 	request := func() *httptest.ResponseRecorder {
 		recorder = httptest.NewRecorder()
+		recorder.Header().Set("X-Frame-Options", "DENY")
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test", strings.NewReader(`{"intent":"same"}`))
 		req.Host = "127.0.0.1:8422"
 		req.Header.Set("X-Waffle-Desk-Token", security.Token())
@@ -157,6 +158,9 @@ func TestMutationHandlerPreservesHeadersAndRunsAfterResponseOnceAfterFlush(t *te
 		}
 		if got := response.Header().Get("X-Waffle-Result"); got != "committed" {
 			t.Fatalf("response %d result header = %q", index, got)
+		}
+		if got := response.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("response %d outer security header = %q", index, got)
 		}
 	}
 	if callbacks != 1 {

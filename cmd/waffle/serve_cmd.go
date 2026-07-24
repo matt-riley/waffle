@@ -244,6 +244,76 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	wsManager := newWorkspaceManager(cfg, st, serveBroker)
 	configureServeWorkspaceManager(cfg, wsManager, serveBrokerURL(cfg.Broker.Listen))
 
+	gw := &gateway.Gateway{
+		Agent:             agents[config.GroupMain],
+		Agents:            agents,
+		Profiles:          profilesMain,
+		GroupProfiles:     profilesGroup,
+		Entities:          entities,
+		Sessions:          sessions,
+		Adapters:          adapters,
+		Log:               log,
+		Observability:     obs,
+		Usage:             usageStore,
+		ReflectEveryTurns: cfg.Memory.ReflectEveryTurns,
+	}
+	gatewayDone := make(chan error, 1)
+	go func() {
+		log.Info("waffle gateway starting", "channels", len(adapters))
+		gatewayDone <- gw.Run(ctx)
+	}()
+	gatewayWaited := false
+	defer func() {
+		if gatewayWaited {
+			return
+		}
+		stop()
+		<-gatewayDone
+	}()
+
+	// Start the scheduler before deferred provider transactions are finalized:
+	// /healthz is not ready until the scheduler's initial reconciliation tick
+	// and configured adapters have had an opportunity to report a healthy poll.
+	sched := &schedule.Scheduler{
+		Store: scheduleStore,
+		Runner: &schedule.Runner{
+			Agent:           cronAgent,
+			AgentsByProfile: profilesCron,
+			Sessions:        sessions,
+			Deliverer:       adapterDeliverer(adapters),
+			Log:             log,
+			Observability:   obs,
+			Learn: func(ctx context.Context) (string, error) {
+				return learnDigest(ctx, cfg, st)
+			},
+		},
+		Log:    log,
+		Usage:  usageStore,
+		Health: obs,
+		Policy: schedule.RetryPolicy{
+			MaxAttempts:  cfg.Jobs.MaxAttempts,
+			BaseBackoff:  mustDuration(cfg.Jobs.BaseBackoff),
+			MaxBackoff:   mustDuration(cfg.Jobs.MaxBackoff),
+			StallTimeout: mustDuration(cfg.Jobs.StallTimeout),
+		},
+	}
+	schedDone := make(chan error, 1)
+	go func() {
+		serr := sched.Run(ctx)
+		if serr != nil {
+			log.Error("scheduler stopped", "err", serr)
+		}
+		schedDone <- serr
+	}()
+	schedulerWaited := false
+	defer func() {
+		if schedulerWaited {
+			return
+		}
+		stop()
+		<-schedDone
+	}()
+
 	var dashboardProviders *providerconfig.Manager
 	if cfg.Dashboard.Enabled {
 		dashboardProviders, err = defaultDashboardProviderManager()
@@ -368,20 +438,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		}
 	}()
 
-	gw := &gateway.Gateway{
-		Agent:             agents[config.GroupMain],
-		Agents:            agents,
-		Profiles:          profilesMain,
-		GroupProfiles:     profilesGroup,
-		Entities:          entities,
-		Sessions:          sessions,
-		Adapters:          adapters,
-		Log:               log,
-		Observability:     obs,
-		Usage:             usageStore,
-		ReflectEveryTurns: cfg.Memory.ReflectEveryTurns,
-	}
-
 	// Idle reflection: summarize sessions that went quiet without a finish pass (#59).
 	// reflect_after = "0" or empty disables; when armed, holds the same group
 	// lock as message handling (skip if the conversation is busy).
@@ -414,42 +470,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		log.Info("idle reflection armed", "after", after, "every", every)
 	}
 
-	// Scheduler: fire cron jobs while the gateway runs, delivering results
-	// through the same channel adapters. Runs on the restricted cron agent
-	// (or a named profile built against the cron tier when Job.Profile is set).
-	sched := &schedule.Scheduler{
-		Store: scheduleStore,
-		Runner: &schedule.Runner{
-			Agent:           cronAgent,
-			AgentsByProfile: profilesCron,
-			Sessions:        sessions,
-			Deliverer:       adapterDeliverer(adapters),
-			Log:             log,
-			Observability:   obs,
-			Learn: func(ctx context.Context) (string, error) {
-				return learnDigest(ctx, cfg, st)
-			},
-		},
-		Log:    log,
-		Usage:  usageStore,
-		Health: obs,
-		Policy: schedule.RetryPolicy{
-			MaxAttempts:  cfg.Jobs.MaxAttempts,
-			BaseBackoff:  mustDuration(cfg.Jobs.BaseBackoff),
-			MaxBackoff:   mustDuration(cfg.Jobs.MaxBackoff),
-			StallTimeout: mustDuration(cfg.Jobs.StallTimeout),
-		},
-	}
-	schedDone := make(chan error, 1)
-	go func() {
-		serr := sched.Run(ctx)
-		if serr != nil {
-			log.Error("scheduler stopped", "err", serr)
-		}
-
-		schedDone <- serr
-	}()
-
 	// Issue intake watchers: board-driven dispatch under the restricted issue
 	// tier. Owned exclusively by this serve process (#48 / #51).
 	intakeDone := make(chan struct{})
@@ -458,14 +478,15 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		runIntakeWatchers(lifecycleCtx, cfg, st, sessions, ws, skills, agents, serveBroker, adapterDeliverer(adapters), log)
 	}()
 
-	log.Info("waffle gateway starting", "channels", len(adapters))
-	err = gw.Run(ctx)
+	err = <-gatewayDone
+	gatewayWaited = true
 
 	// Stop the scheduler and wait for its in-flight-job drain before the
 	// deferred cleanup tears down the shared sandbox executor and MCP
 	// clients a running cron job may still be using. Also join the credential
 	// broker so a fast restart does not hit "address already in use" (#109).
 	chatErr := waitForServeWorkers(stop, lifecycleCancel, schedDone, intakeDone, chatDone, brokerDone)
+	schedulerWaited = true
 	if chatErr != nil && !errors.Is(chatErr, context.Canceled) {
 		return fmt.Errorf("chat server: %w", chatErr)
 	}

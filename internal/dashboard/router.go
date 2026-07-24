@@ -254,10 +254,8 @@ func NewMutationHandler(
 }
 
 func copyResponseHeader(destination, source http.Header) {
-	for name := range destination {
-		destination.Del(name)
-	}
 	for name, values := range source {
+		destination.Del(name)
 		destination[name] = append([]string(nil), values...)
 	}
 }
