@@ -102,6 +102,15 @@
   margin-top: 0.8rem;
 }
 
+.connection-card {
+  min-width: 0;
+}
+
+.connection-card > strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .connection-detail {
   overflow-wrap: anywhere;
 }

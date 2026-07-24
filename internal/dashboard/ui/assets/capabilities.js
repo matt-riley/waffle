@@ -43,6 +43,7 @@ if (root) {
     catalogueModels: [],
     staged: null,
     restarting: false,
+    loadGeneration: 0,
   };
 
   function setStatus(message) {
@@ -277,14 +278,24 @@ if (root) {
   }
 
   async function loadCapabilities() {
-    const [snapshot, connections] = await Promise.all([
-      getCapabilities(),
-      getConnections(),
-    ]);
+    const generation = ++state.loadGeneration;
+    let snapshot;
+    let connections;
+    try {
+      [snapshot, connections] = await Promise.all([
+        getCapabilities(),
+        getConnections(),
+      ]);
+    } catch (error) {
+      if (generation !== state.loadGeneration) return false;
+      throw error;
+    }
+    if (generation !== state.loadGeneration) return false;
     renderModels(snapshot.providers);
     renderSkills(snapshot.skills);
     renderConnections(connections);
     setStatus("Capabilities are current.");
+    return true;
   }
 
   function delay(milliseconds) {

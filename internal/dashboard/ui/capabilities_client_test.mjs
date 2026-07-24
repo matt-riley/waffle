@@ -48,10 +48,24 @@ function response(body, ok = true, status = 200) {
   };
 }
 
+function deferredResponse() {
+  let resolve;
+  const promise = new Promise((release) => {
+    resolve = release;
+  });
+  return {
+    promise,
+    resolve(body, ok = true, status = 200) {
+      resolve(response(body, ok, status));
+    },
+  };
+}
+
 function createHarness({
   providerResponse = response({}, true, 202),
   catalogueResponse = response({ connection: "primary", models: [] }),
   connectionResponse = response([]),
+  connectionResponses = null,
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
 } = {}) {
   const selectors = [
@@ -82,6 +96,7 @@ function createHarness({
   elements["#capability-provider-credential"].value = "sk-super-private";
   const calls = [];
   let bootstrapPolls = 0;
+  let connectionFetches = 0;
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
     if (path === "/api/v1/desk/capabilities") {
@@ -97,6 +112,11 @@ function createHarness({
       });
     }
     if (path === "/api/v1/desk/connections") {
+      if (connectionResponses) {
+        const index = Math.min(connectionFetches, connectionResponses.length - 1);
+        connectionFetches += 1;
+        return connectionResponses[index];
+      }
       return connectionResponse;
     }
     if (path === "/api/v1/desk/providers") {
@@ -282,4 +302,33 @@ test("connections use a stable accessible empty state", async () => {
     harness.elements["#capability-connections"].textContent,
     "No tools or connections are configured.",
   );
+});
+
+test("an older overlapping load cannot overwrite newer post-mutation connections", async () => {
+  const olderConnections = deferredResponse();
+  const harness = createHarness({
+    providerResponse: response({ restart_required: false }),
+    connectionResponses: [
+      olderConnections.promise,
+      response([{ name: "newer-mcp", kind: "mcp", status: "configured" }]),
+    ],
+  });
+  await flush();
+
+  await harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const list = harness.elements["#capability-connections"];
+  assert.equal(list.childNodes[0].childNodes[0].textContent, "newer-mcp");
+  assert.equal(harness.elements["#capability-status"].textContent, "Capabilities are current.");
+
+  olderConnections.resolve([
+    { name: "older-mcp", kind: "mcp", status: "configured" },
+  ]);
+  await flush();
+
+  assert.equal(list.childNodes[0].childNodes[0].textContent, "newer-mcp");
+  assert.equal(harness.elements["#capability-status"].textContent, "Capabilities are current.");
 });

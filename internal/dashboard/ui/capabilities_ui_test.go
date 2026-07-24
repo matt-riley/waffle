@@ -53,6 +53,8 @@ func TestCapabilitiesConnectionsStayReadableOnNarrowScreens(t *testing.T) {
 	}
 	body := response.Body.String()
 	for name, pattern := range map[string]string{
+		"connection cards shrink": `(?s)\.connection-card\s*\{[^}]*min-width:\s*0;`,
+		"connection titles wrap":  `(?s)\.connection-card\s*>\s*strong\s*\{[^}]*max-width:\s*100%;[^}]*overflow-wrap:\s*anywhere;`,
 		"connection details wrap": `(?s)\.connection-detail\s*\{[^}]*overflow-wrap:\s*anywhere;`,
 		"single column mobile":    `(?s)@media \(max-width:\s*48rem\)\s*\{.*?\.capability-grid\s*\{[^}]*grid-template-columns:\s*1fr;`,
 	} {
