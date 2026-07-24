@@ -430,7 +430,7 @@ function settleTurn(turn) {
   ) {
     return;
   }
-  if (!turn.postSettled || !turn.eventSettled) {
+  if (!turn.postSettled || !turn.eventSettled || !turn.cancelSettled) {
     if (
       turn.postSettled &&
       state.currentPhase !== phase.cancelling
@@ -459,6 +459,7 @@ async function submitTurn(event) {
     generation,
     postSettled: false,
     eventSettled: false,
+    cancelSettled: true,
   };
   state.activeTurn = turn;
   setPhase(phase.sending);
@@ -493,16 +494,29 @@ async function cancelTurn() {
   ) {
     return;
   }
-  const generation = state.generation;
+  const turn = state.activeTurn;
+  turn.cancelSettled = false;
   setPhase(phase.cancelling);
   try {
     await postMutation("/api/v1/desk/chat/cancel", {
       client_id: state.clientID,
     });
-  } catch (error) {
-    if (generation !== state.generation) {
+    if (
+      state.activeTurn !== turn ||
+      turn.generation !== state.generation
+    ) {
       return;
     }
+    turn.cancelSettled = true;
+    settleTurn(turn);
+  } catch (error) {
+    if (
+      state.activeTurn !== turn ||
+      turn.generation !== state.generation
+    ) {
+      return;
+    }
+    turn.cancelSettled = true;
     disconnect(error.safeMessage || "Cancel could not be confirmed. Refresh the Desk.");
   }
 }

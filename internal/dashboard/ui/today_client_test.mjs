@@ -170,6 +170,7 @@ function createHarness({
     querySelector: (selector) => elements[selector] || null,
   };
   const calls = [];
+  const cancelResponse = deferred();
   const turnResponse = deferred();
   const fetch = async (path, options) => {
     calls.push({ path, options });
@@ -193,6 +194,9 @@ function createHarness({
     }
     if (path === "/api/v1/desk/chat/turn") {
       return turnResponse.promise;
+    }
+    if (path === "/api/v1/desk/chat/cancel") {
+      return cancelResponse.promise;
     }
     return jsonResponse({});
   };
@@ -235,7 +239,13 @@ function createHarness({
   });
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
-  return { calls, elements, EventSource: FakeEventSource, turnResponse };
+  return {
+    calls,
+    cancelResponse,
+    elements,
+    EventSource: FakeEventSource,
+    turnResponse,
+  };
 }
 
 async function flush() {
@@ -350,4 +360,76 @@ test("turn remains locked until its POST and turn_done settle, then applies cano
     ),
     ["Question", "Answer"],
   );
+});
+
+test("cancel keeps the turn locked until its mutation and turn_done settle", async () => {
+  const harness = createHarness();
+  await flush();
+
+  const form = harness.elements["#desk-composer"];
+  const message = harness.elements["#desk-message"];
+  const submit = form.listener("submit");
+  message.value = "Question";
+  const submission = submit({ preventDefault() {} });
+  harness.turnResponse.resolve(jsonResponse({}));
+  await submission;
+  await flush();
+
+  const cancellation = harness.elements["#desk-cancel"].listener("click")();
+  await flush();
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: { title: "Question" } },
+  });
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "cancelling");
+  assert.equal(message.disabled, true);
+  message.value = "Must stay blocked";
+  void submit({ preventDefault() {} });
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+
+  harness.cancelResponse.resolve(jsonResponse({}));
+  await cancellation;
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(message.disabled, false);
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/cancel").length, 1);
+});
+
+test("late cancel rejection cannot overwrite a disconnected turn", async () => {
+  const harness = createHarness();
+  await flush();
+
+  const message = harness.elements["#desk-message"];
+  message.value = "Question";
+  const submission = harness.elements["#desk-composer"].listener("submit")({
+    preventDefault() {},
+  });
+  harness.turnResponse.resolve(jsonResponse({}));
+  await submission;
+  await flush();
+
+  const cancellation = harness.elements["#desk-cancel"].listener("click")();
+  await flush();
+  harness.EventSource.instances[0].emit("error", {});
+  const disconnectedMessage =
+    "The live connection closed. Refresh before sending again.";
+  assert.equal(
+    harness.elements["#desk-stale-message"].textContent,
+    disconnectedMessage,
+  );
+
+  harness.cancelResponse.reject(new Error("late cancel failure"));
+  await cancellation;
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "disconnected");
+  assert.equal(
+    harness.elements["#desk-stale-message"].textContent,
+    disconnectedMessage,
+  );
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
 });
