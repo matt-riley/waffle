@@ -17,6 +17,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/observability"
@@ -28,7 +29,11 @@ import (
 // ErrStalled marks a run that was canceled by the stall watchdog rather than
 // by the caller, so fire's retry-status logic can detect it without matching
 // on formatted error text.
-var ErrStalled = errors.New("job stalled")
+var (
+	ErrStalled       = errors.New("job stalled")
+	ErrInvalidUpdate = errors.New("invalid job update")
+	ErrJobNotFound   = errors.New("job not found")
+)
 
 // Job is one scheduled task.
 type Job struct {
@@ -56,6 +61,17 @@ type RetryPolicy struct {
 	BaseBackoff  time.Duration
 	MaxBackoff   time.Duration
 	StallTimeout time.Duration
+}
+
+// Update is a complete replacement for a job's editable definition. Runtime
+// bookkeeping is deliberately not part of the input.
+type Update struct {
+	Name    string
+	Cron    string
+	Prompt  string
+	Deliver string
+	Profile string
+	Enabled bool
 }
 
 func DefaultRetryPolicy() RetryPolicy {
@@ -146,6 +162,81 @@ func (s *Store) AddWithProfile(ctx context.Context, name, spec, prompt, deliver,
 	return j, nil
 }
 
+// Update validates and replaces a job's editable definition while preserving
+// its execution history and retry bookkeeping.
+func (s *Store) Update(ctx context.Context, jobID string, in Update) (_ *Job, err error) {
+	in, err = ValidateUpdate(in)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("update job: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	enabled := 0
+	if in.Enabled {
+		enabled = 1
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs SET name=?, cron=?, prompt=?, deliver=?, profile=?, enabled=?
+		WHERE id=?`,
+		in.Name, in.Cron, in.Prompt, in.Deliver, in.Profile, enabled, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("update job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update job result: %w", err)
+	}
+	if affected == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrJobNotFound, jobID)
+	}
+	job, err := scanJob(tx.QueryRowContext(ctx, `
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout, profile
+		FROM jobs WHERE id = ?`, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("read updated job: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit job update: %w", err)
+	}
+	return job, nil
+}
+
+// ValidateUpdate applies the schedule package's canonical validation and
+// normalization without touching storage. Mutation services use it to validate
+// a create request before AddWithProfile performs its insert.
+func ValidateUpdate(in Update) (Update, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	in.Cron = strings.TrimSpace(in.Cron)
+	in.Prompt = strings.TrimSpace(in.Prompt)
+	in.Deliver = strings.TrimSpace(in.Deliver)
+	if in.Name == "" {
+		return Update{}, fmt.Errorf("%w: name is required", ErrInvalidUpdate)
+	}
+	if in.Prompt == "" {
+		return Update{}, fmt.Errorf("%w: prompt is required", ErrInvalidUpdate)
+	}
+	if _, parseErr := parser.Parse(in.Cron); parseErr != nil {
+		return Update{}, fmt.Errorf("%w: invalid cron: %v", ErrInvalidUpdate, parseErr)
+	}
+	if in.Deliver != "" {
+		if _, _, ok := ParseTarget(in.Deliver); !ok {
+			return Update{}, fmt.Errorf("%w: invalid delivery target", ErrInvalidUpdate)
+		}
+	}
+	if in.Profile != "" && !config.ValidProfileName(in.Profile) {
+		return Update{}, fmt.Errorf("%w: invalid profile", ErrInvalidUpdate)
+	}
+	return in, nil
+}
+
 // Remove deletes a job.
 func (s *Store) Remove(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id)
@@ -153,7 +244,7 @@ func (s *Store) Remove(ctx context.Context, id string) error {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("no job %q", id)
+		return fmt.Errorf("%w: %q", ErrJobNotFound, id)
 	}
 	return nil
 }
@@ -213,7 +304,7 @@ func scanJob(row rowScanner) (*Job, error) {
 	var lastRun, created, nextRetry, base, max, stall string
 	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.Prompt, &j.Deliver, &enabled, &lastRun, &j.LastStatus, &created, &j.Attempt, &nextRetry, &j.MaxAttempts, &base, &max, &stall, &j.Profile)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("job not found")
+		return nil, ErrJobNotFound
 	}
 	if err != nil {
 		return nil, err

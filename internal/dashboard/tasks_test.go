@@ -1,0 +1,348 @@
+package dashboard
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/schedule"
+	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/usage"
+)
+
+func TestAttentionClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		job  schedule.Job
+		run  *TaskView
+		want bool
+	}{
+		{
+			name: "failed schedule",
+			job:  schedule.Job{LastStatus: "failed: provider unavailable"},
+			want: true,
+		},
+		{
+			name: "stalled schedule",
+			job:  schedule.Job{LastStatus: "Stalled", Attempt: 1, MaxAttempts: 3},
+			want: true,
+		},
+		{
+			name: "exhausted retry",
+			job:  schedule.Job{LastStatus: "failed: no capacity", Attempt: 3, MaxAttempts: 3},
+			want: true,
+		},
+		{
+			name: "disabled schedule retains failure evidence",
+			job:  schedule.Job{Enabled: false, LastStatus: "failed: denied"},
+			want: true,
+		},
+		{
+			name: "failed run",
+			run:  &TaskView{Outcome: "failed"},
+			want: true,
+		},
+		{
+			name: "successful history",
+			job:  schedule.Job{Enabled: true, LastStatus: "ok", Attempt: 1, MaxAttempts: 3},
+			run:  &TaskView{Outcome: "ok"},
+			want: false,
+		},
+		{
+			name: "ordinary text containing failed is not attention",
+			job:  schedule.Job{Enabled: true, LastStatus: "notified: failed search was expected"},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TaskNeedsAttention(test.job, test.run); got != test.want {
+				t.Fatalf("TaskNeedsAttention() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTasksShapesCanonicalScheduleAndCronRunCards(t *testing.T) {
+	operations := &Operations{
+		Jobs: taskJobReader{jobs: []schedule.Job{
+			{
+				ID: "job-1", Name: "Morning brief", Cron: "0 9 * * *",
+				Prompt: "Summarize", Deliver: "telegram:900", Profile: "researcher",
+				Enabled: true, LastStatus: "ok", Attempt: 1, MaxAttempts: 3,
+			},
+		}},
+		Runs: taskRunReader{snapshot: observability.Snapshot{
+			Active: []observability.ActiveRun{
+				{ID: "run-active", SessionID: "session-live", Source: "cron", Phase: "agent", Profile: "researcher", ElapsedMS: 1250, InputTokens: 7, OutputTokens: 3},
+				{ID: "run-chat", SessionID: "session-chat", Source: "chat", Phase: "agent"},
+			},
+			Recent: []observability.RecentRun{
+				{ID: "run-recent", SessionID: "session-missing", Source: "cron", Phase: "done", Profile: "reviewer", Outcome: "ok", RuntimeMS: 2400, InputTokens: 11, OutputTokens: 5},
+				{ID: "run-http", SessionID: "session-http", Source: "http", Outcome: "failed"},
+			},
+		}},
+		Sessions: taskSessionReader{sessions: map[string]*session.Session{
+			"session-live": {ID: "session-live", Title: "Persisted run"},
+		}},
+		Usage: taskUsageReader{rows: []usage.Row{
+			{SessionID: "session-live", Period: "day", InputTokens: 50, OutputTokens: 20, Requests: 2},
+			{SessionID: "session-live", Period: "hour", InputTokens: 12, OutputTokens: 4, Requests: 1},
+		}},
+	}
+
+	snapshot, err := NewTasksService(operations).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(snapshot.Tasks) != 3 {
+		t.Fatalf("task count = %d, want 3: %+v", len(snapshot.Tasks), snapshot.Tasks)
+	}
+	if snapshot.Errors == nil || len(snapshot.Errors) != 0 {
+		t.Fatalf("errors = %#v, want canonical empty slice", snapshot.Errors)
+	}
+
+	scheduleView := taskByID(t, snapshot.Tasks, "job-1")
+	if scheduleView.Kind != TaskKindSchedule || scheduleView.Source != "schedule" ||
+		scheduleView.Name != "Morning brief" || scheduleView.Profile != "researcher" ||
+		scheduleView.Cron != "0 9 * * *" || scheduleView.Outcome != "ok" ||
+		scheduleView.Retry.Attempt != 1 || scheduleView.Retry.MaxAttempts != 3 ||
+		scheduleView.EvidenceLabel != "Last run succeeded" || scheduleView.OpenAtDesk {
+		t.Fatalf("schedule view = %+v", scheduleView)
+	}
+
+	active := taskByID(t, snapshot.Tasks, "run-active")
+	if active.Kind != TaskKindActive || active.Source != "cron" ||
+		active.Phase != "agent" || active.Profile != "researcher" ||
+		active.SessionID != "session-live" || active.ElapsedMS != 1250 ||
+		active.Usage.InputTokens != 50 || active.Usage.OutputTokens != 20 ||
+		!active.OpenAtDesk || active.EvidenceLabel != "Running now" {
+		t.Fatalf("active view = %+v", active)
+	}
+
+	recent := taskByID(t, snapshot.Tasks, "run-recent")
+	if recent.Kind != TaskKindRecent || recent.Source != "cron" ||
+		recent.Phase != "done" || recent.Profile != "reviewer" ||
+		recent.SessionID != "session-missing" || recent.RuntimeMS != 2400 ||
+		recent.Usage.InputTokens != 11 || recent.Usage.OutputTokens != 5 ||
+		recent.OpenAtDesk || recent.EvidenceLabel != "Completed successfully" {
+		t.Fatalf("recent view = %+v", recent)
+	}
+}
+
+func TestTasksFilters(t *testing.T) {
+	operations := &Operations{
+		Jobs: taskJobReader{jobs: []schedule.Job{
+			{ID: "job-ok", Name: "OK", Enabled: true, LastStatus: "ok"},
+			{ID: "job-attention", Name: "Broken", Enabled: false, LastStatus: "failed: canary"},
+		}},
+		Runs: taskRunReader{snapshot: observability.Snapshot{
+			Active: []observability.ActiveRun{{ID: "run-active", Source: "cron"}},
+			Recent: []observability.RecentRun{
+				{ID: "run-complete", Source: "cron", Outcome: "ok"},
+				{ID: "run-failed", Source: "cron", Outcome: "failed"},
+			},
+		}},
+		Sessions: taskSessionReader{},
+		Usage:    taskUsageReader{},
+	}
+	service := NewTasksService(operations)
+	for _, test := range []struct {
+		filter TaskFilter
+		want   []string
+	}{
+		{filter: TaskFilterAll, want: []string{"job-ok", "job-attention", "run-active", "run-complete", "run-failed"}},
+		{filter: TaskFilterActive, want: []string{"run-active"}},
+		{filter: TaskFilterScheduled, want: []string{"job-ok", "job-attention"}},
+		{filter: TaskFilterCompleted, want: []string{"run-complete", "run-failed"}},
+		{filter: TaskFilterAttention, want: []string{"job-attention", "run-failed"}},
+	} {
+		t.Run(string(test.filter), func(t *testing.T) {
+			snapshot, err := service.Read(context.Background(), test.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(snapshot.Tasks))
+			for _, task := range snapshot.Tasks {
+				got = append(got, task.ID)
+			}
+			if strings.Join(got, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("IDs = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTasksKeepsHealthyCardsAndSanitizesPartialFailures(t *testing.T) {
+	secret := errors.New("sqlite token=super-secret")
+	operations := &Operations{
+		Jobs:  taskJobReader{jobs: []schedule.Job{{ID: "job-ok", Name: "Healthy", Enabled: true}}},
+		Runs:  taskRunReader{err: secret},
+		Usage: taskUsageReader{err: secret},
+		Sessions: taskSessionReader{
+			errs: map[string]error{"session-one": secret},
+		},
+	}
+
+	snapshot, err := NewTasksService(operations).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "job-ok" {
+		t.Fatalf("healthy tasks = %+v", snapshot.Tasks)
+	}
+	if len(snapshot.Errors) != 2 {
+		t.Fatalf("errors = %+v, want runs and usage", snapshot.Errors)
+	}
+	public, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), "super-secret") || strings.Contains(string(public), "sqlite") {
+		t.Fatalf("public response leaked backend failure: %s", public)
+	}
+	for _, sectionErr := range snapshot.Errors {
+		if sectionErr.Code != OperationsSectionUnavailableCode ||
+			sectionErr.Message != OperationsSectionUnavailableMessage {
+			t.Fatalf("unsanitized section error = %+v", sectionErr)
+		}
+	}
+}
+
+func TestTasksSanitizesScheduleFailureEvidence(t *testing.T) {
+	const secret = "provider failed with token=super-secret"
+	operations := &Operations{
+		Jobs:     taskJobReader{jobs: []schedule.Job{{ID: "job-failed", LastStatus: "failed: " + secret}}},
+		Runs:     taskRunReader{},
+		Sessions: taskSessionReader{},
+		Usage:    taskUsageReader{},
+	}
+	snapshot, err := NewTasksService(operations).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), secret) || strings.Contains(string(public), "super-secret") {
+		t.Fatalf("task view leaked schedule failure details: %s", public)
+	}
+	if strings.Contains(string(public), "0001-01-01") {
+		t.Fatalf("task view serialized absent timestamps: %s", public)
+	}
+	if got := snapshot.Tasks[0].Outcome; got != "failed" {
+		t.Fatalf("outcome = %q, want canonical failed", got)
+	}
+	if got := snapshot.Tasks[0].Retry.Status; got != "failed" {
+		t.Fatalf("retry status = %q, want canonical failed", got)
+	}
+}
+
+func TestTasksKeepsRunWhenSessionHandoffCheckFails(t *testing.T) {
+	secret := errors.New("session store token=super-secret")
+	operations := &Operations{
+		Jobs: taskJobReader{},
+		Runs: taskRunReader{snapshot: observability.Snapshot{
+			Recent: []observability.RecentRun{{
+				ID: "run-one", SessionID: "session-one", Source: "cron", Outcome: "ok",
+			}},
+		}},
+		Sessions: taskSessionReader{errs: map[string]error{"session-one": secret}},
+		Usage:    taskUsageReader{},
+	}
+	snapshot, err := NewTasksService(operations).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].OpenAtDesk {
+		t.Fatalf("run view = %+v", snapshot.Tasks)
+	}
+	if len(snapshot.Errors) != 1 || snapshot.Errors[0].Section != OperationsSectionSessions {
+		t.Fatalf("errors = %+v, want one sessions section error", snapshot.Errors)
+	}
+	public, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), "super-secret") || strings.Contains(string(public), "session store") {
+		t.Fatalf("session failure leaked: %s", public)
+	}
+}
+
+func TestTasksRejectsUnknownOrRepeatedFilter(t *testing.T) {
+	for _, values := range [][]string{{"unknown"}, {"all", "active"}} {
+		if _, err := ParseTaskFilter(values); !errors.Is(err, ErrInvalidTaskFilter) {
+			t.Fatalf("ParseTaskFilter(%v) error = %v", values, err)
+		}
+	}
+	for _, values := range [][]string{nil, {}, {"all"}, {"active"}, {"scheduled"}, {"completed"}, {"attention"}} {
+		if _, err := ParseTaskFilter(values); err != nil {
+			t.Fatalf("ParseTaskFilter(%v): %v", values, err)
+		}
+	}
+}
+
+func taskByID(t *testing.T, tasks []TaskView, id string) TaskView {
+	t.Helper()
+	for _, task := range tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	t.Fatalf("task %q not found in %+v", id, tasks)
+	return TaskView{}
+}
+
+type taskJobReader struct {
+	jobs []schedule.Job
+	err  error
+}
+
+func (f taskJobReader) List(context.Context) ([]schedule.Job, error) {
+	return f.jobs, f.err
+}
+
+type taskRunReader struct {
+	snapshot observability.Snapshot
+	err      error
+}
+
+func (f taskRunReader) Snapshot(context.Context) (observability.Snapshot, error) {
+	return f.snapshot, f.err
+}
+
+type taskUsageReader struct {
+	rows []usage.Row
+	err  error
+}
+
+func (f taskUsageReader) List(context.Context, string) ([]usage.Row, error) {
+	return f.rows, f.err
+}
+
+type taskSessionReader struct {
+	sessions map[string]*session.Session
+	errs     map[string]error
+}
+
+func (f taskSessionReader) Get(_ context.Context, id string) (*session.Session, error) {
+	if err := f.errs[id]; err != nil {
+		return nil, err
+	}
+	if value := f.sessions[id]; value != nil {
+		return value, nil
+	}
+	return nil, session.ErrNotFound
+}
+
+func (taskSessionReader) Search(context.Context, string, int) ([]session.Hit, error) {
+	return nil, nil
+}
+
+func (taskSessionReader) SearchSummaries(context.Context, string, int) ([]session.Hit, error) {
+	return nil, nil
+}

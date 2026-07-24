@@ -21,9 +21,9 @@ templ Navigation(view ShellView) {
 templ NavigationItem(section string, label string, active string) {
 	<li>
 		if section == active {
-			<a href={ "/desk/?section=" + section } aria-current="page">{ label }</a>
+			<a href={ "/desk/?section=" + section } data-desk-section={ section } aria-current="page">{ label }</a>
 		} else {
-			<a href={ "/desk/?section=" + section }>{ label }</a>
+			<a href={ "/desk/?section=" + section } data-desk-section={ section }>{ label }</a>
 		}
 	</li>
 }
