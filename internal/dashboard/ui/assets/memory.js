@@ -20,6 +20,8 @@ if (root) {
     query: "",
     hits: [],
     debounce: 0,
+    searchGeneration: 0,
+    searchController: null,
     pendingForget: null,
     requestToken: document.body.dataset.requestToken || "",
   };
@@ -164,7 +166,19 @@ if (root) {
         : `${state.hits.length} attributed result${state.hits.length === 1 ? "" : "s"}.`;
   }
 
-  async function loadMemory() {
+  function supersedeMemorySearch() {
+    state.searchGeneration += 1;
+    if (state.searchController) {
+      state.searchController.abort();
+      state.searchController = null;
+    }
+    return state.searchGeneration;
+  }
+
+  async function loadMemory(generation = supersedeMemorySearch()) {
+    if (generation !== state.searchGeneration) {
+      return;
+    }
     const query = elements.query.value.trim();
     state.query = query;
     if (!query) {
@@ -173,6 +187,8 @@ if (root) {
       elements.status.textContent = "Enter a search to begin.";
       return;
     }
+    const controller = new AbortController();
+    state.searchController = controller;
     elements.status.textContent = "Searching attributed memory…";
     try {
       const response = await fetch(
@@ -182,25 +198,42 @@ if (root) {
           credentials: "same-origin",
           cache: "no-store",
           headers: { Accept: "application/json" },
+          signal: controller.signal,
         },
       );
       const payload = await readJSON(response);
+      if (generation !== state.searchGeneration || controller.signal.aborted) {
+        return;
+      }
       renderHits(payload.hits);
     } catch (error) {
+      if (
+        generation !== state.searchGeneration ||
+        controller.signal.aborted ||
+        error?.name === "AbortError"
+      ) {
+        return;
+      }
       elements.results.replaceChildren();
       elements.status.textContent =
         error.safeMessage || "Attributed memory could not be searched.";
+    } finally {
+      if (state.searchController === controller) {
+        state.searchController = null;
+      }
     }
   }
 
   elements.form.addEventListener("submit", (event) => {
     event.preventDefault();
     clearTimeout(state.debounce);
-    void loadMemory();
+    const generation = supersedeMemorySearch();
+    void loadMemory(generation);
   });
   elements.query.addEventListener("input", () => {
     clearTimeout(state.debounce);
-    state.debounce = setTimeout(() => void loadMemory(), 250);
+    const generation = supersedeMemorySearch();
+    state.debounce = setTimeout(() => void loadMemory(generation), 250);
   });
   elements.forgetCancel.addEventListener("click", () => {
     state.pendingForget = null;
