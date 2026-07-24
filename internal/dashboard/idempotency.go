@@ -53,8 +53,12 @@ func (s *IdempotencyStore) Do(
 // is cached as the authoritative, terminal result regardless of runCtx's
 // state by the time run returns — callers that need a bounded runtime must
 // enforce it themselves (e.g. via runCtx's own deadline) rather than relying
-// on the result being discarded here. Waiting for an already in-flight
-// duplicate request is still bound by ctx.
+// on the result being discarded here. This includes a timeout or error
+// response produced because runCtx expired mid-mutation: that response is
+// cached too and gets replayed verbatim to every later request reusing the
+// same idempotency key, until the entry's TTL elapses — it is not retried
+// automatically. Waiting for an already in-flight duplicate request is still
+// bound by ctx.
 func (s *IdempotencyStore) DoDetached(
 	ctx, runCtx context.Context,
 	key, operation, requestDigest string,

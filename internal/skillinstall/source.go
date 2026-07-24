@@ -352,7 +352,11 @@ func reviewedTreeFromArchive(archive []byte) (reviewedTree, error) {
 // extended headers are rejected outright instead of merely skipping global
 // ones; GitHub's codeload archives are held to that stricter standard, while
 // plain `git archive` output (which does not use PAX extensions) only needs
-// its global headers skipped.
+// its global headers skipped. Either way, a per-file PAX header
+// (tar.TypeXHeader) is never accepted as file content: with allowPAXHeaders
+// false it hits the explicit rejection above, and with it true the header
+// falls through to the type switch below and is refused there as a special
+// archive entry.
 func reviewedTreeFromTar(archive io.Reader, rootPrefix string, allowPAXHeaders bool) (reviewedTree, error) {
 	reader := tar.NewReader(archive)
 	files := make([]reviewedFile, 0)
