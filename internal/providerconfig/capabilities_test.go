@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -208,4 +209,128 @@ func TestManagerFinalizeDeferredFinalizesHealthyOrRollsBackFailure(t *testing.T)
 			t.Fatalf("journal remains after rollback: %v", statErr)
 		}
 	})
+}
+
+func TestManagerFinalizeDeferredRejectsUnboundOrTamperedTransactions(t *testing.T) {
+	tests := []struct {
+		name   string
+		tamper func(*testing.T, *Manager)
+	}{
+		{
+			name: "missing transaction ID",
+			tamper: func(t *testing.T, m *Manager) {
+				journal, present, err := m.readJournal()
+				if err != nil || !present {
+					t.Fatalf("read journal: present=%v err=%v", present, err)
+				}
+				journal.TransactionID = ""
+				if err := m.writeJournal(journal); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed transaction ID",
+			tamper: func(t *testing.T, m *Manager) {
+				journal, present, err := m.readJournal()
+				if err != nil || !present {
+					t.Fatalf("read journal: present=%v err=%v", present, err)
+				}
+				journal.TransactionID = "not-a-config-digest"
+				if err := m.writeJournal(journal); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "stale transaction ID",
+			tamper: func(t *testing.T, m *Manager) {
+				journal, present, err := m.readJournal()
+				if err != nil || !present {
+					t.Fatalf("read journal: present=%v err=%v", present, err)
+				}
+				journal.TransactionID = strings.Repeat("0", 32)
+				if err := m.writeJournal(journal); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "committed config changed after journal",
+			tamper: func(t *testing.T, m *Manager) {
+				raw, err := os.ReadFile(m.ConfigPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# tampered after commit\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager(t)
+			before := captureManagerState(t, m)
+			if _, err := m.AddWithMode(t.Context(), validAddRequest(), CommitForRestart); err != nil {
+				t.Fatal(err)
+			}
+			healthCalls := 0
+			m.Health = func(context.Context) error {
+				healthCalls++
+				return nil
+			}
+			tt.tamper(t, m)
+
+			err := m.FinalizeDeferred(t.Context())
+
+			if err == nil || !strings.Contains(err.Error(), "deferred provider transaction integrity check failed") {
+				t.Fatalf("FinalizeDeferred error = %v, want integrity failure", err)
+			}
+			if healthCalls != 0 {
+				t.Fatalf("health calls = %d, want zero before integrity validation", healthCalls)
+			}
+			assertManagerState(t, m, before)
+			for _, path := range []string{
+				m.journalPath(),
+				m.ConfigPath + ".bak",
+				m.SecretsPath + ".bak",
+				m.readyPath() + ".bak",
+			} {
+				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("transaction evidence %q remains after successful rollback: %v", path, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestManagerFinalizeDeferredRetainsRecoveryEvidenceWhenIntegrityRollbackFails(t *testing.T) {
+	m := newTestManager(t)
+	if _, err := m.AddWithMode(t.Context(), validAddRequest(), CommitForRestart); err != nil {
+		t.Fatal(err)
+	}
+	journal, present, err := m.readJournal()
+	if err != nil || !present {
+		t.Fatalf("read journal: present=%v err=%v", present, err)
+	}
+	journal.TransactionID = ""
+	if err := m.writeJournal(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(m.ConfigPath + ".bak"); err != nil {
+		t.Fatal(err)
+	}
+
+	err = m.FinalizeDeferred(t.Context())
+
+	if err == nil || !strings.Contains(err.Error(), "deferred provider transaction integrity check failed") {
+		t.Fatalf("FinalizeDeferred error = %v, want integrity failure", err)
+	}
+	for _, path := range []string{m.journalPath(), m.SecretsPath + ".bak"} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("recovery evidence %q was discarded: %v", path, statErr)
+		}
+	}
 }

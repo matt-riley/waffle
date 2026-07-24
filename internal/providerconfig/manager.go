@@ -44,6 +44,9 @@ var (
 	// ErrDeferredHealth means the new process could not confirm the deferred
 	// provider transaction and the previous state was restored.
 	ErrDeferredHealth = errors.New("deferred provider configuration health check failed")
+	// ErrDeferredIntegrity means an awaiting-restart journal is not bound to
+	// the exact config generation currently committed on disk.
+	ErrDeferredIntegrity = errors.New("deferred provider transaction integrity check failed")
 )
 
 // Probe validates one concrete provider/model pair without mutating live state.
@@ -1116,8 +1119,12 @@ func transactionIDForStage(configStage string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return transactionIDForBytes(contents), nil
+}
+
+func transactionIDForBytes(contents []byte) string {
 	sum := sha256.Sum256(contents)
-	return hex.EncodeToString(sum[:16]), nil
+	return hex.EncodeToString(sum[:16])
 }
 
 func (m *Manager) statusFromConfig(ctx context.Context, cfg config.Config) (Status, error) {
@@ -1792,7 +1799,17 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 		return m.rollbackJournal(ctx, &journal)
 	}
 
+	configBytes, err := m.deferredConfigBytes(journal)
+	if err != nil {
+		rollbackErr := m.rollbackJournal(ctx, &journal)
+		return errors.Join(err, rollbackErr)
+	}
 	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		rollbackErr := m.rollbackJournal(ctx, &journal)
+		return errors.Join(err, rollbackErr)
+	}
+	configBytes, err = m.deferredConfigBytes(journal)
 	if err != nil {
 		rollbackErr := m.rollbackJournal(ctx, &journal)
 		return errors.Join(err, rollbackErr)
@@ -1802,10 +1819,10 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 			rollbackErr := m.rollbackJournal(ctx, &journal)
 			return errors.Join(ErrDeferredHealth, rollbackErr)
 		}
-		configBytes, readErr := os.ReadFile(m.ConfigPath)
-		if readErr != nil {
+		configBytes, err = m.deferredConfigBytes(journal)
+		if err != nil {
 			rollbackErr := m.rollbackJournal(ctx, &journal)
-			return errors.Join(readErr, rollbackErr)
+			return errors.Join(err, rollbackErr)
 		}
 		if err := writeDurable(m.readyPath(), generationBytes(configBytes), 0o600); err != nil {
 			rollbackErr := m.rollbackJournal(ctx, &journal)
@@ -1820,6 +1837,17 @@ func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 		return errors.Join(err, rollbackErr)
 	}
 	return m.finalizeTransaction()
+}
+
+func (m *Manager) deferredConfigBytes(journal transactionJournal) ([]byte, error) {
+	configBytes, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		return nil, errors.Join(ErrDeferredIntegrity, err)
+	}
+	if journal.TransactionID == "" || journal.TransactionID != transactionIDForBytes(configBytes) {
+		return nil, ErrDeferredIntegrity
+	}
+	return configBytes, nil
 }
 
 func restoreFromBackup(destination, backup string, mode fs.FileMode, existed bool) error {
