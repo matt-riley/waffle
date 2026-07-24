@@ -55,6 +55,10 @@ func (m *ttlMap[V]) pruneExpired(now time.Time, onDrop func(string, ttlRecord[V]
 
 // makeSpace ensures room for one more non-sticky insert by evicting the
 // soonest-expiring non-sticky record. Returns false when every resident is sticky.
+//
+// Callers must run pruneExpired first when expired entries should surface as
+// expiry rather than capacity eviction: makeSpace ranks purely by ExpiresAt and
+// would otherwise drop an already-expired key through onDrop as an eviction.
 func (m *ttlMap[V]) makeSpace(onDrop func(string, ttlRecord[V])) bool {
 	if m.capacity <= 0 || len(m.items) < m.capacity {
 		return true
@@ -114,7 +118,8 @@ func (r *boundedRing) put(key string, value error) {
 		return
 	}
 	oldest := r.order[0]
-	r.order = r.order[1:]
+	// Copy on eviction so the backing array does not retain dropped heads.
+	r.order = append([]string(nil), r.order[1:]...)
 	delete(r.values, oldest)
 }
 
