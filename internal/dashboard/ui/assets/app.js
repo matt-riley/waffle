@@ -1,6 +1,8 @@
-const desk = document.querySelector(".desk-shell");
+const moduleURL = new URL("./today.js", import.meta.url);
+const version = new URL(import.meta.url).searchParams.get("v");
 
-if (desk) {
-  const requestToken = document.body.dataset.requestToken;
-  desk.dataset.ready = requestToken ? "true" : "false";
+if (version) {
+  moduleURL.searchParams.set("v", version);
 }
+
+void import(moduleURL.href);

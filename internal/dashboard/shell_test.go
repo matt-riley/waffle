@@ -103,6 +103,46 @@ func TestShellProvidesAccessibleDocumentAndRequestToken(t *testing.T) {
 	}
 }
 
+func TestTodayRendersConversationControlsAndContext(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newTestShellHandler(t, ui.ShellView{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
+	body := rec.Body.String()
+
+	for _, required := range []string{
+		`id="desk-session-title"`,
+		`id="desk-stale-status"`,
+		`id="desk-transcript"`,
+		`aria-label="Conversation transcript"`,
+		`id="desk-tool-activity"`,
+		`aria-label="Tool activity"`,
+		`<label for="desk-message">`,
+		`<textarea id="desk-message"`,
+		`rows="4"`,
+		`<button id="desk-send" type="submit"`,
+		`<button id="desk-cancel" type="button"`,
+		`<label for="desk-model">`,
+		`<select id="desk-model"`,
+		`id="desk-connection"`,
+		`id="desk-profile"`,
+		`id="desk-workspace"`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("Today view missing %q", required)
+		}
+	}
+	for section, label := range map[string]string{
+		"tasks":        "Review tasks",
+		"workspaces":   "Open a workspace",
+		"memory":       "Search memory",
+		"capabilities": "Browse capabilities",
+	} {
+		link := regexp.MustCompile(`<a href="/desk/\?section=` + section + `"[^>]*>` + label + `</a>`)
+		if !link.MatchString(body) {
+			t.Errorf("Today view missing quick action %q", label)
+		}
+	}
+}
+
 func TestShellServesVersionedEmbeddedAssets(t *testing.T) {
 	handler := newTestShellHandler(t, ui.ShellView{})
 	rec := httptest.NewRecorder()
@@ -115,6 +155,20 @@ func TestShellServesVersionedEmbeddedAssets(t *testing.T) {
 	}
 	if !strings.Contains(body, `/desk/assets/app.js?v=`+assetURL[1]) {
 		t.Fatal("shell JS URL must use the embedded asset version")
+	}
+
+	appModule := httptest.NewRecorder()
+	handler.ServeHTTP(appModule, httptest.NewRequest(http.MethodGet, "/desk/assets/app.js?v="+assetURL[1], nil))
+	if appModule.Code != http.StatusOK {
+		t.Fatalf("app module status = %d, want %d", appModule.Code, http.StatusOK)
+	}
+	for _, required := range []string{
+		`new URL("./today.js", import.meta.url)`,
+		`moduleURL.searchParams.set("v", version)`,
+	} {
+		if !strings.Contains(appModule.Body.String(), required) {
+			t.Errorf("app module missing versioned Today loader %q", required)
+		}
 	}
 
 	asset := httptest.NewRecorder()
@@ -130,6 +184,18 @@ func TestShellServesVersionedEmbeddedAssets(t *testing.T) {
 	}
 	if bytes.Contains(asset.Body.Bytes(), []byte("https://")) {
 		t.Fatal("embedded asset must not load external resources")
+	}
+
+	todayAsset := httptest.NewRecorder()
+	handler.ServeHTTP(todayAsset, httptest.NewRequest(http.MethodGet, "/desk/assets/today.js?v="+assetURL[1], nil))
+	if todayAsset.Code != http.StatusOK {
+		t.Fatalf("Today asset status = %d, want %d", todayAsset.Code, http.StatusOK)
+	}
+	if contentType := todayAsset.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/javascript") {
+		t.Errorf("Today asset Content-Type = %q", contentType)
+	}
+	if cacheControl := todayAsset.Header().Get("Cache-Control"); cacheControl != "public, max-age=31536000, immutable" {
+		t.Errorf("Today asset Cache-Control = %q", cacheControl)
 	}
 }
 

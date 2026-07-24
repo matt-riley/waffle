@@ -5,14 +5,87 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/dashboard/ui"
 	"github.com/matt-riley/waffle/internal/llm"
 )
+
+func TestTodayClientStaticContract(t *testing.T) {
+	handler := newTestShellHandler(t, ui.ShellView{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/assets/today.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Today client status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	source := rec.Body.String()
+
+	for _, required := range []string{
+		`const phase = Object.freeze({`,
+		`opening: "opening"`,
+		`idle: "idle"`,
+		`sending: "sending"`,
+		`streaming: "streaming"`,
+		`cancelling: "cancelling"`,
+		`disconnected: "disconnected"`,
+		`document.createTextNode`,
+		`.textContent`,
+		`"/api/v1/desk/bootstrap"`,
+		`"/api/v1/desk/chat/open"`,
+		`"/api/v1/desk/chat/turn"`,
+		`"/api/v1/desk/chat/cancel"`,
+		`"/api/v1/desk/chat/command"`,
+		`"/api/v1/desk/chat/close"`,
+		`"/api/v1/desk/events"`,
+		`resource_id !== state.clientID`,
+		`command: { name: "model", args: alias }`,
+		`crypto.randomUUID()`,
+		`eventSource.close()`,
+		`activeOperation: null`,
+		`turnRequestPending: false`,
+		`state.activeOperation !== "turn"`,
+		`const staleClientID = state.clientID`,
+		`generation: 0`,
+		`generation !== state.generation`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("Today client missing static contract %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"innerHTML",
+		"localStorage",
+		"sessionStorage",
+		"retryTurn",
+		"retryMutation",
+		"console.",
+		"setTimeout(",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Today client contains forbidden behavior %q", forbidden)
+		}
+	}
+	if got := strings.Count(source, `postMutation("/api/v1/desk/chat/turn"`); got != 1 {
+		t.Errorf("turn mutation call sites = %d, want exactly 1", got)
+	}
+	if got := strings.Count(source, `postMutation("/api/v1/desk/chat/cancel"`); got != 1 {
+		t.Errorf("cancel mutation call sites = %d, want exactly 1", got)
+	}
+	cancelStart := strings.Index(source, "async function cancelTurn")
+	modelStart := strings.Index(source, "async function selectModel")
+	if cancelStart == -1 || modelStart <= cancelStart {
+		t.Fatal("Today client must define bounded cancel and model handlers")
+	}
+	if strings.Contains(source[cancelStart:modelStart], "setPhase(phase.idle)") {
+		t.Fatal("cancel must wait for turn_done instead of restoring idle itself")
+	}
+}
 
 func TestChatClientDoesNotRetryTurnAfterDisconnect(t *testing.T) {
 	backend := &fakeChatBackend{}

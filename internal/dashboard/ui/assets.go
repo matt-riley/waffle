@@ -32,7 +32,7 @@ func ServeAsset(w http.ResponseWriter, r *http.Request, name string) bool {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return true
 	}
-	if name != "app.css" && name != "app.js" {
+	if name != "app.css" && name != "app.js" && name != "today.js" {
 		return false
 	}
 	contents, err := assetFiles.ReadFile(path.Join("assets", name))

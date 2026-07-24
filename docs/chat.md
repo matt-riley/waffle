@@ -59,6 +59,23 @@ reports that path and the service/socket units; it does not fall back to direct
 mode or open local state. The managed wrapper always selects
 `/run/waffle/chat.sock` and rejects attempts to override it.
 
+### Waffle Desk browser companion
+
+Waffle Desk is a browser companion to `waffle chat`, not a replacement for the
+terminal interface. Enable the dashboard, run `waffle serve`, and open
+`http://127.0.0.1:8422/desk/` on the same machine. The browser and terminal
+paths share Waffle's session ownership, so they cannot mutate one session at
+the same time.
+
+If another client already owns the session, the Desk reports that the chat
+session is active instead of creating a second runtime. Finish or close the
+other client, then use the Desk's explicit refresh action. The Desk never
+retries a submitted turn automatically.
+
+The Desk model picker uses the existing `/model <alias>` command. Like the
+terminal command, it persists the alias for the current session only and does
+not change Waffle's global default.
+
 The complete invocation is:
 
 ```text
