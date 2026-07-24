@@ -38,11 +38,56 @@ var ErrWorkspaceNotFound = errors.New("workspace not found")
 // closed row from a clean, closeable workspace.
 var ErrWorkspaceAlreadyClosed = errors.New("workspace already closed")
 
+type lifecycleLockRegistry struct {
+	mu      sync.Mutex
+	entries map[string]*lifecycleLockEntry
+}
+
+type lifecycleLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type lifecycleLock struct {
+	registry *lifecycleLockRegistry
+	key      string
+	entry    *lifecycleLockEntry
+}
+
 // workspaceLifecycleLocks coordinates lifecycle transitions across Manager
-// instances in this process. Workspace IDs are globally unique, so the keyed
-// locks safely serialize CLI, reaper, and dashboard actors that use separate
-// managers over the same store.
-var workspaceLifecycleLocks sync.Map
+// instances in this process. Its references count both current holders and
+// waiters so an entry cannot be retired during lock handoff.
+var workspaceLifecycleLocks lifecycleLockRegistry
+
+func (r *lifecycleLockRegistry) lock(key string) *lifecycleLock {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.entries == nil {
+		r.entries = make(map[string]*lifecycleLockEntry)
+	}
+	entry := r.entries[key]
+	if entry == nil {
+		entry = &lifecycleLockEntry{}
+		r.entries[key] = entry
+	}
+	entry.refs++
+	return &lifecycleLock{registry: r, key: key, entry: entry}
+}
+
+func (l *lifecycleLock) Lock() {
+	l.entry.mu.Lock()
+}
+
+func (l *lifecycleLock) Unlock() {
+	l.entry.mu.Unlock()
+
+	l.registry.mu.Lock()
+	defer l.registry.mu.Unlock()
+	l.entry.refs--
+	if l.entry.refs == 0 {
+		delete(l.registry.entries, l.key)
+	}
+}
 
 // Workspace is one repo workspace.
 type Workspace struct {
@@ -1010,9 +1055,8 @@ teardown:
 	return report, true, nil
 }
 
-func workspaceLifecycleLock(id string) *sync.Mutex {
-	lock, _ := workspaceLifecycleLocks.LoadOrStore(id, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+func workspaceLifecycleLock(id string) *lifecycleLock {
+	return workspaceLifecycleLocks.lock(id)
 }
 
 func (m *Manager) revokeSession(sessionID string) {

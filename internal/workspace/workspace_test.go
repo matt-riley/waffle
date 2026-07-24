@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1159,6 +1160,125 @@ func TestInspectCloseClosedWorkspaceIsExplicit(t *testing.T) {
 	}
 }
 
+func TestLifecycleLockRegistryRetiresQuiescentKeys(t *testing.T) {
+	var registry lifecycleLockRegistry
+	for i := range 256 {
+		lock := registry.lock(fmt.Sprintf("quiescent-%d", i))
+		lock.Lock()
+		runtime.Gosched()
+		lock.Unlock()
+	}
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("quiescent registry entries = %d, want 0", got)
+	}
+}
+
+func TestLifecycleLockRegistryRetiresFailedWorkspaceCalls(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+
+	for i := range 64 {
+		id := fmt.Sprintf("missing-%d", i)
+		if _, err := mgr.InspectClose(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("InspectClose(%q) error = %v", id, err)
+		}
+		if _, _, err := mgr.CloseTransition(ctx, id, false); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("CloseTransition(%q) error = %v", id, err)
+		}
+		if err := mgr.Idle(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("Idle(%q) error = %v", id, err)
+		}
+		if _, _, err := mgr.Resume(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("Resume(%q) error = %v", id, err)
+		}
+	}
+	if got := lifecycleRegistrySize(&workspaceLifecycleLocks); got != 0 {
+		t.Fatalf("failed lifecycle calls retained %d registry entries", got)
+	}
+}
+
+func TestLifecycleLockRegistryKeepsOneEntryThroughContendedHandoff(t *testing.T) {
+	var registry lifecycleLockRegistry
+	const key = "contended"
+
+	holder := registry.lock(key)
+	holder.Lock()
+	waiter := registry.lock(key)
+	if holder.entry != waiter.entry {
+		t.Fatal("contended callers received different keyed mutexes")
+	}
+
+	waiterAcquired := make(chan struct{})
+	releaseWaiter := make(chan struct{})
+	waiterDone := make(chan struct{})
+	go func() {
+		waiter.Lock()
+		close(waiterAcquired)
+		<-releaseWaiter
+		waiter.Unlock()
+		close(waiterDone)
+	}()
+
+	holder.Unlock()
+	<-waiterAcquired
+	if got := lifecycleRegistryRefs(&registry, key); got != 1 {
+		t.Fatalf("registry refs during handoff = %d, want 1", got)
+	}
+	if entry := lifecycleRegistryEntry(&registry, key); entry != waiter.entry {
+		t.Fatal("registry deleted or replaced a lock during handoff")
+	}
+
+	close(releaseWaiter)
+	<-waiterDone
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("registry entries after handoff = %d, want 0", got)
+	}
+}
+
+func TestLifecycleLockRegistryConcurrentStressRetiresAllKeys(t *testing.T) {
+	var registry lifecycleLockRegistry
+	const (
+		workers = 24
+		keys    = 11
+		rounds  = 200
+	)
+
+	var activeMu sync.Mutex
+	active := make(map[string]bool)
+	errs := make(chan string, workers*rounds)
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := range rounds {
+				key := fmt.Sprintf("stress-%d", (worker+round)%keys)
+				lock := registry.lock(key)
+				lock.Lock()
+				activeMu.Lock()
+				if active[key] {
+					errs <- key
+				}
+				active[key] = true
+				activeMu.Unlock()
+				runtime.Gosched()
+				activeMu.Lock()
+				active[key] = false
+				activeMu.Unlock()
+				lock.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for key := range errs {
+		t.Errorf("concurrent critical sections for key %q", key)
+	}
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("stress registry entries = %d, want 0", got)
+	}
+}
+
 func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T) {
 	ctx := context.Background()
 	mgr, rt := newTestManager(t, &scriptedBash{})
@@ -1206,7 +1326,7 @@ func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T
 		_, transitioned, err := closer.CloseTransition(ctx, ws.ID, true)
 		closeDone <- closeResult{transitioned: transitioned, err: err}
 	}()
-	time.Sleep(500 * time.Millisecond)
+	waitForLifecycleRegistryRefs(t, &workspaceLifecycleLocks, ws.ID, 2)
 	if rt.hasEventPrefix("rm ") {
 		t.Fatal("CloseTransition from a second manager escaped guarded preview")
 	}
@@ -1218,6 +1338,9 @@ func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T
 	result := <-closeDone
 	if result.err != nil || !result.transitioned {
 		t.Fatalf("CloseTransition after preview = %+v", result)
+	}
+	if got := lifecycleRegistryRefs(&workspaceLifecycleLocks, ws.ID); got != 0 {
+		t.Fatalf("workspace lifecycle refs after close = %d, want 0", got)
 	}
 }
 
@@ -1262,6 +1385,48 @@ func TestCloseTransitionReportsExactlyOneConcurrentTransition(t *testing.T) {
 	}
 	if report, err := mgr.Close(ctx, ws.ID, false); err != nil || report != nil {
 		t.Fatalf("backward-compatible Close(closed) = %+v, %v", report, err)
+	}
+}
+
+func lifecycleRegistrySize(registry *lifecycleLockRegistry) int {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return len(registry.entries)
+}
+
+func lifecycleRegistryRefs(registry *lifecycleLockRegistry, key string) int {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if entry := registry.entries[key]; entry != nil {
+		return entry.refs
+	}
+	return 0
+}
+
+func lifecycleRegistryEntry(registry *lifecycleLockRegistry, key string) *lifecycleLockEntry {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return registry.entries[key]
+}
+
+func waitForLifecycleRegistryRefs(
+	t *testing.T,
+	registry *lifecycleLockRegistry,
+	key string,
+	want int,
+) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if got := lifecycleRegistryRefs(registry, key); got == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("lifecycle registry refs for %q did not reach %d", key, want)
+		default:
+			runtime.Gosched()
+		}
 	}
 }
 
