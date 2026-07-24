@@ -1,5 +1,7 @@
 [tools]
 go = "1.25.12"
+node = "26.1.0"
+pnpm = "11.9.0"
 
 [tasks.build]
 description = "Build bin/waffle with a git-stamped version"
@@ -15,8 +17,54 @@ run = "go vet ./..."
 [tasks.test]
 description = "Unit tests (includes internal/eval) and zero-network waffle eval (#63)"
 run = """
+mise run dashboard-generate
+git diff --exit-code -- internal/dashboard/ui/*_templ.go
+mise run dashboard-client-test
 go test -race ./...
 go run ./cmd/waffle eval
+"""
+
+[tasks.dashboard-generate]
+description = "Generate Waffle Desk templ components"
+run = "go tool templ generate -path internal/dashboard/ui"
+
+[tasks.dashboard-client-test]
+description = "Test the dependency-free Waffle Desk browser client"
+run = """
+node --test \
+  internal/dashboard/ui/today_client_test.mjs \
+  internal/dashboard/ui/tasks_client_test.mjs \
+  internal/dashboard/ui/workspaces_client_test.mjs \
+  internal/dashboard/ui/memory_client_test.mjs \
+  internal/dashboard/ui/capabilities_client_test.mjs
+"""
+
+[tasks.dashboard-install]
+description = "Install Waffle Desk browser-test dependencies"
+env = { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1" }
+run = """
+dashboard_node="$(mise which node)"
+dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
+test "$("$dashboard_node" --version)" = "v26.1.0"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts
+"""
+
+[tasks.dashboard-test]
+description = "Run Waffle Desk browser tests with system Chrome"
+run = """
+dashboard_node="$(mise which node)"
+dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
+test "$("$dashboard_node" --version)" = "v26.1.0"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests test
+"""
+
+[tasks.dashboard-check]
+description = "Run the complete Waffle Desk browser rollout gate"
+run = """
+mise run dashboard-install
+mise run dashboard-test
 """
 
 [tasks.fmt]

@@ -56,6 +56,14 @@
 # [chat]
 # socket = "/absolute/path/to/waffle/chat.sock"
 
+# Optional Waffle Desk web interface. It is disabled by default.
+[dashboard]
+enabled = false
+# skill_import_roots = ["/absolute/path/to/reviewed-skills"]
+# github.com supports public repositories at exact full commits through a
+# bounded codeload archive; private/authenticated repositories fail closed.
+# skill_git_hosts = ["github.com"]
+
 [agent]
 default_profile = "main"
 

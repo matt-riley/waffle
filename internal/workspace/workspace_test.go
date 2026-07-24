@@ -2,11 +2,13 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -85,14 +87,28 @@ func (s *scriptedBash) ran(substr string) bool {
 	return false
 }
 
+func (s *scriptedBash) count(substr string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var count int
+	for _, c := range s.commands {
+		if strings.Contains(c, substr) {
+			count++
+		}
+	}
+	return count
+}
+
 // fakeRuntime runs an in-process Runner per "container" instead of docker.
 type fakeRuntime struct {
-	mu       sync.Mutex
-	tools    *scriptedBash
-	cancels  map[string]context.CancelFunc
-	events   []string
-	opts     []ContainerOpts
-	startErr error
+	mu           sync.Mutex
+	tools        *scriptedBash
+	cancels      map[string]context.CancelFunc
+	events       []string
+	opts         []ContainerOpts
+	startErr     error
+	stopErr      error
+	restartDelay time.Duration
 }
 
 type revocationTracker struct {
@@ -127,6 +143,17 @@ func (f *fakeRuntime) log(e string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeRuntime) hasEventPrefix(prefix string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, event := range f.events {
+		if strings.HasPrefix(event, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) error {
 	f.mu.Lock()
 	f.opts = append(f.opts, opts)
@@ -144,17 +171,47 @@ func (f *fakeRuntime) launch(name, queueDir string) {
 	rctx, cancel := context.WithCancel(context.Background())
 	f.mu.Lock()
 	f.cancels[name] = cancel
+	delay := f.restartDelay
 	f.mu.Unlock()
 	go func() {
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-rctx.Done():
+				return
+			}
+		}
 		r := &sandbox.Runner{Tools: tool.NewRegistry(f.tools)}
 		_ = r.Serve(rctx, queueDir)
 	}()
 }
 
 func (f *fakeRuntime) StopContainer(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.log("stop " + name)
+	f.mu.Lock()
+	err := f.stopErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	f.halt(name)
 	return nil
+}
+
+func writeStaleRunnerHeartbeat(t *testing.T, queueDir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(queueDir, "outbound.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(`INSERT OR REPLACE INTO results (request_id, content, is_error, created_at) VALUES (-1, 'alive', 0, ?)`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
@@ -783,6 +840,593 @@ func TestCloseRefusesUnpushedWork(t *testing.T) {
 	}
 	if got, _ := mgr.Get(ctx, ws.ID); got.Status != StatusClosed {
 		t.Errorf("status = %s", got.Status)
+	}
+}
+
+func TestInspectCloseReportsDirtyAndUnpushedWithoutTeardown(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	var minted, revoked int
+	mgr.MintToken = func(context.Context, string) (string, error) {
+		minted++
+		return "wk_test", nil
+	}
+	mgr.RevokeSession = func(string) { revoked++ }
+
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+	beforeMinted := minted
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	if minted != beforeMinted || revoked != 0 {
+		t.Fatalf("inspection changed credentials: minted=%d revoked=%d", minted, revoked)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("inspection tore down workspace: %s", events)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil || got.Status != StatusOpen {
+		t.Fatalf("workspace after inspection = %+v, %v", got, err)
+	}
+}
+
+func TestInspectCloseOpenWorkspaceDoesNotTouchLifecycleState(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+
+	if _, err := mgr.InspectClose(ctx, ws.ID); err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != before.Status || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed lifecycle state: before=%+v after=%+v", before, got)
+	}
+	if events := rt.events[beforeEvents:]; len(events) != 0 {
+		t.Fatalf("open inspection changed runtime state: %v", events)
+	}
+}
+
+func TestInspectCloseRestoresIdleWorkspaceWithoutRecreatingContainer(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	var minted, revoked int
+	mgr.MintToken = func(context.Context, string) (string, error) {
+		minted++
+		return "wk_test", nil
+	}
+	mgr.RevokeSession = func(string) { revoked++ }
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents, beforeMinted, beforeRevoked := len(rt.events), minted, revoked
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("InspectClose: %v", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+	if minted != beforeMinted || revoked != beforeRevoked {
+		t.Fatalf("inspection changed credentials: minted=%d revoked=%d", minted, revoked)
+	}
+	events := rt.events[beforeEvents:]
+	want := []string{"restart " + ws.Container, "stop " + ws.Container}
+	if strings.Join(events, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("idle inspection events = %v, want %v", events, want)
+	}
+}
+
+func TestInspectCloseWaitsForFreshIdleRunnerHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	writeStaleRunnerHeartbeat(t, mgr.queueDir(ws.ID))
+	rt.mu.Lock()
+	rt.restartDelay = 300 * time.Millisecond
+	rt.mu.Unlock()
+	before, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.InspectClose(ctx, ws.ID); err != nil {
+		t.Fatalf("InspectClose with stale heartbeat: %v", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestWaitForInspectionHeartbeatAllowsSupportedColdStart(t *testing.T) {
+	if inspectionRunnerReadyTimeout != time.Minute {
+		t.Fatalf("inspection runner readiness timeout = %s, want sandbox cold-start allowance %s", inspectionRunnerReadyTimeout, time.Minute)
+	}
+	startedAt := time.Date(2026, time.July, 23, 22, 30, 0, 0, time.UTC)
+	ticks := make(chan time.Time, 1)
+	ticks <- startedAt.Add(16 * time.Second)
+	queries := 0
+	err := waitForInspectionHeartbeat(context.Background(), startedAt, inspectionRunnerReadyTimeout,
+		func(context.Context) (time.Time, error) {
+			queries++
+			if queries == 1 {
+				return time.Time{}, nil
+			}
+			return startedAt.Add(16 * time.Second), nil
+		}, ticks)
+	if err != nil {
+		t.Fatalf("wait for heartbeat arriving inside the supported window: %v", err)
+	}
+}
+
+func TestInspectCloseIdleRestoresWithCanceledCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tools := &scriptedBash{delays: map[string]time.Duration{"git status --porcelain": 10 * time.Second}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(context.Background(), ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+	result := make(chan error, 1)
+	go func() {
+		_, err := mgr.InspectClose(ctx, ws.ID)
+		result <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !tools.ran("git status --porcelain") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !tools.ran("git status --porcelain") {
+		t.Fatal("inspection command never started")
+	}
+	cancel()
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("InspectClose error = %v, want canceled inspection", err)
+	}
+	got, err := mgr.Get(context.Background(), ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle || !got.UpdatedAt.Equal(before.UpdatedAt) || !got.LastActive.Equal(before.LastActive) {
+		t.Fatalf("canceled inspection changed idle lifecycle state: before=%+v after=%+v", before, got)
+	}
+	events := rt.events[beforeEvents:]
+	want := []string{"restart " + ws.Container, "stop " + ws.Container}
+	if strings.Join(events, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("canceled inspection events = %v, want %v", events, want)
+	}
+}
+
+func TestInspectCloseIdleRestorationFailureRefusesWithoutTeardown(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{"git status --porcelain": " M main.go"}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	rt.stopErr = errors.New("restore failed")
+	rt.mu.Unlock()
+	beforeEvents := len(rt.events)
+
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if err == nil || !strings.Contains(err.Error(), "restore idle") {
+		t.Fatalf("InspectClose error = %v, want restoration failure", err)
+	}
+	if report == nil || report.Dirty != "M main.go" {
+		t.Fatalf("inspection evidence lost: %+v", report)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("restoration failure tore down workspace: %s", events)
+	}
+	got, getErr := mgr.Get(ctx, ws.ID)
+	if getErr != nil || got.Status == StatusClosed {
+		t.Fatalf("workspace after failed inspection = %+v, %v", got, getErr)
+	}
+}
+
+func TestCloseWithoutForceReusesInspectClose(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": " M main.go",
+		"git log --oneline":      "abc123 wip",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+
+	report, err := mgr.Close(ctx, ws.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "unsaved work") {
+		t.Fatalf("Close error = %v, want refusal", err)
+	}
+	if report.Dirty != "M main.go" || report.Unpushed != "abc123 wip" {
+		t.Fatalf("report = %+v", report)
+	}
+	if tools.count("git status --porcelain") != 1 || tools.count("git log --oneline") != 1 {
+		t.Fatalf("Close did not perform one shared inspection: commands=%v", tools.commands)
+	}
+	if events := strings.Join(rt.events[beforeEvents:], "\n"); strings.Contains(events, "rm ") || strings.Contains(events, "rmvol ") {
+		t.Fatalf("refused close tore down workspace: %s", events)
+	}
+}
+
+func TestInspectCloseClosedWorkspaceIsExplicit(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Close(ctx, ws.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	report, err := mgr.InspectClose(ctx, ws.ID)
+	if !errors.Is(err, ErrWorkspaceAlreadyClosed) || report == nil || report.Dirty != "" || report.Unpushed != "" {
+		t.Fatalf("InspectClose(closed) = %+v, %v", report, err)
+	}
+}
+
+func TestLifecycleLockRegistryRetiresQuiescentKeys(t *testing.T) {
+	var registry lifecycleLockRegistry
+	for i := range 256 {
+		lock := registry.lock(fmt.Sprintf("quiescent-%d", i))
+		lock.Lock()
+		runtime.Gosched()
+		lock.Unlock()
+	}
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("quiescent registry entries = %d, want 0", got)
+	}
+}
+
+func TestLifecycleLockRegistryRetiresFailedWorkspaceCalls(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+
+	for i := range 64 {
+		id := fmt.Sprintf("missing-%d", i)
+		if _, err := mgr.InspectClose(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("InspectClose(%q) error = %v", id, err)
+		}
+		if _, _, err := mgr.CloseTransition(ctx, id, false); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("CloseTransition(%q) error = %v", id, err)
+		}
+		if err := mgr.Idle(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("Idle(%q) error = %v", id, err)
+		}
+		if _, _, err := mgr.Resume(ctx, id); !errors.Is(err, ErrWorkspaceNotFound) {
+			t.Fatalf("Resume(%q) error = %v", id, err)
+		}
+	}
+	if got := lifecycleRegistrySize(&workspaceLifecycleLocks); got != 0 {
+		t.Fatalf("failed lifecycle calls retained %d registry entries", got)
+	}
+}
+
+func TestLifecycleLockRegistryKeepsOneEntryThroughContendedHandoff(t *testing.T) {
+	var registry lifecycleLockRegistry
+	const key = "contended"
+
+	holder := registry.lock(key)
+	holder.Lock()
+	waiter := registry.lock(key)
+	if holder.entry != waiter.entry {
+		t.Fatal("contended callers received different keyed mutexes")
+	}
+
+	waiterAcquired := make(chan struct{})
+	releaseWaiter := make(chan struct{})
+	waiterDone := make(chan struct{})
+	go func() {
+		waiter.Lock()
+		close(waiterAcquired)
+		<-releaseWaiter
+		waiter.Unlock()
+		close(waiterDone)
+	}()
+
+	holder.Unlock()
+	<-waiterAcquired
+	if got := lifecycleRegistryRefs(&registry, key); got != 1 {
+		t.Fatalf("registry refs during handoff = %d, want 1", got)
+	}
+	if entry := lifecycleRegistryEntry(&registry, key); entry != waiter.entry {
+		t.Fatal("registry deleted or replaced a lock during handoff")
+	}
+
+	close(releaseWaiter)
+	<-waiterDone
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("registry entries after handoff = %d, want 0", got)
+	}
+}
+
+func TestLifecycleLockRegistryConcurrentStressRetiresAllKeys(t *testing.T) {
+	var registry lifecycleLockRegistry
+	const (
+		workers = 24
+		keys    = 11
+		rounds  = 200
+	)
+
+	var activeMu sync.Mutex
+	active := make(map[string]bool)
+	errs := make(chan string, workers*rounds)
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := range rounds {
+				key := fmt.Sprintf("stress-%d", (worker+round)%keys)
+				lock := registry.lock(key)
+				lock.Lock()
+				activeMu.Lock()
+				if active[key] {
+					errs <- key
+				}
+				active[key] = true
+				activeMu.Unlock()
+				runtime.Gosched()
+				activeMu.Lock()
+				active[key] = false
+				activeMu.Unlock()
+				lock.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for key := range errs {
+		t.Errorf("concurrent critical sections for key %q", key)
+	}
+	if got := lifecycleRegistrySize(&registry); got != 0 {
+		t.Fatalf("stress registry entries = %d, want 0", got)
+	}
+}
+
+func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	acceptStarted := make(chan struct{})
+	releaseAccept := make(chan struct{})
+	inspectDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.InspectCloseGuarded(ctx, ws.ID, func(report *CloseReport) error {
+			if report.Dirty != "" || report.Unpushed != "" {
+				return errors.New("unexpected close evidence")
+			}
+			close(acceptStarted)
+			<-releaseAccept
+			return nil
+		})
+		inspectDone <- err
+	}()
+	<-acceptStarted
+
+	closer := &Manager{
+		DB:           mgr.DB,
+		Sessions:     mgr.Sessions,
+		Runtime:      mgr.Runtime,
+		QueueRoot:    mgr.QueueRoot,
+		DefaultImage: mgr.DefaultImage,
+		Network:      mgr.Network,
+		ExecTimeout:  mgr.ExecTimeout,
+		MintToken:    mgr.MintToken,
+		BrokerURL:    mgr.BrokerURL,
+	}
+	type closeResult struct {
+		transitioned bool
+		err          error
+	}
+	closeDone := make(chan closeResult, 1)
+	go func() {
+		_, transitioned, err := closer.CloseTransition(ctx, ws.ID, true)
+		closeDone <- closeResult{transitioned: transitioned, err: err}
+	}()
+	waitForLifecycleRegistryRefs(t, &workspaceLifecycleLocks, ws.ID, 2)
+	if rt.hasEventPrefix("rm ") {
+		t.Fatal("CloseTransition from a second manager escaped guarded preview")
+	}
+
+	close(releaseAccept)
+	if err := <-inspectDone; err != nil {
+		t.Fatalf("InspectCloseGuarded: %v", err)
+	}
+	result := <-closeDone
+	if result.err != nil || !result.transitioned {
+		t.Fatalf("CloseTransition after preview = %+v", result)
+	}
+	if got := lifecycleRegistryRefs(&workspaceLifecycleLocks, ws.ID); got != 0 {
+		t.Fatalf("workspace lifecycle refs after close = %d, want 0", got)
+	}
+}
+
+func TestCloseTransitionReportsExactlyOneConcurrentTransition(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		transitioned bool
+		err          error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, transitioned, err := mgr.CloseTransition(ctx, ws.ID, false)
+			results <- result{transitioned: transitioned, err: err}
+		}()
+	}
+	close(start)
+
+	var transitioned int
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("CloseTransition: %v", result.err)
+		}
+		if result.transitioned {
+			transitioned++
+		}
+	}
+	if transitioned != 1 {
+		t.Fatalf("concurrent transitioned count = %d, want one", transitioned)
+	}
+	if report, err := mgr.Close(ctx, ws.ID, false); err != nil || report != nil {
+		t.Fatalf("backward-compatible Close(closed) = %+v, %v", report, err)
+	}
+}
+
+func lifecycleRegistrySize(registry *lifecycleLockRegistry) int {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return len(registry.entries)
+}
+
+func lifecycleRegistryRefs(registry *lifecycleLockRegistry, key string) int {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if entry := registry.entries[key]; entry != nil {
+		return entry.refs
+	}
+	return 0
+}
+
+func lifecycleRegistryEntry(registry *lifecycleLockRegistry, key string) *lifecycleLockEntry {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return registry.entries[key]
+}
+
+func waitForLifecycleRegistryRefs(
+	t *testing.T,
+	registry *lifecycleLockRegistry,
+	key string,
+	want int,
+) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if got := lifecycleRegistryRefs(registry, key); got == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("lifecycle registry refs for %q did not reach %d", key, want)
+		default:
+			runtime.Gosched()
+		}
 	}
 }
 

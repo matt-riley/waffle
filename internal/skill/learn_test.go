@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -164,6 +165,127 @@ func TestPromotionAcceptHeldInImprove(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "status: inactive") {
 		t.Fatalf("skill not inactive: %s", raw)
+	}
+}
+
+func TestSkillStatusPreservesInstallProvenance(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "status.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	const (
+		name          = "reviewer"
+		sourceRef     = "git:https://example.invalid/org/reviewer@0123456789abcdef0123456789abcdef01234567"
+		contentDigest = "sha256:0123456789abcdef"
+	)
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name:          name,
+		Status:        StatusInactive,
+		Source:        "install",
+		SourceRef:     sourceRef,
+		ContentDigest: contentDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name:   name,
+		Status: StatusActive,
+		Source: "activate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var status, source, gotSourceRef, gotContentDigest, activatedAt string
+	if err := st.DB.QueryRowContext(ctx, `
+		SELECT status, source, source_ref, content_digest, activated_at
+		FROM skill_status
+		WHERE name = ?`, name).Scan(
+		&status, &source, &gotSourceRef, &gotContentDigest, &activatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusActive || source != "activate" || activatedAt == "" {
+		t.Fatalf("activation state = (%q, %q, %q)", status, source, activatedAt)
+	}
+	if gotSourceRef != sourceRef || gotContentDigest != contentDigest {
+		t.Fatalf("activation provenance = (%q, %q), want (%q, %q)",
+			gotSourceRef, gotContentDigest, sourceRef, contentDigest)
+	}
+
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name:   name,
+		Status: StatusInactive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var inactiveSource, inactiveSourceRef, inactiveDigest, inactiveActivated string
+	if err := st.DB.QueryRowContext(ctx, `
+		SELECT source, source_ref, content_digest, activated_at
+		FROM skill_status
+		WHERE name = ?`, name).Scan(
+		&inactiveSource, &inactiveSourceRef, &inactiveDigest, &inactiveActivated,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if inactiveSource != "activate" {
+		t.Fatalf("blank source erased action source: %q", inactiveSource)
+	}
+	if inactiveSourceRef != sourceRef || inactiveDigest != contentDigest {
+		t.Fatalf("inactive provenance = (%q, %q), want (%q, %q)",
+			inactiveSourceRef, inactiveDigest, sourceRef, contentDigest)
+	}
+	if inactiveActivated != activatedAt {
+		t.Fatalf("inactive activated_at = %q, want preserved %q", inactiveActivated, activatedAt)
+	}
+}
+
+func TestActivateSkillRestoresInactiveFrontmatterWhenStatusPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
+	path := filepath.Join(ws.SkillsDir(), "atomic-activation", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("---\nname: atomic-activation\ndescription: Atomic activation.\nstatus: inactive\n---\n\n# Atomic\n")
+	if err := os.WriteFile(path, before, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.Context(), filepath.Join(root, "state", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = ActivateSkill(t.Context(), st.DB, ws, "atomic-activation")
+
+	if err == nil {
+		t.Fatal("ActivateSkill succeeded with an unavailable status store")
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("frontmatter was not restored after status failure:\n%s", after)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("restored skill mode = %v, want 0640", info.Mode().Perm())
+	}
+	active, discoverErr := DiscoverActive(ws.SkillsDir(), nil)
+	if discoverErr != nil {
+		t.Fatal(discoverErr)
+	}
+	if len(active) != 0 {
+		t.Fatalf("failed activation remained active: %#v", active)
 	}
 }
 

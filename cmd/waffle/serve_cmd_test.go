@@ -17,12 +17,16 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/matt-riley/waffle/internal/channel"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/instance"
 	"github.com/matt-riley/waffle/internal/localsocket"
+	"github.com/matt-riley/waffle/internal/providerconfig"
+	"github.com/matt-riley/waffle/internal/secret"
 )
 
 // TestServeHelpPrintsUsageWithoutStartingDaemon verifies -h/--help return
@@ -188,6 +192,16 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	resp, err := client.Get("http://" + addr + "/desk/")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /desk/: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		cancel()
+		t.Fatalf("disabled dashboard GET /desk/ status = %d, want 404", resp.StatusCode)
+	}
 
 	cancel()
 	select {
@@ -202,6 +216,333 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("status listener still bound after serve shutdown: %v", err)
+	}
+	_ = listener.Close()
+}
+
+func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configBody := "[gateway]\nstatus_listen = \"" + addr + "\"\n[dashboard]\nenabled = true\n[provider]\napi_key = \"test-key\"\n[agent]\nsubagents = false\nlearn = false\n"
+	if err := os.WriteFile(filepath.Join(os.Getenv("WAFFLE_HOME"), "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return nil, nil
+		})
+	}()
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := client.Get("http://" + addr + "/status")
+		if err == nil {
+			if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+				_ = resp.Body.Close()
+				t.Fatalf("X-Frame-Options = %q, want DENY", got)
+			}
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("dashboard listener did not start: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	resp, err := client.Get("http://" + addr + "/desk/")
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /desk/: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		cancel()
+		t.Fatalf("read /desk/: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("GET /desk/ status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Contains(body, []byte("Waffle Desk")) {
+		cancel()
+		t.Fatalf("GET /desk/ did not render Desk shell: %q", body)
+	}
+	for _, endpoint := range []string{
+		"/healthz",
+		"/api/v1/desk/tasks",
+		"/api/v1/desk/workspaces",
+		"/api/v1/desk/memory?query=anything",
+		"/api/v1/desk/capabilities",
+		"/api/v1/desk/connections",
+	} {
+		response, requestErr := client.Get("http://" + addr + endpoint)
+		if requestErr != nil {
+			cancel()
+			t.Fatalf("GET %s: %v", endpoint, requestErr)
+		}
+		responseBody, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil {
+			cancel()
+			t.Fatalf("read %s: %v", endpoint, readErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			cancel()
+			t.Fatalf("GET %s status = %d body=%q, want 200", endpoint, response.StatusCode, responseBody)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveCmd() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveCmd did not return after cancellation")
+	}
+}
+
+func TestServeDashboardFinalizesDeferredProviderTransactionAfterHealthStarts(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	t.Setenv("INVOCATION_ID", "")
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(secret.EnvIdentity, identity.String())
+
+	statusAddr := unusedTCPAddress(t)
+	configBody := fmt.Sprintf(`[gateway]
+status_listen = %q
+
+[dashboard]
+enabled = true
+
+[providers.primary]
+type = "openai"
+
+[models.test]
+provider = "primary"
+model = "test-model"
+
+[agent]
+subagents = false
+learn = false
+`, statusAddr)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := providerconfig.New(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Probe = func(context.Context, config.ResolvedModel, string) error { return nil }
+	manager.Restart = func(context.Context) error { return nil }
+	manager.Stop = func(context.Context) error { return nil }
+	manager.Health = func(context.Context) error { return nil }
+	manager.ServiceActive = func(context.Context) (bool, error) { return false, nil }
+	manager.RestoreService = func(context.Context, bool) error { return nil }
+	result, err := manager.ActivateModelWithMode(t.Context(), "test", providerconfig.CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || result.TransactionID == "" {
+		t.Fatalf("deferred result = %#v", result)
+	}
+	journalPath := filepath.Join(home, "provider-config.lock.transaction.json")
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("deferred journal missing before serve: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+			return nil, nil
+		})
+	}()
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		response, requestErr := client.Get("http://" + statusAddr + "/healthz")
+		if requestErr == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatalf("serve stopped before health: %v", serveErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("dashboard health did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		if _, err := os.Stat(journalPath); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if err != nil {
+			cancel()
+			t.Fatalf("inspect deferred journal after healthy startup: %v", err)
+		}
+		select {
+		case serveErr := <-done:
+			t.Fatalf("serve stopped before deferred finalization: %v", serveErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("deferred journal still present after healthy startup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case serveErr := <-done:
+		if serveErr != nil {
+			t.Fatalf("serve shutdown: %v", serveErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after deferred finalization test")
+	}
+}
+
+func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
+	home := unixServeTempDir(t)
+	t.Setenv("WAFFLE_HOME", home)
+	clearServeActivationEnvironment(t)
+	statusAddr := unusedTCPAddress(t)
+	socketPath := filepath.Join(home, "chat.sock")
+	writeServeTestConfig(t, home, statusAddr, socketPath)
+	configPath := filepath.Join(home, "config.toml")
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configBody, []byte("\n[dashboard]\nenabled = true\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCmdWithAdapterFactory(ctx, nil, &bytes.Buffer{}, func(config.Config) ([]channel.Adapter, error) {
+			return []channel.Adapter{blockingAdapter{}}, nil
+		})
+	}()
+
+	socket := dialChatUntilReady(t, socketPath)
+	state, err := socket.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer func() { _ = socket.Close(context.Background()) }()
+
+	client := &http.Client{Timeout: time.Second}
+	var token string
+	deadline := time.Now().Add(2 * time.Second)
+	for token == "" {
+		response, requestErr := client.Get("http://" + statusAddr + "/desk/")
+		if requestErr == nil {
+			body, readErr := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if readErr == nil {
+				const marker = `data-request-token="`
+				if start := strings.Index(string(body), marker); start >= 0 {
+					rest := string(body)[start+len(marker):]
+					if end := strings.Index(rest, `"`); end >= 0 {
+						token = rest[:end]
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("dashboard token was not available")
+		}
+		if token == "" {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+statusAddr+"/api/v1/desk/chat/open", strings.NewReader(`{"session_id":"`+state.SessionID+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Waffle-Desk-Token", token)
+	request.Header.Set("Idempotency-Key", "second-owner")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"session_active"`)) {
+		t.Fatalf("dashboard second open = %d %q, want session_active conflict", response.StatusCode, body)
+	}
+	if response.Header.Get("X-Frame-Options") != "DENY" ||
+		response.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("dashboard mutation security headers = %#v", response.Header)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve shutdown = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after cancellation")
+	}
+}
+
+func TestServeDashboardSecurityFailureReleasesStatusListener(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	statusAddr := unusedTCPAddress(t)
+	configBody := fmt.Sprintf(
+		"[gateway]\nstatus_listen = %q\n\n[dashboard]\nenabled = true\n\n[provider]\napi_key = \"test-key\"\n\n[agent]\nsubagents = false\nlearn = false\n",
+		statusAddr,
+	)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalRandom := dashboardRandom
+	dashboardRandom = strings.NewReader("")
+	defer func() { dashboardRandom = originalRandom }()
+
+	err := serveCmdWithAdapterFactory(context.Background(), nil, io.Discard, func(config.Config) ([]channel.Adapter, error) {
+		t.Fatal("adapter factory must not run after dashboard security failure")
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "dashboard security") {
+		t.Fatalf("serve security failure = %v, want dashboard security error", err)
+	}
+	listener, err := net.Listen("tcp", statusAddr)
+	if err != nil {
+		t.Fatalf("status listener remained bound after dashboard security failure: %v", err)
 	}
 	_ = listener.Close()
 }

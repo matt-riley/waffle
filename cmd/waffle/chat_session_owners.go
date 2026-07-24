@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type sessionAlreadyActiveError struct{ sessionID string }
@@ -55,13 +57,22 @@ func (o *chatSessionOwners) transfer(owner *chatRuntime, from, to string) bool {
 	return true
 }
 
-func (o *chatSessionOwners) release(owner *chatRuntime, sessionID string) {
+func (o *chatSessionOwners) releaseContext(ctx context.Context, owner *chatRuntime, sessionID string) error {
 	if o == nil || sessionID == "" {
-		return
+		return nil
 	}
-	o.mu.Lock()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !o.mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 	defer o.mu.Unlock()
 	if o.owners[sessionID] == owner {
 		delete(o.owners, sessionID)
 	}
+	return nil
 }

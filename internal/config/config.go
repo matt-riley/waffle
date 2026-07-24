@@ -24,6 +24,7 @@ import (
 type Config struct {
 	Gateway   Gateway                       `toml:"gateway"`
 	Chat      Chat                          `toml:"chat"`
+	Dashboard Dashboard                     `toml:"dashboard"`
 	Provider  Provider                      `toml:"provider"`
 	Providers map[string]ProviderConnection `toml:"providers"`
 	Models    map[string]ModelTarget        `toml:"models"`
@@ -64,6 +65,13 @@ type Config struct {
 // Chat configures the local managed-chat client connection.
 type Chat struct {
 	Socket string `toml:"socket"`
+}
+
+// Dashboard configures the optional Waffle Desk web interface.
+type Dashboard struct {
+	Enabled          bool     `toml:"enabled"`
+	SkillImportRoots []string `toml:"skill_import_roots"`
+	SkillGitHosts    []string `toml:"skill_git_hosts"`
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).

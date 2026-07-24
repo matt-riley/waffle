@@ -74,6 +74,9 @@ type Client struct {
 	nextID  int
 	pending map[int]chan rpcResponse
 	readErr error // set once when the reader loop exits
+
+	closeMu       sync.Mutex
+	processClosed bool
 }
 
 // BuildProcessEnv constructs the restricted environment for an MCP child
@@ -257,15 +260,31 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 // Close terminates the server process. When the server was docker-wrapped
 // (containerName set), it first stops and force-removes the named container
 // so killing only the local docker CLI cannot leave an orphaned container
-// running (#97). Stop/rm use short timeouts so Close returns promptly.
+// running (#97). The compatibility wrapper retains the prior bounded default.
 func (c *Client) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return c.CloseContext(ctx)
+}
+
+// CloseContext terminates the server process and any wrapper container under
+// the caller's deadline. Timed-out container cleanup stays retryable while the
+// local process teardown remains exact-once.
+func (c *Client) CloseContext(ctx context.Context) error {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+
+	var containerErr error
 	if c.containerName != "" {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = exec.CommandContext(stopCtx, "docker", "stop", "-t", "1", c.containerName).Run()
-		cancel()
-		rmCtx, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = exec.CommandContext(rmCtx, "docker", "rm", "-f", c.containerName).Run()
-		cancel2()
+		stopErr := runDockerCleanup(ctx, "stop", "-t", "1", c.containerName)
+		removeErr := runDockerCleanup(ctx, "rm", "-f", c.containerName)
+		containerErr = errors.Join(stopErr, removeErr)
+		if removeErr == nil {
+			c.containerName = ""
+		}
+	}
+	if c.processClosed {
+		return containerErr
 	}
 
 	var first error
@@ -293,7 +312,16 @@ func (c *Client) Close() error {
 			first = err
 		}
 	}
-	return first
+	c.processClosed = true
+	return errors.Join(containerErr, first)
+}
+
+func runDockerCleanup(ctx context.Context, args ...string) error {
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "No such container:") {
+		return nil
+	}
+	return fmt.Errorf("mcp: docker %s: %w\n%s", args[0], err, strings.TrimSpace(string(out)))
 }
 
 // readLoop is the sole reader of the server's stdout. It routes each

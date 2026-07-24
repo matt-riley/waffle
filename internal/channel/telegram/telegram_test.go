@@ -120,6 +120,38 @@ func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 	}
 }
 
+func TestEnsureBotMarksHealthyBeforeFirstLongPoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"waffle_bot"}}`)
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			t.Error("ensureBot unexpectedly entered the long poll")
+			http.Error(w, "unexpected poll", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	healthy := make(chan struct{}, 1)
+	adapter := New("test-token", srv.URL)
+	adapter.SetPollObserver(func() {
+		select {
+		case healthy <- struct{}{}:
+		default:
+		}
+	})
+	if err := adapter.ensureBot(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-healthy:
+	default:
+		t.Fatal("Telegram did not report health after successful getMe")
+	}
+}
+
 // groupTestServer serves getMe plus a single getUpdates payload, then empty polls.
 func groupTestServer(t *testing.T, firstUpdates string) *httptest.Server {
 	t.Helper()

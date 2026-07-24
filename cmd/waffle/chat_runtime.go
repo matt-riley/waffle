@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"sort"
 	"strings"
@@ -28,33 +29,36 @@ import (
 )
 
 const (
-	chatNewConfirmArg       = "confirm"
-	chatRuntimeCloseTimeout = 10 * time.Second
+	chatNewConfirmArg            = "confirm"
+	chatRuntimeCloseTimeout      = 10 * time.Second
+	maxAttachedSkillContextBytes = 256 << 10
 )
 
 // chatRuntime owns the presentation-neutral state and behavior for one chat
 // connection. Renderers are responsible only for displaying its state,
 // events, and command results.
 type chatRuntime struct {
-	mu              sync.Mutex
-	commandMu       sync.Mutex
-	agent           *agent.Agent
-	agentCancel     context.CancelFunc
-	commandCancel   context.CancelFunc
-	commandDone     chan struct{}
-	sessions        *session.Store
-	current         *session.Session
-	history         []llm.Message
-	persisted       int
-	cfg             config.Config
-	st              *store.Store
-	skills          []skill.Skill
-	profileName     string
-	chatProfileName string
-	agentCleanup    func()
-	wsBroker        *broker.Broker
-	wsURL           string
-	wsClient        io.Closer
+	mu                  sync.Mutex
+	commandMu           sync.Mutex
+	agent               *agent.Agent
+	agentCancel         context.CancelFunc
+	commandCancel       context.CancelFunc
+	commandDone         chan struct{}
+	sessions            *session.Store
+	current             *session.Session
+	history             []llm.Message
+	persisted           int
+	cfg                 config.Config
+	st                  *store.Store
+	skills              []skill.Skill
+	baseSystem          string
+	attachedSkills      []chatpkg.SkillRef
+	profileName         string
+	chatProfileName     string
+	agentCleanupContext agentCleanupContext
+	wsBroker            *broker.Broker
+	wsURL               string
+	wsClient            io.Closer
 
 	modelError          string
 	workspace           string
@@ -71,11 +75,13 @@ type chatRuntime struct {
 	cleanupDone         chan struct{}
 	cleanupComplete     bool
 	closeErr            error
+	opening             bool
 	closed              bool
 	profileAgentBuilder func(context.Context, string) (*agent.Agent, func(), error)
 	repoOpener          func(context.Context, string, string) (repoInstall, error)
 	sessionOwners       *chatSessionOwners
 	ownedSessionID      string
+	retiredCleanup      []*chatRuntimeCleanup
 }
 
 type repoInstall struct {
@@ -83,6 +89,61 @@ type repoInstall struct {
 	policy    *repopolicy.Policy
 	tools     tool.Toolbox
 	client    io.Closer
+}
+
+type chatRuntimeCleanup struct {
+	mu     sync.Mutex
+	client io.Closer
+	agent  agentCleanupContext
+}
+
+func newChatRuntimeCleanup(client io.Closer, agentCleanup agentCleanupContext) *chatRuntimeCleanup {
+	if client == nil && agentCleanup == nil {
+		return nil
+	}
+	return &chatRuntimeCleanup{client: client, agent: agentCleanup}
+}
+
+func (c *chatRuntimeCleanup) close(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var cleanupErr error
+	if c.client != nil {
+		if err := closeRuntimeResource(ctx, c.client); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			c.client = nil
+		}
+	}
+	if c.agent != nil {
+		if err := c.agent(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			c.agent = nil
+		}
+	}
+	return cleanupErr
+}
+
+func (c *chatRuntimeCleanup) complete() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.client == nil && c.agent == nil
+}
+
+type contextCloser interface {
+	CloseContext(context.Context) error
+}
+
+func closeRuntimeResource(ctx context.Context, closer io.Closer) error {
+	if contextual, ok := closer.(contextCloser); ok {
+		return contextual.CloseContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return closer.Close()
 }
 
 // newChatRuntime records dependencies without constructing provider, sandbox,
@@ -102,13 +163,21 @@ func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (ch
 
 func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return chatpkg.State{}, errors.New("chat runtime is closed")
 	}
-	if r.current != nil {
+	if r.current != nil || r.opening {
+		r.mu.Unlock()
 		return chatpkg.State{}, errors.New("chat runtime is already open")
 	}
+	r.opening = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.opening = false
+		r.mu.Unlock()
+	}()
 
 	profileName := strings.TrimSpace(options.Profile)
 	if profileName != "" && !config.ValidProfileName(profileName) {
@@ -124,12 +193,19 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
-	built, cleanup, err := buildAgentWithProfile(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName)
+	built, cleanup, err := buildAgentWithProfileContext(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName)
 	if err != nil {
-		cleanup()
+		_ = cleanup(resourceCtx)
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = cleanup(resourceCtx)
+			resourceCancel()
+		}
+	}()
 
 	var current *session.Session
 	switch {
@@ -142,15 +218,11 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		}
 	}
 	if err != nil {
-		cleanup()
-		resourceCancel()
 		return chatpkg.State{}, err
 	}
 	if current == nil {
 		current, err = r.sessions.Create(ctx, "")
 		if err != nil {
-			cleanup()
-			resourceCancel()
 			return chatpkg.State{}, err
 		}
 	}
@@ -159,20 +231,50 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	if options.Continue || strings.TrimSpace(options.SessionID) != "" {
 		history, err = r.sessions.Turns(ctx, current.ID)
 		if err != nil {
-			cleanup()
-			resourceCancel()
 			return chatpkg.State{}, err
 		}
 		history = session.Repair(history)
 	}
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, current.ID)
+	if err != nil {
+		return chatpkg.State{}, err
+	}
+	attachedSkills, attachedSystem, err := buildAttachedSkillContext(built.System, skills, attachedNames)
+	if err != nil {
+		return chatpkg.State{}, err
+	}
 	if !r.sessionOwners.acquire(r, current.ID) {
-		cleanup()
-		resourceCancel()
 		return chatpkg.State{}, sessionAlreadyActiveError{sessionID: current.ID}
 	}
+	ownershipAcquired := true
+	defer func() {
+		if ownershipAcquired {
+			_ = r.sessionOwners.releaseContext(context.Background(), r, current.ID)
+		}
+	}()
 
+	modelError := ""
+	if current.ModelAlias != "" {
+		if _, resolveErr := r.cfg.ResolveModel(current.ModelAlias); resolveErr != nil {
+			modelError = resolveErr.Error()
+		} else {
+			built.Model = current.ModelAlias
+		}
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return chatpkg.State{}, errors.New("chat runtime is closed")
+	}
+	if r.current != nil {
+		r.mu.Unlock()
+		return chatpkg.State{}, errors.New("chat runtime is already open")
+	}
 	r.agent = built
-	r.agentCleanup = cleanup
+	r.baseSystem = built.System
+	r.agent.System = attachedSystem
+	r.attachedSkills = attachedSkills
+	r.agentCleanupContext = cleanup
 	r.skills = skills
 	r.profileName = profileName
 	r.chatProfileName = profileName
@@ -183,15 +285,12 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.ownedSessionID = current.ID
 	r.history = history
 	r.persisted = len(history)
-	r.modelError = ""
-	if current.ModelAlias != "" {
-		if _, resolveErr := r.cfg.ResolveModel(current.ModelAlias); resolveErr != nil {
-			r.modelError = resolveErr.Error()
-		} else {
-			r.agent.Model = current.ModelAlias
-		}
-	}
-	return r.stateLocked(r.capabilities), nil
+	r.modelError = modelError
+	state := r.stateLocked(r.capabilities)
+	r.mu.Unlock()
+	adopted = true
+	ownershipAcquired = false
+	return state, nil
 }
 
 func (r *chatRuntime) Command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
@@ -236,7 +335,7 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 		return r.commandModel(commandCtx, command.Args)
 	case chatpkg.CommandHelp, chatpkg.CommandModels, chatpkg.CommandNew,
 		chatpkg.CommandSessions, chatpkg.CommandResume, chatpkg.CommandStatus,
-		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill,
+		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill, chatpkg.CommandSkills,
 		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandExit:
 		return r.runCommand(commandCtx, command, emit)
 	default:
@@ -251,6 +350,8 @@ func invalidatesNewConfirmation(command chatpkg.ParsedCommand) bool {
 		return args != ""
 	case chatpkg.CommandSkill:
 		return true
+	case chatpkg.CommandSkills:
+		return args != ""
 	case chatpkg.CommandWorkset:
 		verb, _, _ := strings.Cut(args, " ")
 		return verb == "replace" || verb == "drop" || verb == "clear"
@@ -284,6 +385,8 @@ func (r *chatRuntime) runCommand(ctx context.Context, command chatpkg.ParsedComm
 		return r.commandPermissions(), nil
 	case chatpkg.CommandSkill:
 		return r.commandSkill(ctx, command.Args, emit)
+	case chatpkg.CommandSkills:
+		return r.commandSkills(ctx, command.Args, emit)
 	case chatpkg.CommandRepo:
 		return r.commandRepo(ctx, command.Args, emit)
 	case chatpkg.CommandWorkset:
@@ -379,14 +482,22 @@ func (r *chatRuntime) endExclusiveChange() {
 // It is also retained as a narrow compatibility method for focused tests.
 func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.current == nil {
+		r.mu.Unlock()
 		return 0, errors.New("chat runtime is not open")
 	}
 	if r.agentCancel != nil {
+		r.mu.Unlock()
 		return 0, errors.New("a chat turn is active")
 	}
-	profile, _ := r.cfg.Profile(r.profileName)
+	previous := r.current
+	activeAgent := r.agent
+	baseSystem := r.baseSystem
+	activeSkills := append([]skill.Skill(nil), r.skills...)
+	profileName := r.profileName
+	r.mu.Unlock()
+
+	profile, _ := r.cfg.Profile(profileName)
 	model, err := resolveRuntimeProfileModel(r.cfg, profile)
 	if err != nil {
 		return 0, err
@@ -394,7 +505,7 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	dropped := 0
 	if r.st != nil {
 		ws := &workset.Store{DB: r.st.DB}
-		if n, err := ws.DropUnpinnedModelAssumptions(ctx, r.current.ID); err == nil {
+		if n, err := ws.DropUnpinnedModelAssumptions(ctx, previous.ID); err == nil {
 			dropped = n
 		}
 	}
@@ -402,7 +513,17 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if !r.sessionOwners.transfer(r, r.current.ID, current.ID) {
+	nextSkills, nextSystem, err := buildAttachedSkillContext(baseSystem, activeSkills, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.current != previous || r.agent != activeAgent || r.agentCancel != nil || r.baseSystem != baseSystem {
+		return 0, errors.New("chat runtime changed while starting a new session")
+	}
+	if !r.sessionOwners.transfer(r, previous.ID, current.ID) {
 		return 0, sessionAlreadyActiveError{sessionID: current.ID}
 	}
 	r.current = current
@@ -412,7 +533,9 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	r.modelError = ""
 	if r.agent != nil {
 		r.agent.Model = model
+		r.agent.System = nextSystem
 	}
+	r.attachedSkills = nextSkills
 	return dropped, nil
 }
 
@@ -454,6 +577,9 @@ func (r *chatRuntime) commandResume(ctx context.Context, id string, emit func(ch
 		return chatpkg.Result{}, errors.New("a chat command is changing runtime state")
 	}
 	r.blockTurns = true
+	activeAgent := r.agent
+	baseSystem := r.baseSystem
+	activeSkills := append([]skill.Skill(nil), r.skills...)
 	r.mu.Unlock()
 	defer r.endExclusiveChange()
 
@@ -480,12 +606,23 @@ func (r *chatRuntime) commandResume(ctx context.Context, id string, emit func(ch
 			model = target.ModelAlias
 		}
 	}
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, target.ID)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	attachedSkills, attachedSystem, err := buildAttachedSkillContext(baseSystem, activeSkills, attachedNames)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
 	reflectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	reflectErr := r.reflectSession(reflectCtx)
 	cancel()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.agent != activeAgent || r.baseSystem != baseSystem {
+		return chatpkg.Result{}, errors.New("chat runtime changed while resuming session")
+	}
 	if !r.sessionOwners.transfer(r, r.current.ID, target.ID) {
 		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
 	}
@@ -495,6 +632,8 @@ func (r *chatRuntime) commandResume(ctx context.Context, id string, emit func(ch
 	r.persisted = len(history)
 	r.modelError = modelError
 	r.agent.Model = model
+	r.agent.System = attachedSystem
+	r.attachedSkills = attachedSkills
 	state := r.stateLocked(r.capabilities)
 	text := "resumed session " + target.ID
 	if reflectErr != nil {
@@ -620,6 +759,194 @@ func (r *chatRuntime) skillMessage(rest string) (string, error) {
 	return message, nil
 }
 
+func (r *chatRuntime) commandSkills(ctx context.Context, args string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.current == nil {
+			return chatpkg.Result{}, errors.New("chat runtime is not open")
+		}
+		state := r.stateLocked(r.capabilities)
+		return chatpkg.Result{Title: "Session skills", Text: formatSkillRefs(state.Skills), State: &state}, nil
+	}
+	if len(fields) != 2 || (fields[0] != "attach" && fields[0] != "detach") {
+		return chatpkg.Result{}, errors.New("usage: /skills [attach <name>|detach <name>]")
+	}
+	return r.changeSessionSkill(ctx, fields[0], fields[1], emit)
+}
+
+func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	r.mu.Lock()
+	if r.current == nil || r.agent == nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	if r.agentCancel != nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("cannot change skills while a turn is active")
+	}
+	if r.blockTurns {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("a chat command is changing runtime state")
+	}
+	if action == "attach" {
+		if _, ok := skill.Find(r.skills, name); !ok {
+			r.mu.Unlock()
+			return chatpkg.Result{}, fmt.Errorf("skill %q is not active or installed; activate or install it before attaching", name)
+		}
+	}
+	r.blockTurns = true
+	sessionID := r.current.ID
+	activeAgent := r.agent
+	baseSystem := r.baseSystem
+	activeSkills := append([]skill.Skill(nil), r.skills...)
+	r.mu.Unlock()
+	defer r.endExclusiveChange()
+
+	attachments := &skill.Attachments{DB: r.st.DB}
+	currentNames, err := attachments.List(ctx, sessionID)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	wasAttached := containsString(currentNames, name)
+	nextNames := append([]string(nil), currentNames...)
+	switch action {
+	case "attach":
+		if !wasAttached {
+			nextNames = append(nextNames, name)
+			sort.Strings(nextNames)
+		}
+	case "detach":
+		nextNames = removeString(nextNames, name)
+	default:
+		return chatpkg.Result{}, errors.New("usage: /skills [attach <name>|detach <name>]")
+	}
+	nextRefs, nextSystem, err := buildAttachedSkillContext(baseSystem, activeSkills, nextNames)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	if action == "attach" {
+		err = attachments.Attach(ctx, sessionID, name)
+	} else {
+		err = attachments.Detach(ctx, sessionID, name)
+	}
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+
+	r.mu.Lock()
+	valid := r.current != nil && r.current.ID == sessionID && r.agent == activeAgent && r.baseSystem == baseSystem
+	if valid {
+		r.attachedSkills = nextRefs
+		r.agent.System = nextSystem
+		state := r.stateLocked(r.capabilities)
+		r.mu.Unlock()
+		if emit != nil {
+			emit(chatpkg.Event{Kind: chatpkg.EventState, State: &state})
+		}
+		return chatpkg.Result{Text: action + "ed skill " + name, State: &state}, nil
+	}
+	r.mu.Unlock()
+
+	var rollbackErr error
+	if wasAttached {
+		rollbackErr = attachments.Attach(ctx, sessionID, name)
+	} else {
+		rollbackErr = attachments.Detach(ctx, sessionID, name)
+	}
+	return chatpkg.Result{}, errors.Join(errors.New("chat session changed while updating skills"), rollbackErr)
+}
+
+func buildAttachedSkillContext(baseSystem string, active []skill.Skill, attachedNames []string) ([]chatpkg.SkillRef, string, error) {
+	activeByName := make(map[string]skill.Skill, len(active))
+	for _, candidate := range active {
+		if _, exists := activeByName[candidate.Name]; !exists {
+			activeByName[candidate.Name] = candidate
+		}
+	}
+	attached := make(map[string]bool, len(attachedNames))
+	for _, name := range attachedNames {
+		attached[name] = true
+	}
+
+	refs := make([]chatpkg.SkillRef, 0, len(activeByName)+len(attached))
+	for name, candidate := range activeByName {
+		refs = append(refs, chatpkg.SkillRef{
+			Name: name, Description: candidate.Description, Attached: attached[name],
+		})
+	}
+	for name := range attached {
+		if _, ok := activeByName[name]; !ok {
+			refs = append(refs, chatpkg.SkillRef{Name: name, Attached: true, Missing: true})
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+
+	var block strings.Builder
+	block.WriteString("\n<attached_skills>\n")
+	injected := 0
+	for _, ref := range refs {
+		if !ref.Attached || ref.Missing {
+			continue
+		}
+		body, err := activeByName[ref.Name].Body()
+		if err != nil {
+			return nil, "", fmt.Errorf("read attached skill %q: %w", ref.Name, err)
+		}
+		fmt.Fprintf(&block, "<attached_skill name=\"%s\">\n%s\n</attached_skill>\n", html.EscapeString(ref.Name), body)
+		injected++
+		if block.Len()+len("</attached_skills>") > maxAttachedSkillContextBytes {
+			return nil, "", fmt.Errorf("attached skill context exceeds %d bytes; detach one or more skills", maxAttachedSkillContextBytes)
+		}
+	}
+	if injected == 0 {
+		return refs, baseSystem, nil
+	}
+	block.WriteString("</attached_skills>")
+	if block.Len() > maxAttachedSkillContextBytes {
+		return nil, "", fmt.Errorf("attached skill context exceeds %d bytes; detach one or more skills", maxAttachedSkillContextBytes)
+	}
+	return refs, baseSystem + block.String(), nil
+}
+
+func formatSkillRefs(refs []chatpkg.SkillRef) string {
+	if len(refs) == 0 {
+		return "no active or attached skills"
+	}
+	lines := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		switch {
+		case ref.Missing:
+			lines = append(lines, fmt.Sprintf("%s — attached but unavailable; restore or reactivate it, or run /skills detach %s", ref.Name, ref.Name))
+		case ref.Attached:
+			lines = append(lines, fmt.Sprintf("%s — %s (attached)", ref.Name, ref.Description))
+		default:
+			lines = append(lines, fmt.Sprintf("%s — %s", ref.Name, ref.Description))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, unwanted string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != unwanted {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	repoArg = strings.TrimSpace(repoArg)
 	if repoArg == "" {
@@ -685,31 +1012,34 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	return r.installRepo(ctx, install, emit)
 }
 
-func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, func(), error) {
+func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, agentCleanupContext, error) {
 	if r.profileAgentBuilder != nil {
-		return r.profileAgentBuilder(ctx, profileName)
+		built, cleanup, err := r.profileAgentBuilder(ctx, profileName)
+		return built, func(cleanupCtx context.Context) error {
+			if err := cleanupCtx.Err(); err != nil {
+				return err
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+			return nil
+		}, err
 	}
 	memWS, skills, err := loadWorkspaceWithStore(r.st)
 	if err != nil {
 		return nil, nil, err
 	}
-	return buildAgentWithProfile(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
+	return buildAgentWithProfileContext(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
 }
 
 func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	if install.workspace == nil || install.tools == nil || install.client == nil {
 		return chatpkg.Result{}, errors.New("incomplete repository workspace install")
 	}
-	adopted := false
-	defer func() {
-		if !adopted {
-			_ = install.client.Close()
-		}
-	}()
-
 	r.mu.Lock()
 	profileName := r.chatProfileName
 	resourceCtx := r.resourceCtx
+	activeSkills := append([]skill.Skill(nil), r.skills...)
 	r.mu.Unlock()
 	if install.workspace.Profile != "" {
 		profileName = install.workspace.Profile
@@ -717,17 +1047,23 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	if resourceCtx == nil {
 		resourceCtx = context.WithoutCancel(ctx)
 	}
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = closeRuntimeResource(resourceCtx, install.client)
+		}
+	}()
 	currentAgent, replacementCleanup, err := r.buildCleanProfileAgent(resourceCtx, profileName)
 	if err != nil {
 		if replacementCleanup != nil {
-			replacementCleanup()
+			_ = replacementCleanup(resourceCtx)
 		}
 		return chatpkg.Result{}, err
 	}
 	cleanupAdopted := false
 	defer func() {
 		if !cleanupAdopted && replacementCleanup != nil {
-			replacementCleanup()
+			_ = replacementCleanup(resourceCtx)
 		}
 	}()
 
@@ -756,8 +1092,9 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	}
 	hostTools := tool.Restrict(currentAgent.Tools, toolPolicy)
 	boxed := tool.Restrict(tool.Combine(install.tools, hostTools), toolPolicy)
+	workspaceBaseSystem := currentAgent.System + systemExtra
 	workspaceAgent := &agent.Agent{
-		Provider: currentAgent.Provider, Tools: boxed, System: currentAgent.System + systemExtra,
+		Provider: currentAgent.Provider, Tools: boxed, System: workspaceBaseSystem,
 		Model: currentAgent.Model, UtilityModel: currentAgent.UtilityModel, Profile: currentAgent.Profile,
 		MaxTokens: currentAgent.MaxTokens, MaxIterations: currentAgent.MaxIterations,
 		Redact: currentAgent.Redact, Spill: currentAgent.Spill, Usage: currentAgent.Usage,
@@ -776,6 +1113,15 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		return chatpkg.Result{}, fmt.Errorf("load workspace session %s: %w", target.ID, err)
 	}
 	history = session.Repair(history)
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, target.ID)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	attachedSkills, attachedSystem, err := buildAttachedSkillContext(workspaceBaseSystem, activeSkills, attachedNames)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	workspaceAgent.System = attachedSystem
 	modelError := ""
 	if target.ModelAlias != "" {
 		if _, resolveErr := r.cfg.ResolveModel(target.ModelAlias); resolveErr != nil {
@@ -798,12 +1144,16 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		r.mu.Unlock()
 		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
 	}
-	oldClient := r.wsClient
-	oldCleanup := r.agentCleanup
+	retired := newChatRuntimeCleanup(r.wsClient, r.agentCleanupContext)
+	if retired != nil {
+		r.retiredCleanup = append(r.retiredCleanup, retired)
+	}
 	r.wsClient = install.client
 	adopted = true
 	r.agent = workspaceAgent
-	r.agentCleanup = replacementCleanup
+	r.baseSystem = workspaceBaseSystem
+	r.attachedSkills = attachedSkills
+	r.agentCleanupContext = replacementCleanup
 	cleanupAdopted = true
 	r.profileName = profileName
 	r.current = target
@@ -814,12 +1164,7 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	r.workspace = fmt.Sprintf("%s at /work/repo", install.workspace.Repo)
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
-	if oldClient != nil {
-		_ = oldClient.Close()
-	}
-	if oldCleanup != nil {
-		oldCleanup()
-	}
+	_ = r.cleanupRetiredResources(ctx)
 	if emit != nil {
 		emit(chatpkg.Event{Kind: chatpkg.EventState, State: &state})
 	}
@@ -942,6 +1287,7 @@ func (r *chatRuntime) stateLocked(capabilities []string) chatpkg.State {
 		Workspace:      r.workspace,
 		ModelError:     r.modelError,
 		Models:         r.modelsLocked(),
+		Skills:         append([]chatpkg.SkillRef(nil), r.attachedSkills...),
 		Capabilities:   append([]string(nil), capabilities...),
 		History:        append([]llm.Message(nil), r.history...),
 	}
@@ -1039,7 +1385,6 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 			close(turnDone)
 		}
 		r.mu.Unlock()
-		r.finishCloseIfIdle()
 	}()
 
 	var emitMu sync.Mutex
@@ -1226,7 +1571,7 @@ func (r *chatRuntime) Close(ctx context.Context) error {
 }
 
 func (r *chatRuntime) close(ctx context.Context) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.runtimeCloseTimeout())
+	cleanupCtx, cancel := detachedRuntimeCloseContext(ctx, r.runtimeCloseTimeout())
 	defer cancel()
 
 	r.mu.Lock()
@@ -1278,82 +1623,146 @@ func (r *chatRuntime) finishCommand(commandCancel context.CancelFunc, commandDon
 	}
 	close(commandDone)
 	r.mu.Unlock()
-	r.finishCloseIfIdle()
 }
 
-func (r *chatRuntime) finishCloseIfIdle() {
-	r.mu.Lock()
-	idle := r.closed && r.commandDone == nil && r.turnDone == nil
-	r.mu.Unlock()
-	if !idle {
-		return
+func detachedRuntimeCloseContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if existing, ok := ctx.Deadline(); ok && existing.Before(deadline) {
+		deadline = existing
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.runtimeCloseTimeout())
-	defer cancel()
-	_ = r.finishClose(cleanupCtx)
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 func (r *chatRuntime) finishClose(ctx context.Context) error {
-	for {
-		r.mu.Lock()
-		if r.cleanupComplete {
-			err := r.closeErr
-			r.mu.Unlock()
-			return err
-		}
-		if r.cleanupStarted {
-			done := r.cleanupDone
-			r.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return fmt.Errorf("wait for chat cleanup: %w", ctx.Err())
-			}
-		}
-		r.cleanupStarted = true
-		r.cleanupDone = make(chan struct{})
-		done := r.cleanupDone
-		r.mu.Unlock()
-
-		err := r.cleanup(ctx)
-		r.mu.Lock()
-		r.closeErr = err
-		r.cleanupComplete = true
-		r.cleanupStarted = false
-		close(done)
+	r.mu.Lock()
+	if r.cleanupComplete {
+		err := r.closeErr
 		r.mu.Unlock()
 		return err
 	}
+	if r.cleanupStarted {
+		done := r.cleanupDone
+		r.mu.Unlock()
+		select {
+		case <-done:
+			r.mu.Lock()
+			err := r.closeErr
+			r.mu.Unlock()
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("wait for chat cleanup: %w", ctx.Err())
+		}
+	}
+	r.cleanupStarted = true
+	r.cleanupDone = make(chan struct{})
+	done := r.cleanupDone
+	r.mu.Unlock()
+
+	err := r.cleanup(ctx)
+	r.mu.Lock()
+	r.closeErr = err
+	r.cleanupComplete = cleanupCompleted(err)
+	r.cleanupStarted = false
+	close(done)
+	r.mu.Unlock()
+	return err
 }
 
 func (r *chatRuntime) cleanup(ctx context.Context) error {
-	var closeErr error
+	var reflectionErr error
 	if err := r.reflectSession(ctx); err != nil {
-		closeErr = errors.Join(closeErr, err)
+		reflectionErr = err
 	}
 
+	var teardownErr error
 	r.mu.Lock()
 	wsClient := r.wsClient
-	agentCleanup := r.agentCleanup
+	agentCleanup := r.agentCleanupContext
 	resourceCancel := r.resourceCancel
-	r.wsClient = nil
-	r.agentCleanup = nil
-	r.resourceCancel = nil
 	ownedSessionID := r.ownedSessionID
-	r.ownedSessionID = ""
 	r.mu.Unlock()
 	if wsClient != nil {
-		closeErr = errors.Join(closeErr, wsClient.Close())
+		if err := closeRuntimeResource(ctx, wsClient); err != nil {
+			teardownErr = errors.Join(teardownErr, err)
+		} else {
+			r.mu.Lock()
+			r.wsClient = nil
+			r.mu.Unlock()
+		}
+	}
+	if agentCleanup != nil {
+		if err := agentCleanup(ctx); err != nil {
+			teardownErr = errors.Join(teardownErr, err)
+		} else {
+			r.mu.Lock()
+			if r.agentCleanupContext != nil {
+				r.agentCleanupContext = nil
+			}
+			r.mu.Unlock()
+		}
+	}
+	teardownErr = errors.Join(teardownErr, r.cleanupRetiredResources(ctx))
+	if teardownErr != nil {
+		return errors.Join(reflectionErr, teardownErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.sessionOwners.releaseContext(ctx, r, ownedSessionID); err != nil {
+		return err
 	}
 	if resourceCancel != nil {
 		resourceCancel()
 	}
-	if agentCleanup != nil {
-		agentCleanup()
+	r.mu.Lock()
+	r.resourceCancel = nil
+	if r.ownedSessionID == ownedSessionID {
+		r.ownedSessionID = ""
 	}
-	r.sessionOwners.release(r, ownedSessionID)
-	return closeErr
+	r.mu.Unlock()
+	if reflectionErr != nil {
+		return completedChatCleanupError{err: reflectionErr}
+	}
+	return nil
+}
+
+func (r *chatRuntime) cleanupRetiredResources(ctx context.Context) error {
+	r.mu.Lock()
+	retired := append([]*chatRuntimeCleanup(nil), r.retiredCleanup...)
+	r.mu.Unlock()
+
+	var cleanupErr error
+	for _, cleanup := range retired {
+		cleanupErr = errors.Join(cleanupErr, cleanup.close(ctx))
+	}
+
+	r.mu.Lock()
+	remaining := r.retiredCleanup[:0]
+	for _, cleanup := range r.retiredCleanup {
+		if !cleanup.complete() {
+			remaining = append(remaining, cleanup)
+		}
+	}
+	for i := len(remaining); i < len(r.retiredCleanup); i++ {
+		r.retiredCleanup[i] = nil
+	}
+	r.retiredCleanup = remaining
+	r.mu.Unlock()
+	return cleanupErr
+}
+
+type completedChatCleanupError struct{ err error }
+
+func (e completedChatCleanupError) Error() string        { return e.err.Error() }
+func (e completedChatCleanupError) Unwrap() error        { return e.err }
+func (completedChatCleanupError) CleanupCompleted() bool { return true }
+
+func cleanupCompleted(err error) bool {
+	if err == nil {
+		return true
+	}
+	var completed interface{ CleanupCompleted() bool }
+	return errors.As(err, &completed) && completed.CleanupCompleted()
 }
 
 type redactedChatRuntimeError struct {
@@ -1432,6 +1841,11 @@ func redactChatState(state chatpkg.State, redact func(string) string) chatpkg.St
 		state.Models[i].Alias = redact(state.Models[i].Alias)
 		state.Models[i].Provider = redact(state.Models[i].Provider)
 		state.Models[i].Upstream = redact(state.Models[i].Upstream)
+	}
+	state.Skills = append([]chatpkg.SkillRef(nil), state.Skills...)
+	for i := range state.Skills {
+		state.Skills[i].Name = redact(state.Skills[i].Name)
+		state.Skills[i].Description = redact(state.Skills[i].Description)
 	}
 	return state
 }

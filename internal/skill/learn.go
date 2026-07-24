@@ -579,7 +579,11 @@ func (l *Learner) applyAccepted(ctx context.Context, p *Proposal) error {
 		if err := writeSkillInactive(l.WS, c); err != nil {
 			return err
 		}
-		return SetSkillStatus(ctx, l.DB, p.Name, StatusInactive, "learn")
+		return SetSkillStatusRecord(ctx, l.DB, StatusRecord{
+			Name:   p.Name,
+			Status: StatusInactive,
+			Source: "learn",
+		})
 	case SurfaceMemory:
 		// Append a config-stub style note candidate under pending via gate body.
 		line := fmt.Sprintf("- [learn:%s] %s", p.PatternSig, oneLine(p.Body))
@@ -808,33 +812,67 @@ func isActiveFrontmatter(raw string) bool {
 	return status == "" || status == StatusActive
 }
 
-// SetSkillStatus upserts skill_status and rewrites frontmatter status.
-func SetSkillStatus(ctx context.Context, db *sql.DB, name, status, source string) error {
-	if name == "" {
+// StatusRecord is the persisted state and install provenance for one skill.
+type StatusRecord struct {
+	Name          string
+	Status        string
+	Source        string
+	SourceRef     string
+	ContentDigest string
+	CreatedAt     time.Time
+	ActivatedAt   time.Time
+}
+
+// SetSkillStatusRecord upserts skill status without erasing existing
+// provenance or historical activation time when those values are omitted.
+func SetSkillStatusRecord(ctx context.Context, db *sql.DB, record StatusRecord) error {
+	if record.Name == "" {
 		return errors.New("skill name required")
 	}
-	if status != StatusActive && status != StatusInactive {
-		return fmt.Errorf("skill status must be active or inactive, got %q", status)
+	if record.Status != StatusActive && record.Status != StatusInactive {
+		return fmt.Errorf("skill status must be active or inactive, got %q", record.Status)
 	}
 	if db != nil {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
+		createdAt := record.CreatedAt.UTC()
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
 		activated := ""
-		if status == StatusActive {
-			activated = now
+		if record.Status == StatusActive {
+			activatedAt := record.ActivatedAt.UTC()
+			if activatedAt.IsZero() {
+				activatedAt = createdAt
+			}
+			activated = activatedAt.Format(time.RFC3339Nano)
 		}
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO skill_status (name, status, source, created_at, activated_at)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO skill_status (
+				name, status, source, source_ref, content_digest, created_at, activated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(name) DO UPDATE SET
 				status = excluded.status,
 				source = CASE WHEN excluded.source != '' THEN excluded.source ELSE skill_status.source END,
+				source_ref = CASE WHEN excluded.source_ref != '' THEN excluded.source_ref ELSE skill_status.source_ref END,
+				content_digest = CASE WHEN excluded.content_digest != '' THEN excluded.content_digest ELSE skill_status.content_digest END,
 				activated_at = CASE WHEN excluded.status = 'active' THEN excluded.activated_at ELSE skill_status.activated_at END`,
-			name, status, source, now, activated)
+			record.Name, record.Status, record.Source, record.SourceRef,
+			record.ContentDigest, createdAt.Format(time.RFC3339Nano), activated)
 		if err != nil {
-			return err
+			return fmt.Errorf("set skill status: %w", err)
 		}
 	}
 	return nil
+}
+
+// SetSkillStatus is the compatibility wrapper for status updates without
+// install provenance.
+func SetSkillStatus(ctx context.Context, db *sql.DB, name, status, source string) error {
+	return SetSkillStatusRecord(ctx, db, StatusRecord{
+		Name:   name,
+		Status: status,
+		Source: source,
+	})
 }
 
 // ActivateSkill marks a skill active in DB and frontmatter.
@@ -844,11 +882,26 @@ func ActivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name st
 	if err != nil {
 		return err
 	}
-	updated := setFrontmatterStatus(string(raw), StatusActive)
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		return err
 	}
-	return SetSkillStatus(ctx, db, name, StatusActive, "activate")
+	updated := setFrontmatterStatus(string(raw), StatusActive)
+	if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := SetSkillStatusRecord(ctx, db, StatusRecord{
+		Name:   name,
+		Status: StatusActive,
+		Source: "activate",
+	}); err != nil {
+		restoreErr := os.WriteFile(path, raw, info.Mode().Perm())
+		if restoreErr != nil {
+			restoreErr = fmt.Errorf("restore inactive skill after status failure: %w", restoreErr)
+		}
+		return errors.Join(err, restoreErr)
+	}
+	return nil
 }
 
 func setFrontmatterStatus(raw, status string) string {

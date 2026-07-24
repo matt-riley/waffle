@@ -34,6 +34,61 @@ import (
 // "no workspace" and churn duplicate containers/volumes.
 var ErrWorkspaceNotFound = errors.New("workspace not found")
 
+// ErrWorkspaceAlreadyClosed distinguishes an inspection that observed a
+// closed row from a clean, closeable workspace.
+var ErrWorkspaceAlreadyClosed = errors.New("workspace already closed")
+
+type lifecycleLockRegistry struct {
+	mu      sync.Mutex
+	entries map[string]*lifecycleLockEntry
+}
+
+type lifecycleLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type lifecycleLock struct {
+	registry *lifecycleLockRegistry
+	key      string
+	entry    *lifecycleLockEntry
+}
+
+// workspaceLifecycleLocks coordinates lifecycle transitions across Manager
+// instances in this process. Its references count both current holders and
+// waiters so an entry cannot be retired during lock handoff.
+var workspaceLifecycleLocks lifecycleLockRegistry
+
+func (r *lifecycleLockRegistry) lock(key string) *lifecycleLock {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.entries == nil {
+		r.entries = make(map[string]*lifecycleLockEntry)
+	}
+	entry := r.entries[key]
+	if entry == nil {
+		entry = &lifecycleLockEntry{}
+		r.entries[key] = entry
+	}
+	entry.refs++
+	return &lifecycleLock{registry: r, key: key, entry: entry}
+}
+
+func (l *lifecycleLock) Lock() {
+	l.entry.mu.Lock()
+}
+
+func (l *lifecycleLock) Unlock() {
+	l.entry.mu.Unlock()
+
+	l.registry.mu.Lock()
+	defer l.registry.mu.Unlock()
+	l.entry.refs--
+	if l.entry.refs == 0 {
+		delete(l.registry.entries, l.key)
+	}
+}
+
 // Workspace is one repo workspace.
 type Workspace struct {
 	ID         string
@@ -663,6 +718,13 @@ func (m *Manager) devcontainerImage(ctx context.Context, client *sandbox.Client,
 
 // Idle stops the container; the volume (and queue) persist.
 func (m *Manager) Idle(ctx context.Context, id string) error {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return m.idle(ctx, id)
+}
+
+func (m *Manager) idle(ctx context.Context, id string) error {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return err
@@ -679,6 +741,13 @@ func (m *Manager) Idle(ctx context.Context, id string) error {
 
 // Resume restarts an idle workspace's container and reconnects the queue.
 func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.Client, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return m.resume(ctx, id)
+}
+
+func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.Client, error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return nil, nil, err
@@ -745,35 +814,208 @@ func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
 	return client, nil
 }
 
+// newInspectionClient connects to a workspace without recording activity.
+// Inspection must not make an open or idle workspace look recently used.
+func (m *Manager) newInspectionClient(ws *Workspace) (*sandbox.Client, error) {
+	return sandbox.NewClient(m.queueDir(ws.ID))
+}
+
+const (
+	// inspectionRunnerReadyTimeout matches sandbox's supported 60-second
+	// cold-start allowance for the first runner heartbeat.
+	inspectionRunnerReadyTimeout  = time.Minute
+	inspectionRunnerProbeInterval = 100 * time.Millisecond
+	inspectionRestoreTimeout      = 30 * time.Second
+)
+
+// waitForInspectionRunner waits for a heartbeat created after an idle
+// container restart. The queue persists across idle periods, so an old stale
+// heartbeat must not make the first inspection command declare the newly
+// started runner dead.
+func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, startedAt time.Time) error {
+	db, err := sql.Open("sqlite", filepath.Join(m.queueDir(ws.ID), "outbound.db"))
+	if err != nil {
+		return fmt.Errorf("open inspection runner heartbeat: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ticker := time.NewTicker(inspectionRunnerProbeInterval)
+	defer ticker.Stop()
+	return waitForInspectionHeartbeat(ctx, startedAt, inspectionRunnerReadyTimeout,
+		func(ctx context.Context) (time.Time, error) {
+			var raw string
+			err := db.QueryRowContext(ctx,
+				`SELECT created_at FROM results WHERE request_id = ?`, -1).Scan(&raw)
+			if errors.Is(err, sql.ErrNoRows) {
+				return time.Time{}, nil
+			}
+			if err != nil {
+				return time.Time{}, err
+			}
+			heartbeat, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				return time.Time{}, nil
+			}
+			return heartbeat, nil
+		}, ticker.C)
+}
+
+// waitForInspectionHeartbeat contains the bounded wait independently of the
+// queue read. Keeping those seams separate makes the supported cold-start
+// window deterministic to test without delaying the suite.
+func waitForInspectionHeartbeat(ctx context.Context, startedAt time.Time, timeout time.Duration, heartbeat func(context.Context) (time.Time, error), ticks <-chan time.Time) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		heartbeatAt, err := heartbeat(waitCtx)
+		if err != nil {
+			return fmt.Errorf("read inspection runner heartbeat: %w", err)
+		}
+		if heartbeatAt.After(startedAt) {
+			return nil
+		}
+
+		select {
+		case <-ticks:
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for restarted workspace runner heartbeat: %w", waitCtx.Err())
+		}
+	}
+}
+
 // CloseReport says what Close found before tearing down.
 type CloseReport struct {
 	Dirty    string // non-empty git status --porcelain output
 	Unpushed string // non-empty log of commits ahead of upstream
 }
 
-// Close tears the workspace down. When force is false and the tree is
-// dirty or has unpushed commits, it refuses and reports instead.
-// before_remove runs best-effort after safety checks and before teardown.
-func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
+// InspectClose gathers the evidence Close needs without changing workspace
+// lifecycle state. Idle workspaces are temporarily started and restored to
+// their stopped state without refreshing credentials or timestamps.
+func (m *Manager) InspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
+	return m.InspectCloseGuarded(ctx, id, nil)
+}
+
+// InspectCloseGuarded keeps the per-workspace lifecycle lock held through
+// accept. This lets a caller atomically accept inspection evidence, for
+// example by issuing a short-lived confirmation token, before another actor
+// can idle, resume, inspect, or close the same workspace. accept must not call
+// workspace lifecycle methods for this ID.
+func (m *Manager) InspectCloseGuarded(
+	ctx context.Context,
+	id string,
+	accept func(*CloseReport) error,
+) (report *CloseReport, err error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	report, err = m.inspectClose(ctx, id)
+	if err != nil {
+		return report, err
+	}
+	if accept != nil {
+		if err := accept(report); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+func (m *Manager) inspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	report = &CloseReport{}
 	if ws.Status == StatusClosed {
-		return nil, nil
+		return report, ErrWorkspaceAlreadyClosed
+	}
+
+	wasIdle := ws.Status == StatusIdle
+	if wasIdle {
+		startedAt := time.Now().UTC()
+		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
+			return report, fmt.Errorf("start idle workspace for inspection: %w", err)
+		}
+		defer func() {
+			restoreCtx, cancel := context.WithTimeout(context.Background(), inspectionRestoreTimeout)
+			defer cancel()
+			if restoreErr := m.Runtime.StopContainer(restoreCtx, ws.Container); restoreErr != nil {
+				if err != nil {
+					err = errors.Join(err, fmt.Errorf("restore idle workspace: %w", restoreErr))
+					return
+				}
+				err = fmt.Errorf("restore idle workspace after inspection: %w", restoreErr)
+			}
+		}()
+		if err := m.waitForInspectionRunner(ctx, ws, startedAt); err != nil {
+			return report, err
+		}
+	}
+
+	client, err := m.newInspectionClient(ws)
+	if err != nil {
+		return report, fmt.Errorf("connect workspace for inspection: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
+	if err != nil {
+		return report, fmt.Errorf("inspect workspace before close: %w", err)
+	}
+	report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
+	if err != nil {
+		return report, fmt.Errorf("inspect workspace before close: %w", err)
+	}
+	return report, nil
+}
+
+// Close tears the workspace down. When force is false and the tree is
+// dirty or has unpushed commits, it refuses and reports instead.
+// before_remove runs best-effort after safety checks and before teardown.
+func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
+	report, _, err := m.CloseTransition(ctx, id, force)
+	return report, err
+}
+
+// CloseTransition closes a workspace and reports whether this invocation
+// performed the durable non-closed to closed transition. Existing Close
+// callers retain their no-op compatibility for rows already closed.
+func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*CloseReport, bool, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if ws.Status == StatusClosed {
+		return nil, false, nil
 	}
 
 	report := &CloseReport{}
+	if !force {
+		report, err = m.inspectClose(ctx, id)
+		if err != nil {
+			return report, false, err
+		}
+		if report.Dirty != "" || report.Unpushed != "" {
+			return report, false, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
+		}
+	}
+
 	wasIdle := ws.Status == StatusIdle
 	var client *sandbox.Client
 	if wasIdle {
-		resumed, resumedClient, err := m.Resume(ctx, id)
+		resumed, resumedClient, err := m.resume(ctx, id)
 		if err != nil {
 			if force {
 				// Force-close without a live container when resume fails.
 				goto teardown
 			}
-			return report, fmt.Errorf("resume workspace for safety check: %w", err)
+			return report, false, fmt.Errorf("resume workspace for safety check: %w", err)
 		}
 		ws = resumed
 		client = resumedClient
@@ -783,7 +1025,7 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 			if force {
 				goto teardown
 			}
-			return report, fmt.Errorf("connect workspace for safety check: %w", err)
+			return report, false, fmt.Errorf("connect workspace for safety check: %w", err)
 		}
 	}
 	defer func() {
@@ -791,33 +1033,6 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 			_ = client.Close()
 		}
 	}()
-
-	if !force {
-		report.Dirty, err = m.bashOutput(ctx, client, "cd /work/repo && git status --porcelain")
-		if err == nil {
-			report.Unpushed, err = m.bashOutput(ctx, client, "cd /work/repo && if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then git log --oneline '@{upstream}'..HEAD; else git log --oneline HEAD --not --remotes; fi")
-		}
-		if err != nil {
-			if wasIdle {
-				_ = client.Close()
-				client = nil
-				if idleErr := m.Idle(ctx, id); idleErr != nil {
-					return report, fmt.Errorf("inspect workspace before close: %w (also failed to restore idle: %v)", err, idleErr)
-				}
-			}
-			return report, fmt.Errorf("inspect workspace before close: %w", err)
-		}
-		if report.Dirty != "" || report.Unpushed != "" {
-			if wasIdle {
-				_ = client.Close()
-				client = nil
-				if idleErr := m.Idle(ctx, id); idleErr != nil {
-					return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard; also failed to restore idle: %v)", id, idleErr)
-				}
-			}
-			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
-		}
-	}
 
 	// before_remove is best-effort and must not block teardown (#54).
 	if client != nil {
@@ -828,13 +1043,20 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 
 teardown:
 	if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
-		return report, err
+		return report, false, err
 	}
 	if err := m.Runtime.RemoveVolume(ctx, ws.Volume); err != nil {
-		return report, err
+		return report, false, err
 	}
 	m.revokeSession(ws.SessionID)
-	return report, m.setStatus(ctx, id, StatusClosed)
+	if err := m.setStatus(ctx, id, StatusClosed); err != nil {
+		return report, false, err
+	}
+	return report, true, nil
+}
+
+func workspaceLifecycleLock(id string) *lifecycleLock {
+	return workspaceLifecycleLocks.lock(id)
 }
 
 func (m *Manager) revokeSession(sessionID string) {

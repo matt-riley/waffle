@@ -12,6 +12,12 @@ import (
 // NewHandler returns the local HTTP status API handler.
 func NewHandler(service *Service) http.Handler {
 	mux := http.NewServeMux()
+	RegisterRoutes(mux, service)
+	return mux
+}
+
+// RegisterRoutes adds the local HTTP status API to mux.
+func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -41,13 +47,17 @@ func NewHandler(service *Service) http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(health)
 	})
-	return mux
 }
 
 // ServeListener serves the local status API until ctx is canceled.
 func ServeListener(ctx context.Context, listener net.Listener, service *Service) error {
+	return ServeHandler(ctx, listener, NewHandler(service))
+}
+
+// ServeHandler serves handler until ctx is canceled.
+func ServeHandler(ctx context.Context, listener net.Listener, handler http.Handler) error {
 	server := &http.Server{
-		Handler:           NewHandler(service),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

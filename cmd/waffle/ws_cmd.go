@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -325,6 +326,25 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	}
 
 	b := broker.New(st, brokerUpstreams(cfg))
+	if err := configureWorkspaceBroker(cfg, st, b); err != nil {
+		_ = ln.Close()
+		return nil, "", err
+	}
+	go func() {
+		if err := b.ServeListener(ctx, ln); err != nil {
+			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
+		}
+	}()
+
+	// Containers reach the host through the host-gateway alias set up by
+	// the runtime (--add-host waffle-host:host-gateway).
+	return b, "http://waffle-host:" + port, nil
+}
+
+func configureWorkspaceBroker(cfg config.Config, st *store.Store, b *broker.Broker) error {
+	if b == nil {
+		return errors.New("credential broker is required")
+	}
 	// allowlist: configured hosts. none: empty here; Open adds the repo host
 	// so git clone can use the proxy while other hosts stay denied (#95).
 	if cfg.Workspace.Egress == "allowlist" {
@@ -339,18 +359,15 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	scope := repoScopeResolver(b, mgr)
 	if cfg.GitHub.App.PrivateKey != "" {
 		if !strings.HasPrefix(cfg.GitHub.App.PrivateKey, "secret://") {
-			_ = ln.Close()
-			return nil, "", fmt.Errorf("github app private_key must be a secret:// reference")
+			return fmt.Errorf("github app private_key must be a secret:// reference")
 		}
 		key, err := resolveSecretValue(cfg.GitHub.App.PrivateKey, "")
 		if err != nil {
-			_ = ln.Close()
-			return nil, "", fmt.Errorf("github app private key: %w", err)
+			return fmt.Errorf("github app private key: %w", err)
 		}
 		app, err := gitcred.NewApp(cfg.GitHub.App.AppID, cfg.GitHub.App.InstallationID, []byte(key), cfg.GitHub.App.BaseURL, nil, nil)
 		if err != nil {
-			_ = ln.Close()
-			return nil, "", err
+			return err
 		}
 		b.GitBackend = "github-app"
 		b.GitCredential = gitCredentialFromApp(scope, app)
@@ -358,15 +375,7 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 		b.GitBackend = "pat"
 		b.GitCredential = gitCredentialFromSecrets(scope)
 	}
-	go func() {
-		if err := b.ServeListener(ctx, ln); err != nil {
-			fmt.Fprintf(stderr, "waffle: broker: %v\n", err)
-		}
-	}()
-
-	// Containers reach the host through the host-gateway alias set up by
-	// the runtime (--add-host waffle-host:host-gateway).
-	return b, "http://waffle-host:" + port, nil
+	return nil
 }
 
 func gitCredentialFromApp(repoForSession func(context.Context, string) (string, error), app *gitcred.App) broker.GitCredentialFunc {

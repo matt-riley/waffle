@@ -89,7 +89,20 @@ func NewClient(dir string) (*Client, error) {
 // Close releases the queue handles (the runner is told to stop separately;
 // see Shutdown).
 func (c *Client) Close() error {
+	return c.CloseContext(context.Background())
+}
+
+// CloseContext releases the queue handles without starting a private timeout.
+// Chat cleanup supplies its one shared deadline after active queue operations
+// have drained; callers without a lifecycle context may continue to use Close.
+func (c *Client) CloseContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	err1 := c.inbound.Close()
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err1, err)
+	}
 	err2 := c.outbound.Close()
 	return errors.Join(err1, err2)
 }

@@ -67,7 +67,10 @@ func New(token, baseURL string) *Adapter {
 // Name implements channel.Adapter.
 func (a *Adapter) Name() string { return "telegram" }
 
-// SetPollObserver installs a callback invoked after each successful poll.
+// SetPollObserver installs a health callback invoked after Telegram first
+// authenticates the bot and after each successful long poll. The initial
+// getMe signal avoids making process readiness wait for an otherwise idle
+// 50-second getUpdates request.
 func (a *Adapter) SetPollObserver(fn func()) { a.onPoll = fn }
 
 // BotUsername returns the cached bot username (without @), or empty if
@@ -307,6 +310,9 @@ func (a *Adapter) ensureBot(ctx context.Context) error {
 	a.botUser = me.Username
 	a.botMentionRe = botMentionRegexp(me.Username)
 	a.botMu.Unlock()
+	if a.onPoll != nil {
+		a.onPoll()
+	}
 	return nil
 }
 

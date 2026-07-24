@@ -32,10 +32,14 @@ func TestCommandRegistryParsesAliasesAndNearMisses(t *testing.T) {
 		{"/usage", CommandUsage, "", true},
 		{"/permissions", CommandPermissions, "", true},
 		{"/skill audit fast", CommandSkill, "audit fast", true},
+		{"/skills", CommandSkills, "", true},
+		{"/skills attach reviewer", CommandSkills, "attach reviewer", true},
+		{"/skills detach reviewer", CommandSkills, "detach reviewer", true},
 		{"/repo owner/repo", CommandRepo, "owner/repo", true},
 		{"/workset list", CommandWorkset, "list", true},
 		{"/modelsx", "", "", false},
 		{"/skillful audit", "", "", false},
+		{"/skillsx", "", "", false},
 		{"/repos owner/repo", "", "", false},
 		{"plain /model text", "", "", false},
 	}
@@ -76,6 +80,24 @@ func TestParseInputReportsExactUsage(t *testing.T) {
 	}
 }
 
+func TestSkillsCommandReportsExactUsageForMalformedForms(t *testing.T) {
+	for _, input := range []string{
+		"/skills attach",
+		"/skills detach",
+		"/skills reviewer",
+		"/skills attach reviewer extra",
+		"/skills detach reviewer extra",
+	} {
+		got, ok, err := ParseInput(input)
+		if !ok || got.Name != CommandSkills {
+			t.Fatalf("ParseInput(%q) = %+v,%v", input, got, ok)
+		}
+		if err == nil || err.Error() != "usage: /skills [attach <name>|detach <name>]" {
+			t.Fatalf("ParseInput(%q) error = %v", input, err)
+		}
+	}
+}
+
 func TestCompletionIsStableAndDocumented(t *testing.T) {
 	got := Complete("/mo")
 	if len(got) != 2 || got[0].Name != CommandModel || got[1].Name != CommandModels {
@@ -86,13 +108,17 @@ func TestCompletionIsStableAndDocumented(t *testing.T) {
 			t.Fatalf("undocumented: %+v", command)
 		}
 	}
+	skills := Complete("/ski")
+	if got := commandNames(skills); !reflect.DeepEqual(got, []Name{CommandSkill, CommandSkills}) {
+		t.Fatalf("Complete(/ski) = %v", got)
+	}
 }
 
 func TestCommandsAreCanonicalAndImmutable(t *testing.T) {
 	want := []Name{
 		CommandHelp, CommandExit, CommandModel, CommandModels, CommandNew,
 		CommandSessions, CommandResume, CommandStatus, CommandUsage,
-		CommandPermissions, CommandSkill, CommandRepo, CommandWorkset,
+		CommandPermissions, CommandSkill, CommandSkills, CommandRepo, CommandWorkset,
 	}
 	first := Commands()
 	if got := commandNames(first); !reflect.DeepEqual(got, want) {
@@ -127,7 +153,8 @@ func TestSharedDTOsUseStableJSONFieldNames(t *testing.T) {
 		{UsageRow{SessionID: "s", Period: "day", PeriodStart: "today", Requests: 1, InputTokens: 2, OutputTokens: 3, ReservedTokens: 4}, []string{"session_id", "period", "period_start", "requests", "input_tokens", "output_tokens", "reserved_tokens"}},
 		{PermissionView{SandboxMode: "read-only", Allow: []string{"read"}, Deny: []string{"bash"}, DenyPrefixes: []string{"secret"}}, []string{"sandbox_mode", "allow", "deny", "deny_prefixes"}},
 		{WorkItem{ID: "w", Text: "work"}, []string{"id", "text"}},
-		{State{SessionID: "s", Title: "t", ModelAlias: "a", ModelError: "missing", ProviderLabel: "p", Profile: "default", ConnectionMode: "direct", SandboxMode: "read-only", Workspace: "w", History: []llm.Message{{}}, Models: []Model{{Alias: "a"}}, Capabilities: []string{"c"}}, []string{"session_id", "title", "model_alias", "model_error", "provider_label", "profile", "connection_mode", "sandbox_mode", "workspace", "history", "models", "capabilities"}},
+		{SkillRef{Name: "reviewer", Description: "review changes", Attached: true, Missing: false}, []string{"name", "description", "attached", "missing"}},
+		{State{SessionID: "s", Title: "t", ModelAlias: "a", ModelError: "missing", ProviderLabel: "p", Profile: "default", ConnectionMode: "direct", SandboxMode: "read-only", Workspace: "w", History: []llm.Message{{}}, Models: []Model{{Alias: "a"}}, Skills: []SkillRef{{Name: "reviewer"}}, Capabilities: []string{"c"}}, []string{"session_id", "title", "model_alias", "model_error", "provider_label", "profile", "connection_mode", "sandbox_mode", "workspace", "history", "models", "skills", "capabilities"}},
 		{Event{Kind: EventNotice, Text: "text", ToolName: "tool", IsError: true, ByteCount: 2, Usage: llm.Usage{InputTokens: 1}, State: &State{SessionID: "s"}}, []string{"kind", "text", "tool_name", "is_error", "byte_count", "usage", "state"}},
 		{Result{Title: "t", Text: "x", Commands: []Command{{Name: CommandHelp}}, Models: []Model{{Alias: "a"}}, Sessions: []Session{{ID: "s"}}, Usage: []UsageRow{{Requests: 1}}, Permissions: &PermissionView{SandboxMode: "read-only"}, Workset: []WorkItem{{ID: "w"}}, State: &State{SessionID: "s"}, Confirm: true, ShouldClose: true}, []string{"title", "text", "commands", "models", "sessions", "usage", "permissions", "workset", "state", "confirm", "should_close"}},
 		{Command{Name: CommandExit, Usage: "/exit", Aliases: []string{"quit"}, Description: "close"}, []string{"name", "usage", "aliases", "description"}},
@@ -224,7 +251,7 @@ func commandNames(commands []Command) []Name {
 }
 
 func TestUsageErrorsDoNotMatchNearMisses(t *testing.T) {
-	for _, input := range []string{"/skills", "/repos"} {
+	for _, input := range []string{"/skillful", "/repos"} {
 		_, ok, err := ParseInput(input)
 		if ok || err != nil {
 			t.Fatalf("ParseInput(%q) = ok %v, error %v", input, ok, err)
