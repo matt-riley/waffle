@@ -262,6 +262,50 @@ func TestConnectionsSortsRecordsAndUsesClosedSummaries(t *testing.T) {
 	}
 }
 
+func TestConnectionsProfileSandboxUsesOwnGroupNotMain(t *testing.T) {
+	cfg := config.Config{
+		Sandbox: config.Sandbox{Mode: "host"},
+		Agent: config.Agent{
+			Groups: map[string]config.AgentGroup{
+				config.GroupMain: {Sandbox: "host"},
+				config.GroupCron: {Sandbox: "docker"},
+			},
+			Profiles: map[string]config.AgentProfile{
+				// Same name as the cron group: must keep cron's docker mode,
+				// not collapse to GroupMain host (#155).
+				config.GroupCron: {},
+				// Profile-only posture inherits main, then applies override.
+				"review": {Sandbox: "docker"},
+				// Profile-only without override inherits main (host).
+				"planner": {},
+			},
+		},
+	}
+	source := NewConnectionSource(cfg, nil)
+	got, err := source.Connections(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]ConnectionView, len(got))
+	for _, record := range got {
+		if record.Kind == "profile" {
+			byName[record.Name] = record
+		}
+	}
+	if record := byName[config.GroupCron]; record.SandboxMode != "docker" || record.Guidance != "Runs in a sandbox." {
+		t.Fatalf("cron summary = %#v, want docker from group policy", record)
+	}
+	if record := byName["review"]; record.SandboxMode != "docker" {
+		t.Fatalf("review summary = %#v, want docker from profile override", record)
+	}
+	if record := byName["planner"]; record.SandboxMode != "host" || record.Guidance != "Tool policy is enforced." {
+		t.Fatalf("planner summary = %#v, want host inherited from main", record)
+	}
+	if record := byName[config.GroupMain]; record.SandboxMode != "host" {
+		t.Fatalf("main summary = %#v, want host", record)
+	}
+}
+
 func TestConnectionsFailureIsClosedAndRoutesAreGETOnly(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterConnectionsRoutes(mux, NewConnectionSource(
