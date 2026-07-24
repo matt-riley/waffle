@@ -163,6 +163,55 @@ func TestTaskScheduleUpdatePreservesStateAndPublishesCanonicalEvent(t *testing.T
 	}
 }
 
+func TestTaskScheduleLateCancellationReplaysCommittedUpdate(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	events := NewEventHub(4)
+	requestContext, cancel := context.WithCancel(context.Background())
+	schedules := &cancelAfterTaskUpdateStore{
+		cancel: cancel,
+		job: schedule.Job{
+			ID: "job-cancel", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
+		},
+	}
+	mux := http.NewServeMux()
+	RegisterTaskRoutes(mux, TaskRouteConfig{
+		Operations: &Operations{
+			Jobs: taskJobReader{}, Runs: taskRunReader{},
+			Sessions: taskSessionReader{}, Usage: taskUsageReader{},
+		},
+		Schedules: schedules, Security: security,
+		Idempotency: NewIdempotencyStore(nil, 4, time.Minute),
+		Events:      events,
+	})
+	body := `{"name":"Edited","cron":"0 9 * * *","prompt":"Changed","deliver":"","profile":"","enabled":true}`
+	request := func(ctx context.Context) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost,
+			"http://127.0.0.1:8422/api/v1/desk/tasks/schedules/job-cancel", strings.NewReader(body))
+		req = req.WithContext(ctx)
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", "cancel-after-commit")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := request(requestContext)
+	replay := request(context.Background())
+	if first.Code != http.StatusOK || replay.Code != http.StatusOK {
+		t.Fatalf("statuses = %d/%d: %s / %s", first.Code, replay.Code, first.Body.String(), replay.Body.String())
+	}
+	if !bytes.Equal(first.Body.Bytes(), replay.Body.Bytes()) {
+		t.Fatalf("replay differs: %q / %q", first.Body.Bytes(), replay.Body.Bytes())
+	}
+	if schedules.updates != 1 {
+		t.Fatalf("updates = %d, want one committed update", schedules.updates)
+	}
+	if events.Cursor() != 1 {
+		t.Fatalf("event cursor = %d, want one publication", events.Cursor())
+	}
+}
+
 func TestTaskScheduleInvalidUpdateDoesNotMutateOrPublish(t *testing.T) {
 	harness := newTaskRouteHarness(t)
 	job, err := harness.schedules.Add(context.Background(), "Old", "0 8 * * *", "Old prompt", "")
@@ -397,4 +446,32 @@ func (f failingTaskScheduleStore) Get(context.Context, string) (*schedule.Job, e
 
 func (f failingTaskScheduleStore) Update(context.Context, string, schedule.Update) (*schedule.Job, error) {
 	return nil, f.err
+}
+
+type cancelAfterTaskUpdateStore struct {
+	cancel  context.CancelFunc
+	job     schedule.Job
+	updates int
+}
+
+func (s *cancelAfterTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
+	return nil, errors.New("unexpected create")
+}
+
+func (s *cancelAfterTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error) {
+	job := s.job
+	return &job, nil
+}
+
+func (s *cancelAfterTaskUpdateStore) Update(_ context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
+	s.updates++
+	s.job.Name = input.Name
+	s.job.Cron = input.Cron
+	s.job.Prompt = input.Prompt
+	s.job.Deliver = input.Deliver
+	s.job.Profile = input.Profile
+	s.job.Enabled = input.Enabled
+	s.cancel()
+	job := s.job
+	return &job, nil
 }

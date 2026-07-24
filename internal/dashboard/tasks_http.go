@@ -47,10 +47,23 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 	}
 	mutation := func(next http.Handler) http.Handler {
 		protected := NewMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, next)
-		return preserveTaskResponseType(protected)
+		return preserveTaskResponseType(completeTaskMutation(protected))
 	}
 	mux.Handle("POST /api/v1/desk/tasks/schedules", mutation(newTaskScheduleCreateHandler(config.Schedules, events)))
 	mux.Handle("POST /api/v1/desk/tasks/schedules/{id}", mutation(newTaskScheduleUpdateHandler(config.Schedules, events)))
+}
+
+// completeTaskMutation keeps a Tasks mutation alive once its request has
+// reached the mutation boundary. This lets the shared idempotency store retain
+// a response when the client disconnects after storage has committed.
+func completeTaskMutation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Err() != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithoutCancel(r.Context())))
+	})
 }
 
 func newTasksReadHandler(service *TasksService) http.Handler {
