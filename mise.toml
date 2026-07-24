@@ -17,6 +17,7 @@ description = "Unit tests (includes internal/eval) and zero-network waffle eval 
 run = """
 mise run dashboard-generate
 git diff --exit-code -- internal/dashboard/ui/*_templ.go
+mise run dashboard-client-test
 go test -race ./...
 go run ./cmd/waffle eval
 """
@@ -24,6 +25,10 @@ go run ./cmd/waffle eval
 [tasks.dashboard-generate]
 description = "Generate Waffle Desk templ components"
 run = "go tool templ generate -path internal/dashboard/ui"
+
+[tasks.dashboard-client-test]
+description = "Test the dependency-free Waffle Desk browser client"
+run = "node --test internal/dashboard/ui/today_client_test.mjs"
 
 [tasks.fmt]
 run = "gofmt -l . && test -z \"$(gofmt -l .)\""

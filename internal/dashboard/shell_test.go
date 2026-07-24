@@ -44,6 +44,17 @@ func TestShellMobileNavigationRemovesRedundantBrandFromTabOrder(t *testing.T) {
 	}
 }
 
+func TestShellMobileNavigationProvidesMinimumTouchTargets(t *testing.T) {
+	handler := newTestShellHandler(t, ui.ShellView{})
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/desk/assets/app.css", nil))
+
+	mobileTargets := regexp.MustCompile(`(?s)@media \(max-width: 768px\) \{.*?\.section-links a \{[^}]*min-height:\s*2\.75rem;[^}]*\}`)
+	if !mobileTargets.Match(asset.Body.Bytes()) {
+		t.Fatal("mobile navigation links must provide at least 2.75rem touch targets")
+	}
+}
+
 func TestShellHandlerProvidesDefaultShellView(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	rec := httptest.NewRecorder()

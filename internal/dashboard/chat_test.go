@@ -42,14 +42,16 @@ func TestTodayClientStaticContract(t *testing.T) {
 		`"/api/v1/desk/chat/cancel"`,
 		`"/api/v1/desk/chat/command"`,
 		`"/api/v1/desk/chat/close"`,
-		`"/api/v1/desk/events"`,
 		`resource_id !== state.clientID`,
 		`command: { name: "model", args: alias }`,
 		`crypto.randomUUID()`,
 		`eventSource.close()`,
 		`activeOperation: null`,
-		`turnRequestPending: false`,
-		`state.activeOperation !== "turn"`,
+		`activeTurn: null`,
+		`state.activeTurn !== turn`,
+		`bootstrap.request_token`,
+		`bootstrap.event_cursor`,
+		`/api/v1/desk/events?after=`,
 		`const staleClientID = state.clientID`,
 		`generation: 0`,
 		`generation !== state.generation`,
@@ -66,6 +68,8 @@ func TestTodayClientStaticContract(t *testing.T) {
 		"retryMutation",
 		"console.",
 		"setTimeout(",
+		"turnDoneSeen",
+		"turnRequestPending",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Today client contains forbidden behavior %q", forbidden)

@@ -35,11 +35,12 @@ const state = {
   currentPhase: phase.opening,
   clientID: "",
   requestToken: document.body.dataset.requestToken || "",
+  eventCursor: 0,
   eventSource: null,
   streamingMessage: null,
-  turnDoneSeen: false,
+  activeTurn: null,
   activeOperation: null,
-  turnRequestPending: false,
+  turnSequence: 0,
   generation: 0,
 };
 
@@ -70,7 +71,7 @@ function setPhase(next) {
 function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
   const cancellable =
-    state.activeOperation === "turn" &&
+    state.activeTurn !== null &&
     (state.currentPhase === phase.sending ||
       state.currentPhase === phase.streaming);
   elements.message.disabled = !idle;
@@ -228,6 +229,24 @@ async function getBootstrap() {
   return readJSON(response);
 }
 
+function validateBootstrap(bootstrap) {
+  if (
+    !bootstrap ||
+    typeof bootstrap.request_token !== "string" ||
+    bootstrap.request_token === "" ||
+    !Number.isSafeInteger(bootstrap.event_cursor) ||
+    bootstrap.event_cursor < 0
+  ) {
+    const error = new Error("invalid_bootstrap");
+    error.safeMessage = "Waffle Desk could not verify the live session. Refresh to try again.";
+    throw error;
+  }
+  return {
+    requestToken: bootstrap.request_token,
+    eventCursor: bootstrap.event_cursor,
+  };
+}
+
 async function postMutation(path, body) {
   const response = await fetch(path, {
     method: "POST",
@@ -249,10 +268,9 @@ function disconnect(message) {
     state.eventSource.close();
     state.eventSource = null;
   }
+  state.activeTurn = null;
   state.activeOperation = null;
-  if (!state.turnRequestPending) {
-    state.streamingMessage = null;
-  }
+  state.streamingMessage = null;
   elements.staleMessage.textContent =
     message || "The transcript is still here, but sending is paused.";
   setPhase(phase.disconnected);
@@ -292,16 +310,15 @@ function handleDeskEvent(event) {
         elements.phase.textContent = data.text;
       }
       break;
-    case "turn_done":
-      state.turnDoneSeen = true;
-      state.activeOperation = null;
-      if (!state.turnRequestPending) {
-        state.streamingMessage = null;
-      }
-      if (state.currentPhase !== phase.disconnected) {
-        setPhase(phase.idle);
+    case "turn_done": {
+      renderCanonicalState(data.state, false);
+      const turn = state.activeTurn;
+      if (turn && turn.generation === state.generation) {
+        turn.eventSettled = true;
+        settleTurn(turn);
       }
       break;
+    }
   }
 }
 
@@ -309,7 +326,12 @@ function openEventStream() {
   if (state.eventSource) {
     state.eventSource.close();
   }
-  const eventSource = new EventSource("/api/v1/desk/events");
+  if (!Number.isSafeInteger(state.eventCursor) || state.eventCursor < 0) {
+    throw new Error("invalid_event_cursor");
+  }
+  const eventSource = new EventSource(
+    `/api/v1/desk/events?after=${encodeURIComponent(String(state.eventCursor))}`,
+  );
   const generation = state.generation;
   const handleCurrentEvent = (event) => {
     if (generation !== state.generation) {
@@ -349,15 +371,17 @@ async function openDesk() {
   const staleClientID = state.clientID;
   state.generation += 1;
   const generation = state.generation;
-  state.turnRequestPending = false;
+  state.activeTurn = null;
   state.activeOperation = null;
   state.streamingMessage = null;
   setPhase(phase.opening);
   try {
-    await getBootstrap();
+    const bootstrap = validateBootstrap(await getBootstrap());
     if (generation !== state.generation) {
       return;
     }
+    state.requestToken = bootstrap.requestToken;
+    state.eventCursor = bootstrap.eventCursor;
     if (recovering && staleClientID) {
       try {
         await postMutation("/api/v1/desk/chat/close", {
@@ -398,41 +422,62 @@ async function openDesk() {
   }
 }
 
+function settleTurn(turn) {
+  if (
+    state.activeTurn !== turn ||
+    turn.generation !== state.generation ||
+    state.currentPhase === phase.disconnected
+  ) {
+    return;
+  }
+  if (!turn.postSettled || !turn.eventSettled) {
+    if (
+      turn.postSettled &&
+      state.currentPhase !== phase.cancelling
+    ) {
+      setPhase(phase.streaming);
+    }
+    return;
+  }
+  state.streamingMessage = null;
+  state.activeTurn = null;
+  state.activeOperation = null;
+  setPhase(phase.idle);
+}
+
 async function submitTurn(event) {
   event.preventDefault();
   const text = elements.message.value.trim();
   if (state.currentPhase !== phase.idle || !text) {
     return;
   }
-  state.turnDoneSeen = false;
   state.streamingMessage = null;
   state.activeOperation = "turn";
-  state.turnRequestPending = true;
   const generation = state.generation;
+  const turn = {
+    id: ++state.turnSequence,
+    generation,
+    postSettled: false,
+    eventSettled: false,
+  };
+  state.activeTurn = turn;
   setPhase(phase.sending);
   try {
     await postMutation("/api/v1/desk/chat/turn", {
       client_id: state.clientID,
       text,
     });
-    if (generation !== state.generation) {
+    if (state.activeTurn !== turn || generation !== state.generation) {
       return;
     }
     appendMessage("user", text, state.streamingMessage);
     elements.message.value = "";
-    state.turnRequestPending = false;
-    if (state.turnDoneSeen) {
-      state.streamingMessage = null;
-      state.activeOperation = null;
-    }
-    if (state.currentPhase !== phase.disconnected) {
-      setPhase(state.turnDoneSeen ? phase.idle : phase.streaming);
-    }
+    turn.postSettled = true;
+    settleTurn(turn);
   } catch (error) {
-    if (generation !== state.generation) {
+    if (state.activeTurn !== turn || generation !== state.generation) {
       return;
     }
-    state.turnRequestPending = false;
     disconnect(
       error.safeMessage ||
         "The turn outcome is unknown. Refresh before sending another message.",
@@ -442,7 +487,7 @@ async function submitTurn(event) {
 
 async function cancelTurn() {
   if (
-    state.activeOperation !== "turn" ||
+    state.activeTurn === null ||
     state.currentPhase !== phase.sending &&
     state.currentPhase !== phase.streaming
   ) {

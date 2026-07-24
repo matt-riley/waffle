@@ -590,7 +590,11 @@ h3 {
   }
 
   .section-links a {
+    align-items: center;
+    display: flex;
     font-size: 0.68rem;
+    justify-content: center;
+    min-height: 2.75rem;
     overflow-wrap: anywhere;
     padding: 0.65rem 0.2rem;
     text-align: center;
