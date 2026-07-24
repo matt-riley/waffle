@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -418,6 +419,59 @@ func TestDockerCloseIgnoresAlreadyRemovedContainer(t *testing.T) {
 	executor := &DockerExecutor{client: client, container: "waffle-sb-gone"}
 	if err := executor.Close(); err != nil {
 		t.Fatalf("Close returned an error for an already-removed container: %v", err)
+	}
+}
+
+func TestDockerCloseContextPreservesCallerDeadlineAndCanRetry(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	releasePath := filepath.Join(binDir, "release")
+	script := "#!/bin/sh\nwhile [ ! -f \"$WAFFLE_TEST_RELEASE\" ]; do sleep 0.01; done\nexit 0\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("WAFFLE_TEST_RELEASE", releasePath)
+
+	client, err := NewClient(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &DockerExecutor{client: client, container: "waffle-sb-context"}
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	started := time.Now()
+	err = executor.CloseContext(closeCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("CloseContext replaced caller deadline: %v", elapsed)
+	}
+
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.CloseContext(context.Background()); err != nil {
+		t.Fatalf("CloseContext retry: %v", err)
+	}
+}
+
+func TestClientCloseContextLeavesQueueRetryableWhenAlreadyCancelled(t *testing.T) {
+	client, err := NewClient(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.CloseContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseContext error = %v, want context canceled", err)
+	}
+	if _, err := client.inbound.ExecContext(context.Background(), "SELECT 1"); err != nil {
+		t.Fatalf("cancelled CloseContext closed inbound queue: %v", err)
+	}
+	if err := client.CloseContext(context.Background()); err != nil {
+		t.Fatalf("CloseContext retry: %v", err)
 	}
 }
 

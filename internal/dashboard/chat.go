@@ -50,12 +50,13 @@ type chatClient struct {
 	closeErr        error
 	closing         bool
 	closed          bool
+	retiring        bool
 }
 
 func (c *chatClient) prepareCancel() (chan struct{}, bool) {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
-	if c.closed || c.closing {
+	if c.closed || c.closing || c.retiring {
 		return nil, false
 	}
 	if c.cancelled {
@@ -72,57 +73,85 @@ func (c *chatClient) finishCancel(done chan struct{}) {
 }
 
 func (c *chatClient) close(ctx context.Context) error {
-	for {
-		c.lifecycle.Lock()
-		if c.closed {
+	c.lifecycle.Lock()
+	if c.closed {
+		err := c.closeErr
+		c.lifecycle.Unlock()
+		return err
+	}
+	if c.closing {
+		done := c.closeDone
+		c.lifecycle.Unlock()
+		select {
+		case <-done:
+			c.lifecycle.Lock()
 			err := c.closeErr
 			c.lifecycle.Unlock()
 			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		if c.closing {
-			done := c.closeDone
+	}
+	if c.cancelDone != nil {
+		select {
+		case <-c.cancelDone:
+		default:
+			done := c.cancelDone
 			c.lifecycle.Unlock()
 			select {
 			case <-done:
-				continue
+				return c.close(ctx)
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
-		if c.cancelDone != nil {
-			select {
-			case <-c.cancelDone:
-			default:
-				done := c.cancelDone
-				c.lifecycle.Unlock()
-				select {
-				case <-done:
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-		}
-		c.closing = true
-		c.closeDone = make(chan struct{})
-		done := c.closeDone
-		c.lifecycle.Unlock()
-
-		err := c.backend.Close(ctx)
-		c.lifecycle.Lock()
-		c.closeErr = err
-		c.closed = true
-		c.closing = false
-		close(done)
-		c.lifecycle.Unlock()
-		return err
 	}
+	c.retiring = true
+	c.closing = true
+	c.closeDone = make(chan struct{})
+	done := c.closeDone
+	c.lifecycle.Unlock()
+
+	err := c.backend.Close(ctx)
+	c.lifecycle.Lock()
+	c.closeErr = err
+	c.closed = cleanupCompleted(err)
+	c.closing = false
+	close(done)
+	c.lifecycle.Unlock()
+	return err
+}
+
+func (c *chatClient) markRetiring() {
+	c.lifecycle.Lock()
+	c.retiring = true
+	c.lifecycle.Unlock()
+}
+
+func (c *chatClient) isRetiring() bool {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.retiring
+}
+
+func (c *chatClient) cleanupCompleted() bool {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.closed
+}
+
+func cleanupCompleted(err error) bool {
+	if err == nil {
+		return true
+	}
+	var completed interface{ CleanupCompleted() bool }
+	return errors.As(err, &completed) && completed.CleanupCompleted()
 }
 
 func (c *chatClient) beginOperation() bool {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
-	if c.closed || c.closing {
+	if c.closed || c.closing || c.retiring {
 		return false
 	}
 	if c.cancelDone != nil {
@@ -139,19 +168,21 @@ func (c *chatClient) beginOperation() bool {
 
 // ChatClients adapts browser client IDs to isolated chat backends.
 type ChatClients struct {
-	mu           sync.Mutex
-	clients      map[string]*chatClient
-	factory      BackendFactory
-	ids          io.Reader
-	now          func() time.Time
-	maxClients   int
-	idleTTL      time.Duration
-	shutdownTTL  time.Duration
-	events       *EventHub
-	shutting     bool
-	shutdownDone chan struct{}
-	shutdownErr  error
-	pending      map[*chatClient]*chatCleanup
+	mu               sync.Mutex
+	clients          map[string]*chatClient
+	factory          BackendFactory
+	ids              io.Reader
+	now              func() time.Time
+	maxClients       int
+	idleTTL          time.Duration
+	shutdownTTL      time.Duration
+	events           *EventHub
+	shutting         bool
+	shutdownDone     chan struct{}
+	shutdownErr      error
+	shutdownRunning  bool
+	shutdownComplete bool
+	pending          map[*chatClient]*chatCleanup
 }
 
 // NewChatClients returns a bounded manager with production lifecycle limits.
@@ -258,6 +289,9 @@ func (c *ChatClients) Command(ctx context.Context, clientID string, command chat
 func (c *ChatClients) Cancel(clientID string) error {
 	c.mu.Lock()
 	client, ok := c.clients[clientID]
+	if ok && client.isRetiring() {
+		ok = false
+	}
 	if ok {
 		client.lastActive = c.now()
 		if client.operationCancel != nil {
@@ -280,14 +314,16 @@ func (c *ChatClients) Cancel(clientID string) error {
 	return nil
 }
 
-// Close removes a client and closes its backend once active work has settled.
+// Close retires a client and removes it only after its backend closes
+// successfully. A failed close keeps the same ID and backend available for an
+// explicit cleanup retry while rejecting further client operations.
 func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 	c.mu.Lock()
 	client, ok := c.clients[clientID]
 	var done <-chan struct{}
 	var operationCancel context.CancelFunc
 	if ok {
-		delete(c.clients, clientID)
+		client.markRetiring()
 		if client.busy {
 			done = client.done
 			operationCancel = client.operationCancel
@@ -297,7 +333,7 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 		c.mu.Unlock()
 		return errChatClientNotFound
 	}
-	cleanup := c.startCleanupLocked(client, done, operationCancel, ctx)
+	cleanup := c.startCleanupLocked(clientID, client, done, operationCancel, ctx)
 	c.mu.Unlock()
 	select {
 	case <-cleanup.done:
@@ -312,7 +348,7 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 	closeCtx, closeCancel := detachedTimeoutContext(ctx, c.shutdownTTL)
 	defer closeCancel()
 	c.mu.Lock()
-	if c.shutting {
+	if c.shutdownRunning {
 		done := c.shutdownDone
 		c.mu.Unlock()
 		select {
@@ -325,22 +361,25 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 			return closeCtx.Err()
 		}
 	}
-	c.shutting = true
-	c.shutdownDone = make(chan struct{})
-	cleanups := make([]*chatCleanup, 0, len(c.pending)+len(c.clients))
-	for _, cleanup := range c.pending {
-		cleanups = append(cleanups, cleanup)
+	if c.shutdownComplete {
+		err := c.shutdownErr
+		c.mu.Unlock()
+		return err
 	}
-	for _, client := range c.clients {
+	c.shutting = true
+	c.shutdownRunning = true
+	c.shutdownDone = make(chan struct{})
+	cleanups := make([]*chatCleanup, 0, len(c.clients))
+	for clientID, client := range c.clients {
+		client.markRetiring()
 		var done <-chan struct{}
 		var operationCancel context.CancelFunc
 		if client.busy {
 			done = client.done
 			operationCancel = client.operationCancel
 		}
-		cleanups = append(cleanups, c.startCleanupLocked(client, done, operationCancel, closeCtx))
+		cleanups = append(cleanups, c.startCleanupLocked(clientID, client, done, operationCancel, closeCtx))
 	}
-	c.clients = make(map[string]*chatClient)
 	c.mu.Unlock()
 
 	var first error
@@ -374,6 +413,8 @@ func (c *ChatClients) Shutdown(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.shutdownErr = first
+	c.shutdownRunning = false
+	c.shutdownComplete = len(c.clients) == 0 && len(c.pending) == 0
 	close(c.shutdownDone)
 	c.mu.Unlock()
 	return first
@@ -384,6 +425,9 @@ func (c *ChatClients) begin(ctx context.Context, clientID string) (*chatClient, 
 	defer c.mu.Unlock()
 	client, ok := c.clients[clientID]
 	if !ok {
+		return nil, nil, errChatClientNotFound
+	}
+	if client.isRetiring() {
 		return nil, nil, errChatClientNotFound
 	}
 	if client.busy {
@@ -422,8 +466,8 @@ func (c *ChatClients) reap(ctx context.Context) error {
 	var cleanups []*chatCleanup
 	for id, client := range c.clients {
 		if !client.busy && c.now().Sub(client.lastActive) >= c.idleTTL {
-			delete(c.clients, id)
-			cleanups = append(cleanups, c.startCleanupLocked(client, nil, nil, ctx))
+			client.markRetiring()
+			cleanups = append(cleanups, c.startCleanupLocked(id, client, nil, nil, ctx))
 		}
 	}
 	c.mu.Unlock()
@@ -444,6 +488,7 @@ func (c *ChatClients) reap(ctx context.Context) error {
 }
 
 func (c *ChatClients) startCleanupLocked(
+	clientID string,
 	client *chatClient,
 	activeDone <-chan struct{},
 	operationCancel context.CancelFunc,
@@ -471,6 +516,9 @@ func (c *ChatClients) startCleanupLocked(
 			cleanup.err = client.close(cleanupCtx)
 		}
 		c.mu.Lock()
+		if client.cleanupCompleted() && c.clients[clientID] == client {
+			delete(c.clients, clientID)
+		}
 		delete(c.pending, client)
 		c.mu.Unlock()
 		close(cleanup.done)

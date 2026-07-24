@@ -734,6 +734,190 @@ func TestChatClientsShutdownShortensPendingCloseToGlobalDeadlineAndJoins(t *test
 	}
 }
 
+func TestChatClientCloseTimeoutRemainsRetryableUntilExplicitCloseSucceeds(t *testing.T) {
+	backend := newRetryableCleanupBackend()
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = time.Second
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	if err := clients.Close(closeCtx, id); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close error = %v, want deadline exceeded", err)
+	}
+	clients.mu.Lock()
+	retained := clients.clients[id]
+	cleanup := clients.pending[retained]
+	clients.mu.Unlock()
+	if cleanup != nil {
+		<-cleanup.done
+	}
+	<-backend.attemptDone(0)
+
+	clients.mu.Lock()
+	retained = clients.clients[id]
+	pending := len(clients.pending)
+	clients.mu.Unlock()
+	if retained == nil || retained.backend != backend {
+		t.Fatal("timed-out Close lost or replaced the retryable client handle")
+	}
+	if pending != 0 {
+		t.Fatalf("pending cleanups after timed-out Close = %d, want 0", pending)
+	}
+	if !backend.ownerHeld() || !backend.resourcesHeld() {
+		t.Fatal("timed-out Close released runtime ownership or resources")
+	}
+	if err := clients.Turn(context.Background(), id, "must not run"); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("Turn during retryable cleanup error = %v, want client not found", err)
+	}
+	if _, err := clients.Command(context.Background(), id, chat.ParsedCommand{Name: chat.CommandStatus}); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("Command during retryable cleanup error = %v, want client not found", err)
+	}
+	if err := clients.Cancel(id); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("Cancel during retryable cleanup error = %v, want client not found", err)
+	}
+
+	backend.allowSuccess()
+	if err := clients.Close(context.Background(), id); err != nil {
+		t.Fatalf("explicit Close retry: %v", err)
+	}
+	if calls := backend.closeCount(); calls != 2 {
+		t.Fatalf("backend Close calls = %d, want 2", calls)
+	}
+	if backend.ownerHeld() || backend.resourcesHeld() {
+		t.Fatal("successful Close retry retained runtime ownership or resources")
+	}
+	clients.mu.Lock()
+	retained = clients.clients[id]
+	pending = len(clients.pending)
+	clients.mu.Unlock()
+	if retained != nil || pending != 0 {
+		t.Fatalf("successful Close retry retained client=%t pending=%d", retained != nil, pending)
+	}
+}
+
+func TestChatClientCloseTimeoutRemainsRetryableUntilShutdownSucceeds(t *testing.T) {
+	backend := newRetryableCleanupBackend()
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = time.Second
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	if err := clients.Close(closeCtx, id); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close error = %v, want deadline exceeded", err)
+	}
+	clients.mu.Lock()
+	retained := clients.clients[id]
+	cleanup := clients.pending[retained]
+	clients.mu.Unlock()
+	if cleanup != nil {
+		<-cleanup.done
+	}
+	<-backend.attemptDone(0)
+	backend.allowSuccess()
+
+	if err := clients.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown retry: %v", err)
+	}
+	if calls := backend.closeCount(); calls != 2 {
+		t.Fatalf("backend Close calls = %d, want 2", calls)
+	}
+	if backend.ownerHeld() || backend.resourcesHeld() {
+		t.Fatal("successful Shutdown retry retained runtime ownership or resources")
+	}
+	clients.mu.Lock()
+	retainedCount := len(clients.clients)
+	pending := len(clients.pending)
+	clients.mu.Unlock()
+	if retainedCount != 0 || pending != 0 {
+		t.Fatalf("successful Shutdown retry retained clients=%d pending=%d", retainedCount, pending)
+	}
+}
+
+type retryableCleanupBackend struct {
+	mu          sync.Mutex
+	allow       chan struct{}
+	attempts    []chan struct{}
+	closeCalls  int
+	ownsSession bool
+	hasResource bool
+}
+
+func newRetryableCleanupBackend() *retryableCleanupBackend {
+	return &retryableCleanupBackend{
+		allow:       make(chan struct{}),
+		attempts:    []chan struct{}{make(chan struct{}), make(chan struct{})},
+		ownsSession: true,
+		hasResource: true,
+	}
+}
+
+func (b *retryableCleanupBackend) Open(context.Context, chat.OpenOptions) (chat.State, error) {
+	return chat.State{SessionID: "retryable-session"}, nil
+}
+
+func (b *retryableCleanupBackend) Turn(context.Context, string, func(chat.Event)) error {
+	return nil
+}
+
+func (b *retryableCleanupBackend) Command(context.Context, chat.ParsedCommand, func(chat.Event)) (chat.Result, error) {
+	return chat.Result{}, nil
+}
+
+func (b *retryableCleanupBackend) Cancel() {}
+
+func (b *retryableCleanupBackend) Close(ctx context.Context) error {
+	b.mu.Lock()
+	call := b.closeCalls
+	b.closeCalls++
+	done := b.attempts[call]
+	b.mu.Unlock()
+	defer close(done)
+	select {
+	case <-b.allow:
+		b.mu.Lock()
+		b.ownsSession = false
+		b.hasResource = false
+		b.mu.Unlock()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *retryableCleanupBackend) allowSuccess() {
+	close(b.allow)
+}
+
+func (b *retryableCleanupBackend) attemptDone(call int) <-chan struct{} {
+	return b.attempts[call]
+}
+
+func (b *retryableCleanupBackend) closeCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closeCalls
+}
+
+func (b *retryableCleanupBackend) ownerHeld() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ownsSession
+}
+
+func (b *retryableCleanupBackend) resourcesHeld() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hasResource
+}
+
 type cleanupContractBackend struct {
 	mu                  sync.Mutex
 	operation           string

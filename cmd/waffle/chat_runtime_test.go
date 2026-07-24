@@ -19,6 +19,7 @@ import (
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/dashboard"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
@@ -834,7 +835,10 @@ func TestChatRuntimeExitWarnsOnReflectionFailureAndCleansUpOnce(t *testing.T) {
 	closed := 0
 	runtime.wsClient = closeFunc(func() error { closed++; return nil })
 	cleaned := 0
-	runtime.agentCleanup = func() { cleaned++ }
+	runtime.agentCleanupContext = func(context.Context) error {
+		cleaned++
+		return nil
+	}
 	var events []chatpkg.Event
 	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandExit}, func(event chatpkg.Event) { events = append(events, event) })
 	if err != nil {
@@ -1197,14 +1201,14 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndRequiresExplicitCleanu
 	}
 
 	var cleanupCalls atomic.Int32
-	originalCleanup := runtime.agentCleanup
+	originalCleanup := runtime.agentCleanupContext
 	cleanupStarted := make(chan struct{})
 	allowCleanup := make(chan struct{})
-	runtime.agentCleanup = func() {
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
 		cleanupCalls.Add(1)
 		close(cleanupStarted)
 		<-allowCleanup
-		originalCleanup()
+		return originalCleanup(cleanupCtx)
 	}
 	resourceDone := runtime.resourceCtx.Done()
 	started := make(chan struct{})
@@ -1312,12 +1316,12 @@ func TestChatRuntimeClosePreservesEarlierDeadlineWithoutBackgroundFinalizer(t *t
 	}
 
 	var cleanupCalls atomic.Int32
-	originalCleanup := runtime.agentCleanup
+	originalCleanup := runtime.agentCleanupContext
 	cleanupStarted := make(chan struct{}, 1)
-	runtime.agentCleanup = func() {
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
 		cleanupCalls.Add(1)
 		cleanupStarted <- struct{}{}
-		originalCleanup()
+		return originalCleanup(cleanupCtx)
 	}
 	commandStarted := make(chan struct{})
 	releaseCommand := make(chan struct{})
@@ -1369,6 +1373,85 @@ func TestChatRuntimeClosePreservesEarlierDeadlineWithoutBackgroundFinalizer(t *t
 	}
 	if cleanupCalls.Load() != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls.Load())
+	}
+}
+
+func TestChatClientsShutdownBoundsRuntimeFinalCleanupAndRetriesOwnershipRelease(t *testing.T) {
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	owners := newChatSessionOwners()
+	runtime.sessionOwners = owners
+	clients := dashboard.NewChatClients(
+		func(context.Context) (chatpkg.Backend, error) { return runtime, nil },
+		nil,
+	)
+	id, state, err := clients.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalCleanup := runtime.agentCleanupContext
+	cleanupStarted := make(chan struct{})
+	var cleanupCalls atomic.Int32
+	runtime.agentCleanupContext = func(ctx context.Context) error {
+		if cleanupCalls.Add(1) == 1 {
+			close(cleanupStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return originalCleanup(ctx)
+	}
+	resourceDone := runtime.resourceCtx.Done()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer shutdownCancel()
+	shutdownDone := make(chan error, 1)
+	started := time.Now()
+	go func() { shutdownDone <- clients.Shutdown(shutdownCtx) }()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not reach final agent/Docker-shaped cleanup")
+	}
+	err = <-shutdownDone
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("Shutdown exceeded the single global deadline: %v", elapsed)
+	}
+	select {
+	case <-resourceDone:
+		t.Fatal("failed final cleanup released runtime resources")
+	default:
+	}
+	if calls := cleanupCalls.Load(); calls != 1 {
+		t.Fatalf("cleanup calls after first Shutdown = %d, want 1", calls)
+	}
+	if err := clients.Turn(context.Background(), id, "must not run"); err == nil {
+		t.Fatal("retiring client accepted a turn after failed cleanup")
+	}
+
+	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	contender.sessionOwners = owners
+	if _, err := contender.Open(context.Background(), chatpkg.OpenOptions{SessionID: state.SessionID}); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("session ownership released before successful cleanup retry: %v", err)
+	}
+
+	if err := clients.Shutdown(context.Background()); err != nil {
+		t.Fatalf("explicit Shutdown retry: %v", err)
+	}
+	if calls := cleanupCalls.Load(); calls != 2 {
+		t.Fatalf("cleanup calls after retry = %d, want 2", calls)
+	}
+	select {
+	case <-resourceDone:
+	default:
+		t.Fatal("successful cleanup retry retained runtime resources")
+	}
+	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	reacquired.sessionOwners = owners
+	if _, err := reacquired.Open(context.Background(), chatpkg.OpenOptions{SessionID: state.SessionID}); err != nil {
+		t.Fatalf("reacquire session after successful cleanup retry: %v", err)
 	}
 }
 

@@ -74,6 +74,10 @@ type Client struct {
 	nextID  int
 	pending map[int]chan rpcResponse
 	readErr error // set once when the reader loop exits
+
+	closeMu       sync.Mutex
+	processClosed bool
+	processErr    error
 }
 
 // BuildProcessEnv constructs the restricted environment for an MCP child
@@ -257,15 +261,32 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 // Close terminates the server process. When the server was docker-wrapped
 // (containerName set), it first stops and force-removes the named container
 // so killing only the local docker CLI cannot leave an orphaned container
-// running (#97). Stop/rm use short timeouts so Close returns promptly.
+// running (#97). The compatibility wrapper retains the prior bounded default.
 func (c *Client) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return c.CloseContext(ctx)
+}
+
+// CloseContext terminates the server process and any wrapper container under
+// the caller's deadline. Timed-out container cleanup stays retryable while the
+// local process teardown remains exact-once.
+func (c *Client) CloseContext(ctx context.Context) error {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+
+	var contextErr error
 	if c.containerName != "" {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = exec.CommandContext(stopCtx, "docker", "stop", "-t", "1", c.containerName).Run()
-		cancel()
-		rmCtx, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = exec.CommandContext(rmCtx, "docker", "rm", "-f", c.containerName).Run()
-		cancel2()
+		_ = exec.CommandContext(ctx, "docker", "stop", "-t", "1", c.containerName).Run()
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", c.containerName).Run()
+		if err := ctx.Err(); err != nil {
+			contextErr = err
+		} else {
+			c.containerName = ""
+		}
+	}
+	if c.processClosed {
+		return errors.Join(contextErr, c.processErr)
 	}
 
 	var first error
@@ -293,7 +314,9 @@ func (c *Client) Close() error {
 			first = err
 		}
 	}
-	return first
+	c.processClosed = true
+	c.processErr = first
+	return errors.Join(contextErr, first)
 }
 
 // readLoop is the sole reader of the server's stdout. It routes each

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -613,6 +614,40 @@ func TestCloseStopsNamedContainer(t *testing.T) {
 	}
 	if !strings.Contains(body, wantRM) {
 		t.Errorf("docker log missing %q:\n%s", wantRM, body)
+	}
+}
+
+func TestCloseContextPreservesCallerDeadlineForContainerCleanup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake docker is unix-only")
+	}
+	dir := t.TempDir()
+	fakeDocker := filepath.Join(dir, "docker")
+	script := "#!/usr/bin/env bash\nwhile true; do sleep 0.01; done\n"
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	path := writeFakeServer(t)
+	client, err := ConnectRestricted(context.Background(), Server{
+		Name:            "fake",
+		Command:         "bash",
+		Args:            []string{path},
+		DockerContainer: "waffle-mcp-context",
+	}, RestrictOpts{Mode: "sandbox"})
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	started := time.Now()
+	err = client.CloseContext(closeCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("CloseContext replaced caller deadline: %v", elapsed)
 	}
 }
 

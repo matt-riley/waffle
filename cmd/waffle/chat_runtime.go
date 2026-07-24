@@ -36,25 +36,25 @@ const (
 // connection. Renderers are responsible only for displaying its state,
 // events, and command results.
 type chatRuntime struct {
-	mu              sync.Mutex
-	commandMu       sync.Mutex
-	agent           *agent.Agent
-	agentCancel     context.CancelFunc
-	commandCancel   context.CancelFunc
-	commandDone     chan struct{}
-	sessions        *session.Store
-	current         *session.Session
-	history         []llm.Message
-	persisted       int
-	cfg             config.Config
-	st              *store.Store
-	skills          []skill.Skill
-	profileName     string
-	chatProfileName string
-	agentCleanup    func()
-	wsBroker        *broker.Broker
-	wsURL           string
-	wsClient        io.Closer
+	mu                  sync.Mutex
+	commandMu           sync.Mutex
+	agent               *agent.Agent
+	agentCancel         context.CancelFunc
+	commandCancel       context.CancelFunc
+	commandDone         chan struct{}
+	sessions            *session.Store
+	current             *session.Session
+	history             []llm.Message
+	persisted           int
+	cfg                 config.Config
+	st                  *store.Store
+	skills              []skill.Skill
+	profileName         string
+	chatProfileName     string
+	agentCleanupContext agentCleanupContext
+	wsBroker            *broker.Broker
+	wsURL               string
+	wsClient            io.Closer
 
 	modelError          string
 	workspace           string
@@ -83,6 +83,20 @@ type repoInstall struct {
 	policy    *repopolicy.Policy
 	tools     tool.Toolbox
 	client    io.Closer
+}
+
+type contextCloser interface {
+	CloseContext(context.Context) error
+}
+
+func closeRuntimeResource(ctx context.Context, closer io.Closer) error {
+	if contextual, ok := closer.(contextCloser); ok {
+		return contextual.CloseContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return closer.Close()
 }
 
 // newChatRuntime records dependencies without constructing provider, sandbox,
@@ -124,9 +138,9 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
-	built, cleanup, err := buildAgentWithProfile(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName)
+	built, cleanup, err := buildAgentWithProfileContext(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName)
 	if err != nil {
-		cleanup()
+		_ = cleanup(resourceCtx)
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
@@ -142,14 +156,14 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		}
 	}
 	if err != nil {
-		cleanup()
+		_ = cleanup(resourceCtx)
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
 	if current == nil {
 		current, err = r.sessions.Create(ctx, "")
 		if err != nil {
-			cleanup()
+			_ = cleanup(resourceCtx)
 			resourceCancel()
 			return chatpkg.State{}, err
 		}
@@ -159,20 +173,20 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	if options.Continue || strings.TrimSpace(options.SessionID) != "" {
 		history, err = r.sessions.Turns(ctx, current.ID)
 		if err != nil {
-			cleanup()
+			_ = cleanup(resourceCtx)
 			resourceCancel()
 			return chatpkg.State{}, err
 		}
 		history = session.Repair(history)
 	}
 	if !r.sessionOwners.acquire(r, current.ID) {
-		cleanup()
+		_ = cleanup(resourceCtx)
 		resourceCancel()
 		return chatpkg.State{}, sessionAlreadyActiveError{sessionID: current.ID}
 	}
 
 	r.agent = built
-	r.agentCleanup = cleanup
+	r.agentCleanupContext = cleanup
 	r.skills = skills
 	r.profileName = profileName
 	r.chatProfileName = profileName
@@ -685,28 +699,30 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 	return r.installRepo(ctx, install, emit)
 }
 
-func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, func(), error) {
+func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName string) (*agent.Agent, agentCleanupContext, error) {
 	if r.profileAgentBuilder != nil {
-		return r.profileAgentBuilder(ctx, profileName)
+		built, cleanup, err := r.profileAgentBuilder(ctx, profileName)
+		return built, func(cleanupCtx context.Context) error {
+			if err := cleanupCtx.Err(); err != nil {
+				return err
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+			return nil
+		}, err
 	}
 	memWS, skills, err := loadWorkspaceWithStore(r.st)
 	if err != nil {
 		return nil, nil, err
 	}
-	return buildAgentWithProfile(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
+	return buildAgentWithProfileContext(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
 }
 
 func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 	if install.workspace == nil || install.tools == nil || install.client == nil {
 		return chatpkg.Result{}, errors.New("incomplete repository workspace install")
 	}
-	adopted := false
-	defer func() {
-		if !adopted {
-			_ = install.client.Close()
-		}
-	}()
-
 	r.mu.Lock()
 	profileName := r.chatProfileName
 	resourceCtx := r.resourceCtx
@@ -717,17 +733,23 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	if resourceCtx == nil {
 		resourceCtx = context.WithoutCancel(ctx)
 	}
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = closeRuntimeResource(resourceCtx, install.client)
+		}
+	}()
 	currentAgent, replacementCleanup, err := r.buildCleanProfileAgent(resourceCtx, profileName)
 	if err != nil {
 		if replacementCleanup != nil {
-			replacementCleanup()
+			_ = replacementCleanup(resourceCtx)
 		}
 		return chatpkg.Result{}, err
 	}
 	cleanupAdopted := false
 	defer func() {
 		if !cleanupAdopted && replacementCleanup != nil {
-			replacementCleanup()
+			_ = replacementCleanup(resourceCtx)
 		}
 	}()
 
@@ -799,11 +821,11 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: target.ID}
 	}
 	oldClient := r.wsClient
-	oldCleanup := r.agentCleanup
+	oldCleanup := r.agentCleanupContext
 	r.wsClient = install.client
 	adopted = true
 	r.agent = workspaceAgent
-	r.agentCleanup = replacementCleanup
+	r.agentCleanupContext = replacementCleanup
 	cleanupAdopted = true
 	r.profileName = profileName
 	r.current = target
@@ -815,10 +837,10 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
 	if oldClient != nil {
-		_ = oldClient.Close()
+		_ = closeRuntimeResource(ctx, oldClient)
 	}
 	if oldCleanup != nil {
-		oldCleanup()
+		_ = oldCleanup(ctx)
 	}
 	if emit != nil {
 		emit(chatpkg.Event{Kind: chatpkg.EventState, State: &state})
@@ -1288,66 +1310,109 @@ func detachedRuntimeCloseContext(ctx context.Context, timeout time.Duration) (co
 }
 
 func (r *chatRuntime) finishClose(ctx context.Context) error {
-	for {
-		r.mu.Lock()
-		if r.cleanupComplete {
-			err := r.closeErr
-			r.mu.Unlock()
-			return err
-		}
-		if r.cleanupStarted {
-			done := r.cleanupDone
-			r.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return fmt.Errorf("wait for chat cleanup: %w", ctx.Err())
-			}
-		}
-		r.cleanupStarted = true
-		r.cleanupDone = make(chan struct{})
-		done := r.cleanupDone
-		r.mu.Unlock()
-
-		err := r.cleanup(ctx)
-		r.mu.Lock()
-		r.closeErr = err
-		r.cleanupComplete = true
-		r.cleanupStarted = false
-		close(done)
+	r.mu.Lock()
+	if r.cleanupComplete {
+		err := r.closeErr
 		r.mu.Unlock()
 		return err
 	}
+	if r.cleanupStarted {
+		done := r.cleanupDone
+		r.mu.Unlock()
+		select {
+		case <-done:
+			r.mu.Lock()
+			err := r.closeErr
+			r.mu.Unlock()
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("wait for chat cleanup: %w", ctx.Err())
+		}
+	}
+	r.cleanupStarted = true
+	r.cleanupDone = make(chan struct{})
+	done := r.cleanupDone
+	r.mu.Unlock()
+
+	err := r.cleanup(ctx)
+	r.mu.Lock()
+	r.closeErr = err
+	r.cleanupComplete = cleanupCompleted(err)
+	r.cleanupStarted = false
+	close(done)
+	r.mu.Unlock()
+	return err
 }
 
 func (r *chatRuntime) cleanup(ctx context.Context) error {
-	var closeErr error
+	var reflectionErr error
 	if err := r.reflectSession(ctx); err != nil {
-		closeErr = errors.Join(closeErr, err)
+		reflectionErr = err
 	}
 
+	var teardownErr error
 	r.mu.Lock()
 	wsClient := r.wsClient
-	agentCleanup := r.agentCleanup
+	agentCleanup := r.agentCleanupContext
 	resourceCancel := r.resourceCancel
-	r.wsClient = nil
-	r.agentCleanup = nil
-	r.resourceCancel = nil
 	ownedSessionID := r.ownedSessionID
-	r.ownedSessionID = ""
 	r.mu.Unlock()
 	if wsClient != nil {
-		closeErr = errors.Join(closeErr, wsClient.Close())
+		if err := closeRuntimeResource(ctx, wsClient); err != nil {
+			teardownErr = errors.Join(teardownErr, err)
+		} else {
+			r.mu.Lock()
+			r.wsClient = nil
+			r.mu.Unlock()
+		}
+	}
+	if agentCleanup != nil {
+		if err := agentCleanup(ctx); err != nil {
+			teardownErr = errors.Join(teardownErr, err)
+		} else {
+			r.mu.Lock()
+			if r.agentCleanupContext != nil {
+				r.agentCleanupContext = nil
+			}
+			r.mu.Unlock()
+		}
+	}
+	if teardownErr != nil {
+		return errors.Join(reflectionErr, teardownErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.sessionOwners.releaseContext(ctx, r, ownedSessionID); err != nil {
+		return err
 	}
 	if resourceCancel != nil {
 		resourceCancel()
 	}
-	if agentCleanup != nil {
-		agentCleanup()
+	r.mu.Lock()
+	r.resourceCancel = nil
+	if r.ownedSessionID == ownedSessionID {
+		r.ownedSessionID = ""
 	}
-	r.sessionOwners.release(r, ownedSessionID)
-	return closeErr
+	r.mu.Unlock()
+	if reflectionErr != nil {
+		return completedChatCleanupError{err: reflectionErr}
+	}
+	return nil
+}
+
+type completedChatCleanupError struct{ err error }
+
+func (e completedChatCleanupError) Error() string        { return e.err.Error() }
+func (e completedChatCleanupError) Unwrap() error        { return e.err }
+func (completedChatCleanupError) CleanupCompleted() bool { return true }
+
+func cleanupCompleted(err error) bool {
+	if err == nil {
+		return true
+	}
+	var completed interface{ CleanupCompleted() bool }
+	return errors.As(err, &completed) && completed.CleanupCompleted()
 }
 
 type redactedChatRuntimeError struct {
