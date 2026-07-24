@@ -421,3 +421,27 @@ func TestRepairWithReclaimPreservesOrderAndFabricatesMissing(t *testing.T) {
 		t.Fatalf("repaired blocks = %#v", blocks)
 	}
 }
+
+func TestExistIDsReportsPresentAndAbsent(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	a, err := sessions.Create(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := sessions.Create(ctx, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sessions.ExistIDs(ctx, []string{a.ID, "missing", b.ID, a.ID, ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[a.ID] || !got[b.ID] || got["missing"] || len(got) != 2 {
+		t.Fatalf("ExistIDs = %#v", got)
+	}
+	empty, err := sessions.ExistIDs(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty ExistIDs = %#v, %v", empty, err)
+	}
+}

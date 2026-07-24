@@ -372,6 +372,19 @@ func (f taskSessionReader) Get(_ context.Context, id string) (*session.Session, 
 	return nil, session.ErrNotFound
 }
 
+func (f taskSessionReader) ExistIDs(_ context.Context, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if err := f.errs[id]; err != nil {
+			return nil, err
+		}
+		if value := f.sessions[id]; value != nil {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
 func (taskSessionReader) Search(context.Context, string, int) ([]session.Hit, error) {
 	return nil, nil
 }

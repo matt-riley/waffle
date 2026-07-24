@@ -41,6 +41,12 @@ type SessionStore interface {
 	SearchSummaries(context.Context, string, int) ([]session.Hit, error)
 }
 
+// sessionExistenceReader is an optional SessionStore capability used by Tasks
+// to resolve OpenAtDesk without one Get per cron run (#150).
+type sessionExistenceReader interface {
+	ExistIDs(context.Context, []string) (map[string]bool, error)
+}
+
 type NotesSearcher interface {
 	Search(context.Context, string, int) ([]memory.NoteHit, error)
 }
