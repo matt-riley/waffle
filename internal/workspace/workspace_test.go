@@ -1141,6 +1141,53 @@ func TestCloseWithoutForceReusesInspectClose(t *testing.T) {
 	}
 }
 
+func TestCloseIdleCleanStartsContainerOnce(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"git status --porcelain": "",
+		"git log --oneline":      "",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	// Disable credential refresh so resume would only StartContainer — the
+	// regression is a second start after inspection (#148).
+	mgr.MintToken = nil
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(rt.events)
+
+	report, transitioned, err := mgr.CloseTransition(ctx, ws.ID, false)
+	if err != nil {
+		t.Fatalf("CloseTransition: %v", err)
+	}
+	if !transitioned || report == nil {
+		t.Fatalf("CloseTransition = %+v transitioned=%v", report, transitioned)
+	}
+	events := rt.events[beforeEvents:]
+	var restarts int
+	for _, event := range events {
+		if strings.HasPrefix(event, "restart ") {
+			restarts++
+		}
+		if strings.HasPrefix(event, "start-workspace ") {
+			t.Fatalf("idle clean close recreated workspace: %v", events)
+		}
+	}
+	if restarts != 1 {
+		t.Fatalf("idle clean close start count = %d, want 1; events=%v", restarts, events)
+	}
+	if !strings.Contains(strings.Join(events, "\n"), "rm "+ws.Container) {
+		t.Fatalf("close did not remove container: %v", events)
+	}
+}
+
 func TestInspectCloseClosedWorkspaceIsExplicit(t *testing.T) {
 	ctx := context.Background()
 	mgr, _ := newTestManager(t, &scriptedBash{})
