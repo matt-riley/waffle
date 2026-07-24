@@ -21,6 +21,11 @@ if (root) {
     modelConnection: document.querySelector("#capability-model-connection"),
     modelAlias: document.querySelector("#capability-model-alias"),
     modelID: document.querySelector("#capability-model-id"),
+    catalogueForm: document.querySelector("#capability-catalogue-form"),
+    catalogueConnection: document.querySelector("#capability-catalogue-connection"),
+    catalogueSearch: document.querySelector("#capability-catalogue-search"),
+    catalogueSummary: document.querySelector("#capability-catalogue-summary"),
+    catalogueResults: document.querySelector("#capability-catalogue-results"),
     stageForm: document.querySelector("#capability-skill-stage-form"),
     stageLocal: document.querySelector("#capability-skill-local-path"),
     stageGit: document.querySelector("#capability-skill-git-url"),
@@ -32,6 +37,9 @@ if (root) {
 
   const state = {
     requestToken: document.body.dataset.requestToken || "",
+    processGeneration: "",
+    catalogueConnection: "",
+    catalogueModels: [],
     staged: null,
     restarting: false,
   };
@@ -66,6 +74,28 @@ if (root) {
       headers: { Accept: "application/json" },
     });
     return readJSON(response);
+  }
+
+  async function getBootstrap() {
+    const response = await fetch("/api/v1/desk/bootstrap", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    return readJSON(response);
+  }
+
+  function validateBootstrap(bootstrap) {
+    if (
+      typeof bootstrap.request_token !== "string" ||
+      !bootstrap.request_token ||
+      typeof bootstrap.process_generation !== "string" ||
+      !bootstrap.process_generation
+    ) {
+      throw new Error("invalid_bootstrap");
+    }
+    return bootstrap;
   }
 
   async function postMutation(path, body) {
@@ -144,6 +174,37 @@ if (root) {
     }
   }
 
+  function renderCatalogue() {
+    clearNode(elements.catalogueResults);
+    const query = elements.catalogueSearch.value.trim().toLowerCase();
+    const matches = state.catalogueModels.filter((model) => {
+      if (!query) return true;
+      return [model.id, model.display_name, model.owner].some(
+        (value) => typeof value === "string" && value.toLowerCase().includes(query),
+      );
+    });
+    for (const model of matches) {
+      const card = document.createElement("article");
+      card.className = "capability-card";
+      const title = document.createElement("strong");
+      title.textContent = model.display_name || model.id || "Unnamed model";
+      const detail = document.createElement("p");
+      const owner = model.owner ? ` · ${model.owner}` : "";
+      detail.textContent = `${model.id || "Unknown model ID"}${owner}`;
+      card.appendChild(title);
+      card.appendChild(detail);
+      elements.catalogueResults.appendChild(card);
+    }
+    if (matches.length === 0) {
+      elements.catalogueResults.textContent = query
+        ? "No refreshed models match this search."
+        : "This catalogue returned no models.";
+    }
+    elements.catalogueSummary.textContent = query
+      ? `${matches.length} of ${state.catalogueModels.length} models match.`
+      : `${state.catalogueModels.length} models from ${state.catalogueConnection}.`;
+  }
+
   async function loadCapabilities() {
     const snapshot = await getCapabilities();
     renderModels(snapshot.providers);
@@ -160,17 +221,12 @@ if (root) {
     elements.restart.hidden = false;
     for (;;) {
       try {
-        const response = await fetch("/api/v1/desk/bootstrap", {
-          method: "GET",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        });
-        const bootstrap = await readJSON(response);
-        if (typeof bootstrap.request_token !== "string" || !bootstrap.request_token) {
-          throw new Error("invalid_bootstrap");
+        const bootstrap = validateBootstrap(await getBootstrap());
+        if (bootstrap.process_generation === state.processGeneration) {
+          throw new Error("old_process");
         }
         state.requestToken = bootstrap.request_token;
+        state.processGeneration = bootstrap.process_generation;
         state.restarting = false;
         elements.restart.hidden = true;
         await loadCapabilities();
@@ -253,6 +309,25 @@ if (root) {
     );
   });
 
+  elements.catalogueForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const result = await postMutation("/api/v1/desk/models/catalogue/refresh", {
+        connection: elements.catalogueConnection.value.trim(),
+      });
+      state.catalogueConnection = result.connection || elements.catalogueConnection.value.trim();
+      state.catalogueModels = Array.isArray(result.models) ? result.models : [];
+      renderCatalogue();
+      setStatus("Catalogue refreshed.");
+    } catch (error) {
+      setStatus(error.safeMessage || "Catalogue could not be refreshed.");
+    }
+  });
+
+  elements.catalogueSearch?.addEventListener("input", () => {
+    renderCatalogue();
+  });
+
   elements.stageForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -285,7 +360,14 @@ if (root) {
     }
   });
 
-  void loadCapabilities().catch((error) => {
+  async function initialize() {
+    const bootstrap = validateBootstrap(await getBootstrap());
+    state.requestToken = bootstrap.request_token;
+    state.processGeneration = bootstrap.process_generation;
+    await loadCapabilities();
+  }
+
+  void initialize().catch((error) => {
     setStatus(error.safeMessage || "Capabilities could not be loaded.");
   });
 }

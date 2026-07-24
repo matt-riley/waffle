@@ -22,11 +22,12 @@ func TestBootstrapSerializesStableContract(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, APIConfig{
-		Observability: obs,
-		Security:      security,
-		Hub:           hub,
-		Version:       "test",
-		Now:           func() time.Time { return now },
+		Observability:     obs,
+		Security:          security,
+		Hub:               hub,
+		Version:           "test",
+		ProcessGeneration: "process-generation-test",
+		Now:               func() time.Time { return now },
 	})
 
 	recorder := httptest.NewRecorder()
@@ -42,7 +43,11 @@ func TestBootstrapSerializesStableContract(t *testing.T) {
 	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&bootstrap); err != nil {
 		t.Fatalf("decode bootstrap: %v", err)
 	}
-	if bootstrap.Version != "test" || !bootstrap.ServerTime.Equal(now.UTC()) || bootstrap.RequestToken != security.Token() || bootstrap.EventCursor != 1 {
+	if bootstrap.Version != "test" ||
+		bootstrap.ProcessGeneration != "process-generation-test" ||
+		!bootstrap.ServerTime.Equal(now.UTC()) ||
+		bootstrap.RequestToken != security.Token() ||
+		bootstrap.EventCursor != 1 {
 		t.Fatalf("bootstrap = %+v", bootstrap)
 	}
 	if bootstrap.Status.Active == nil || bootstrap.Status.Recent == nil || bootstrap.Status.RetryQueue == nil {
@@ -108,12 +113,30 @@ func TestBootstrapSanitizesObservabilityFailures(t *testing.T) {
 	}
 }
 
+func TestBootstrapRejectsMissingProcessGeneration(t *testing.T) {
+	mux := http.NewServeMux()
+	config := testAPIConfig(t)
+	config.ProcessGeneration = ""
+	RegisterRoutes(mux, config)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/desk/bootstrap", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	if got := recorder.Body.String(); got != "bootstrap_unavailable\n" {
+		t.Fatalf("body = %q", got)
+	}
+}
+
 func testAPIConfig(t *testing.T) APIConfig {
 	t.Helper()
 	return APIConfig{
-		Observability: observability.New(nil, time.Now),
-		Security:      mustSecurity(t, "127.0.0.1:8422"),
-		Hub:           NewEventHub(256),
-		Version:       "test",
+		Observability:     observability.New(nil, time.Now),
+		Security:          mustSecurity(t, "127.0.0.1:8422"),
+		Hub:               NewEventHub(256),
+		Version:           "test",
+		ProcessGeneration: "test-process-generation",
 	}
 }

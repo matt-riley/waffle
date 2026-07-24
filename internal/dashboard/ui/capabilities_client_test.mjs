@@ -44,7 +44,11 @@ function response(body, ok = true, status = 200) {
   };
 }
 
-function createHarness({ providerResponse }) {
+function createHarness({
+  providerResponse = response({}, true, 202),
+  catalogueResponse = response({ connection: "primary", models: [] }),
+  bootstrapGenerations = ["process-old", "process-old", "process-new"],
+} = {}) {
   const selectors = [
     "#desk-capabilities",
     "#capability-status",
@@ -58,6 +62,11 @@ function createHarness({ providerResponse }) {
     "#capability-provider-model-alias",
     "#capability-provider-model-id",
     "#capability-provider-credential",
+    "#capability-catalogue-form",
+    "#capability-catalogue-connection",
+    "#capability-catalogue-search",
+    "#capability-catalogue-summary",
+    "#capability-catalogue-results",
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#capability-provider-name"].value = "openai";
@@ -84,12 +93,17 @@ function createHarness({ providerResponse }) {
     if (path === "/api/v1/desk/providers") {
       return providerResponse;
     }
+    if (path === "/api/v1/desk/models/catalogue/refresh") {
+      return catalogueResponse;
+    }
     if (path === "/api/v1/desk/bootstrap") {
+      const generation =
+        bootstrapGenerations[Math.min(bootstrapPolls, bootstrapGenerations.length - 1)];
       bootstrapPolls += 1;
-      if (bootstrapPolls === 1) {
-        throw new Error("restarting");
-      }
-      return response({ request_token: "fresh-token" });
+      return response({
+        request_token: generation === "process-new" ? "fresh-token" : "token",
+        process_generation: generation,
+      });
     }
     throw new Error(`unexpected fetch ${path}`);
   };
@@ -118,7 +132,7 @@ async function flush() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("provider credential is cleared after success and restart polling never replays mutation", async () => {
+test("provider credential clears and polling waits for a changed process without replay", async () => {
   const harness = createHarness({
     providerResponse: response({
       restart_required: true,
@@ -138,7 +152,7 @@ test("provider credential is cleared after success and restart polling never rep
     1,
   );
   assert.ok(
-    harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length >= 2,
+    harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length >= 3,
   );
   assert.equal(harness.elements["#capability-restart-status"].hidden, true);
 });
@@ -165,5 +179,49 @@ test("provider credential is cleared after failure and never appears in safe UI"
   assert.equal(
     harness.elements["#capability-status"].textContent.includes("sk-super-private"),
     false,
+  );
+});
+
+test("catalogue refresh renders results and search filters without another request", async () => {
+  const harness = createHarness({
+    catalogueResponse: response({
+      connection: "primary",
+      models: [
+        { id: "vendor/alpha", display_name: "Alpha", owner: "Vendor" },
+        { id: "vendor/beta", display_name: "Beta", owner: "Vendor" },
+      ],
+    }),
+  });
+  harness.elements["#capability-catalogue-connection"].value = "primary";
+  await flush();
+
+  await harness.elements["#capability-catalogue-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const results = harness.elements["#capability-catalogue-results"];
+  assert.equal(results.childNodes.length, 2);
+  assert.equal(
+    harness.elements["#capability-catalogue-summary"].textContent,
+    "2 models from primary.",
+  );
+  assert.equal(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/models/catalogue/refresh").length,
+    1,
+  );
+  const refreshCall = harness.calls.find(
+    (call) => call.path === "/api/v1/desk/models/catalogue/refresh",
+  );
+  assert.deepEqual(JSON.parse(refreshCall.options.body), { connection: "primary" });
+
+  harness.elements["#capability-catalogue-search"].value = "beta";
+  harness.elements["#capability-catalogue-search"].listener("input")();
+
+  assert.equal(results.childNodes.length, 1);
+  assert.equal(results.childNodes[0].childNodes[0].textContent, "Beta");
+  assert.equal(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/models/catalogue/refresh").length,
+    1,
   );
 });

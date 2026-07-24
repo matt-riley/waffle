@@ -15,8 +15,8 @@ templ Capabilities(view CapabilitiesView) {
 			<p class="capability-status" id="capability-status" role="status" aria-live="polite">Loading capabilities…</p>
 		</header>
 		<div class="capability-restart" id="capability-restart-status" role="status" aria-live="polite" hidden>
-			<strong>Waffle is restarting.</strong>
-			<span>The Desk will reconnect without replaying your change.</span>
+			<strong>Restart required.</strong>
+			<span>Waiting for a new Waffle process. If it does not arrive, restart waffle serve.</span>
 		</div>
 		<nav class="capability-tabs" aria-label="Capability sections">
 			<a href="#capability-models-panel">Models</a>
@@ -45,6 +45,18 @@ templ Capabilities(view CapabilitiesView) {
 					</form>
 				</div>
 				<p class="scope-note"><strong>Session</strong> model choices live on Today and change one conversation only. The controls above are Waffle-wide.</p>
+				<form id="capability-catalogue-form" class="capability-catalogue-form">
+					<h3>Browse a provider catalogue</h3>
+					<label for="capability-catalogue-connection">Enrolled connection</label>
+					<input id="capability-catalogue-connection" required/>
+					<button type="submit">Refresh catalogue</button>
+				</form>
+				<div class="capability-catalogue-search">
+					<label for="capability-catalogue-search">Search refreshed models</label>
+					<input id="capability-catalogue-search" type="search" placeholder="Model name or ID"/>
+					<p id="capability-catalogue-summary" class="scope-note" aria-live="polite">Refresh a connection to browse its models.</p>
+				</div>
+				<div id="capability-catalogue-results" class="capability-list" aria-live="polite"></div>
 				<form id="capability-model-form">
 					<h3>Add a model from an enrolled provider</h3>
 					<label for="capability-model-connection">Connection</label>

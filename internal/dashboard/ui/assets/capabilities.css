@@ -97,6 +97,20 @@
   margin: 0;
 }
 
+.capability-catalogue-search {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.8rem;
+}
+
+#capability-catalogue-results {
+  border: 1px solid var(--rule);
+  margin-top: 0.8rem;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 0 0.7rem;
+}
+
 .skill-review {
   border: 1px dashed var(--rule-dark);
   margin-top: 1rem;

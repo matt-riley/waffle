@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/observability"
@@ -10,15 +11,19 @@ import (
 // Bootstrap is the initial Desk state returned before a client starts its
 // event stream.
 type Bootstrap struct {
-	Version      string                 `json:"version"`
-	ServerTime   time.Time              `json:"server_time"`
-	RequestToken string                 `json:"request_token"`
-	EventCursor  uint64                 `json:"event_cursor"`
-	Health       observability.Health   `json:"health"`
-	Status       observability.Snapshot `json:"status"`
+	Version           string                 `json:"version"`
+	ServerTime        time.Time              `json:"server_time"`
+	RequestToken      string                 `json:"request_token"`
+	ProcessGeneration string                 `json:"process_generation"`
+	EventCursor       uint64                 `json:"event_cursor"`
+	Health            observability.Health   `json:"health"`
+	Status            observability.Snapshot `json:"status"`
 }
 
 func buildBootstrap(ctx context.Context, config APIConfig) (Bootstrap, error) {
+	if config.ProcessGeneration == "" {
+		return Bootstrap{}, errors.New("dashboard process generation is required")
+	}
 	health, err := config.Observability.HealthSnapshot(ctx, 2*time.Minute)
 	if err != nil {
 		return Bootstrap{}, err
@@ -37,11 +42,12 @@ func buildBootstrap(ctx context.Context, config APIConfig) (Bootstrap, error) {
 		status.RetryQueue = make([]any, 0)
 	}
 	return Bootstrap{
-		Version:      config.Version,
-		ServerTime:   config.now()().UTC(),
-		RequestToken: config.Security.Token(),
-		EventCursor:  config.Hub.Cursor(),
-		Health:       health,
-		Status:       status,
+		Version:           config.Version,
+		ServerTime:        config.now()().UTC(),
+		RequestToken:      config.Security.Token(),
+		ProcessGeneration: config.ProcessGeneration,
+		EventCursor:       config.Hub.Cursor(),
+		Health:            health,
+		Status:            status,
 	}, nil
 }

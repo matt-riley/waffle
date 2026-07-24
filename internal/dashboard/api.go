@@ -23,8 +23,12 @@ type APIConfig struct {
 	ChatClients   *ChatClients
 	Idempotency   *IdempotencyStore
 	Version       string
-	Now           func() time.Time
-	Heartbeat     func(time.Duration) (<-chan time.Time, func())
+	// ProcessGeneration is a coordinator-created opaque identity that changes
+	// for every serving process. Restart-aware clients use it to reject the
+	// still-running process while waiting for deferred activation.
+	ProcessGeneration string
+	Now               func() time.Time
+	Heartbeat         func(time.Duration) (<-chan time.Time, func())
 }
 
 func (c APIConfig) now() func() time.Time {
