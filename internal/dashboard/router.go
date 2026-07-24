@@ -125,12 +125,11 @@ func writeChatError(w http.ResponseWriter, err error, fallback string) {
 	case errors.Is(err, errChatUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "chat_unavailable", "chat service is unavailable"
 	default:
-		var safe interface {
+		var coded interface {
 			ErrorCode() string
-			SafeMessage() string
 		}
-		if errors.As(err, &safe) {
-			status, code, message = http.StatusConflict, safe.ErrorCode(), sanitizeDashboardString(safe.SafeMessage())
+		if errors.As(err, &coded) && coded.ErrorCode() == "session_active" {
+			status, code, message = http.StatusConflict, "session_active", "chat session is already active"
 		}
 	}
 	writeChatJSON(w, status, struct {

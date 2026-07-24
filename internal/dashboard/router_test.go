@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/llm"
 )
 
 func TestMutationHandlerReplaysExactEndpointAndBodyOnce(t *testing.T) {
@@ -130,6 +132,112 @@ func TestChatOpenRouteUsesMutationProtectionAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestChatOpenRouteReturnsResumedHistory(t *testing.T) {
+	const canary = "persisted transcript canary"
+	security := mustSecurity(t, "127.0.0.1:8422")
+	backend := &fakeChatBackend{openState: chat.State{
+		SessionID: "resumed",
+		History:   []llm.Message{llm.UserText(canary)},
+	}}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{
+		Security:    security,
+		Hub:         NewEventHub(4),
+		ChatClients: clients,
+		Idempotency: NewIdempotencyStore(nil, 4, time.Minute),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/open", strings.NewReader(`{"session_id":"resumed"}`))
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", "resume")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		State chat.State `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.State.History) != 1 || response.State.History[0].Blocks[0].Text != canary {
+		t.Fatalf("history = %+v, want persisted transcript", response.State.History)
+	}
+}
+
+func TestChatRoutesAllowlistStableErrors(t *testing.T) {
+	const canary = "hostile backend-controlled message"
+	for _, test := range []struct {
+		name        string
+		backendCode string
+		wantStatus  int
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "unknown backend code",
+			backendCode: "backend_owned_code",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "open_failed",
+			wantMessage: "chat request could not be completed",
+		},
+		{
+			name:        "session active",
+			backendCode: "session_active",
+			wantStatus:  http.StatusConflict,
+			wantCode:    "session_active",
+			wantMessage: "chat session is already active",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			security := mustSecurity(t, "127.0.0.1:8422")
+			backend := &fakeChatBackend{openErr: hostileChatError{code: test.backendCode, message: canary}}
+			clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+			mux := http.NewServeMux()
+			RegisterRoutes(mux, APIConfig{
+				Security:    security,
+				Hub:         NewEventHub(4),
+				ChatClients: clients,
+				Idempotency: NewIdempotencyStore(nil, 4, time.Minute),
+			})
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/open", strings.NewReader(`{}`))
+			req.Host = "127.0.0.1:8422"
+			req.Header.Set("X-Waffle-Desk-Token", security.Token())
+			req.Header.Set("Idempotency-Key", test.name)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != test.wantStatus {
+				t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.wantCode || response.Message != test.wantMessage {
+				t.Fatalf("response = %+v, want code %q message %q", response, test.wantCode, test.wantMessage)
+			}
+			if strings.Contains(rec.Body.String(), canary) {
+				t.Fatalf("response leaked backend-controlled message: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+type hostileChatError struct {
+	code    string
+	message string
+}
+
+func (e hostileChatError) Error() string       { return e.message }
+func (e hostileChatError) ErrorCode() string   { return e.code }
+func (e hostileChatError) SafeMessage() string { return e.message }
+
 func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	factoryCalls := 0
@@ -211,27 +319,54 @@ func TestChatRoutesReplayWithoutReinvocationAndRejectConflicts(t *testing.T) {
 			case "cancel", "close":
 				body = `{"client_id":"` + id + `"}`
 			}
-			do := func(path, payload string) int {
+			do := func(path, payload string) *httptest.ResponseRecorder {
 				rec := httptest.NewRecorder()
 				req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+path, strings.NewReader(payload))
 				req.Host = "127.0.0.1:8422"
 				req.Header.Set("X-Waffle-Desk-Token", security.Token())
 				req.Header.Set("Idempotency-Key", "same")
 				mux.ServeHTTP(rec, req)
-				return rec.Code
+				return rec
 			}
-			if a, b := do(route, body), do(route, body); a != b || a != http.StatusOK {
-				t.Fatalf("replay statuses %d %d", a, b)
+			first, replay := do(route, body), do(route, body)
+			if first.Code != replay.Code || first.Code != http.StatusOK {
+				t.Fatalf("replay statuses %d %d", first.Code, replay.Code)
 			}
-			if got := do(route, body+" "); got != http.StatusConflict {
+			if got := do(route, body+" ").Code; got != http.StatusConflict {
 				t.Fatalf("body conflict %d", got)
 			}
-			if route != "open" && do("open", `{}`) != http.StatusConflict {
-				t.Fatal("operation conflict missing")
+			counter := func(operation string) int {
+				return map[string]int{
+					"open":    backend.openCount(),
+					"turn":    backend.turnCount(),
+					"command": backend.commandCount(),
+					"cancel":  backend.cancelCount(),
+					"close":   backend.closeCount(),
+				}[operation]
 			}
-			calls := map[string]int{"open": backend.openCount(), "turn": backend.turnCount(), "command": backend.commandCount(), "cancel": backend.cancelCount(), "close": backend.closeCount()}[route]
-			if calls != 1 {
-				t.Fatalf("calls=%d", calls)
+			conflictingRoute, conflictingBody := "open", `{}`
+			if route == "open" {
+				var response struct {
+					ClientID string `json:"client_id"`
+				}
+				if err := json.Unmarshal(first.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				conflictingRoute = "turn"
+				conflictingBody = `{"client_id":"` + response.ClientID + `","text":"must not run"}`
+			}
+			originalCalls, conflictingCalls := counter(route), counter(conflictingRoute)
+			if got := do(conflictingRoute, conflictingBody).Code; got != http.StatusConflict {
+				t.Fatalf("operation conflict status = %d", got)
+			}
+			if got := counter(route); got != originalCalls {
+				t.Fatalf("original %s calls after operation conflict = %d, want %d", route, got, originalCalls)
+			}
+			if got := counter(conflictingRoute); got != conflictingCalls {
+				t.Fatalf("conflicting %s calls = %d, want %d", conflictingRoute, got, conflictingCalls)
+			}
+			if originalCalls != 1 {
+				t.Fatalf("%s calls = %d, want 1", route, originalCalls)
 			}
 		})
 	}

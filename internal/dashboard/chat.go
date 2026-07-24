@@ -45,52 +45,87 @@ type chatClient struct {
 	lifecycle  sync.Mutex
 	cancelDone chan struct{}
 	cancelled  bool
+	closeErr   error
 	closed     bool
 }
 
-func (c *chatClient) cancel() {
+func (c *chatClient) cancel(ctx context.Context) error {
 	c.lifecycle.Lock()
 	if c.closed {
 		c.lifecycle.Unlock()
-		return
+		return nil
 	}
+	var done chan struct{}
 	if c.cancelled {
-		done := c.cancelDone
+		done = c.cancelDone
 		c.lifecycle.Unlock()
-		<-done
-		return
+	} else {
+		c.cancelled, c.cancelDone = true, make(chan struct{})
+		done = c.cancelDone
+		c.lifecycle.Unlock()
+		go func() {
+			c.backend.Cancel()
+			close(done)
+		}()
 	}
-	c.cancelled, c.cancelDone = true, make(chan struct{})
-	done := c.cancelDone
-	c.lifecycle.Unlock()
-	c.backend.Cancel()
-	close(done)
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *chatClient) close(ctx context.Context) error {
-	c.cancel()
+	if err := c.cancel(ctx); err != nil {
+		return err
+	}
+	c.lifecycle.Lock()
+	if c.closed {
+		err := c.closeErr
+		c.lifecycle.Unlock()
+		return err
+	}
+	c.closeErr = c.backend.Close(ctx)
+	c.closed = true
+	err := c.closeErr
+	c.lifecycle.Unlock()
+	return err
+}
+
+func (c *chatClient) beginOperation() bool {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
 	if c.closed {
-		return nil
+		return false
 	}
-	err := c.backend.Close(ctx)
-	c.closed = true
-	return err
+	if c.cancelDone != nil {
+		select {
+		case <-c.cancelDone:
+		default:
+			return false
+		}
+	}
+	c.cancelled = false
+	c.cancelDone = nil
+	return true
 }
 
 // ChatClients adapts browser client IDs to isolated chat backends.
 type ChatClients struct {
-	mu          sync.Mutex
-	clients     map[string]*chatClient
-	factory     BackendFactory
-	ids         io.Reader
-	now         func() time.Time
-	maxClients  int
-	idleTTL     time.Duration
-	shutdownTTL time.Duration
-	events      *EventHub
-	shutting    bool
+	mu           sync.Mutex
+	clients      map[string]*chatClient
+	factory      BackendFactory
+	ids          io.Reader
+	now          func() time.Time
+	maxClients   int
+	idleTTL      time.Duration
+	shutdownTTL  time.Duration
+	events       *EventHub
+	shutting     bool
+	shutdownDone chan struct{}
+	shutdownErr  error
+	pending      map[*chatClient]*chatCleanup
 }
 
 // NewChatClients returns a bounded manager with production lifecycle limits.
@@ -106,6 +141,7 @@ func NewChatClients(factory BackendFactory, ids io.Reader) *ChatClients {
 		maxClients:  defaultChatClientLimit,
 		idleTTL:     defaultChatIdleTTL,
 		shutdownTTL: 5 * time.Second,
+		pending:     make(map[*chatClient]*chatCleanup),
 	}
 }
 
@@ -203,8 +239,9 @@ func (c *ChatClients) Cancel(clientID string) error {
 	if !ok {
 		return errChatClientNotFound
 	}
-	client.cancel()
-	return nil
+	cancelCtx, cancel := context.WithTimeout(context.Background(), c.shutdownTTL)
+	defer cancel()
+	return client.cancel(cancelCtx)
 }
 
 // Close removes a client and closes its backend once active work has settled.
@@ -218,66 +255,76 @@ func (c *ChatClients) Close(ctx context.Context, clientID string) error {
 			done = client.done
 		}
 	}
-	c.mu.Unlock()
 	if !ok {
+		c.mu.Unlock()
 		return errChatClientNotFound
 	}
-	client.cancel()
-	if done != nil {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			go func() {
-				<-done
-				closeBackend(context.Background(), client.backend)
-			}()
-			return ctx.Err()
-		}
+	cleanup := c.startCleanupLocked(client, done, nil)
+	c.mu.Unlock()
+	select {
+	case <-cleanup.done:
+		return cleanup.err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	closeCtx, cancel := cleanupContext(ctx)
-	defer cancel()
-	return client.close(closeCtx)
 }
 
 // Shutdown stops future opens and closes all live backends exactly once.
 func (c *ChatClients) Shutdown(ctx context.Context) error {
+	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), c.shutdownTTL)
+	defer closeCancel()
 	c.mu.Lock()
 	if c.shutting {
+		done := c.shutdownDone
 		c.mu.Unlock()
-		return nil
+		select {
+		case <-done:
+			c.mu.Lock()
+			err := c.shutdownErr
+			c.mu.Unlock()
+			return err
+		case <-closeCtx.Done():
+			return closeCtx.Err()
+		}
 	}
 	c.shutting = true
-	clients := make([]chatShutdownClient, 0, len(c.clients))
+	c.shutdownDone = make(chan struct{})
+	cleanups := make([]*chatCleanup, 0, len(c.pending)+len(c.clients))
+	for _, cleanup := range c.pending {
+		cleanups = append(cleanups, cleanup)
+	}
 	for _, client := range c.clients {
 		var done <-chan struct{}
 		if client.busy {
 			done = client.done
 		}
-		clients = append(clients, chatShutdownClient{client: client, done: done})
+		cleanups = append(cleanups, c.startCleanupLocked(client, done, closeCtx))
 	}
 	c.clients = make(map[string]*chatClient)
 	c.mu.Unlock()
-	for _, client := range clients {
-		client.client.cancel()
-	}
-	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), c.shutdownTTL)
-	defer closeCancel()
+
 	var first error
-	for _, client := range clients {
-		if client.done != nil {
-			select {
-			case <-client.done:
-			case <-ctx.Done():
-				if first == nil {
-					first = ctx.Err()
-				}
+	for _, cleanup := range cleanups {
+		select {
+		case <-cleanup.done:
+			if cleanup.err != nil && first == nil {
+				first = cleanup.err
+			}
+		case <-closeCtx.Done():
+			if first == nil {
+				first = closeCtx.Err()
 			}
 		}
-		err := client.client.close(closeCtx)
-		if err != nil && first == nil {
-			first = err
+	}
+	if closeCtx.Err() != nil {
+		for _, cleanup := range cleanups {
+			<-cleanup.done
 		}
 	}
+	c.mu.Lock()
+	c.shutdownErr = first
+	close(c.shutdownDone)
+	c.mu.Unlock()
 	return first
 }
 
@@ -289,6 +336,9 @@ func (c *ChatClients) begin(clientID string) (*chatClient, error) {
 		return nil, errChatClientNotFound
 	}
 	if client.busy {
+		return nil, errChatTurnActive
+	}
+	if !client.beginOperation() {
 		return nil, errChatTurnActive
 	}
 	client.busy = true
@@ -312,25 +362,61 @@ func (c *ChatClients) end(clientID string, client *chatClient) {
 
 func (c *ChatClients) reap(ctx context.Context) error {
 	c.mu.Lock()
-	var stale []*chatClient
+	var cleanups []*chatCleanup
 	for id, client := range c.clients {
 		if !client.busy && c.now().Sub(client.lastActive) >= c.idleTTL {
 			delete(c.clients, id)
-			stale = append(stale, client)
+			cleanups = append(cleanups, c.startCleanupLocked(client, nil, nil))
 		}
 	}
 	c.mu.Unlock()
 	var first error
-	for _, client := range stale {
-		client.cancel()
-		closeCtx, cancel := cleanupContext(ctx)
-		err := client.close(closeCtx)
-		cancel()
-		if err != nil && first == nil {
-			first = err
+	for _, cleanup := range cleanups {
+		select {
+		case <-cleanup.done:
+			if cleanup.err != nil && first == nil {
+				first = cleanup.err
+			}
+		case <-ctx.Done():
+			if first == nil {
+				first = ctx.Err()
+			}
 		}
 	}
 	return first
+}
+
+func (c *ChatClients) startCleanupLocked(client *chatClient, activeDone <-chan struct{}, cleanupCtx context.Context) *chatCleanup {
+	if cleanup, ok := c.pending[client]; ok {
+		return cleanup
+	}
+	var cancel context.CancelFunc
+	if cleanupCtx == nil {
+		cleanupCtx, cancel = context.WithTimeout(context.Background(), c.shutdownTTL)
+	} else {
+		cleanupCtx, cancel = context.WithCancel(cleanupCtx)
+	}
+	cleanup := &chatCleanup{done: make(chan struct{})}
+	c.pending[client] = cleanup
+	go func() {
+		defer cancel()
+		cleanup.err = client.cancel(cleanupCtx)
+		if cleanup.err == nil && activeDone != nil {
+			select {
+			case <-activeDone:
+			case <-cleanupCtx.Done():
+				cleanup.err = cleanupCtx.Err()
+			}
+		}
+		if cleanup.err == nil {
+			cleanup.err = client.close(cleanupCtx)
+		}
+		close(cleanup.done)
+		c.mu.Lock()
+		delete(c.pending, client)
+		c.mu.Unlock()
+	}()
+	return cleanup
 }
 
 func (c *ChatClients) newClientID() (string, error) {
@@ -353,9 +439,9 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 		if event.IsError {
 			text = "chat operation failed"
 		}
-		var state *chat.State
+		var state *dashboardChatState
 		if event.State != nil {
-			safe := safeChatState(*event.State)
+			safe := safeDashboardChatState(*event.State)
 			state = &safe
 		}
 		data, err := json.Marshal(dashboardChatEvent{
@@ -378,18 +464,32 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 }
 
 type dashboardChatEvent struct {
-	Kind      chat.EventKind `json:"kind"`
-	Text      string         `json:"text,omitempty"`
-	ToolName  string         `json:"tool_name,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
-	ByteCount int            `json:"byte_count,omitempty"`
-	Usage     dashboardUsage `json:"usage,omitempty"`
-	State     *chat.State    `json:"state,omitempty"`
+	Kind      chat.EventKind      `json:"kind"`
+	Text      string              `json:"text,omitempty"`
+	ToolName  string              `json:"tool_name,omitempty"`
+	IsError   bool                `json:"is_error,omitempty"`
+	ByteCount int                 `json:"byte_count,omitempty"`
+	Usage     dashboardUsage      `json:"usage,omitempty"`
+	State     *dashboardChatState `json:"state,omitempty"`
 }
 
-type chatShutdownClient struct {
-	client *chatClient
-	done   <-chan struct{}
+type dashboardChatState struct {
+	SessionID      string       `json:"session_id"`
+	Title          string       `json:"title"`
+	ModelAlias     string       `json:"model_alias"`
+	ModelError     string       `json:"model_error"`
+	ProviderLabel  string       `json:"provider_label"`
+	Profile        string       `json:"profile"`
+	ConnectionMode string       `json:"connection_mode"`
+	SandboxMode    string       `json:"sandbox_mode"`
+	Workspace      string       `json:"workspace"`
+	Models         []chat.Model `json:"models"`
+	Capabilities   []string     `json:"capabilities"`
+}
+
+type chatCleanup struct {
+	done chan struct{}
+	err  error
 }
 
 type dashboardUsage struct {
@@ -421,13 +521,29 @@ func safeChatState(state chat.State) chat.State {
 	state.ProviderLabel = sanitizeDashboardString(state.ProviderLabel)
 	state.Profile = sanitizeDashboardString(state.Profile)
 	state.Workspace = sanitizeDashboardString(state.Workspace)
-	state.History = nil
 	for i := range state.Models {
 		state.Models[i].Alias = sanitizeDashboardString(state.Models[i].Alias)
 		state.Models[i].Provider = sanitizeDashboardString(state.Models[i].Provider)
 		state.Models[i].Upstream = sanitizeDashboardString(state.Models[i].Upstream)
 	}
 	return state
+}
+
+func safeDashboardChatState(state chat.State) dashboardChatState {
+	state = safeChatState(state)
+	return dashboardChatState{
+		SessionID:      state.SessionID,
+		Title:          state.Title,
+		ModelAlias:     state.ModelAlias,
+		ModelError:     state.ModelError,
+		ProviderLabel:  state.ProviderLabel,
+		Profile:        state.Profile,
+		ConnectionMode: state.ConnectionMode,
+		SandboxMode:    state.SandboxMode,
+		Workspace:      state.Workspace,
+		Models:         state.Models,
+		Capabilities:   state.Capabilities,
+	}
 }
 
 func safeChatResult(result chat.Result) chat.Result {

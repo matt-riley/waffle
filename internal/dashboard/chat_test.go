@@ -137,12 +137,15 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 		t.Fatalf("error event = %s", first.Data)
 	}
 	var projected struct {
-		State chat.State `json:"state"`
+		State map[string]json.RawMessage `json:"state"`
 	}
 	if err := json.Unmarshal(second.Data, &projected); err != nil {
 		t.Fatal(err)
 	}
-	if len(projected.State.History) != 0 || strings.Contains(string(second.Data), canary) || strings.Contains(string(second.Data), `"history":[`) || strings.Contains(string(second.Data), "/var/lib/waffle") {
+	if _, exists := projected.State["history"]; exists {
+		t.Fatalf("state event contains history field: %s", second.Data)
+	}
+	if strings.Contains(string(second.Data), canary) || strings.Contains(string(second.Data), "/var/lib/waffle") {
 		t.Fatalf("state event = %s", second.Data)
 	}
 }
@@ -248,6 +251,93 @@ func TestChatClientCloseFinalizesAfterCallerCancellation(t *testing.T) {
 	}
 }
 
+func TestChatClientCloseBoundsActiveWorkForBackgroundCaller(t *testing.T) {
+	backend := &fakeChatBackend{
+		turnStarted: make(chan struct{}),
+		releaseTurn: make(chan struct{}),
+		closeCalled: make(chan struct{}),
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnDone := make(chan error, 1)
+	go func() { turnDone <- clients.Turn(context.Background(), id, "hold") }()
+	<-backend.turnStarted
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- clients.Close(context.Background(), id) }()
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		close(backend.releaseTurn)
+		<-turnDone
+		<-closeDone
+		t.Fatal("Close with background caller waited forever for active work")
+	}
+	select {
+	case <-backend.closeCalled:
+		t.Fatal("Close called backend while active work was still running")
+	default:
+	}
+	close(backend.releaseTurn)
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChatClientsShutdownWaitsForCallerCancelledCloseFinalization(t *testing.T) {
+	backend := &fakeChatBackend{
+		turnStarted: make(chan struct{}),
+		releaseTurn: make(chan struct{}),
+		closeCalled: make(chan struct{}),
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = time.Second
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnDone := make(chan error, 1)
+	go func() { turnDone <- clients.Turn(context.Background(), id, "hold") }()
+	<-backend.turnStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := clients.Close(ctx, id); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close error = %v, want context canceled", err)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before pending Close finalized: %v", err)
+	case <-backend.closeCalled:
+		t.Fatal("pending Close called backend before active work drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.releaseTurn)
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backend.closeCalled:
+	default:
+		t.Fatal("pending Close did not finalize backend before Shutdown returned")
+	}
+	if backend.closeCount() != 1 {
+		t.Fatalf("close calls = %d, want 1", backend.closeCount())
+	}
+}
+
 func TestChatClientRejectsConcurrentCommandAndPropagatesCancel(t *testing.T) {
 	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{})}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{10}, 32)))
@@ -267,6 +357,45 @@ func TestChatClientRejectsConcurrentCommandAndPropagatesCancel(t *testing.T) {
 		t.Fatalf("cancel calls = %d", backend.cancelCount())
 	}
 	close(backend.releaseTurn)
+}
+
+func TestChatClientCancellationResetsForSecondTurn(t *testing.T) {
+	firstStarted, firstRelease := make(chan struct{}), make(chan struct{})
+	secondStarted, secondRelease := make(chan struct{}), make(chan struct{})
+	backend := &fakeChatBackend{
+		turnStarts:   []chan struct{}{firstStarted, secondStarted},
+		releaseTurns: []chan struct{}{firstRelease, secondRelease},
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- clients.Turn(context.Background(), id, "first") }()
+	<-firstStarted
+	if err := clients.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	close(firstRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- clients.Turn(context.Background(), id, "second") }()
+	<-secondStarted
+	if err := clients.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	if backend.cancelCount() != 2 {
+		t.Fatalf("cancel calls after second turn = %d, want 2", backend.cancelCount())
+	}
+	close(secondRelease)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestChatClientEnforces64ClientCap(t *testing.T) {
@@ -352,15 +481,175 @@ func TestChatClientsShutdownUsesOneGlobalDeadline(t *testing.T) {
 	}
 }
 
+func TestChatClientsShutdownBoundsBlockingCancel(t *testing.T) {
+	releaseCancel := make(chan struct{})
+	backend := &fakeChatBackend{
+		cancelStarted: make(chan struct{}),
+		releaseCancel: releaseCancel,
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
+	<-backend.cancelStarted
+	select {
+	case err := <-shutdownDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		close(releaseCancel)
+		<-shutdownDone
+		t.Fatal("Shutdown stalled on blocking Backend.Cancel")
+	}
+	close(releaseCancel)
+}
+
+func TestChatClientCancelBoundsBlockingBackend(t *testing.T) {
+	releaseCancel := make(chan struct{})
+	backend := &fakeChatBackend{
+		cancelStarted: make(chan struct{}),
+		releaseCancel: releaseCancel,
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- clients.Cancel(id) }()
+	<-backend.cancelStarted
+	select {
+	case err := <-cancelDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Cancel error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		close(releaseCancel)
+		<-cancelDone
+		t.Fatal("Cancel stalled on blocking backend")
+	}
+	close(releaseCancel)
+}
+
+func TestChatClientsShutdownWithCancelledCallerDrainsActiveWork(t *testing.T) {
+	backend := &fakeChatBackend{
+		turnStarted: make(chan struct{}),
+		releaseTurn: make(chan struct{}),
+		closeCalled: make(chan struct{}),
+	}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	clients.shutdownTTL = time.Second
+	id, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnDone := make(chan error, 1)
+	go func() { turnDone <- clients.Turn(context.Background(), id, "hold") }()
+	<-backend.turnStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- clients.Shutdown(ctx) }()
+	select {
+	case <-backend.closeCalled:
+		t.Fatal("Shutdown closed backend before active work drained")
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before active work drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.releaseTurn)
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-shutdownDone; err != nil {
+		t.Fatalf("Shutdown error = %v", err)
+	}
+	select {
+	case <-backend.closeCalled:
+	default:
+		t.Fatal("Shutdown did not close backend after active work drained")
+	}
+}
+
+func TestChatClientsShutdownUsesGlobalDeadlineAcrossBlockingBackends(t *testing.T) {
+	releaseCancel := make(chan struct{})
+	first := &fakeChatBackend{
+		cancelStarted:    make(chan struct{}),
+		releaseCancel:    releaseCancel,
+		closeWaitContext: true,
+	}
+	second := &fakeChatBackend{
+		cancelStarted:    make(chan struct{}),
+		releaseCancel:    releaseCancel,
+		closeWaitContext: true,
+	}
+	backends := []chat.Backend{first, second}
+	index := 0
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) {
+		backend := backends[index]
+		index++
+		return backend, nil
+	}, nil)
+	clients.shutdownTTL = 30 * time.Millisecond
+	for range 2 {
+		if _, _, err := clients.Open(context.Background(), chat.OpenOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- clients.Shutdown(context.Background()) }()
+	select {
+	case <-first.cancelStarted:
+	case <-second.cancelStarted:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseCancel)
+		t.Fatal("no backend cancellation started")
+	}
+	select {
+	case <-first.cancelStarted:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseCancel)
+		<-shutdownDone
+		t.Fatal("first backend cancellation did not share the global deadline")
+	}
+	select {
+	case <-second.cancelStarted:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseCancel)
+		<-shutdownDone
+		t.Fatal("second backend cancellation did not share the global deadline")
+	}
+	if err := <-shutdownDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
+	}
+	close(releaseCancel)
+	if first.cancelCount() != 1 || second.cancelCount() != 1 {
+		t.Fatalf("cancel counts = %d, %d; want 1, 1", first.cancelCount(), second.cancelCount())
+	}
+}
+
 type fakeChatBackend struct {
 	mu               sync.Mutex
 	openCalls        int
+	openState        chat.State
+	openErr          error
 	turnCalls        int
 	commandCalls     int
 	closeCalls       int
 	turnStarted      chan struct{}
 	releaseTurn      chan struct{}
 	closeCalled      chan struct{}
+	turnStarts       []chan struct{}
+	releaseTurns     []chan struct{}
 	turnEvent        chat.Event
 	turnEvents       []chat.Event
 	closeErr         error
@@ -374,13 +663,21 @@ func (f *fakeChatBackend) Open(context.Context, chat.OpenOptions) (chat.State, e
 	f.mu.Lock()
 	f.openCalls++
 	f.mu.Unlock()
-	return chat.State{SessionID: "session"}, nil
+	if f.openState.SessionID != "" || len(f.openState.History) > 0 {
+		return f.openState, f.openErr
+	}
+	return chat.State{SessionID: "session"}, f.openErr
 }
 
 func (f *fakeChatBackend) Turn(_ context.Context, _ string, emit func(chat.Event)) error {
 	f.mu.Lock()
+	call := f.turnCalls
 	f.turnCalls++
 	f.mu.Unlock()
+	if call < len(f.turnStarts) {
+		close(f.turnStarts[call])
+		<-f.releaseTurns[call]
+	}
 	if f.turnStarted != nil {
 		close(f.turnStarted)
 		<-f.releaseTurn
