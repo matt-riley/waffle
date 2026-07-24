@@ -27,17 +27,49 @@ func TestPullRequestWorkflowRunsDeterministicEval(t *testing.T) {
 func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/ci.yml")
 
+	assertWorkflowActionPins(t, workflow, "actions/checkout", map[string]string{
+		"9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0": "v7",
+		"3d3c42e5aac5ba805825da76410c181273ba90b1": "v7",
+	})
+	assertWorkflowActionPins(t, workflow, "actions/setup-go", map[string]string{
+		"924ae3a1cded613372ab5595356fb5720e22ba16": "v6",
+		"b7ad1dad31e06c5925ef5d2fc7ad053ef454303e": "v7.0.0",
+	})
+
 	for _, want := range []string{
 		"linux-artifact-repro:",
 		"bash scripts/check-linux-artifact-repro.sh",
-		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7",
-		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6",
 		"build-linux-artifact:",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("workflow missing %q:\n%s", want, workflow)
 		}
+	}
+}
+
+func assertWorkflowActionPins(t *testing.T, workflow, action string, allowed map[string]string) {
+	t.Helper()
+	prefix := "- uses: " + action + "@"
+	found := false
+	for _, line := range strings.Split(workflow, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		found = true
+		parts := strings.SplitN(strings.TrimPrefix(line, prefix), " # ", 2)
+		if len(parts) != 2 {
+			t.Fatalf("workflow action %q is not annotated with a version: %q", action, line)
+		}
+		pin := strings.TrimSpace(parts[0])
+		version := strings.TrimSpace(parts[1])
+		if allowedVersion, ok := allowed[pin]; !ok || version != allowedVersion {
+			t.Fatalf("workflow action %q has unreviewed pin %q %q", action, pin, version)
+		}
+	}
+	if !found {
+		t.Fatalf("workflow does not use %q", action)
 	}
 }
 

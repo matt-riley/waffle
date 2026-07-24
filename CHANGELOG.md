@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/matt-riley/waffle/compare/v0.7.0...v0.8.0) (2026-07-24)
+
+
+### Features
+
+* add embedded Waffle Desk personal cockpit ([#146](https://github.com/matt-riley/waffle/issues/146)) ([6461df0](https://github.com/matt-riley/waffle/commit/6461df0a3df39d2471fa2ce2f0b7f6ccb4d678ea))
+
 ## [0.7.0](https://github.com/matt-riley/waffle/compare/v0.6.0...v0.7.0) (2026-07-21)
 
 
