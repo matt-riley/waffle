@@ -26,6 +26,9 @@ const (
 var errInvalidTaskFieldIntent = errors.New("invalid task field intent")
 
 type TaskScheduleStore interface {
+	// Implementations must honor ctx and return only after the storage
+	// operation has terminated. In particular, a deadline error must not leave
+	// work capable of committing after this method returns.
 	AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (*schedule.Job, error)
 	Get(ctx context.Context, id string) (*schedule.Job, error)
 	Update(ctx context.Context, id string, in schedule.Update) (*schedule.Job, error)
@@ -76,11 +79,6 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 type taskMutationExecutor struct {
 	store   *IdempotencyStore
 	timeout time.Duration
-}
-
-type taskMutationResult struct {
-	status int
-	body   []byte
 }
 
 func newTaskMutationHandler(
@@ -172,12 +170,29 @@ func (e taskMutationExecutor) Do(
 	store.mu.Unlock()
 
 	completionCtx, cancel := taskMutationCompletionContext(requestCtx, e.timeout)
-	go e.complete(key, entry, completionCtx, cancel, run)
-	<-ready
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			store.mu.Lock()
+			if store.entries[key] == entry && entry.ready != nil {
+				delete(store.entries, key)
+				close(ready)
+			}
+			store.mu.Unlock()
+			panic(recovered)
+		}
+	}()
+	status, body = run(completionCtx)
 	store.mu.Lock()
-	status, body = entry.status, append([]byte(nil), entry.body...)
+	if store.entries[key] == entry && entry.ready != nil {
+		entry.status = status
+		entry.body = append([]byte(nil), body...)
+		entry.expiresAt = store.now().Add(store.ttl)
+		entry.ready = nil
+		close(ready)
+	}
 	store.mu.Unlock()
-	return status, body, nil
+	return status, append([]byte(nil), body...), nil
 }
 
 func taskMutationCompletionContext(requestCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -188,47 +203,6 @@ func taskMutationCompletionContext(requestCtx context.Context, timeout time.Dura
 		deadline = inherited
 	}
 	return context.WithDeadline(base, deadline)
-}
-
-func (e taskMutationExecutor) complete(
-	key string,
-	entry *idempotencyEntry,
-	ctx context.Context,
-	cancel context.CancelFunc,
-	run func(context.Context) (status int, body []byte),
-) {
-	defer cancel()
-	result := make(chan taskMutationResult, 1)
-	go func() {
-		status, body := run(ctx)
-		result <- taskMutationResult{status: status, body: body}
-	}()
-
-	var completed taskMutationResult
-	select {
-	case completed = <-result:
-	case <-ctx.Done():
-		select {
-		case completed = <-result:
-		default:
-			completed = taskMutationResult{
-				status: http.StatusServiceUnavailable,
-				body:   []byte("{\"code\":\"schedule_unavailable\",\"message\":\"schedule could not be saved\"}\n"),
-			}
-		}
-	}
-
-	store := e.store
-	store.mu.Lock()
-	if store.entries[key] == entry && entry.ready != nil {
-		ready := entry.ready
-		entry.status = completed.status
-		entry.body = append([]byte(nil), completed.body...)
-		entry.expiresAt = store.now().Add(store.ttl)
-		entry.ready = nil
-		close(ready)
-	}
-	store.mu.Unlock()
 }
 
 func waitForTaskMutation(

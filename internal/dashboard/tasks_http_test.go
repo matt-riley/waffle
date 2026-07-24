@@ -328,31 +328,100 @@ func TestTaskMutationCanceledReplayWaiterDoesNotCancelAdmittedMutation(t *testin
 	}
 }
 
-func TestTaskMutationHardBoundSuppressesLateStoreResult(t *testing.T) {
+func TestTaskMutationDoesNotCacheBeforeUncooperativeStoreTerminates(t *testing.T) {
 	schedules := newLateTaskUpdateStore()
+	events := NewEventHub(4)
+	handler, security := newTaskMutationTestHandler(t, schedules, events, 35*time.Millisecond)
+	ownerDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		ownerDone <- serveTaskUpdate(handler, security, context.Background(), "late-store-result")
+	}()
+	<-schedules.started
+	<-schedules.deadline
+	select {
+	case early := <-ownerDone:
+		close(schedules.release)
+		<-schedules.returned
+		t.Fatalf("owner returned before store termination: %d %s", early.Code, early.Body.String())
+	default:
+	}
+
+	waiterCtx, cancelWaiter := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancelWaiter()
+	waiter := serveTaskUpdate(handler, security, waiterCtx, "late-store-result")
+	if waiter.Code != http.StatusServiceUnavailable || waiter.Body.String() != "mutation_unavailable\n" {
+		t.Fatalf("in-flight waiter = %d %q, want request-scoped cancellation", waiter.Code, waiter.Body.String())
+	}
+	if events.Cursor() != 0 {
+		t.Fatal("in-flight uncooperative store published an event")
+	}
+
+	close(schedules.release)
+	<-schedules.returned
+	owner := <-ownerDone
+	if owner.Code != http.StatusServiceUnavailable {
+		t.Fatalf("owner status = %d, want actual post-termination 503: %s", owner.Code, owner.Body.String())
+	}
+	replay := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
+	if replay.Code != owner.Code || !bytes.Equal(replay.Body.Bytes(), owner.Body.Bytes()) {
+		t.Fatalf("replay = %d %q, want cached actual result %d %q", replay.Code, replay.Body.Bytes(), owner.Code, owner.Body.Bytes())
+	}
+	if events.Cursor() != 0 {
+		t.Fatal("late store result published an event")
+	}
+	if schedules.updateCount() != 1 {
+		t.Fatalf("updates = %d, want one", schedules.updateCount())
+	}
+}
+
+func TestTaskMutationProductionStoreDeadlineLeavesScheduleUnchanged(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	schedules := schedule.NewStore(st)
+	job, err := schedules.Add(context.Background(), "Old", "0 8 * * *", "Old prompt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := st.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	events := NewEventHub(4)
 	handler, security := newTaskMutationTestHandler(t, schedules, events, 35*time.Millisecond)
 	started := time.Now()
 
-	rec := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
-	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
-		t.Fatalf("bounded response took %v", elapsed)
-	}
+	rec := serveTaskUpdateID(handler, security, context.Background(), "production-deadline", job.ID)
 	if rec.Code != http.StatusServiceUnavailable {
+		_ = held.Rollback()
 		t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
 	}
-	close(schedules.release)
-	<-schedules.returned
-	time.Sleep(20 * time.Millisecond)
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		_ = held.Rollback()
+		t.Fatalf("owner returned after %v", elapsed)
+	}
+	if err := held.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := schedules.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != "Old" || stored.Cron != "0 8 * * *" || stored.Prompt != "Old prompt" {
+		t.Fatalf("deadline mutation changed production store: %+v", stored)
+	}
 	if events.Cursor() != 0 {
-		t.Fatal("store result after completion deadline published an event")
+		t.Fatal("deadline mutation published an event")
 	}
-	replay := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
-	if replay.Code != http.StatusServiceUnavailable || !bytes.Equal(rec.Body.Bytes(), replay.Body.Bytes()) {
-		t.Fatalf("replay = %d %q, want cached %d %q", replay.Code, replay.Body.Bytes(), rec.Code, rec.Body.Bytes())
-	}
-	if schedules.updateCount() != 1 {
-		t.Fatalf("updates = %d, want one", schedules.updateCount())
+	replay := serveTaskUpdateID(handler, security, context.Background(), "production-deadline", job.ID)
+	if replay.Code != rec.Code || !bytes.Equal(replay.Body.Bytes(), rec.Body.Bytes()) {
+		t.Fatalf("replay = %d %q, want %d %q", replay.Code, replay.Body.Bytes(), rec.Code, rec.Body.Bytes())
 	}
 }
 
@@ -807,9 +876,19 @@ func serveTaskUpdate(
 	ctx context.Context,
 	key string,
 ) *httptest.ResponseRecorder {
+	return serveTaskUpdateID(handler, security, ctx, key, "job-control")
+}
+
+func serveTaskUpdateID(
+	handler http.Handler,
+	security *Security,
+	ctx context.Context,
+	key string,
+	jobID string,
+) *httptest.ResponseRecorder {
 	body := `{"name":"Edited","cron":"0 9 * * *","prompt":"Changed","deliver":"","profile":"","enabled":true}`
 	req := httptest.NewRequest(http.MethodPost,
-		"http://127.0.0.1:8422/api/v1/desk/tasks/schedules/job-control", strings.NewReader(body))
+		"http://127.0.0.1:8422/api/v1/desk/tasks/schedules/"+jobID, strings.NewReader(body))
 	req = req.WithContext(ctx)
 	req.Host = "127.0.0.1:8422"
 	req.Header.Set("X-Waffle-Desk-Token", security.Token())
@@ -889,6 +968,8 @@ type lateTaskUpdateStore struct {
 	mu       sync.Mutex
 	job      schedule.Job
 	updates  int
+	started  chan struct{}
+	deadline chan struct{}
 	release  chan struct{}
 	returned chan struct{}
 }
@@ -898,6 +979,8 @@ func newLateTaskUpdateStore() *lateTaskUpdateStore {
 		job: schedule.Job{
 			ID: "job-control", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
 		},
+		started:  make(chan struct{}),
+		deadline: make(chan struct{}),
 		release:  make(chan struct{}),
 		returned: make(chan struct{}),
 	}
@@ -914,10 +997,13 @@ func (s *lateTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error
 	return &job, nil
 }
 
-func (s *lateTaskUpdateStore) Update(_ context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
+func (s *lateTaskUpdateStore) Update(ctx context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
 	s.mu.Lock()
 	s.updates++
 	s.mu.Unlock()
+	close(s.started)
+	<-ctx.Done()
+	close(s.deadline)
 	<-s.release
 	s.mu.Lock()
 	s.job.Name = input.Name

@@ -190,6 +190,81 @@ func TestUpdateMissingJobReturnsStableNotFound(t *testing.T) {
 	}
 }
 
+func TestStoreOperationsHonorDeadlineWithoutCommitting(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Store, string) error
+	}{
+		{
+			name: "add",
+			run: func(ctx context.Context, jobs *Store, _ string) error {
+				_, err := jobs.Add(ctx, "new", "0 10 * * *", "new prompt", "")
+				return err
+			},
+		},
+		{
+			name: "get",
+			run: func(ctx context.Context, jobs *Store, jobID string) error {
+				_, err := jobs.Get(ctx, jobID)
+				return err
+			},
+		},
+		{
+			name: "update",
+			run: func(ctx context.Context, jobs *Store, jobID string) error {
+				_, err := jobs.Update(ctx, jobID, Update{
+					Name: "new", Cron: "0 10 * * *", Prompt: "new prompt", Enabled: true,
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newTestStore(t)
+			jobs := NewStore(st)
+			job, err := jobs.Add(context.Background(), "old", "0 9 * * *", "old prompt", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			held, err := st.DB.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			started := time.Now()
+			err = test.run(ctx, jobs, job.ID)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				_ = held.Rollback()
+				t.Fatalf("error = %v, want deadline exceeded", err)
+			}
+			if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+				_ = held.Rollback()
+				t.Fatalf("operation returned after %v", elapsed)
+			}
+			if err := held.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+
+			stored, err := jobs.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Name != "old" || stored.Cron != "0 9 * * *" || stored.Prompt != "old prompt" {
+				t.Fatalf("deadline operation changed stored job: %+v", stored)
+			}
+			rows, err := jobs.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("jobs = %d, want only original job", len(rows))
+			}
+		})
+	}
+}
+
 // echoProvider replies with the user's text, verbatim.
 type echoProvider struct{}
 
