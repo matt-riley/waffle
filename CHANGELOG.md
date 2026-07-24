@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.1](https://github.com/matt-riley/waffle/compare/v0.8.0...v0.8.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **#149:** discover skills once for capabilities list ([#163](https://github.com/matt-riley/waffle/issues/163)) ([6033e13](https://github.com/matt-riley/waffle/commit/6033e13ae30094be2aa6c1e7f3adca38ac07bc5d)), closes [#149](https://github.com/matt-riley/waffle/issues/149)
+* **#153:** project chat secrets by structure and exact redaction ([#159](https://github.com/matt-riley/waffle/issues/159)) ([7a5138e](https://github.com/matt-riley/waffle/commit/7a5138e8a7aafa5fa3fe0634707b851c75a92ede))
+* **#155:** resolve profile sandbox from own group, not main ([#157](https://github.com/matt-riley/waffle/issues/157)) ([728db63](https://github.com/matt-riley/waffle/commit/728db63c9d8f43ce4dbb21b0b26da521b1861e95))
+* isolate dashboard serve test from managed host state ([bbb2d32](https://github.com/matt-riley/waffle/commit/bbb2d32f886e47a6f9489b17eccaa8ba30c81b9d))
+
 ## [0.8.0](https://github.com/matt-riley/waffle/compare/v0.7.0...v0.8.0) (2026-07-24)
 
 
