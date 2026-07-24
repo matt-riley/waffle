@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.3](https://github.com/matt-riley/waffle/compare/v0.8.2...v0.8.3) (2026-07-24)
+
+
+### Bug Fixes
+
+* **#151:** cache Desk static assets at process start ([#165](https://github.com/matt-riley/waffle/issues/165)) ([30cb33e](https://github.com/matt-riley/waffle/commit/30cb33ed185619a169d3caa6f1b301129b55f565))
+* **#152:** audit desk and skillinstall mutations in policy_audit ([#166](https://github.com/matt-riley/waffle/issues/166)) ([21a7511](https://github.com/matt-riley/waffle/commit/21a7511c96f889a33ca30920548c02b59c55d526))
+* **#154:** unify Desk bounded/TTL token stores ([#167](https://github.com/matt-riley/waffle/issues/167)) ([9088983](https://github.com/matt-riley/waffle/commit/9088983c04f867cf555258c5077d97d67600dec6))
+* **#156:** share crash-safe file commit for skillinstall provenance ([#168](https://github.com/matt-riley/waffle/issues/168)) ([f9e4a61](https://github.com/matt-riley/waffle/commit/f9e4a613f34f640e0a03fd279ab166098300ca3f))
+
 ## [0.8.2](https://github.com/matt-riley/waffle/compare/v0.8.1...v0.8.2) (2026-07-24)
 
 
