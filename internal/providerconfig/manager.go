@@ -38,6 +38,12 @@ var (
 	// ErrSimulatedCrash is used only by deterministic recovery tests. The
 	// transaction is intentionally left on disk exactly as a dead process would.
 	ErrSimulatedCrash = errors.New("simulated provider transaction process death")
+	// ErrDeferredRestartPending means committed provider state is waiting for a
+	// new process to confirm health and finalize its recovery journal.
+	ErrDeferredRestartPending = errors.New("provider configuration restart is pending")
+	// ErrDeferredHealth means the new process could not confirm the deferred
+	// provider transaction and the previous state was restored.
+	ErrDeferredHealth = errors.New("deferred provider configuration health check failed")
 )
 
 // Probe validates one concrete provider/model pair without mutating live state.
@@ -61,6 +67,22 @@ type AddModelRequest struct {
 	UpstreamModel  string
 	Default        bool
 	Utility        bool
+}
+
+// CommitMode selects whether a provider transaction reconciles the current
+// process immediately or leaves a durable journal for a new process.
+type CommitMode int
+
+const (
+	CommitAndReconcile CommitMode = iota
+	CommitForRestart
+)
+
+// MutationResult is the public, credential-free outcome of one provider
+// mutation.
+type MutationResult struct {
+	RestartRequired bool   `json:"restart_required"`
+	TransactionID   string `json:"transaction_id,omitempty"`
 }
 
 // CatalogSnapshot is the private provider catalogue input for one enrollment.
@@ -111,6 +133,7 @@ type Status struct {
 type Listing struct {
 	State        string                     `json:"state"`
 	DefaultModel string                     `json:"default_model,omitempty"`
+	UtilityModel string                     `json:"utility_model,omitempty"`
 	Providers    map[string]ProviderSummary `json:"providers"`
 	Models       map[string]ModelSummary    `json:"models"`
 }
@@ -152,6 +175,32 @@ type Manager struct {
 	afterReadStatus func()
 }
 
+type commitModeContextKey struct{}
+
+type commitModeState struct {
+	mode   CommitMode
+	result MutationResult
+}
+
+func runWithCommitMode(ctx context.Context, mode CommitMode, mutate func(context.Context) error) (MutationResult, error) {
+	if mode != CommitAndReconcile && mode != CommitForRestart {
+		return MutationResult{}, errors.New("invalid provider commit mode")
+	}
+	state := &commitModeState{mode: mode}
+	if err := mutate(context.WithValue(ctx, commitModeContextKey{}, state)); err != nil {
+		return MutationResult{}, err
+	}
+	return state.result, nil
+}
+
+func commitState(ctx context.Context) *commitModeState {
+	state, _ := ctx.Value(commitModeContextKey{}).(*commitModeState)
+	if state == nil {
+		return &commitModeState{mode: CommitAndReconcile}
+	}
+	return state
+}
+
 // New returns a manager rooted in WAFFLE_HOME using the supplied identity.
 func New(identity *age.X25519Identity) (*Manager, error) {
 	configPath, err := config.Path()
@@ -176,7 +225,20 @@ func New(identity *age.X25519Identity) (*Manager, error) {
 }
 
 // Add validates and enrolls a connection and one or more aliases.
-func (m *Manager) Add(ctx context.Context, req AddRequest) (err error) {
+func (m *Manager) Add(ctx context.Context, req AddRequest) error {
+	_, err := m.AddWithMode(ctx, req, CommitAndReconcile)
+	return err
+}
+
+// AddWithMode validates and enrolls a connection using the requested commit
+// lifecycle.
+func (m *Manager) AddWithMode(ctx context.Context, req AddRequest, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.add(modeCtx, req)
+	})
+}
+
+func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err
@@ -396,7 +458,19 @@ func (m *Manager) CatalogSnapshot(ctx context.Context, name string) (snapshot Ca
 }
 
 // AddModel adds one favourite alias and optional agent roles transactionally.
-func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error) {
+func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) error {
+	_, err := m.AddModelWithMode(ctx, req, CommitAndReconcile)
+	return err
+}
+
+// AddModelWithMode adds one alias using the requested commit lifecycle.
+func (m *Manager) AddModelWithMode(ctx context.Context, req AddModelRequest, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.addModel(modeCtx, req)
+	})
+}
+
+func (m *Manager) addModel(ctx context.Context, req AddModelRequest) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err
@@ -479,7 +553,35 @@ func (m *Manager) AddModel(ctx context.Context, req AddModelRequest) (err error)
 
 // ActivateModel validates an existing alias, makes it the default, and moves
 // an Installed host to Ready transactionally.
-func (m *Manager) ActivateModel(ctx context.Context, alias string) (err error) {
+func (m *Manager) ActivateModel(ctx context.Context, alias string) error {
+	_, err := m.ActivateModelWithMode(ctx, alias, CommitAndReconcile)
+	return err
+}
+
+// ActivateModelWithMode sets the default role using the requested commit
+// lifecycle.
+func (m *Manager) ActivateModelWithMode(ctx context.Context, alias string, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.activateModel(modeCtx, alias, false)
+	})
+}
+
+// ActivateUtilityModel validates an existing alias and makes it the utility
+// model transactionally.
+func (m *Manager) ActivateUtilityModel(ctx context.Context, alias string) error {
+	_, err := m.ActivateUtilityModelWithMode(ctx, alias, CommitAndReconcile)
+	return err
+}
+
+// ActivateUtilityModelWithMode sets the utility role using the requested
+// commit lifecycle.
+func (m *Manager) ActivateUtilityModelWithMode(ctx context.Context, alias string, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.activateModel(modeCtx, alias, true)
+	})
+}
+
+func (m *Manager) activateModel(ctx context.Context, alias string, utility bool) (err error) {
 	if !config.ValidModelAlias(alias) {
 		return fmt.Errorf("invalid model alias %q", alias)
 	}
@@ -500,18 +602,29 @@ func (m *Manager) ActivateModel(ctx context.Context, alias string) (err error) {
 		return err
 	}
 	stage, candidate, err := m.stageConfig(before.configBytes, func(doc *tomlDocument, _ config.Config) error {
-		doc.setValue("agent", "default_model", strconv.Quote(alias))
+		field := "default_model"
+		if utility {
+			field = "utility_model"
+		}
+		doc.setValue("agent", field, strconv.Quote(alias))
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(stage) }()
-	if candidate.Agent.DefaultModel != alias {
-		return errors.New("semantic default-model activation failed")
-	}
 	expectedAgent := before.cfg.Agent
-	expectedAgent.DefaultModel = alias
+	if utility {
+		if candidate.Agent.UtilityModel != alias {
+			return errors.New("semantic utility-model activation failed")
+		}
+		expectedAgent.UtilityModel = alias
+	} else {
+		if candidate.Agent.DefaultModel != alias {
+			return errors.New("semantic default-model activation failed")
+		}
+		expectedAgent.DefaultModel = alias
+	}
 	if !reflect.DeepEqual(candidate.Providers, before.cfg.Providers) ||
 		!reflect.DeepEqual(candidate.Models, before.cfg.Models) ||
 		!reflect.DeepEqual(candidate.Agent, expectedAgent) {
@@ -698,11 +811,11 @@ func (m *Manager) lockedConfigStatus(ctx context.Context, listHook bool) (cfg co
 	return cfg, status, nil
 }
 
-// List returns a deterministic, credential-free JSON document.
-func (m *Manager) List(ctx context.Context) ([]byte, error) {
+// Snapshot returns typed, credential-free provider state.
+func (m *Manager) Snapshot(ctx context.Context) (Listing, error) {
 	cfg, status, err := m.lockedConfigStatus(ctx, true)
 	if err != nil {
-		return nil, err
+		return Listing{}, err
 	}
 	providers := make(map[string]ProviderSummary, len(cfg.Providers))
 	for name, connection := range cfg.Providers {
@@ -712,7 +825,21 @@ func (m *Manager) List(ctx context.Context) ([]byte, error) {
 	for alias, target := range cfg.Models {
 		models[alias] = ModelSummary{Provider: target.Provider, Model: target.Model, MaxTokens: target.MaxTokens}
 	}
-	listing := Listing{State: status.State, DefaultModel: status.DefaultModel, Providers: providers, Models: models}
+	return Listing{
+		State:        status.State,
+		DefaultModel: status.DefaultModel,
+		UtilityModel: cfg.Agent.UtilityModel,
+		Providers:    providers,
+		Models:       models,
+	}, nil
+}
+
+// List returns a deterministic, credential-free JSON document.
+func (m *Manager) List(ctx context.Context) ([]byte, error) {
+	listing, err := m.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
 	b, err := json.MarshalIndent(listing, "", "  ")
 	if err != nil {
 		return nil, err
@@ -872,11 +999,16 @@ func (m *Manager) stageSecrets(original []byte, mutate func(secret.Store) error)
 }
 
 func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, key string) (err error) {
+	state := commitState(ctx)
+	transactionID, err := transactionIDForStage(configStage)
+	if err != nil {
+		return err
+	}
 	journal := transactionJournal{
 		Phase: "prepared", ConfigExisted: before.configExist, SecretExisted: before.secretExist,
 		ReadyExisted: before.readyExist, ConfigMode: uint32(before.configMode),
 		SecretMode: uint32(before.secretMode), ReadyMode: uint32(before.readyMode),
-		ServiceActive: before.serviceActive,
+		ServiceActive: before.serviceActive, TransactionID: transactionID,
 	}
 	if err := writeBackups(m, before); err != nil {
 		return err
@@ -920,6 +1052,16 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 	}
 	if err = m.crashPoint("config_committed"); err != nil {
 		return err
+	}
+	if state.mode == CommitForRestart {
+		if err = m.advanceJournal(&journal, "awaiting_restart"); err != nil {
+			return err
+		}
+		state.result = MutationResult{
+			RestartRequired: true,
+			TransactionID:   transactionID,
+		}
+		return nil
 	}
 
 	if candidate.Agent.DefaultModel == "" {
@@ -967,6 +1109,15 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 		return err
 	}
 	return m.finalizeTransaction()
+}
+
+func transactionIDForStage(configStage string) (string, error) {
+	contents, err := os.ReadFile(configStage)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(contents)
+	return hex.EncodeToString(sum[:16]), nil
 }
 
 func (m *Manager) statusFromConfig(ctx context.Context, cfg config.Config) (Status, error) {
@@ -1525,6 +1676,7 @@ func writeBackups(m *Manager, before snapshot) error {
 
 type transactionJournal struct {
 	Phase         string `json:"phase"`
+	TransactionID string `json:"transaction_id,omitempty"`
 	ConfigExisted bool   `json:"config_existed"`
 	SecretExisted bool   `json:"secret_existed"`
 	ReadyExisted  bool   `json:"ready_existed"`
@@ -1563,19 +1715,40 @@ func (m *Manager) crashPoint(phase string) error {
 }
 
 func (m *Manager) recoverLocked(ctx context.Context) error {
-	b, err := os.ReadFile(m.journalPath())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	j, present, err := m.readJournal()
 	if err != nil {
 		return err
 	}
-	var j transactionJournal
-	if err := json.Unmarshal(b, &j); err != nil {
-		return fmt.Errorf("parse provider transaction journal: %w", err)
+	if !present {
+		return nil
+	}
+	if j.Phase == "awaiting_restart" {
+		return ErrDeferredRestartPending
 	}
 	if j.Phase == "healthy" || j.Phase == "rolled_back" {
 		return m.finalizeTransaction()
+	}
+	return m.rollbackJournal(ctx, &j)
+}
+
+func (m *Manager) readJournal() (transactionJournal, bool, error) {
+	b, err := os.ReadFile(m.journalPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return transactionJournal{}, false, nil
+	}
+	if err != nil {
+		return transactionJournal{}, false, err
+	}
+	var j transactionJournal
+	if err := json.Unmarshal(b, &j); err != nil {
+		return transactionJournal{}, false, fmt.Errorf("parse provider transaction journal: %w", err)
+	}
+	return j, true, nil
+}
+
+func (m *Manager) rollbackJournal(ctx context.Context, j *transactionJournal) error {
+	if j == nil {
+		return errors.New("provider transaction journal is required")
 	}
 	if m.RestoreService == nil {
 		return errors.New("cannot recover provider transaction: service restore callback is not configured")
@@ -1591,8 +1764,60 @@ func (m *Manager) recoverLocked(ctx context.Context) error {
 	if err := m.RestoreService(ctx, j.ServiceActive); err != nil {
 		return fmt.Errorf("restore previous service state: %w", err)
 	}
-	if err := m.advanceJournal(&j, "rolled_back"); err != nil {
+	if err := m.advanceJournal(j, "rolled_back"); err != nil {
 		return err
+	}
+	return m.finalizeTransaction()
+}
+
+// FinalizeDeferred confirms that a newly started process is healthy before
+// removing the transaction journal and backups. A failed confirmation restores
+// the exact previous files and service state.
+func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+
+	journal, present, err := m.readJournal()
+	if err != nil || !present {
+		return err
+	}
+	switch journal.Phase {
+	case "healthy", "rolled_back":
+		return m.finalizeTransaction()
+	case "awaiting_restart":
+	default:
+		return m.rollbackJournal(ctx, &journal)
+	}
+
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		rollbackErr := m.rollbackJournal(ctx, &journal)
+		return errors.Join(err, rollbackErr)
+	}
+	if cfg.Agent.DefaultModel != "" {
+		if m.Health == nil || m.Health(ctx) != nil {
+			rollbackErr := m.rollbackJournal(ctx, &journal)
+			return errors.Join(ErrDeferredHealth, rollbackErr)
+		}
+		configBytes, readErr := os.ReadFile(m.ConfigPath)
+		if readErr != nil {
+			rollbackErr := m.rollbackJournal(ctx, &journal)
+			return errors.Join(readErr, rollbackErr)
+		}
+		if err := writeDurable(m.readyPath(), generationBytes(configBytes), 0o600); err != nil {
+			rollbackErr := m.rollbackJournal(ctx, &journal)
+			return errors.Join(err, rollbackErr)
+		}
+	} else if err := removeIfExists(m.readyPath()); err != nil {
+		rollbackErr := m.rollbackJournal(ctx, &journal)
+		return errors.Join(err, rollbackErr)
+	}
+	if err := m.advanceJournal(&journal, "healthy"); err != nil {
+		rollbackErr := m.rollbackJournal(ctx, &journal)
+		return errors.Join(err, rollbackErr)
 	}
 	return m.finalizeTransaction()
 }
