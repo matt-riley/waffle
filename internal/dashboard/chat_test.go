@@ -162,6 +162,8 @@ func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 	canary := "sk-browser-event-secret"
 	backend := &fakeChatBackend{turnEvent: chat.Event{Kind: chat.EventNotice, Text: "safe " + canary, ToolName: "/var/lib/waffle/private"}}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{4}, 32)))
+	// Exact-value redaction is the chat secret boundary; format regex is not (#153).
+	clients.SetRedactor(func(s string) string { return strings.ReplaceAll(s, canary, "[redacted]") })
 	hub := NewEventHub(4)
 	clients.events = hub
 	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
@@ -189,6 +191,9 @@ func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 			t.Fatalf("event data leaked %q: %q", leaked, data)
 		}
 	}
+	if !strings.Contains(data, `"tool_name":"[redacted]"`) {
+		t.Fatalf("tool name was not structurally rejected: %s", data)
+	}
 }
 
 func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
@@ -198,6 +203,7 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 		{Kind: chat.EventState, State: &chat.State{Title: "ready", Workspace: "/var/lib/waffle/work", History: []llm.Message{{Role: llm.RoleUser, Blocks: []llm.Block{{Text: canary}}}}}},
 	}}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{7}, 32)))
+	clients.SetRedactor(func(s string) string { return strings.ReplaceAll(s, canary, "[redacted]") })
 	hub := NewEventHub(4)
 	clients.SetEventHub(hub)
 	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
@@ -224,6 +230,9 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 	}
 	if strings.Contains(string(second.Data), canary) || strings.Contains(string(second.Data), "/var/lib/waffle") {
 		t.Fatalf("state event = %s", second.Data)
+	}
+	if workspace, exists := projected.State["workspace"]; !exists || string(workspace) != `""` {
+		t.Fatalf("absolute workspace path was not dropped: %s", second.Data)
 	}
 }
 

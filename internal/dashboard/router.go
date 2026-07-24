@@ -85,7 +85,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 		writeChatJSON(w, http.StatusOK, struct {
 			ClientID string     `json:"client_id"`
 			State    chat.State `json:"state"`
-		}{ClientID: clientID, State: safeChatState(state)})
+		}{ClientID: clientID, State: config.ChatClients.safeChatState(state)})
 	})))
 	mux.Handle("POST /api/v1/desk/chat/turn", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -114,7 +114,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeChatError(w, err, "command_failed")
 			return
 		}
-		writeChatJSON(w, http.StatusOK, safeChatResult(result))
+		writeChatJSON(w, http.StatusOK, config.ChatClients.safeChatResult(result))
 	})))
 	for _, route := range []struct {
 		path string

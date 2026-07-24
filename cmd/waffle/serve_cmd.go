@@ -148,6 +148,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		dashboardHub = dashboard.NewEventHub(256)
 		dashboardClients = dashboard.NewChatClients(runtimeFactory, rand.Reader)
 		dashboardClients.SetEventHub(dashboardHub)
+		if store, err := secret.TryOpen(); err == nil {
+			if redactor, err := secret.NewRedactor(store); err == nil {
+				dashboardClients.SetRedactor(redactor.Redact)
+			}
+		}
 	}
 
 	sessions := session.New(st)
