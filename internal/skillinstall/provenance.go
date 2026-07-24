@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/matt-riley/waffle/internal/filecommit"
 )
 
 const installProvenanceVersion = 1
@@ -210,37 +212,14 @@ func (i *Installer) readInstallProvenance(stageID string) (installProvenanceReco
 	return readBoundedJSONFile[installProvenanceRecord](i.installProvenancePath(stageID), maxStageRecord)
 }
 
-func (i *Installer) writeInstallProvenance(record installProvenanceRecord) (retErr error) {
+func (i *Installer) writeInstallProvenance(record installProvenanceRecord) error {
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("encode reviewed install provenance: %w", err)
 	}
-	temporary, err := os.CreateTemp(i.StageRoot, ".install-provenance-write-*")
-	if err != nil {
-		return fmt.Errorf("create reviewed install provenance: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			retErr = errors.Join(retErr, temporary.Close())
-		}
-		if removeErr := os.Remove(temporaryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			retErr = errors.Join(retErr, removeErr)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	if err := writeSyncClose(temporary, append(encoded, '\n')); err != nil {
-		return fmt.Errorf("write reviewed install provenance: %w", err)
-	}
-	closed = true
-	if err := os.Rename(temporaryPath, i.installProvenancePath(record.Provenance.StageID)); err != nil {
+	// Shared crash-safe commit: temp → fsync → rename → dir sync (#156).
+	if err := filecommit.Write(i.installProvenancePath(record.Provenance.StageID), append(encoded, '\n'), 0o600); err != nil {
 		return fmt.Errorf("commit reviewed install provenance: %w", err)
-	}
-	if err := syncDirectory(i.StageRoot); err != nil {
-		return fmt.Errorf("sync reviewed install provenance: %w", err)
 	}
 	return nil
 }
@@ -249,5 +228,5 @@ func (i *Installer) removeInstallProvenance(stageID string) error {
 	if err := os.Remove(i.installProvenancePath(stageID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDirectory(i.StageRoot)
+	return filecommit.SyncDir(i.StageRoot)
 }
