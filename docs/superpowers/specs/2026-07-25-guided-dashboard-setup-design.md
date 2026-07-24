@@ -1,6 +1,6 @@
 # Guided Dashboard Setup and Capability Onboarding Design
 
-**Status:** Approved product direction; awaiting written-spec review
+**Status:** Approved on 2026-07-25
 
 ## Summary
 
@@ -155,6 +155,10 @@ Manual upstream model entry remains available when discovery is unsupported.
 2. **Upload archive** — a bounded `.zip` containing one or more skills.
 3. **Approved host folder** — an advanced path shown only when the host has
    configured labeled import roots.
+
+Public `github.com` discovery is a built-in source and does not require an
+operator to pre-edit `skill_git_hosts`. Existing exact-Git host allowlists
+remain an advanced/recovery policy and do not authorize private credentials.
 
 An unavailable method is explained in policy-neutral language rather than
 rendered as a dead form. The server returns safe capability flags and labels,
