@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.4](https://github.com/matt-riley/waffle/compare/v0.8.3...v0.8.4) (2026-07-24)
+
+
+### Bug Fixes
+
+* address Greptile review comments from [#165](https://github.com/matt-riley/waffle/issues/165) [#166](https://github.com/matt-riley/waffle/issues/166) [#168](https://github.com/matt-riley/waffle/issues/168) ([#170](https://github.com/matt-riley/waffle/issues/170)) ([a9fedad](https://github.com/matt-riley/waffle/commit/a9fedad656ec3a27f884ead94d4f8bf86a4b18f7))
+* address Greptile review comments on ttlmap ([#167](https://github.com/matt-riley/waffle/issues/167)) ([#172](https://github.com/matt-riley/waffle/issues/172)) ([93787cf](https://github.com/matt-riley/waffle/commit/93787cff43ee2c39b5cace13ac88c364ff6279ba))
+
 ## [0.8.3](https://github.com/matt-riley/waffle/compare/v0.8.2...v0.8.3) (2026-07-24)
 
 
