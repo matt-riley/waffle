@@ -35,8 +35,8 @@ jobs:
           cache: true
       - name: Verify browser runtime
         run: |
-          node --version
-          pnpm --version
+          test "$(node --version)" = "v26.1.0"
+          test "$(pnpm --version)" = "11.9.0"
           google-chrome --version
       - name: Run Waffle Desk browser gate
         env:

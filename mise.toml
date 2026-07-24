@@ -42,11 +42,23 @@ node --test \
 [tasks.dashboard-install]
 description = "Install Waffle Desk browser-test dependencies"
 env = { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1" }
-run = "pnpm --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts"
+run = """
+dashboard_node="$(mise which node)"
+dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
+test "$("$dashboard_node" --version)" = "v26.1.0"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts
+"""
 
 [tasks.dashboard-test]
 description = "Run Waffle Desk browser tests with system Chrome"
-run = "pnpm --dir tools/dashboard-tests test"
+run = """
+dashboard_node="$(mise which node)"
+dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
+test "$("$dashboard_node" --version)" = "v26.1.0"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests test
+"""
 
 [tasks.dashboard-check]
 description = "Run the complete Waffle Desk browser rollout gate"
