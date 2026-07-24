@@ -934,6 +934,13 @@ func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 	if err != nil {
 		return nil, err
 	}
+	return FilterActive(all, db)
+}
+
+// FilterActive returns the active subset of an already-discovered skill list.
+// Callers that also need the full list should Discover once and filter, rather
+// than calling Discover and DiscoverActive (which walks the directory twice).
+func FilterActive(all []Skill, db *sql.DB) ([]Skill, error) {
 	statusOverride := map[string]string{}
 	if db != nil {
 		rows, err := db.Query(`SELECT name, status FROM skill_status`)
@@ -960,6 +967,20 @@ func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 		if st == StatusActive {
 			out = append(out, s)
 		}
+	}
+	return out, nil
+}
+
+// ActiveNames returns the set of active skill names for an already-discovered
+// list. Prefer this when only membership is needed after a single Discover.
+func ActiveNames(all []Skill, db *sql.DB) (map[string]struct{}, error) {
+	active, err := FilterActive(all, db)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(active))
+	for _, item := range active {
+		out[item.Name] = struct{}{}
 	}
 	return out, nil
 }
