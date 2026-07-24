@@ -64,7 +64,7 @@ func newEventsHandler(config APIConfig) http.Handler {
 			http.Error(w, "streaming_unsupported", http.StatusInternalServerError)
 			return
 		}
-		after, err := parseLastEventID(r.Header.Get("Last-Event-ID"))
+		after, err := parseEventCursor(r)
 		if err != nil {
 			http.Error(w, "invalid_last_event_id", http.StatusBadRequest)
 			return
@@ -115,6 +115,20 @@ func parseLastEventID(value string) (uint64, error) {
 		}
 	}
 	return strconv.ParseUint(value, 10, 64)
+}
+
+func parseEventCursor(r *http.Request) (uint64, error) {
+	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+		return parseLastEventID(lastEventID)
+	}
+	after, present := r.URL.Query()["after"]
+	if !present {
+		return 0, nil
+	}
+	if len(after) != 1 || after[0] == "" {
+		return 0, fmt.Errorf("after must be one unsigned decimal")
+	}
+	return parseLastEventID(after[0])
 }
 
 func writeSSE(w http.ResponseWriter, eventType string, cursor uint64, data []byte) error {

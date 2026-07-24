@@ -50,6 +50,100 @@ func TestEventsRejectsMalformedLastEventID(t *testing.T) {
 	}
 }
 
+func TestEventsUsesAfterQueryForInitialNativeEventSourceCursor(t *testing.T) {
+	hub := NewEventHub(2)
+	hub.Publish(Event{Type: "one"})
+	hub.Publish(Event{Type: "two"})
+	current := hub.Publish(Event{Type: "three"})
+	ticks := make(chan time.Time, 1)
+	config := testAPIConfig(t)
+	config.Hub = hub
+	config.Heartbeat = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := newStreamRecorder()
+	request, _ := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"http://127.0.0.1:8422/api/v1/desk/events?after="+stringCursor(current.Cursor),
+		nil,
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newEventsHandler(config).ServeHTTP(writer, request)
+	}()
+	ticks <- time.Now()
+	writer.waitForFlush(t)
+	cancel()
+	<-done
+
+	if got, want := writer.String(), ": heartbeat\n\n"; got != want {
+		t.Fatalf("fresh cursor SSE = %q, want %q", got, want)
+	}
+}
+
+func TestEventsLastEventIDTakesPrecedenceOverAfterQuery(t *testing.T) {
+	hub := NewEventHub(4)
+	first := hub.Publish(Event{Type: "one"})
+	second := hub.Publish(Event{Type: "two"})
+	config := testAPIConfig(t)
+	config.Hub = hub
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := newStreamRecorder()
+	request, _ := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"http://127.0.0.1:8422/api/v1/desk/events?after=not-a-cursor",
+		nil,
+	)
+	request.Header.Set("Last-Event-ID", stringCursor(first.Cursor))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newEventsHandler(config).ServeHTTP(writer, request)
+	}()
+	writer.waitForFlush(t)
+	cancel()
+	<-done
+
+	want := "id: 2\nevent: two\ndata: {\"cursor\":2,\"type\":\"two\"}\n\n"
+	if got := writer.String(); got != want {
+		t.Fatalf("header precedence SSE = %q, want %q (second cursor %d)", got, want, second.Cursor)
+	}
+}
+
+func TestEventsRejectsInvalidAfterQuery(t *testing.T) {
+	for _, rawQuery := range []string{
+		"after=",
+		"after=-1",
+		"after=+1",
+		"after=%201",
+		"after=18446744073709551616",
+		"after=1&after=2",
+	} {
+		t.Run(rawQuery, func(t *testing.T) {
+			writer := newStreamRecorder()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			request, _ := http.NewRequestWithContext(
+				ctx,
+				http.MethodGet,
+				"http://127.0.0.1:8422/api/v1/desk/events?"+rawQuery,
+				nil,
+			)
+			newEventsHandler(testAPIConfig(t)).ServeHTTP(writer, request)
+			if writer.status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", writer.status)
+			}
+			if got, want := writer.String(), "invalid_last_event_id\n"; got != want {
+				t.Fatalf("body = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestEventsHeartbeatAndRequestCancellation(t *testing.T) {
 	ticks := make(chan time.Time, 1)
 	config := testAPIConfig(t)
