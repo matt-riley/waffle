@@ -188,11 +188,18 @@ func (s *MemoryService) Attach(ctx context.Context, request MemoryAttachRequest)
 		return nil, err
 	}
 
-	prefix := fmt.Sprintf("Memory [%s:%s]: ", hit.Source, hit.SourceID)
+	prefix := strings.ToValidUTF8(
+		fmt.Sprintf("Memory [%s:%s]: ", hit.Source, hit.SourceID),
+		"\uFFFD",
+	)
 	if len(prefix) >= workset.MaxEntryBytes {
 		return nil, ErrMemoryHitNotFound
 	}
-	body := prefix + textcut.Cut(memory.OneLine(hit.Excerpt), workset.MaxEntryBytes-len(prefix))
+	excerpt := strings.ToValidUTF8(memory.OneLine(hit.Excerpt), "\uFFFD")
+	body := strings.ToValidUTF8(
+		prefix+textcut.Cut(excerpt, workset.MaxEntryBytes-len(prefix)),
+		"\uFFFD",
+	)
 	entry, err := s.operations.Workset.Add(
 		ctx,
 		sessionID,
@@ -403,10 +410,12 @@ func normalizeMemoryQuery(query string) (string, error) {
 }
 
 func safeMemoryExcerpt(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	return textcut.Cut(memory.OneLine(sanitizeDashboardString(value)), MemoryExcerptMaxBytes)
 }
 
 func safeMemoryLabel(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	return textcut.Cut(memory.OneLine(sanitizeDashboardString(value)), memorySourceLabelMaxLen)
 }
 

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/workset"
 )
 
@@ -162,6 +165,103 @@ func TestMemoryAttachResolvesHitAndPreservesWorksetBounds(t *testing.T) {
 		Source: MemorySourceNote, SourceID: "note-live",
 	}); !errors.Is(err, ErrMemoryWorksetConflict) {
 		t.Fatalf("full workset error = %v", err)
+	}
+}
+
+func TestMemoryAttachNormalizesInvalidUTF8BeforeBoundingWorksetBody(t *testing.T) {
+	invalidID := string([]byte{'n', 0xff, '1'})
+	invalidExcerpt := string([]byte{0xff}) + strings.Repeat("x", 508) + "🧇tail"
+	sessions := &memorySessionStore{
+		get: map[string]*session.Session{"session-live": {ID: "session-live"}},
+	}
+	notes := &memoryNotesStore{hits: []memory.NoteHit{{
+		ID:      invalidID,
+		Snippet: invalidExcerpt,
+	}}}
+	worksets := &recordingMemoryWorkset{}
+	service := NewMemoryService(&Operations{
+		Sessions: sessions,
+		Notes:    notes,
+		Workset:  worksets,
+	}, memory.Workspace{})
+
+	hits, err := service.Search(context.Background(), "waffle", MemorySearchLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %#v", hits)
+	}
+	if !utf8.ValidString(hits[0].SourceID) || !utf8.ValidString(hits[0].Excerpt) {
+		t.Fatalf("search hit retained invalid UTF-8: %#v", hits[0])
+	}
+	if len(hits[0].Excerpt) > MemoryExcerptMaxBytes {
+		t.Fatalf("excerpt bytes = %d, want <= %d", len(hits[0].Excerpt), MemoryExcerptMaxBytes)
+	}
+
+	entry, err := service.Attach(context.Background(), MemoryAttachRequest{
+		SessionID: "session-live",
+		Query:     "waffle",
+		Source:    MemorySourceNote,
+		SourceID:  invalidID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(entry.Body) || len(entry.Body) > workset.MaxEntryBytes {
+		t.Fatalf("workset body bytes=%d valid=%t: %q", len(entry.Body), utf8.ValidString(entry.Body), entry.Body)
+	}
+	if !strings.HasPrefix(entry.Body, "Memory [note:n\uFFFD1]: \uFFFD") {
+		t.Fatalf("normalized workset prefix/body = %q", entry.Body)
+	}
+}
+
+func TestMemorySearchUsesPersistedSummaryUpdatedAtForNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	opened, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	sessions := session.New(opened)
+	clock := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	sessions.Now = func() time.Time { return clock }
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderID, newerID := first.ID, second.ID
+	if olderID > newerID {
+		olderID, newerID = newerID, olderID
+	}
+	older := clock.Add(time.Hour)
+	newer := clock.Add(2 * time.Hour)
+	clock = older
+	if err := sessions.SetSummary(ctx, olderID, "security older"); err != nil {
+		t.Fatal(err)
+	}
+	clock = newer
+	if err := sessions.SetSummary(ctx, newerID, "security newer"); err != nil {
+		t.Fatal(err)
+	}
+	service := NewMemoryService(&Operations{
+		Sessions: sessions,
+		Notes:    &memoryNotesStore{},
+	}, memory.Workspace{})
+
+	hits, err := service.Search(ctx, "security", MemorySearchLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %#v", hits)
+	}
+	if hits[0].SourceID != newerID || !hits[0].Timestamp.Equal(newer) {
+		t.Fatalf("newest summary = %#v, want id=%q timestamp=%s", hits[0], newerID, newer)
 	}
 }
 

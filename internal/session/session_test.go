@@ -174,6 +174,45 @@ func TestSearchFindsTextAndToolResults(t *testing.T) {
 	}
 }
 
+func TestSearchSummariesPopulatesUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	clock := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	sessions.Now = func() time.Time { return clock }
+	older, err := sessions.Create(ctx, "older")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := sessions.Create(ctx, "newer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderUpdatedAt := clock.Add(time.Hour)
+	newerUpdatedAt := clock.Add(2 * time.Hour)
+	clock = olderUpdatedAt
+	if err := sessions.SetSummary(ctx, older.ID, "security summary older"); err != nil {
+		t.Fatal(err)
+	}
+	clock = newerUpdatedAt
+	if err := sessions.SetSummary(ctx, newer.ID, "security summary newer"); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := sessions.SearchSummaries(ctx, "security summary", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %#v", hits)
+	}
+	if hits[0].SessionID != newer.ID || !hits[0].CreatedAt.Equal(newerUpdatedAt) {
+		t.Fatalf("newest hit = %#v, want updated_at %s", hits[0], newerUpdatedAt)
+	}
+	if hits[1].SessionID != older.ID || !hits[1].CreatedAt.Equal(olderUpdatedAt) {
+		t.Fatalf("older hit = %#v, want updated_at %s", hits[1], olderUpdatedAt)
+	}
+}
+
 func TestSearchBlendsRecencyEqualRelevance(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
