@@ -28,7 +28,9 @@ var errInvalidTaskFieldIntent = errors.New("invalid task field intent")
 type TaskScheduleStore interface {
 	// Implementations must honor ctx and return only after the storage
 	// operation has terminated. In particular, a deadline error must not leave
-	// work capable of committing after this method returns.
+	// work capable of committing after this method returns. A nil error is an
+	// authoritative durable result even if ctx expires immediately afterward;
+	// create and update must return the canonical committed Job.
 	AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (*schedule.Job, error)
 	Get(ctx context.Context, id string) (*schedule.Job, error)
 	Update(ctx context.Context, id string, in schedule.Update) (*schedule.Job, error)
@@ -284,19 +286,6 @@ func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) htt
 			writeTaskStoreError(w, err)
 			return
 		}
-		if err := r.Context().Err(); err != nil {
-			writeTaskStoreError(w, err)
-			return
-		}
-		job, err = store.Get(r.Context(), job.ID)
-		if err != nil {
-			writeTaskStoreError(w, err)
-			return
-		}
-		if err := r.Context().Err(); err != nil {
-			writeTaskStoreError(w, err)
-			return
-		}
 		view := scheduleTaskView(*job)
 		publishTaskScheduleEvent(events, TaskScheduleCreatedEvent, view)
 		writeTaskJSON(w, http.StatusCreated, struct {
@@ -331,10 +320,6 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		job, err := store.Update(r.Context(), r.PathValue("id"), input)
 		if err != nil {
-			writeTaskStoreError(w, err)
-			return
-		}
-		if err := r.Context().Err(); err != nil {
 			writeTaskStoreError(w, err)
 			return
 		}

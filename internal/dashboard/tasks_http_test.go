@@ -328,7 +328,7 @@ func TestTaskMutationCanceledReplayWaiterDoesNotCancelAdmittedMutation(t *testin
 	}
 }
 
-func TestTaskMutationDoesNotCacheBeforeUncooperativeStoreTerminates(t *testing.T) {
+func TestTaskMutationCachesUncooperativeSuccessOnlyAfterTermination(t *testing.T) {
 	schedules := newLateTaskUpdateStore()
 	events := NewEventHub(4)
 	handler, security := newTaskMutationTestHandler(t, schedules, events, 35*time.Millisecond)
@@ -359,18 +359,64 @@ func TestTaskMutationDoesNotCacheBeforeUncooperativeStoreTerminates(t *testing.T
 	close(schedules.release)
 	<-schedules.returned
 	owner := <-ownerDone
-	if owner.Code != http.StatusServiceUnavailable {
-		t.Fatalf("owner status = %d, want actual post-termination 503: %s", owner.Code, owner.Body.String())
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner status = %d, want authoritative durable success: %s", owner.Code, owner.Body.String())
 	}
 	replay := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
 	if replay.Code != owner.Code || !bytes.Equal(replay.Body.Bytes(), owner.Body.Bytes()) {
 		t.Fatalf("replay = %d %q, want cached actual result %d %q", replay.Code, replay.Body.Bytes(), owner.Code, owner.Body.Bytes())
 	}
-	if events.Cursor() != 0 {
-		t.Fatal("late store result published an event")
+	if events.Cursor() != 1 {
+		t.Fatalf("durable success events = %d, want one", events.Cursor())
 	}
 	if schedules.updateCount() != 1 {
 		t.Fatalf("updates = %d, want one", schedules.updateCount())
+	}
+}
+
+func TestTaskScheduleCreateSuccessAfterDeadlineIsAuthoritativeAndCanonical(t *testing.T) {
+	schedules := newDeadlineSuccessCreateStore()
+	events := NewEventHub(4)
+	handler, security := newTaskMutationTestHandler(t, schedules, events, 35*time.Millisecond)
+	ownerDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		ownerDone <- serveTaskCreate(handler, security, context.Background(), "create-after-deadline")
+	}()
+	<-schedules.started
+	<-schedules.deadline
+	select {
+	case early := <-ownerDone:
+		close(schedules.release)
+		t.Fatalf("create returned before store termination: %d %s", early.Code, early.Body.String())
+	default:
+	}
+	close(schedules.release)
+
+	owner := <-ownerDone
+	if owner.Code != http.StatusCreated {
+		t.Fatalf("owner status = %d, want authoritative 201: %s", owner.Code, owner.Body.String())
+	}
+	var response struct {
+		Task TaskView `json:"task"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Task.ID != schedules.job.ID || response.Task.Name != schedules.job.Name ||
+		response.Task.Profile != schedules.job.Profile || response.Task.Retry.MaxAttempts != schedules.job.MaxAttempts ||
+		!response.Task.Enabled {
+		t.Fatalf("response task = %+v, want canonical durable job %+v", response.Task, schedules.job)
+	}
+	replay := serveTaskCreate(handler, security, context.Background(), "create-after-deadline")
+	if replay.Code != owner.Code || !bytes.Equal(replay.Body.Bytes(), owner.Body.Bytes()) {
+		t.Fatalf("replay = %d %q, want %d %q", replay.Code, replay.Body.Bytes(), owner.Code, owner.Body.Bytes())
+	}
+	adds, gets := schedules.counts()
+	if adds != 1 || gets != 0 {
+		t.Fatalf("store calls = add:%d get:%d, want one atomic create and no follow-up read", adds, gets)
+	}
+	if events.Cursor() != 1 {
+		t.Fatalf("events = %d, want one", events.Cursor())
 	}
 }
 
@@ -898,6 +944,24 @@ func serveTaskUpdateID(
 	return rec
 }
 
+func serveTaskCreate(
+	handler http.Handler,
+	security *Security,
+	ctx context.Context,
+	key string,
+) *httptest.ResponseRecorder {
+	body := `{"name":"Morning brief","cron":"0 9 * * *","prompt":"Summarize","deliver":"","profile":"researcher"}`
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1:8422/api/v1/desk/tasks/schedules", strings.NewReader(body))
+	req = req.WithContext(ctx)
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", key)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
 type controlledTaskUpdateStore struct {
 	mu      sync.Mutex
 	job     schedule.Job
@@ -962,6 +1026,59 @@ func (s *controlledTaskUpdateStore) counts() (int, int) {
 type deadlineTaskUpdateStore struct {
 	job      schedule.Job
 	deadline chan time.Time
+}
+
+type deadlineSuccessCreateStore struct {
+	mu       sync.Mutex
+	job      schedule.Job
+	adds     int
+	gets     int
+	started  chan struct{}
+	deadline chan struct{}
+	release  chan struct{}
+}
+
+func newDeadlineSuccessCreateStore() *deadlineSuccessCreateStore {
+	return &deadlineSuccessCreateStore{
+		job: schedule.Job{
+			ID: "job-canonical", Name: "Morning brief", Cron: "0 9 * * *",
+			Prompt: "Summarize", Profile: "researcher", Enabled: true,
+			CreatedAt:   time.Date(2026, time.July, 24, 13, 30, 0, 0, time.UTC),
+			MaxAttempts: 4, BaseBackoff: 15 * time.Second,
+			MaxBackoff: 10 * time.Minute, StallTimeout: 5 * time.Minute,
+		},
+		started: make(chan struct{}), deadline: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (s *deadlineSuccessCreateStore) AddWithProfile(ctx context.Context, _, _, _, _, _ string) (*schedule.Job, error) {
+	s.mu.Lock()
+	s.adds++
+	s.mu.Unlock()
+	close(s.started)
+	<-ctx.Done()
+	close(s.deadline)
+	<-s.release
+	job := s.job
+	return &job, nil
+}
+
+func (s *deadlineSuccessCreateStore) Get(context.Context, string) (*schedule.Job, error) {
+	s.mu.Lock()
+	s.gets++
+	s.mu.Unlock()
+	job := s.job
+	return &job, nil
+}
+
+func (s *deadlineSuccessCreateStore) Update(context.Context, string, schedule.Update) (*schedule.Job, error) {
+	return nil, errors.New("unexpected update")
+}
+
+func (s *deadlineSuccessCreateStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adds, s.gets
 }
 
 type lateTaskUpdateStore struct {

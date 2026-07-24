@@ -63,6 +63,28 @@ func TestAddValidatesCron(t *testing.T) {
 	}
 }
 
+func TestAddReturnsCanonicalCommittedJob(t *testing.T) {
+	jobs := NewStore(newTestStore(t))
+	created, err := jobs.AddWithProfile(
+		context.Background(), "brief", "0 9 * * *", "summarize", "telegram:900", "researcher",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := jobs.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.ID != stored.ID || created.Name != stored.Name ||
+		created.Cron != stored.Cron || created.Prompt != stored.Prompt ||
+		created.Deliver != stored.Deliver || created.Profile != stored.Profile ||
+		created.Enabled != stored.Enabled || created.CreatedAt != stored.CreatedAt ||
+		created.MaxAttempts != stored.MaxAttempts || created.BaseBackoff != stored.BaseBackoff ||
+		created.MaxBackoff != stored.MaxBackoff || created.StallTimeout != stored.StallTimeout {
+		t.Fatalf("created job is not canonical: created=%+v stored=%+v", created, stored)
+	}
+}
+
 func TestJobProfileField(t *testing.T) {
 	ctx := context.Background()
 	s := NewStore(newTestStore(t))

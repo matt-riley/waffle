@@ -143,8 +143,9 @@ func (s *Store) Add(ctx context.Context, name, spec, prompt, deliver string) (*J
 	return s.AddWithProfile(ctx, name, spec, prompt, deliver, "")
 }
 
-// AddWithProfile is Add with an optional named agent profile (#71).
-func (s *Store) AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (*Job, error) {
+// AddWithProfile is Add with an optional named agent profile (#71). Its
+// returned job is the canonical row committed by the same transaction.
+func (s *Store) AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (_ *Job, err error) {
 	if _, err := parser.Parse(spec); err != nil {
 		return nil, fmt.Errorf("invalid cron %q: %w", spec, err)
 	}
@@ -152,14 +153,31 @@ func (s *Store) AddWithProfile(ctx context.Context, name, spec, prompt, deliver,
 	if err != nil {
 		return nil, fmt.Errorf("new job id: %w", err)
 	}
-	j := &Job{ID: jobID, Name: name, Cron: spec, Prompt: prompt, Deliver: deliver, Profile: profile, Enabled: true}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at, max_attempts, base_backoff, max_backoff, stall_timeout, profile)
-		VALUES (?, ?, ?, ?, ?, 1, ?, 1, '10s', '10m', '5m', ?)`, j.ID, name, spec, prompt, deliver, now(), profile)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("add job: %w", err)
 	}
-	return j, nil
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO jobs (id, name, cron, prompt, deliver, enabled, created_at, max_attempts, base_backoff, max_backoff, stall_timeout, profile)
+		VALUES (?, ?, ?, ?, ?, 1, ?, 1, '10s', '10m', '5m', ?)`, jobID, name, spec, prompt, deliver, now(), profile)
+	if err != nil {
+		return nil, fmt.Errorf("add job: %w", err)
+	}
+	job, err := scanJob(tx.QueryRowContext(ctx, `
+		SELECT id, name, cron, prompt, deliver, enabled, last_run, last_status, created_at, attempt, next_retry, max_attempts, base_backoff, max_backoff, stall_timeout, profile
+		FROM jobs WHERE id = ?`, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("read added job: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit added job: %w", err)
+	}
+	return job, nil
 }
 
 // Update validates and replaces a job's editable definition while preserving
