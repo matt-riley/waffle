@@ -328,6 +328,34 @@ func TestTaskMutationCanceledReplayWaiterDoesNotCancelAdmittedMutation(t *testin
 	}
 }
 
+func TestTaskMutationHardBoundSuppressesLateStoreResult(t *testing.T) {
+	schedules := newLateTaskUpdateStore()
+	events := NewEventHub(4)
+	handler, security := newTaskMutationTestHandler(t, schedules, events, 35*time.Millisecond)
+	started := time.Now()
+
+	rec := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("bounded response took %v", elapsed)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	close(schedules.release)
+	<-schedules.returned
+	time.Sleep(20 * time.Millisecond)
+	if events.Cursor() != 0 {
+		t.Fatal("store result after completion deadline published an event")
+	}
+	replay := serveTaskUpdate(handler, security, context.Background(), "late-store-result")
+	if replay.Code != http.StatusServiceUnavailable || !bytes.Equal(rec.Body.Bytes(), replay.Body.Bytes()) {
+		t.Fatalf("replay = %d %q, want cached %d %q", replay.Code, replay.Body.Bytes(), rec.Code, rec.Body.Bytes())
+	}
+	if schedules.updateCount() != 1 {
+		t.Fatalf("updates = %d, want one", schedules.updateCount())
+	}
+}
+
 func TestTaskScheduleInvalidUpdateDoesNotMutateOrPublish(t *testing.T) {
 	harness := newTaskRouteHarness(t)
 	job, err := harness.schedules.Add(context.Background(), "Old", "0 8 * * *", "Old prompt", "")
@@ -855,6 +883,59 @@ func (s *controlledTaskUpdateStore) counts() (int, int) {
 type deadlineTaskUpdateStore struct {
 	job      schedule.Job
 	deadline chan time.Time
+}
+
+type lateTaskUpdateStore struct {
+	mu       sync.Mutex
+	job      schedule.Job
+	updates  int
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func newLateTaskUpdateStore() *lateTaskUpdateStore {
+	return &lateTaskUpdateStore{
+		job: schedule.Job{
+			ID: "job-control", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
+		},
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+}
+
+func (s *lateTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
+	return nil, errors.New("unexpected create")
+}
+
+func (s *lateTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.job
+	return &job, nil
+}
+
+func (s *lateTaskUpdateStore) Update(_ context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
+	s.mu.Lock()
+	s.updates++
+	s.mu.Unlock()
+	<-s.release
+	s.mu.Lock()
+	s.job.Name = input.Name
+	s.job.Cron = input.Cron
+	s.job.Prompt = input.Prompt
+	s.job.Deliver = input.Deliver
+	s.job.Profile = input.Profile
+	s.job.Enabled = input.Enabled
+	job := s.job
+	s.mu.Unlock()
+	close(s.returned)
+	return &job, nil
+}
+
+func (s *lateTaskUpdateStore) updateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updates
 }
 
 func newDeadlineTaskUpdateStore() *deadlineTaskUpdateStore {

@@ -310,8 +310,16 @@ func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) htt
 			writeTaskStoreError(w, err)
 			return
 		}
+		if err := r.Context().Err(); err != nil {
+			writeTaskStoreError(w, err)
+			return
+		}
 		job, err = store.Get(r.Context(), job.ID)
 		if err != nil {
+			writeTaskStoreError(w, err)
+			return
+		}
+		if err := r.Context().Err(); err != nil {
 			writeTaskStoreError(w, err)
 			return
 		}
@@ -338,6 +346,10 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 			writeTaskStoreError(w, err)
 			return
 		}
+		if err := r.Context().Err(); err != nil {
+			writeTaskStoreError(w, err)
+			return
+		}
 		input, err := resolveTaskScheduleUpdate(*current, request)
 		if err != nil {
 			writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
@@ -345,6 +357,10 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		job, err := store.Update(r.Context(), r.PathValue("id"), input)
 		if err != nil {
+			writeTaskStoreError(w, err)
+			return
+		}
+		if err := r.Context().Err(); err != nil {
 			writeTaskStoreError(w, err)
 			return
 		}
