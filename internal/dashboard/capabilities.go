@@ -65,11 +65,12 @@ type CapabilityCatalogueResult struct {
 }
 
 type CapabilitySkill struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Active      bool   `json:"active"`
-	Attached    bool   `json:"attached"`
-	Missing     bool   `json:"missing,omitempty"`
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	Active             bool   `json:"active"`
+	Attached           bool   `json:"attached"`
+	Missing            bool   `json:"missing,omitempty"`
+	InstallDisposition string `json:"install_disposition,omitempty"`
 }
 
 type CapabilitySession struct {

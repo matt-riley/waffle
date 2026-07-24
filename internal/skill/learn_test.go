@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -238,6 +239,53 @@ func TestSkillStatusPreservesInstallProvenance(t *testing.T) {
 	}
 	if inactiveActivated != activatedAt {
 		t.Fatalf("inactive activated_at = %q, want preserved %q", inactiveActivated, activatedAt)
+	}
+}
+
+func TestActivateSkillRestoresInactiveFrontmatterWhenStatusPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
+	path := filepath.Join(ws.SkillsDir(), "atomic-activation", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("---\nname: atomic-activation\ndescription: Atomic activation.\nstatus: inactive\n---\n\n# Atomic\n")
+	if err := os.WriteFile(path, before, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.Context(), filepath.Join(root, "state", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = ActivateSkill(t.Context(), st.DB, ws, "atomic-activation")
+
+	if err == nil {
+		t.Fatal("ActivateSkill succeeded with an unavailable status store")
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("frontmatter was not restored after status failure:\n%s", after)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("restored skill mode = %v, want 0640", info.Mode().Perm())
+	}
+	active, discoverErr := DiscoverActive(ws.SkillsDir(), nil)
+	if discoverErr != nil {
+		t.Fatal(discoverErr)
+	}
+	if len(active) != 0 {
+		t.Fatalf("failed activation remained active: %#v", active)
 	}
 }
 

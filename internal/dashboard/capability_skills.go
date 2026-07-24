@@ -21,9 +21,7 @@ type WorkspaceCapabilitySkills struct {
 	Attachments *skill.Attachments
 	Installer   *skillinstall.Installer
 
-	mu      sync.Mutex
-	staged  map[string]skillinstall.Manifest
-	pending map[string]skill.StatusRecord
+	mu sync.Mutex
 }
 
 func (s *WorkspaceCapabilitySkills) List(ctx context.Context, sessionID string) ([]CapabilitySkill, error) {
@@ -103,45 +101,35 @@ func (s *WorkspaceCapabilitySkills) Stage(ctx context.Context, request skillinst
 	if s == nil || s.Installer == nil {
 		return skillinstall.Manifest{}, ErrCapabilitiesUnavailable
 	}
-	manifest, err := s.Installer.Stage(ctx, request)
-	if err != nil {
-		return skillinstall.Manifest{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.staged == nil {
-		s.staged = make(map[string]skillinstall.Manifest)
-	}
-	s.staged[manifest.StageID] = manifest
-	return manifest, nil
+	return s.Installer.Stage(ctx, request)
 }
 
 func (s *WorkspaceCapabilitySkills) Install(ctx context.Context, stageID, digest string) (CapabilitySkill, error) {
 	if s == nil || s.Installer == nil {
 		return CapabilitySkill{}, ErrCapabilitiesUnavailable
 	}
-	key := stageID + "\x00" + digest
 	s.mu.Lock()
-	if pending, ok := s.pending[key]; ok {
-		s.mu.Unlock()
-		if err := skill.SetSkillStatusRecord(ctx, s.DB, pending); err != nil {
-			return CapabilitySkill{}, err
-		}
-		s.mu.Lock()
-		delete(s.pending, key)
-		delete(s.staged, stageID)
-		s.mu.Unlock()
-		return CapabilitySkill{Name: pending.Name, Active: false}, nil
-	}
-	manifest, ok := s.staged[stageID]
-	s.mu.Unlock()
-	if !ok || manifest.ContentDigest != digest {
-		return CapabilitySkill{}, skillinstall.ErrStageNotFound
-	}
+	defer s.mu.Unlock()
 
-	result, err := s.Installer.InstallReviewed(ctx, stageID, digest)
+	provenance, recovered, err := s.Installer.PrepareInstallProvenance(stageID, digest)
 	if err != nil {
 		return CapabilitySkill{}, err
+	}
+	result := skillinstall.InstallResult{
+		Skill: skill.Skill{
+			Name:        provenance.Name,
+			Description: provenance.Description,
+		},
+		Committed: recovered,
+	}
+	if !recovered {
+		result, err = s.Installer.InstallReviewed(ctx, stageID, digest)
+		if err != nil {
+			if !result.Committed {
+				err = errors.Join(err, s.Installer.DiscardInstallProvenance(stageID, digest))
+			}
+			return CapabilitySkill{}, err
+		}
 	}
 	if !result.Committed {
 		return CapabilitySkill{}, errors.New("reviewed skill install did not commit")
@@ -150,25 +138,24 @@ func (s *WorkspaceCapabilitySkills) Install(ctx context.Context, stageID, digest
 		Name:          result.Skill.Name,
 		Status:        skill.StatusInactive,
 		Source:        "dashboard",
-		SourceRef:     manifest.SourceRef,
-		ContentDigest: manifest.ContentDigest,
+		SourceRef:     provenance.SourceRef,
+		ContentDigest: provenance.ContentDigest,
 	}
 	if err := skill.SetSkillStatusRecord(ctx, s.DB, record); err != nil {
-		s.mu.Lock()
-		if s.pending == nil {
-			s.pending = make(map[string]skill.StatusRecord)
-		}
-		s.pending[key] = record
-		s.mu.Unlock()
 		return CapabilitySkill{}, err
 	}
-	s.mu.Lock()
-	delete(s.staged, stageID)
-	s.mu.Unlock()
+	if err := s.Installer.CompleteInstallProvenance(stageID, digest); err != nil {
+		return CapabilitySkill{}, err
+	}
+	disposition := "committed"
+	if recovered {
+		disposition = "committed_with_provenance_repair"
+	}
 	return CapabilitySkill{
-		Name:        result.Skill.Name,
-		Description: result.Skill.Description,
-		Active:      false,
+		Name:               result.Skill.Name,
+		Description:        result.Skill.Description,
+		Active:             false,
+		InstallDisposition: disposition,
 	}, nil
 }
 

@@ -882,15 +882,26 @@ func ActivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name st
 	if err != nil {
 		return err
 	}
-	updated := setFrontmatterStatus(string(raw), StatusActive)
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		return err
 	}
-	return SetSkillStatusRecord(ctx, db, StatusRecord{
+	updated := setFrontmatterStatus(string(raw), StatusActive)
+	if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := SetSkillStatusRecord(ctx, db, StatusRecord{
 		Name:   name,
 		Status: StatusActive,
 		Source: "activate",
-	})
+	}); err != nil {
+		restoreErr := os.WriteFile(path, raw, info.Mode().Perm())
+		if restoreErr != nil {
+			restoreErr = fmt.Errorf("restore inactive skill after status failure: %w", restoreErr)
+		}
+		return errors.Join(err, restoreErr)
+	}
+	return nil
 }
 
 func setFrontmatterStatus(raw, status string) string {

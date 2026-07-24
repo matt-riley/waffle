@@ -281,6 +281,80 @@ func TestWorkspaceCapabilitySkillsPreservesReviewedProvenanceAndInactiveInstall(
 	}
 }
 
+func TestWorkspaceCapabilitySkillsRepairsCommittedProvenanceAcrossProcessRestart(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(root, "state", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	failedStore, err := store.Open(t.Context(), filepath.Join(root, "failed", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := failedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := memory.Workspace{Dir: filepath.Join(root, "workspace"), Agent: "main"}
+	imports := filepath.Join(root, "imports")
+	source := filepath.Join(imports, "durable-review")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte(
+		"---\nname: durable-review\ndescription: Durable reviewed install.\n---\n\n# Durable review\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stages := filepath.Join(root, "private-stages")
+	first := &WorkspaceCapabilitySkills{
+		DB:        failedStore.DB,
+		Workspace: workspace,
+		Installer: skillinstall.New(workspace.SkillsDir(), stages, []string{imports}, []string{"github.com"}),
+	}
+	manifest, err := first.Stage(t.Context(), skillinstall.StageRequest{LocalPath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := first.Install(t.Context(), manifest.StageID, manifest.ContentDigest); err == nil {
+		t.Fatal("first install succeeded despite unavailable provenance database")
+	}
+	if _, err := os.Stat(filepath.Join(workspace.SkillsDir(), manifest.Name, "SKILL.md")); err != nil {
+		t.Fatalf("skill commit was not retained for repair: %v", err)
+	}
+
+	restarted := &WorkspaceCapabilitySkills{
+		DB:        st.DB,
+		Workspace: workspace,
+		Installer: skillinstall.New(workspace.SkillsDir(), stages, []string{imports}, []string{"github.com"}),
+	}
+	repaired, err := restarted.Install(t.Context(), manifest.StageID, manifest.ContentDigest)
+	if err != nil {
+		t.Fatalf("repair after process restart: %v", err)
+	}
+	public, err := json.Marshal(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(public, []byte(`"install_disposition":"committed_with_provenance_repair"`)) {
+		t.Fatalf("repair result did not distinguish committed repair: %s", public)
+	}
+	if repaired.Active {
+		t.Fatal("repaired install was activated")
+	}
+	var status, sourceRef, digest string
+	if err := st.DB.QueryRowContext(t.Context(), `
+		SELECT status, source_ref, content_digest
+		FROM skill_status WHERE name = ?`, manifest.Name).Scan(&status, &sourceRef, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if status != skill.StatusInactive || sourceRef != manifest.SourceRef || digest != manifest.ContentDigest {
+		t.Fatalf("repaired provenance status=%q source=%q digest=%q", status, sourceRef, digest)
+	}
+}
+
 func TestRegisterCapabilitiesRoutesProviderCredentialNeverLeaks(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
