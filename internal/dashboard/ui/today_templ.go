@@ -81,14 +81,14 @@ func Today(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</option></select><p>Changes this conversation only.</p></div><dl class=\"context-list\"><div><dt>Connection</dt><dd id=\"desk-connection-detail\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</option></select><p>Changes this conversation only.</p></div><div class=\"model-field session-skill-field\"><label for=\"desk-skill\">Session skill</label> <select id=\"desk-skill\" name=\"skill\" disabled></select> <button type=\"button\" id=\"desk-skill-toggle\" disabled>Attach skill</button><p id=\"desk-skill-status\">Changes this conversation only.</p></div><dl class=\"context-list\"><div><dt>Connection</dt><dd id=\"desk-connection-detail\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
 		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(view.Connection)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 70, Col: 55}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 76, Col: 55}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {

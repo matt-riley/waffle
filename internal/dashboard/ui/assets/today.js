@@ -26,6 +26,9 @@ const elements = {
   send: document.querySelector("#desk-send"),
   cancel: document.querySelector("#desk-cancel"),
   model: document.querySelector("#desk-model"),
+  skill: document.querySelector("#desk-skill"),
+  skillToggle: document.querySelector("#desk-skill-toggle"),
+  skillStatus: document.querySelector("#desk-skill-status"),
   profile: document.querySelector("#desk-profile"),
   workspace: document.querySelector("#desk-workspace"),
   provider: document.querySelector("#desk-provider"),
@@ -42,6 +45,8 @@ const state = {
   activeOperation: null,
   turnSequence: 0,
   generation: 0,
+  sessionID: "",
+  skills: [],
 };
 
 function setPhase(next) {
@@ -78,6 +83,8 @@ function updateControls() {
   elements.send.disabled = !idle || elements.message.value.trim() === "";
   elements.cancel.disabled = !cancellable;
   elements.model.disabled = !idle;
+  elements.skill.disabled = !idle || state.skills.length === 0;
+  elements.skillToggle.disabled = !idle || state.skills.length === 0;
   elements.refresh.disabled = state.currentPhase !== phase.disconnected;
 }
 
@@ -183,10 +190,41 @@ function renderModels(models, currentAlias) {
   }
 }
 
+function selectedSkill() {
+  return state.skills.find((skill) => skill.name === elements.skill.value) || null;
+}
+
+function updateSkillControl() {
+  const skill = selectedSkill();
+  elements.skillToggle.textContent = skill?.attached ? "Detach skill" : "Attach skill";
+  elements.skillStatus.textContent = skill?.attached
+    ? "Attached to this conversation."
+    : "Changes this conversation only.";
+}
+
+function renderSkills(skills) {
+  const selected = elements.skill.value;
+  clearNode(elements.skill);
+  state.skills = Array.isArray(skills)
+    ? skills.filter((skill) => skill && skill.name && !skill.missing)
+    : [];
+  for (const skill of state.skills) {
+    const option = document.createElement("option");
+    option.value = skill.name;
+    option.textContent = skill.description
+      ? `${skill.name} · ${skill.description}`
+      : skill.name;
+    option.selected = skill.name === selected;
+    elements.skill.appendChild(option);
+  }
+  updateSkillControl();
+}
+
 function renderCanonicalState(chatState, includeHistory) {
   if (!chatState) {
     return;
   }
+  state.sessionID = chatState.session_id || state.sessionID;
   elements.title.textContent = chatState.title || "Untitled conversation";
   elements.connectionText.textContent = chatState.connection_mode || "Connected";
   elements.connectionDetail.textContent =
@@ -195,6 +233,7 @@ function renderCanonicalState(chatState, includeHistory) {
   elements.workspace.textContent = chatState.workspace || "No workspace";
   elements.provider.textContent = chatState.provider_label || "Not reported";
   renderModels(chatState.models, chatState.model_alias);
+  renderSkills(chatState.skills);
   if (includeHistory && Array.isArray(chatState.history)) {
     renderHistory(chatState.history);
   }
@@ -554,11 +593,47 @@ async function selectModel() {
   }
 }
 
+async function toggleSkill() {
+  if (state.currentPhase !== phase.idle) {
+    return;
+  }
+  const current = selectedSkill();
+  if (!current) {
+    return;
+  }
+  const action = current.attached ? "detach" : "attach";
+  const generation = state.generation;
+  state.activeOperation = "skill";
+  setPhase(phase.sending);
+  elements.phase.textContent = action === "attach" ? "Attaching skill" : "Detaching skill";
+  try {
+    const result = await postMutation("/api/v1/desk/chat/command", {
+      client_id: state.clientID,
+      command: { name: "skills", args: `${action} ${current.name}` },
+    });
+    if (generation !== state.generation) {
+      return;
+    }
+    renderCanonicalState(result.state, false);
+    state.activeOperation = null;
+    if (state.currentPhase !== phase.disconnected) {
+      setPhase(phase.idle);
+    }
+  } catch (error) {
+    if (generation !== state.generation) {
+      return;
+    }
+    disconnect(error.safeMessage || "The skill change could not be confirmed. Refresh the Desk.");
+  }
+}
+
 if (elements.form) {
   elements.form.addEventListener("submit", submitTurn);
   elements.message.addEventListener("input", updateControls);
   elements.cancel.addEventListener("click", cancelTurn);
   elements.model.addEventListener("change", selectModel);
+  elements.skill.addEventListener("change", updateSkillControl);
+  elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
   void openDesk();
 }

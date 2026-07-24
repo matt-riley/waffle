@@ -155,6 +155,9 @@ function createHarness({
     "#desk-send",
     "#desk-cancel",
     "#desk-model",
+    "#desk-skill",
+    "#desk-skill-toggle",
+    "#desk-skill-status",
     "#desk-profile",
     "#desk-workspace",
     "#desk-provider",
@@ -181,6 +184,7 @@ function createHarness({
       return jsonResponse({
         client_id: "client-1",
         state: {
+          session_id: "session-1",
           title: "",
           connection_mode: "Shared session",
           profile: "default",
@@ -188,7 +192,23 @@ function createHarness({
           provider_label: "Test provider",
           model_alias: "old-model",
           models: [{ alias: "old-model", provider: "test", current: true }],
+          skills: [{ name: "review", description: "Review changes", attached: false }],
           history: [],
+        },
+      });
+    }
+    if (path === "/api/v1/desk/chat/command") {
+      return jsonResponse({
+        state: {
+          session_id: "session-1",
+          title: "",
+          connection_mode: "Shared session",
+          profile: "default",
+          workspace: "No workspace",
+          provider_label: "Test provider",
+          model_alias: "old-model",
+          models: [{ alias: "old-model", provider: "test", current: true }],
+          skills: [{ name: "review", description: "Review changes", attached: true }],
         },
       });
     }
@@ -298,6 +318,29 @@ test("invalid bootstrap event cursor prevents opening an unresumable stream", as
   assert.equal(mutationCalls(harness, "/api/v1/desk/chat/open").length, 0);
   assert.equal(harness.EventSource.instances.length, 0);
   assert.equal(harness.elements[".desk-shell"].dataset.phase, "disconnected");
+});
+
+test("session skill control attaches through the live chat command", async () => {
+  const harness = createHarness();
+  await flush();
+
+  assert.equal(harness.elements["#desk-skill"].childNodes[0].value, "review");
+  assert.equal(harness.elements["#desk-skill-toggle"].textContent, "Attach skill");
+
+  harness.elements["#desk-skill"].value = "review";
+  await harness.elements["#desk-skill-toggle"].listener("click")();
+  await flush();
+
+  const [command] = mutationCalls(harness, "/api/v1/desk/chat/command");
+  assert.deepEqual(
+    JSON.parse(command.options.body),
+    {
+      client_id: "client-1",
+      command: { name: "skills", args: "attach review" },
+    },
+  );
+  assert.equal(harness.elements["#desk-skill-toggle"].textContent, "Detach skill");
+  assert.equal(harness.elements["#desk-skill-status"].textContent, "Attached to this conversation.");
 });
 
 test("turn remains locked until its POST and turn_done settle, then applies canonical metadata", async () => {
