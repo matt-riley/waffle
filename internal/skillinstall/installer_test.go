@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/store"
 )
 
 const pinnedCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -1560,5 +1561,41 @@ func TestInstallConcurrentConfirmIsSingleUse(t *testing.T) {
 	}
 	if len(discovered) != 1 {
 		t.Fatalf("installed skills = %+v, want exactly one", discovered)
+	}
+}
+
+func TestStageAndInstallWritePolicyAudit(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "skill-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	f := newInstallerFixture(t)
+	f.installer.AuditDB = st.DB
+	manifest := stageLocal(t, f)
+	if _, err := f.installer.InstallReviewed(ctx, manifest.StageID, manifest.ContentDigest); err != nil {
+		t.Fatal(err)
+	}
+
+	var tools []string
+	rows, err := st.DB.QueryContext(ctx, `SELECT tool FROM policy_audit ORDER BY at`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tool string
+		if err := rows.Scan(&tool); err != nil {
+			t.Fatal(err)
+		}
+		tools = append(tools, tool)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(tools, []string{"skillinstall.stage", "skillinstall.install"}) {
+		t.Fatalf("audit tools = %v", tools)
 	}
 }

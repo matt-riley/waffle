@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/store"
 )
 
 func TestMutationHandlerReplaysExactEndpointAndBodyOnce(t *testing.T) {
@@ -436,5 +438,54 @@ func TestChatRoutesReplayWithoutReinvocationAndRejectConflicts(t *testing.T) {
 				t.Fatalf("%s calls = %d, want 1", route, originalCalls)
 			}
 		})
+	}
+}
+
+func TestMutationHandlerWritesPolicyAuditOnFirstExecution(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "desk-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	security := mustSecurity(t, "127.0.0.1:8422")
+	security.SetPolicyAuditDB(st.DB)
+	idem := NewIdempotencyStore(nil, 512, time.Minute)
+	handler := NewMutationHandler(security, idem, 1024, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test-audit", strings.NewReader(`{"x":1}`))
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", "audit-once")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test-audit", strings.NewReader(`{"x":1}`))
+	req2.Host = "127.0.0.1:8422"
+	req2.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req2.Header.Set("Idempotency-Key", "audit-once")
+	handler.ServeHTTP(rec2, req2)
+
+	var n int
+	if err := st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM policy_audit WHERE tool = 'desk.mutation'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("policy_audit rows = %d, want 1 (first execution only)", n)
+	}
+	var command, verdict string
+	if err := st.DB.QueryRowContext(ctx, `SELECT command, verdict FROM policy_audit WHERE tool = 'desk.mutation'`).Scan(&command, &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(command, "/api/v1/desk/test-audit") || verdict != "allow" {
+		t.Fatalf("command=%q verdict=%q", command, verdict)
 	}
 }

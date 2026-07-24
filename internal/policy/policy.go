@@ -343,6 +343,21 @@ func LogAudit(ctx context.Context, db *sql.DB, session, tool, command string, d 
 	return err
 }
 
+// LogMutation always records a non-tool mutation into policy_audit.
+// Desk and skillinstall call this so their surfaces share the same audit trail
+// as tool decisions, even when no [[policy.rule]] matched.
+func LogMutation(ctx context.Context, db *sql.DB, session, tool, command, detail string) error {
+	if tool == "" {
+		tool = "mutation"
+	}
+	return LogAudit(ctx, db, session, tool, command, Decision{
+		Allowed: true,
+		Verdict: ActionAllow,
+		Rule:    tool,
+		Message: detail,
+	})
+}
+
 // NewEngineFromStore builds an engine with optional audit persistence.
 // Returns an error if any rule fails Compile (including empty selectors).
 func NewEngineFromStore(st *store.Store, rules []Rule, enforcer string) (*Engine, error) {

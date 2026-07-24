@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/skill"
 )
 
@@ -34,6 +36,9 @@ type Installer struct {
 	Fetcher     GitFetcher
 	Now         func() time.Time
 	Random      io.Reader
+	// AuditDB, when set, records Stage/InstallReviewed mutations in policy_audit
+	// so skillinstall shares the host policy audit trail with agent tools.
+	AuditDB *sql.DB
 
 	mu            sync.Mutex
 	rename        func(string, string) error
@@ -169,6 +174,7 @@ func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest M
 		return Manifest{}, err
 	}
 	persisted = true
+	i.auditMutation(ctx, "skillinstall.stage", manifest.Name, "stage_id="+manifest.StageID)
 	return manifest, nil
 }
 
@@ -304,9 +310,19 @@ func (i *Installer) InstallReviewed(ctx context.Context, stageID, digest string)
 			fmt.Errorf("sync installed skill directory: %w", syncErr),
 			fmt.Errorf("roll back installed skill after sync failure: %w", rollbackErr),
 		)
+		i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true,sync_warning=1")
 		return result, nil
 	}
+	i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true")
 	return result, nil
+}
+
+// auditMutation records a skillinstall mutation into policy_audit when AuditDB is set.
+func (i *Installer) auditMutation(ctx context.Context, tool, command, detail string) {
+	if i == nil || i.AuditDB == nil {
+		return
+	}
+	_ = policy.LogMutation(ctx, i.AuditDB, "", tool, command, detail)
 }
 
 func (i *Installer) clock() time.Time {

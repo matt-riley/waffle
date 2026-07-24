@@ -98,6 +98,8 @@ func newDashboardCapabilities(
 		cfg.Dashboard.SkillImportRoots,
 		cfg.Dashboard.SkillGitHosts,
 	)
+	// Share the host policy_audit trail with skillinstall mutations (#152).
+	installer.AuditDB = st.DB
 	return &dashboard.Capabilities{
 		Providers: providers,
 		Sessions:  sessions,
