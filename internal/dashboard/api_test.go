@@ -122,6 +122,7 @@ func TestEventsRejectsInvalidAfterQuery(t *testing.T) {
 		"after=%201",
 		"after=18446744073709551616",
 		"after=1&after=2",
+		"after=1;after=2",
 	} {
 		t.Run(rawQuery, func(t *testing.T) {
 			writer := newStreamRecorder()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -121,7 +122,11 @@ func parseEventCursor(r *http.Request) (uint64, error) {
 	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
 		return parseLastEventID(lastEventID)
 	}
-	after, present := r.URL.Query()["after"]
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return 0, err
+	}
+	after, present := query["after"]
 	if !present {
 		return 0, nil
 	}
