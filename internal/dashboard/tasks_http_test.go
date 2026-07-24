@@ -413,8 +413,12 @@ func TestTaskScheduleUnrelatedEditPreservesExactRedactedFields(t *testing.T) {
 		t.Fatalf("test fixture was not redacted: %+v", view)
 	}
 	body, err := json.Marshal(map[string]any{
-		"name": "Renamed", "cron": view.Cron, "prompt": view.Prompt,
-		"deliver": view.Deliver, "profile": view.Profile, "enabled": view.Enabled,
+		"name": "Renamed", "cron": view.Cron, "prompt": "",
+		"deliver": "", "profile": view.Profile, "enabled": view.Enabled,
+		"field_intents": map[string]any{
+			"prompt":  map[string]any{"action": "preserve"},
+			"deliver": map[string]any{"action": "preserve"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -435,6 +439,147 @@ func TestTaskScheduleUnrelatedEditPreservesExactRedactedFields(t *testing.T) {
 		if strings.Contains(value, "[redacted]") {
 			t.Fatalf("stored redaction placeholder: %+v", stored)
 		}
+	}
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("public response exposed preserved exact value: %s", rec.Body.String())
+	}
+	subscription, _ := harness.events.Subscribe(0)
+	t.Cleanup(func() { harness.events.Unsubscribe(subscription) })
+	event := <-subscription
+	if bytes.Contains(event.Data, []byte(secret)) {
+		t.Fatalf("event exposed preserved exact value: %s", event.Data)
+	}
+}
+
+func TestTaskScheduleRedactedFieldIntentsReplaceAndClear(t *testing.T) {
+	tests := []struct {
+		name        string
+		intents     map[string]any
+		wantPrompt  string
+		wantDeliver string
+	}{
+		{
+			name: "replace",
+			intents: map[string]any{
+				"prompt":  map[string]any{"action": "replace", "value": "New prompt"},
+				"deliver": map[string]any{"action": "replace", "value": "telegram:902"},
+			},
+			wantPrompt: "New prompt", wantDeliver: "telegram:902",
+		},
+		{
+			name: "clear optional delivery",
+			intents: map[string]any{
+				"prompt":  map[string]any{"action": "preserve"},
+				"deliver": map[string]any{"action": "clear"},
+			},
+			wantPrompt: "AGE-SECRET-KEY-original-secret", wantDeliver: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newTaskRouteHarness(t)
+			const secret = "AGE-SECRET-KEY-original-secret"
+			job, err := harness.schedules.Add(context.Background(), "Sensitive", "0 8 * * *", secret, "telegram:"+secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"name": "Sensitive", "cron": "0 8 * * *", "prompt": "",
+				"deliver": "", "profile": "", "enabled": true,
+				"field_intents": test.intents,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rec := harness.request(http.MethodPost, "/api/v1/desk/tasks/schedules/"+job.ID,
+				string(body), "redacted-"+strings.ReplaceAll(test.name, " ", "-"), true)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+			}
+			stored, err := harness.schedules.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Prompt != test.wantPrompt || stored.Deliver != test.wantDeliver {
+				t.Fatalf("stored = %+v, want prompt %q deliver %q", stored, test.wantPrompt, test.wantDeliver)
+			}
+			if strings.Contains(stored.Prompt, "[redacted]") || strings.Contains(stored.Deliver, "[redacted]") {
+				t.Fatalf("stored schedule contains display placeholder: %+v", stored)
+			}
+			if strings.Contains(rec.Body.String(), secret) {
+				t.Fatalf("public response exposed exact secret: %s", rec.Body.String())
+			}
+			subscription, _ := harness.events.Subscribe(0)
+			t.Cleanup(func() { harness.events.Unsubscribe(subscription) })
+			event := <-subscription
+			if bytes.Contains(event.Data, []byte(secret)) || bytes.Contains(event.Data, []byte("New prompt")) {
+				t.Fatalf("event exposed editable content: %s", event.Data)
+			}
+		})
+	}
+}
+
+func TestTaskScheduleRedactedFieldsRejectMissingOrPlaceholderIntent(t *testing.T) {
+	tests := []struct {
+		name    string
+		intents map[string]any
+	}{
+		{
+			name: "missing intent",
+			intents: map[string]any{
+				"prompt": map[string]any{"action": "preserve"},
+			},
+		},
+		{
+			name: "replace with display placeholder",
+			intents: map[string]any{
+				"prompt":  map[string]any{"action": "replace", "value": "[redacted]"},
+				"deliver": map[string]any{"action": "preserve"},
+			},
+		},
+		{
+			name: "replace with derived placeholder",
+			intents: map[string]any{
+				"prompt":  map[string]any{"action": "preserve"},
+				"deliver": map[string]any{"action": "replace", "value": "telegram:[redacted]-changed"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newTaskRouteHarness(t)
+			const secret = "AGE-SECRET-KEY-original-secret"
+			job, err := harness.schedules.Add(context.Background(), "Sensitive", "0 8 * * *", secret, "telegram:"+secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"name": "Renamed", "cron": "0 8 * * *", "prompt": "",
+				"deliver": "", "profile": "", "enabled": true,
+				"field_intents": test.intents,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rec := harness.request(http.MethodPost, "/api/v1/desk/tasks/schedules/"+job.ID,
+				string(body), "invalid-intent-"+strings.ReplaceAll(test.name, " ", "-"), true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			assertTaskError(t, rec.Body.Bytes(), "invalid_request")
+			stored, err := harness.schedules.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Name != "Sensitive" || stored.Prompt != secret || stored.Deliver != "telegram:"+secret {
+				t.Fatalf("invalid intent mutated schedule: %+v", stored)
+			}
+			if harness.events.Cursor() != 0 {
+				t.Fatal("invalid intent published an event")
+			}
+		})
 	}
 }
 

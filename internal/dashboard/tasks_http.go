@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -21,6 +22,8 @@ const (
 	TaskScheduleCreatedEvent = "task.schedule.created"
 	TaskScheduleUpdatedEvent = "task.schedule.updated"
 )
+
+var errInvalidTaskFieldIntent = errors.New("invalid task field intent")
 
 type TaskScheduleStore interface {
 	AddWithProfile(ctx context.Context, name, spec, prompt, deliver, profile string) (*schedule.Job, error)
@@ -274,12 +277,18 @@ type createTaskScheduleRequest struct {
 }
 
 type updateTaskScheduleRequest struct {
-	Name    string `json:"name"`
-	Cron    string `json:"cron"`
-	Prompt  string `json:"prompt"`
-	Deliver string `json:"deliver"`
-	Profile string `json:"profile"`
-	Enabled *bool  `json:"enabled"`
+	Name         string                             `json:"name"`
+	Cron         string                             `json:"cron"`
+	Prompt       string                             `json:"prompt"`
+	Deliver      string                             `json:"deliver"`
+	Profile      string                             `json:"profile"`
+	Enabled      *bool                              `json:"enabled"`
+	FieldIntents map[string]redactedTaskFieldIntent `json:"field_intents,omitempty"`
+}
+
+type redactedTaskFieldIntent struct {
+	Action string  `json:"action"`
+	Value  *string `json:"value,omitempty"`
 }
 
 func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) http.Handler {
@@ -324,16 +333,16 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 			writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
 			return
 		}
-		input := schedule.Update{
-			Name: request.Name, Cron: request.Cron, Prompt: request.Prompt,
-			Deliver: request.Deliver, Profile: request.Profile, Enabled: *request.Enabled,
-		}
 		current, err := store.Get(r.Context(), r.PathValue("id"))
 		if err != nil {
 			writeTaskStoreError(w, err)
 			return
 		}
-		restoreRedactedTaskScheduleFields(current, &input)
+		input, err := resolveTaskScheduleUpdate(*current, request)
+		if err != nil {
+			writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
+			return
+		}
 		job, err := store.Update(r.Context(), r.PathValue("id"), input)
 		if err != nil {
 			writeTaskStoreError(w, err)
@@ -347,20 +356,59 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 	})
 }
 
-func restoreRedactedTaskScheduleFields(current *schedule.Job, input *schedule.Update) {
-	if current == nil || input == nil {
-		return
+func resolveTaskScheduleUpdate(current schedule.Job, request updateTaskScheduleRequest) (schedule.Update, error) {
+	input := schedule.Update{
+		Name: request.Name, Cron: request.Cron, Prompt: request.Prompt,
+		Deliver: request.Deliver, Profile: request.Profile, Enabled: *request.Enabled,
 	}
-	restore := func(exact string, candidate *string) {
-		if exact != sanitizeDashboardString(exact) && *candidate == sanitizeDashboardString(exact) {
-			*candidate = exact
+	fields := map[string]struct {
+		exact     string
+		candidate *string
+	}{
+		"name":    {exact: current.Name, candidate: &input.Name},
+		"cron":    {exact: current.Cron, candidate: &input.Cron},
+		"prompt":  {exact: current.Prompt, candidate: &input.Prompt},
+		"deliver": {exact: current.Deliver, candidate: &input.Deliver},
+		"profile": {exact: current.Profile, candidate: &input.Profile},
+	}
+	for name := range request.FieldIntents {
+		if _, ok := fields[name]; !ok {
+			return schedule.Update{}, errInvalidTaskFieldIntent
 		}
 	}
-	restore(current.Name, &input.Name)
-	restore(current.Cron, &input.Cron)
-	restore(current.Prompt, &input.Prompt)
-	restore(current.Deliver, &input.Deliver)
-	restore(current.Profile, &input.Profile)
+	for name, field := range fields {
+		safe := sanitizeDashboardString(field.exact)
+		intent, supplied := request.FieldIntents[name]
+		if safe == field.exact {
+			if supplied {
+				return schedule.Update{}, errInvalidTaskFieldIntent
+			}
+			continue
+		}
+		if !supplied {
+			return schedule.Update{}, errInvalidTaskFieldIntent
+		}
+		switch intent.Action {
+		case "preserve":
+			if intent.Value != nil {
+				return schedule.Update{}, errInvalidTaskFieldIntent
+			}
+			*field.candidate = field.exact
+		case "replace":
+			if intent.Value == nil || strings.Contains(*intent.Value, "[redacted]") {
+				return schedule.Update{}, errInvalidTaskFieldIntent
+			}
+			*field.candidate = *intent.Value
+		case "clear":
+			if intent.Value != nil {
+				return schedule.Update{}, errInvalidTaskFieldIntent
+			}
+			*field.candidate = ""
+		default:
+			return schedule.Update{}, errInvalidTaskFieldIntent
+		}
+	}
+	return input, nil
 }
 
 func decodeTaskRequest(w http.ResponseWriter, r *http.Request, target any) bool {

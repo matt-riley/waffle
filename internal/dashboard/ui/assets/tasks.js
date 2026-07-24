@@ -13,7 +13,11 @@ if (root) {
     cron: document.querySelector("#task-schedule-cron"),
     prompt: document.querySelector("#task-schedule-prompt"),
     deliver: document.querySelector("#task-schedule-deliver"),
+    deliverClear: document.querySelector("#task-schedule-deliver-clear"),
+    deliverClearRow: document.querySelector("#task-schedule-deliver-clear-row"),
     profile: document.querySelector("#task-schedule-profile"),
+    profileClear: document.querySelector("#task-schedule-profile-clear"),
+    profileClearRow: document.querySelector("#task-schedule-profile-clear-row"),
     enabled: document.querySelector("#task-schedule-enabled"),
     enabledRow: document.querySelector("#task-schedule-enabled-row"),
     cancel: document.querySelector("#task-schedule-cancel"),
@@ -215,6 +219,13 @@ if (root) {
     elements.prompt.value = "";
     elements.deliver.value = "";
     elements.profile.value = "";
+    elements.name.required = true;
+    elements.cron.required = true;
+    elements.prompt.required = true;
+    elements.deliverClear.checked = false;
+    elements.deliverClearRow.hidden = true;
+    elements.profileClear.checked = false;
+    elements.profileClearRow.hidden = true;
     elements.enabled.checked = true;
     elements.enabledRow.hidden = true;
     elements.cancel.hidden = true;
@@ -235,6 +246,13 @@ if (root) {
     elements.prompt.value = editableValue("prompt");
     elements.deliver.value = editableValue("deliver");
     elements.profile.value = editableValue("profile");
+    elements.name.required = !state.redactedEditFields.has("name");
+    elements.cron.required = !state.redactedEditFields.has("cron");
+    elements.prompt.required = !state.redactedEditFields.has("prompt");
+    elements.deliverClear.checked = false;
+    elements.deliverClearRow.hidden = !state.redactedEditFields.has("deliver");
+    elements.profileClear.checked = false;
+    elements.profileClearRow.hidden = !state.redactedEditFields.has("profile");
     elements.enabled.checked = Boolean(task.enabled);
     elements.enabledRow.hidden = false;
     elements.cancel.hidden = false;
@@ -262,21 +280,6 @@ if (root) {
   async function saveSchedule(event) {
     event.preventDefault();
     const editing = elements.id.value !== "";
-    const fields = {
-      name: elements.name,
-      cron: elements.cron,
-      prompt: elements.prompt,
-      deliver: elements.deliver,
-      profile: elements.profile,
-    };
-    if (
-      editing &&
-      [...state.redactedEditFields].some((field) => !fields[field]?.value)
-    ) {
-      elements.status.textContent =
-        "Re-enter every redacted schedule field before saving.";
-      return;
-    }
     const body = {
       name: elements.name.value,
       cron: elements.cron.value,
@@ -286,6 +289,33 @@ if (root) {
     };
     if (editing) {
       body.enabled = elements.enabled.checked;
+      const fields = {
+        name: elements.name,
+        cron: elements.cron,
+        prompt: elements.prompt,
+        deliver: elements.deliver,
+        profile: elements.profile,
+      };
+      const clearControls = {
+        deliver: elements.deliverClear,
+        profile: elements.profileClear,
+      };
+      const fieldIntents = {};
+      for (const field of state.redactedEditFields) {
+        if (clearControls[field]?.checked) {
+          fieldIntents[field] = { action: "clear" };
+        } else if (fields[field]?.value) {
+          fieldIntents[field] = {
+            action: "replace",
+            value: fields[field].value,
+          };
+        } else {
+          fieldIntents[field] = { action: "preserve" };
+        }
+      }
+      if (Object.keys(fieldIntents).length > 0) {
+        body.field_intents = fieldIntents;
+      }
     }
     const path = editing
       ? `/api/v1/desk/tasks/schedules/${encodeURIComponent(elements.id.value)}`

@@ -104,7 +104,11 @@ function createHarness({ snapshotOverrides = {}, fetchOverride } = {}) {
     "#task-schedule-cron",
     "#task-schedule-prompt",
     "#task-schedule-deliver",
+    "#task-schedule-deliver-clear",
+    "#task-schedule-deliver-clear-row",
     "#task-schedule-profile",
+    "#task-schedule-profile-clear",
+    "#task-schedule-profile-clear-row",
     "#task-schedule-enabled",
     "#task-schedule-enabled-row",
     "#task-schedule-cancel",
@@ -245,7 +249,7 @@ test("filters tasks and sends protected create mutations with a fresh intent key
   assert.equal(harness.calls.at(-1).path, "/api/v1/desk/tasks?filter=attention");
 });
 
-test("redacted editable fields require re-entry and are never posted as placeholders", async () => {
+test("redacted editable fields explicitly preserve exact values on unrelated edits", async () => {
   const harness = createHarness({
     snapshotOverrides: {
       all: {
@@ -278,12 +282,69 @@ test("redacted editable fields require re-entry and are never posted as placehol
   assert.equal(harness.elements["#task-schedule-deliver"].value, "");
   harness.elements["#task-schedule-name"].value = "Renamed";
   await harness.elements["#task-schedule-form"].emit("submit");
-  assert.equal(harness.calls.filter((call) => call.options.method === "POST").length, 0);
-  assert.match(harness.elements["#task-schedule-status"].textContent, /re-enter/i);
+  const mutation = harness.calls.find((call) => call.options.method === "POST");
+  assert.deepEqual(
+    JSON.parse(mutation.options.body),
+    {
+      name: "Renamed",
+      cron: "0 9 * * *",
+      prompt: "",
+      deliver: "",
+      profile: "",
+      enabled: true,
+      field_intents: {
+        prompt: { action: "preserve" },
+        deliver: { action: "preserve" },
+      },
+    },
+  );
   assert.doesNotMatch(
-    JSON.stringify(harness.calls),
+    mutation.options.body,
     /\[redacted\]/,
   );
+});
+
+test("redacted editable fields explicitly replace or clear stored values", async () => {
+  const harness = createHarness({
+    snapshotOverrides: {
+      all: {
+        filter: "all",
+        attention_count: 0,
+        errors: [],
+        tasks: [{
+          id: "job-sensitive",
+          kind: "schedule",
+          name: "Sensitive",
+          source: "schedule",
+          cron: "0 9 * * *",
+          prompt: "Summarize [redacted]",
+          deliver: "telegram:[redacted]",
+          enabled: true,
+          redacted_fields: ["prompt", "deliver"],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          retry: { attempt: 0, max_attempts: 1 },
+          evidence_label: "Not run yet",
+        }],
+      },
+    },
+  });
+  await settle();
+  const edit = descendants(harness.elements["#tasks-list"])
+    .find((element) => element.dataset.action === "edit-schedule");
+  await edit.emit("click");
+
+  harness.elements["#task-schedule-prompt"].value = "Replaced prompt";
+  harness.elements["#task-schedule-deliver-clear"].checked = true;
+  await harness.elements["#task-schedule-form"].emit("submit");
+  const mutation = harness.calls.find((call) => call.options.method === "POST");
+  assert.deepEqual(
+    JSON.parse(mutation.options.body).field_intents,
+    {
+      prompt: { action: "replace", value: "Replaced prompt" },
+      deliver: { action: "clear" },
+    },
+  );
+  assert.doesNotMatch(mutation.options.body, /\[redacted\]/);
 });
 
 test("newer task filters abort and supersede late responses", async () => {

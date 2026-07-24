@@ -45,8 +45,16 @@ templ Tasks(view ShellView) {
 					<textarea id="task-schedule-prompt" name="prompt" rows="5" required></textarea>
 					<label for="task-schedule-deliver">Delivery target <span>(optional)</span></label>
 					<input id="task-schedule-deliver" name="deliver" placeholder="telegram:900"/>
+					<label id="task-schedule-deliver-clear-row" for="task-schedule-deliver-clear" hidden class="schedule-enabled schedule-clear">
+						<input id="task-schedule-deliver-clear" type="checkbox"/>
+						Clear stored delivery target
+					</label>
 					<label for="task-schedule-profile">Profile <span>(optional)</span></label>
 					<input id="task-schedule-profile" name="profile" placeholder="researcher"/>
+					<label id="task-schedule-profile-clear-row" for="task-schedule-profile-clear" hidden class="schedule-enabled schedule-clear">
+						<input id="task-schedule-profile-clear" type="checkbox"/>
+						Clear stored profile
+					</label>
 					<label id="task-schedule-enabled-row" for="task-schedule-enabled" hidden class="schedule-enabled">
 						<input id="task-schedule-enabled" name="enabled" type="checkbox" checked/>
 						Enabled
