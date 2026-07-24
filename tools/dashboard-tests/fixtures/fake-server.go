@@ -10,12 +10,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/dashboard"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
@@ -67,6 +69,15 @@ func main() {
 
 	sessions := newFixtureSessions()
 	workspaces := newFixtureWorkspaces()
+	memoryRoot := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(memoryRoot, 0o700); err != nil {
+		fatal(err)
+	}
+	memoryLine := "- [2026-07-24] Use the verified release artifact. [id=a1b2c3]\n"
+	if err := os.WriteFile(filepath.Join(memoryRoot, "MEMORY.md"), []byte(memoryLine), 0o600); err != nil {
+		fatal(err)
+	}
+	notes := fixtureNotes{memoryPath: filepath.Join(memoryRoot, "MEMORY.md")}
 	jobs := fixtureJobs{
 		{
 			ID:          "job-daily",
@@ -95,7 +106,7 @@ func main() {
 		Jobs:       &jobs,
 		Workspaces: workspaces,
 		Sessions:   sessions,
-		Notes:      fixtureNotes{},
+		Notes:      notes,
 		Workset:    &fixtureWorkset{},
 		Usage: fixtureUsage{rows: []usage.Row{
 			{
@@ -111,10 +122,6 @@ func main() {
 		Now:      func() time.Time { return fixtureNow },
 	}
 
-	memoryRoot := filepath.Join(root, "workspace")
-	if err := os.MkdirAll(memoryRoot, 0o700); err != nil {
-		fatal(err)
-	}
 	memoryWorkspace := memory.Workspace{Dir: memoryRoot, Agent: memory.DefaultAgent}
 
 	providers := &fixtureProviders{listing: providerconfig.Listing{
@@ -162,38 +169,41 @@ func main() {
 		Hub:               hub,
 		ChatClients:       chatClients,
 		Idempotency:       idempotency,
+		Operations:        operations,
+		Schedules:         &jobs,
+		Memory:            memoryWorkspace,
+		WorkspaceEgress:   "allowlist",
+		Capabilities:      capabilities,
+		Restart:           fixtureRestart{},
 		Version:           "dashboard-fixture",
 		ProcessGeneration: "dashboard-fixture-generation",
 		Now:               func() time.Time { return fixtureNow },
 	})
-	dashboard.RegisterTaskRoutes(mux, dashboard.TaskRouteConfig{
-		Operations:  operations,
-		Schedules:   &jobs,
-		Security:    security,
-		Idempotency: idempotency,
-		Events:      hub,
-	})
-	dashboard.RegisterWorkspaceRoutes(mux, dashboard.WorkspaceRouteConfig{
-		Operations:  operations,
-		Security:    security,
-		Idempotency: idempotency,
-		Events:      hub,
-		Egress:      "allowlist",
-	})
-	dashboard.RegisterMemoryRoutes(mux, dashboard.MemoryRouteConfig{
-		Operations:  operations,
-		Workspace:   memoryWorkspace,
-		Security:    security,
-		Idempotency: idempotency,
-		Events:      hub,
-	})
-	dashboard.RegisterCapabilitiesRoutes(mux, dashboard.CapabilitiesRouteConfig{
-		Service: capabilities,
-		Mutation: func(limit int64, next http.Handler) http.Handler {
-			return dashboard.NewMutationHandler(security, idempotency, limit, next)
+	dashboard.RegisterConnectionsRoutes(mux, dashboard.NewConnectionSource(config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"fixture": {
+				Type:   "openai",
+				APIKey: "secret://desk-secret-canary",
+			},
 		},
-		Restart: fixtureRestart{},
-	})
+		MCP: []config.MCPServer{
+			{
+				Name:      "fixture-tools",
+				Command:   "mcp --raw-command-canary",
+				Execution: "sandbox",
+				Env:       []string{"WAFFLE_PRIVATE_ENV"},
+			},
+		},
+		Agent: config.Agent{
+			Profiles: map[string]config.AgentProfile{
+				"reviewer": {
+					System:  "@/var/lib/waffle/private",
+					Sandbox: "docker",
+				},
+			},
+		},
+		Workspace: config.Workspace{Egress: "allowlist"},
+	}, nil))
 
 	server := &http.Server{
 		Handler:           security.Wrap(mux),
@@ -354,15 +364,24 @@ func (s *fixtureSessions) SetModelAlias(_ context.Context, id, alias string) err
 	return nil
 }
 
-type fixtureNotes struct{}
+type fixtureNotes struct {
+	memoryPath string
+}
 
-func (fixtureNotes) Search(context.Context, string, int) ([]memory.NoteHit, error) {
+func (n fixtureNotes) Search(context.Context, string, int) ([]memory.NoteHit, error) {
+	content, err := os.ReadFile(n.memoryPath)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(string(content), "[id=a1b2c3]") {
+		return []memory.NoteHit{}, nil
+	}
 	return []memory.NoteHit{
 		{
-			ID:       "note-release",
+			ID:       "a1b2c3",
 			Agent:    memory.DefaultAgent,
 			Body:     "Use the verified release artifact.",
-			RawLine:  "- [2026-07-24] Use the verified release artifact. ^note-release",
+			RawLine:  "- [2026-07-24] Use the verified release artifact. [id=a1b2c3]",
 			Snippet:  "Use the verified release artifact.",
 			NoteDate: fixtureNow,
 			Archived: false,
@@ -406,6 +425,11 @@ func newFixtureWorkspaces() *fixtureWorkspaces {
 			SessionID: "session-primary", Status: workspace.StatusOpen, Profile: "reviewer",
 			CreatedAt: fixtureNow.Add(-time.Hour), UpdatedAt: fixtureNow, LastActive: fixtureNow,
 		},
+		"workspace-dirty": {
+			ID: "workspace-dirty", Repo: "matt-riley/waffle-dirty", Image: "waffle-dev:latest",
+			SessionID: "session-primary", Status: workspace.StatusOpen, Profile: "reviewer",
+			CreatedAt: fixtureNow.Add(-30 * time.Minute), UpdatedAt: fixtureNow, LastActive: fixtureNow,
+		},
 	}}
 }
 
@@ -416,6 +440,9 @@ func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error)
 	for _, item := range w.workspaces {
 		result = append(result, item)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
 	return result, nil
 }
 
@@ -455,8 +482,11 @@ func (w *fixtureWorkspaces) Resume(_ context.Context, id string) (*workspace.Wor
 	return item, nil, err
 }
 
-func (w *fixtureWorkspaces) InspectClose(context.Context, string) (*workspace.CloseReport, error) {
-	return &workspace.CloseReport{}, nil
+func (w *fixtureWorkspaces) InspectClose(_ context.Context, id string) (*workspace.CloseReport, error) {
+	if _, err := w.Get(context.Background(), id); err != nil {
+		return nil, err
+	}
+	return fixtureWorkspaceCloseReport(id), nil
 }
 
 func (w *fixtureWorkspaces) Close(_ context.Context, id string, _ bool) (*workspace.CloseReport, error) {
@@ -468,7 +498,7 @@ func (w *fixtureWorkspaces) InspectCloseGuarded(_ context.Context, id string, ac
 	if _, err := w.Get(context.Background(), id); err != nil {
 		return nil, err
 	}
-	report := &workspace.CloseReport{}
+	report := fixtureWorkspaceCloseReport(id)
 	if accept != nil {
 		if err := accept(report); err != nil {
 			return nil, err
@@ -477,7 +507,7 @@ func (w *fixtureWorkspaces) InspectCloseGuarded(_ context.Context, id string, ac
 	return report, nil
 }
 
-func (w *fixtureWorkspaces) CloseTransition(_ context.Context, id string, _ bool) (*workspace.CloseReport, bool, error) {
+func (w *fixtureWorkspaces) CloseTransition(_ context.Context, id string, force bool) (*workspace.CloseReport, bool, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	item, ok := w.workspaces[id]
@@ -487,10 +517,24 @@ func (w *fixtureWorkspaces) CloseTransition(_ context.Context, id string, _ bool
 	if item.Status == workspace.StatusClosed {
 		return &workspace.CloseReport{}, false, workspace.ErrWorkspaceAlreadyClosed
 	}
+	report := fixtureWorkspaceCloseReport(id)
+	if !force && (report.Dirty != "" || report.Unpushed != "") {
+		return report, false, fmt.Errorf("workspace %s has unsaved work", id)
+	}
 	item.Status = workspace.StatusClosed
 	item.UpdatedAt = fixtureNow
 	w.workspaces[id] = item
-	return &workspace.CloseReport{}, true, nil
+	return report, true, nil
+}
+
+func fixtureWorkspaceCloseReport(id string) *workspace.CloseReport {
+	if id == "workspace-dirty" {
+		return &workspace.CloseReport{
+			Dirty:    "M main.go",
+			Unpushed: "abc123 local commit",
+		}
+	}
+	return &workspace.CloseReport{}
 }
 
 func (w *fixtureWorkspaces) updateStatus(id, status string) error {

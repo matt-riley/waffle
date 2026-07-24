@@ -20,9 +20,11 @@ pnpm --dir tools/dashboard-tests test
 ```
 
 The suite uses Chrome rather than Playwright's bundled Chromium. It verifies the
-five embedded sections, per-session model isolation, Tasks-to-Today handoff,
-keyboard focus return, reduced motion, document overflow at 1470, 768, 375, and
-320 CSS pixels, and an explicit 200-percent zoom gate.
+five embedded sections; the Host, origin, CSRF, response-header, and redaction
+boundaries; Today streaming, cancellation, and SSE recovery; task handoff;
+guarded workspace and memory lifecycles; reviewed skill activation; keyboard
+navigation and dialog focus return; reduced motion; document overflow at 1470,
+768, 375, and 320 CSS pixels; and an explicit 200-percent zoom gate.
 
 Failure screenshots and Playwright result files are local artifacts and are
 ignored. Traces are disabled because provider-enrollment coverage must never

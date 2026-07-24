@@ -1,8 +1,13 @@
 # Waffle Desk
 
 Waffle Desk is the loopback-only personal cockpit embedded in the normal
-`waffle` binary. It is not a separate web service and does not add a public
-administration listener.
+`waffle` binary. It is not a separate web service or listener: it shares the
+numeric-IP loopback address configured by `gateway.status_listen` with
+`/healthz` and `/status`. It does not add a public administration listener.
+
+For the surrounding operator workflows, see the [deployment guide](deploy.md#waffle-desk),
+[Desk operations guide](usage-guide.md#waffle-desk-operations), and
+[`waffle chat` browser companion](chat.md#waffle-desk-browser-companion).
 
 ## Enable and open Desk
 
@@ -31,6 +36,17 @@ ssh -N -L 8422:127.0.0.1:8422 user@host
 
 Use the equivalent local forwarding command with Tailscale SSH, then open
 `http://127.0.0.1:8422/desk/` on the local machine.
+
+## Access boundary
+
+Desk has no login layer and its first release does not provide remote
+authentication. Reads rely on the numeric loopback listener plus the strict
+`Host`, `Origin`, and `Sec-Fetch-Site` boundary. Mutations additionally require
+the process-scoped `X-Waffle-Desk-Token` and an `Idempotency-Key`.
+
+The process token is a CSRF control delivered to the same-origin Desk. It is not
+a bearer credential and must not be treated as authentication for a public
+listener, reverse proxy, or remote client.
 
 ## Scope and safety rules
 
@@ -101,5 +117,7 @@ available. Do not delete databases, secrets, skills, providers, workspaces, or
 memory to disable Desk.
 
 If the binary release itself is unhealthy, use the existing managed artifact
-rollback or `waffle rollback`, then prove the prior service state and loopback
-health. Schema migrations remain forward-only.
+rollback or `waffle rollback`. When Waffle is already running as a service,
+restart that service after `waffle rollback` so the restored binary is actually
+loaded, then prove the prior service state and loopback health. Schema
+migrations remain forward-only.

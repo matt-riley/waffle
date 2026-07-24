@@ -11,7 +11,7 @@ export default defineConfig({
   testDir: "./tests",
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,
   reporter: process.env.CI ? [["line"], ["github"]] : "line",
   timeout: 30_000,
   expect: {
