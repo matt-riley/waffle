@@ -69,7 +69,9 @@ type Chat struct {
 
 // Dashboard configures the optional Waffle Desk web interface.
 type Dashboard struct {
-	Enabled bool `toml:"enabled"`
+	Enabled          bool     `toml:"enabled"`
+	SkillImportRoots []string `toml:"skill_import_roots"`
+	SkillGitHosts    []string `toml:"skill_git_hosts"`
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).

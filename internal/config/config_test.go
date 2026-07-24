@@ -22,6 +22,12 @@ func TestDashboardDefaultsDisabled(t *testing.T) {
 	if Default().Dashboard.Enabled {
 		t.Fatal("dashboard must default disabled")
 	}
+	if Default().Dashboard.SkillImportRoots != nil {
+		t.Fatalf("dashboard skill import roots = %v, want nil deny-by-default", Default().Dashboard.SkillImportRoots)
+	}
+	if Default().Dashboard.SkillGitHosts != nil {
+		t.Fatalf("dashboard skill Git hosts = %v, want nil deny-by-default", Default().Dashboard.SkillGitHosts)
+	}
 }
 
 func TestDashboardEnabledLoads(t *testing.T) {
@@ -33,6 +39,41 @@ func TestDashboardEnabledLoads(t *testing.T) {
 	}
 	if !cfg.Dashboard.Enabled {
 		t.Fatal("dashboard.enabled = false, want true")
+	}
+}
+
+func TestDashboardSkillSourceAllowlistsLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `[dashboard]
+enabled = true
+skill_import_roots = ["/srv/reviewed-skills", "/opt/waffle-skills"]
+skill_git_hosts = ["github.com"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/srv/reviewed-skills", "/opt/waffle-skills"}; !reflect.DeepEqual(cfg.Dashboard.SkillImportRoots, want) {
+		t.Fatalf("skill import roots = %v, want %v", cfg.Dashboard.SkillImportRoots, want)
+	}
+	if want := []string{"github.com"}; !reflect.DeepEqual(cfg.Dashboard.SkillGitHosts, want) {
+		t.Fatalf("skill Git hosts = %v, want %v", cfg.Dashboard.SkillGitHosts, want)
+	}
+}
+
+func TestExampleDashboardSkillSourcesAreCommentedChoices(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		`# skill_import_roots = ["/absolute/path/to/reviewed-skills"]`,
+		`# skill_git_hosts = ["github.com"]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("example config missing %q", want)
+		}
 	}
 }
 

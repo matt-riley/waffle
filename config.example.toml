@@ -59,6 +59,8 @@
 # Optional Waffle Desk web interface. It is disabled by default.
 [dashboard]
 enabled = false
+# skill_import_roots = ["/absolute/path/to/reviewed-skills"]
+# skill_git_hosts = ["github.com"]
 
 [agent]
 default_profile = "main"
