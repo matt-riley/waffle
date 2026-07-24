@@ -34,6 +34,7 @@ type previewEntry struct {
 // process memory. Tokens and their recent terminal outcomes are bounded.
 type PreviewStore struct {
 	mu           sync.Mutex
+	entropyMu    sync.Mutex
 	now          func() time.Time
 	entropy      io.Reader
 	entries      map[string]previewEntry
@@ -66,38 +67,41 @@ func (s *PreviewStore) Issue(operation, resourceID string, ttl time.Duration) st
 		panic("dashboard: preview token TTL must be positive")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.entropyMu.Lock()
+	defer s.entropyMu.Unlock()
 
-	var token string
 	for attempt := 0; attempt < previewTokenAttempts; attempt++ {
 		random := make([]byte, previewTokenBytes)
 		if _, err := io.ReadFull(s.entropy, random); err != nil {
 			panic("dashboard: preview token entropy unavailable")
 		}
 		candidate := base64.RawURLEncoding.EncodeToString(random)
-		if _, exists := s.entries[candidate]; exists {
-			continue
-		}
-		if _, exists := s.outcomes[candidate]; exists {
-			continue
-		}
-		token = candidate
-		break
-	}
-	if token == "" {
-		panic("dashboard: preview token entropy exhausted")
-	}
 
-	now := s.now()
-	s.pruneExpiredLocked(now)
-	s.makeSpaceLocked()
-	s.entries[token] = previewEntry{
-		operation:  operation,
-		resourceID: resourceID,
-		expiresAt:  now.Add(ttl),
+		s.mu.Lock()
+		registered := func() bool {
+			defer s.mu.Unlock()
+			if _, exists := s.entries[candidate]; exists {
+				return false
+			}
+			if _, exists := s.outcomes[candidate]; exists {
+				return false
+			}
+
+			now := s.now()
+			s.pruneExpiredLocked(now)
+			s.makeSpaceLocked()
+			s.entries[candidate] = previewEntry{
+				operation:  operation,
+				resourceID: resourceID,
+				expiresAt:  now.Add(ttl),
+			}
+			return true
+		}()
+		if registered {
+			return candidate
+		}
 	}
-	return token
+	panic("dashboard: preview token entropy exhausted")
 }
 
 // Consume atomically spends a token. Both successful and mismatched attempts

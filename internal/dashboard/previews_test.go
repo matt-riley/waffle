@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,6 +169,143 @@ func TestPreviewIssueBoundsRepeatedEntropyCollisionsAndUnlocksStore(t *testing.T
 	}
 }
 
+func TestPreviewIssueBlockingEntropyDoesNotBlockExistingConsume(t *testing.T) {
+	entropy := newBlockingPreviewEntropy()
+	store := NewPreviewStore(fixedPreviewClock(time.Unix(3_800, 0)), entropy)
+	token := store.Issue("workspace-close", "ws-existing", time.Hour)
+
+	issued := make(chan string, 1)
+	go func() {
+		issued <- store.Issue("workspace-close", "ws-blocked", time.Hour)
+	}()
+
+	select {
+	case <-entropy.blocked:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("second issuance did not reach blocking entropy")
+	}
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		close(entropy.release)
+		released = true
+	}
+	defer release()
+
+	consumed := make(chan error, 1)
+	go func() {
+		consumed <- store.Consume(token, "workspace-close", "ws-existing")
+	}()
+
+	select {
+	case err := <-consumed:
+		if err != nil {
+			t.Fatalf("consume while another issuance blocks: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("existing token consume blocked behind entropy I/O")
+	}
+
+	release()
+	select {
+	case blockedToken := <-issued:
+		if err := store.Consume(blockedToken, "workspace-close", "ws-blocked"); err != nil {
+			t.Fatalf("consume token issued after entropy release: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("blocked issuance did not finish after entropy release")
+	}
+}
+
+func TestPreviewIssueZeroProgressEntropyDoesNotBlockExistingConsume(t *testing.T) {
+	entropy := newZeroProgressPreviewEntropy()
+	store := NewPreviewStore(fixedPreviewClock(time.Unix(3_900, 0)), entropy)
+	token := store.Issue("workspace-close", "ws-existing", time.Hour)
+
+	issued := make(chan string, 1)
+	go func() {
+		issued <- store.Issue("workspace-close", "ws-stalled", time.Hour)
+	}()
+
+	select {
+	case <-entropy.stalled:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("second issuance did not reach zero-progress entropy")
+	}
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		close(entropy.release)
+		released = true
+	}
+	defer release()
+
+	consumed := make(chan error, 1)
+	go func() {
+		consumed <- store.Consume(token, "workspace-close", "ws-existing")
+	}()
+
+	select {
+	case err := <-consumed:
+		if err != nil {
+			t.Fatalf("consume while another issuance stalls: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("existing token consume blocked behind zero-progress entropy")
+	}
+
+	release()
+	select {
+	case stalledToken := <-issued:
+		if err := store.Consume(stalledToken, "workspace-close", "ws-stalled"); err != nil {
+			t.Fatalf("consume token issued after entropy progress: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("stalled issuance did not finish after entropy progress")
+	}
+}
+
+func TestPreviewConcurrentIssueSerializesEntropyThroughRegistration(t *testing.T) {
+	entropy := &collidingConcurrentPreviewEntropy{}
+	store := NewPreviewStore(fixedPreviewClock(time.Unix(3_950, 0)), entropy)
+
+	const issuers = 16
+	start := make(chan struct{})
+	tokens := make(chan string, issuers)
+	var wg sync.WaitGroup
+	wg.Add(issuers)
+	for i := 0; i < issuers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			tokens <- store.Issue("workspace-close", "ws-concurrent", time.Hour)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(tokens)
+
+	seen := make(map[string]struct{}, issuers)
+	for token := range tokens {
+		if _, exists := seen[token]; exists {
+			t.Fatalf("duplicate concurrently issued token %q", token)
+		}
+		seen[token] = struct{}{}
+	}
+	if got := entropy.maximumConcurrentReads.Load(); got != 1 {
+		t.Fatalf("maximum concurrent entropy reads = %d, want 1", got)
+	}
+	if got := len(store.entries); got != issuers {
+		t.Fatalf("live entries = %d, want %d", got, issuers)
+	}
+}
+
 func TestPreviewTokenUsesThirtyTwoOpaqueURLSafeBytes(t *testing.T) {
 	store := NewPreviewStore(fixedPreviewClock(time.Unix(4_000, 0)), previewEntropy(1))
 
@@ -249,6 +387,94 @@ func (r repeatingPreviewEntropy) Read(buffer []byte) (int, error) {
 	for i := range buffer {
 		buffer[i] = r.value
 	}
+	return len(buffer), nil
+}
+
+type blockingPreviewEntropy struct {
+	calls   atomic.Int32
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func newBlockingPreviewEntropy() *blockingPreviewEntropy {
+	return &blockingPreviewEntropy{
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *blockingPreviewEntropy) Read(buffer []byte) (int, error) {
+	call := r.calls.Add(1)
+	if call == 2 {
+		close(r.blocked)
+		<-r.release
+	}
+	for i := range buffer {
+		buffer[i] = byte(call)
+	}
+	return len(buffer), nil
+}
+
+type zeroProgressPreviewEntropy struct {
+	calls   atomic.Int32
+	stalled chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newZeroProgressPreviewEntropy() *zeroProgressPreviewEntropy {
+	return &zeroProgressPreviewEntropy{
+		stalled: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *zeroProgressPreviewEntropy) Read(buffer []byte) (int, error) {
+	call := r.calls.Add(1)
+	if call == 1 {
+		for i := range buffer {
+			buffer[i] = byte(call)
+		}
+		return len(buffer), nil
+	}
+
+	r.once.Do(func() {
+		close(r.stalled)
+	})
+	select {
+	case <-r.release:
+		for i := range buffer {
+			buffer[i] = byte(call)
+		}
+		return len(buffer), nil
+	default:
+		time.Sleep(time.Millisecond)
+		return 0, nil
+	}
+}
+
+type collidingConcurrentPreviewEntropy struct {
+	calls                  atomic.Int32
+	concurrentReads        atomic.Int32
+	maximumConcurrentReads atomic.Int32
+}
+
+func (r *collidingConcurrentPreviewEntropy) Read(buffer []byte) (int, error) {
+	concurrent := r.concurrentReads.Add(1)
+	defer r.concurrentReads.Add(-1)
+	for {
+		maximum := r.maximumConcurrentReads.Load()
+		if concurrent <= maximum || r.maximumConcurrentReads.CompareAndSwap(maximum, concurrent) {
+			break
+		}
+	}
+
+	call := r.calls.Add(1)
+	value := byte((call + 1) / 2)
+	for i := range buffer {
+		buffer[i] = value
+	}
+	time.Sleep(time.Millisecond)
 	return len(buffer), nil
 }
 
