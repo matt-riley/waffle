@@ -3,8 +3,6 @@ package dashboard
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -66,166 +64,11 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 		if timeout <= 0 {
 			timeout = defaultTaskMutationTimeout
 		}
-		protected := newTaskMutationHandler(
-			config.Security,
-			taskMutationExecutor{store: config.Idempotency, timeout: timeout},
-			taskMutationMaxBodyBytes,
-			next,
-		)
-		return preserveTaskResponseType(protected)
+		protected := NewDetachedMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, next, timeout)
+		return preserveResponseType(protected)
 	}
 	mux.Handle("POST /api/v1/desk/tasks/schedules", mutation(newTaskScheduleCreateHandler(config.Schedules, events)))
 	mux.Handle("POST /api/v1/desk/tasks/schedules/{id}", mutation(newTaskScheduleUpdateHandler(config.Schedules, events)))
-}
-
-type taskMutationExecutor struct {
-	store   *IdempotencyStore
-	timeout time.Duration
-}
-
-func newTaskMutationHandler(
-	security *Security,
-	executor taskMutationExecutor,
-	maxBodyBytes int64,
-	next http.Handler,
-) http.Handler {
-	return security.RequireMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Context().Err() != nil {
-			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-		if err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
-				http.Error(w, "request_body_too_large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "invalid_request_body", http.StatusBadRequest)
-			return
-		}
-		if r.Context().Err() != nil {
-			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		digest := sha256.Sum256(body)
-		operation := r.Method + " " + r.URL.Path
-		status, responseBody, doErr := executor.Do(
-			r.Context(),
-			r.Header.Get("Idempotency-Key"),
-			operation,
-			hex.EncodeToString(digest[:]),
-			func(ctx context.Context) (int, []byte) {
-				mutationRequest := r.Clone(ctx)
-				mutationRequest.Body = io.NopCloser(bytes.NewReader(body))
-				recorder := newResponseCapture()
-				next.ServeHTTP(recorder, mutationRequest)
-				return recorder.status, recorder.body.Bytes()
-			},
-		)
-		if doErr != nil && status == 0 {
-			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(status)
-		_, _ = w.Write(responseBody)
-	}))
-}
-
-func (e taskMutationExecutor) Do(
-	requestCtx context.Context,
-	key, operation, requestDigest string,
-	run func(context.Context) (status int, body []byte),
-) (status int, body []byte, err error) {
-	if err := requestCtx.Err(); err != nil {
-		return 0, nil, err
-	}
-
-	store := e.store
-	store.mu.Lock()
-	store.pruneExpiredLocked()
-	if entry, ok := store.entries[key]; ok {
-		if entry.operation != operation || entry.digest != requestDigest {
-			store.mu.Unlock()
-			return http.StatusConflict, []byte("idempotency_conflict"), nil
-		}
-		if entry.ready == nil {
-			status, body = entry.status, append([]byte(nil), entry.body...)
-			store.mu.Unlock()
-			return status, body, nil
-		}
-		ready := entry.ready
-		store.mu.Unlock()
-		return waitForTaskMutation(requestCtx, store, entry, ready)
-	}
-	if !store.makeSpaceLocked() {
-		store.mu.Unlock()
-		return http.StatusServiceUnavailable, []byte("idempotency_unavailable"), errIdempotencyCapacity
-	}
-	entry := &idempotencyEntry{
-		operation: operation,
-		digest:    requestDigest,
-		ready:     make(chan struct{}),
-	}
-	store.entries[key] = entry
-	ready := entry.ready
-	store.mu.Unlock()
-
-	completionCtx, cancel := taskMutationCompletionContext(requestCtx, e.timeout)
-	defer cancel()
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			store.mu.Lock()
-			if store.entries[key] == entry && entry.ready != nil {
-				delete(store.entries, key)
-				close(ready)
-			}
-			store.mu.Unlock()
-			panic(recovered)
-		}
-	}()
-	status, body = run(completionCtx)
-	store.mu.Lock()
-	if store.entries[key] == entry && entry.ready != nil {
-		entry.status = status
-		entry.body = append([]byte(nil), body...)
-		entry.expiresAt = store.now().Add(store.ttl)
-		entry.ready = nil
-		close(ready)
-	}
-	store.mu.Unlock()
-	return status, append([]byte(nil), body...), nil
-}
-
-func taskMutationCompletionContext(requestCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	base := context.WithoutCancel(requestCtx)
-	hardDeadline := time.Now().Add(timeout)
-	deadline := hardDeadline
-	if inherited, ok := requestCtx.Deadline(); ok && inherited.Before(deadline) {
-		deadline = inherited
-	}
-	return context.WithDeadline(base, deadline)
-}
-
-func waitForTaskMutation(
-	ctx context.Context,
-	store *IdempotencyStore,
-	entry *idempotencyEntry,
-	ready <-chan struct{},
-) (status int, body []byte, err error) {
-	select {
-	case <-ready:
-	case <-ctx.Done():
-		select {
-		case <-ready:
-		default:
-			return 0, nil, ctx.Err()
-		}
-	}
-	store.mu.Lock()
-	status, body = entry.status, append([]byte(nil), entry.body...)
-	store.mu.Unlock()
-	return status, body, nil
 }
 
 func newTasksReadHandler(service *TasksService) http.Handler {
@@ -240,7 +83,7 @@ func newTasksReadHandler(service *TasksService) http.Handler {
 			writeTaskError(w, http.StatusBadRequest, "invalid_filter", "task filter is invalid")
 			return
 		}
-		writeTaskJSON(w, http.StatusOK, snapshot)
+		writeJSON(w, http.StatusOK, snapshot)
 	})
 }
 
@@ -288,7 +131,7 @@ func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		view := scheduleTaskView(*job)
 		publishTaskScheduleEvent(events, TaskScheduleCreatedEvent, view)
-		writeTaskJSON(w, http.StatusCreated, struct {
+		writeJSON(w, http.StatusCreated, struct {
 			Task TaskView `json:"task"`
 		}{Task: view})
 	})
@@ -325,7 +168,7 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		view := scheduleTaskView(*job)
 		publishTaskScheduleEvent(events, TaskScheduleUpdatedEvent, view)
-		writeTaskJSON(w, http.StatusOK, struct {
+		writeJSON(w, http.StatusOK, struct {
 			Task TaskView `json:"task"`
 		}{Task: view})
 	})
@@ -419,16 +262,7 @@ func writeTaskStoreError(w http.ResponseWriter, err error) {
 }
 
 func writeTaskError(w http.ResponseWriter, status int, code, message string) {
-	writeTaskJSON(w, status, struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}{Code: code, Message: message})
-}
-
-func writeTaskJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	writeJSON(w, status, errorResponse{Code: code, Message: message})
 }
 
 func publishTaskScheduleEvent(events *EventHub, eventType string, view TaskView) {
@@ -447,19 +281,5 @@ func publishTaskScheduleEvent(events *EventHub, eventType string, view TaskView)
 		Resource:   "schedule",
 		ResourceID: public.ID,
 		Data:       data,
-	})
-}
-
-// NewMutationHandler intentionally replays only status and body. This additive
-// adapter restores JSON Content-Type without changing that shared primitive.
-func preserveTaskResponseType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capture := newResponseCapture()
-		next.ServeHTTP(capture, r)
-		if json.Valid(capture.body.Bytes()) {
-			w.Header().Set("Content-Type", "application/json")
-		}
-		w.WriteHeader(capture.status)
-		_, _ = w.Write(capture.body.Bytes())
 	})
 }

@@ -2,13 +2,13 @@ package dashboard
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/providerconfig"
 )
 
 const connectionHealthStaleAfter = 2 * time.Minute
@@ -49,7 +49,7 @@ type configuredConnectionSource struct {
 func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) ConnectionSource {
 	records := make([]ConnectionView, 0, len(cfg.Providers)+len(cfg.MCP)+len(cfg.Agent.Groups)+len(cfg.Agent.Profiles)+1)
 
-	providerNames := sortedMapKeys(cfg.Providers)
+	providerNames := providerconfig.SortedKeys(cfg.Providers)
 	for _, name := range providerNames {
 		records = append(records, ConnectionView{Name: name, Kind: "provider", Status: "configured"})
 	}
@@ -76,7 +76,7 @@ func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) Conne
 	for name := range cfg.Agent.Profiles {
 		profileNames[name] = struct{}{}
 	}
-	for _, name := range sortedMapKeys(profileNames) {
+	for _, name := range providerconfig.SortedKeys(profileNames) {
 		mode := cfg.AgentPolicy(name).Mode
 		if profile, exists := cfg.Agent.Profiles[name]; exists {
 			mode = cfg.AgentPolicy(config.GroupMain).Mode
@@ -105,15 +105,6 @@ func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) Conne
 		telegramIndex: telegramIndex,
 		health:        health,
 	}
-}
-
-func sortedMapKeys[V any](values map[string]V) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func connectionSandboxSummary(mode string) string {
@@ -175,7 +166,6 @@ func newConnectionsHandler(source ConnectionSource) http.Handler {
 		if records == nil {
 			records = []ConnectionView{}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(records)
+		writeJSON(w, http.StatusOK, records)
 	})
 }

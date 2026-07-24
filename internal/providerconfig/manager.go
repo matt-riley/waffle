@@ -329,7 +329,7 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 	if m.Probe == nil {
 		return errors.New("provider probe is not configured")
 	}
-	aliases := sortedKeys(req.Models)
+	aliases := SortedKeys(req.Models)
 	for _, alias := range aliases {
 		target, resolveErr := candidate.ResolveModel(alias)
 		if resolveErr != nil {
@@ -1568,7 +1568,8 @@ func referencedAliases(cfg config.Config, connection string) []string {
 	return aliases
 }
 
-func sortedKeys[V any](m map[string]V) []string {
+// SortedKeys returns m's keys in ascending order.
+func SortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)

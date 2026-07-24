@@ -322,81 +322,7 @@ func newGitHubHTTPClient() *http.Client {
 }
 
 func reviewedTreeFromGitHubArchive(archive io.Reader, expectedRoot string) (reviewedTree, error) {
-	reader := tar.NewReader(archive)
-	files := make([]reviewedFile, 0)
-	seen := make(map[string]struct{})
-	entriesSeen := 0
-	rootSeen := false
-	var totalBytes int64
-	for {
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return reviewedTree{}, fmt.Errorf("%w: read GitHub archive", ErrUnsafeTree)
-		}
-		if len(header.PAXRecords) != 0 || header.Typeflag == tar.TypeXHeader ||
-			header.Typeflag == tar.TypeXGlobalHeader {
-			return reviewedTree{}, fmt.Errorf("%w: unexpected GitHub archive metadata", ErrUnsafeTree)
-		}
-		name := strings.TrimSuffix(header.Name, "/")
-		if name == expectedRoot && header.Typeflag == tar.TypeDir {
-			if rootSeen {
-				return reviewedTree{}, fmt.Errorf("%w: duplicate GitHub archive root", ErrUnsafeTree)
-			}
-			rootSeen = true
-			continue
-		}
-		prefix := expectedRoot + "/"
-		if !strings.HasPrefix(name, prefix) {
-			return reviewedTree{}, fmt.Errorf("%w: unexpected GitHub archive root", ErrCommitMismatch)
-		}
-		name = strings.TrimPrefix(name, prefix)
-		entriesSeen++
-		if entriesSeen > maxReviewEntries {
-			return reviewedTree{}, fmt.Errorf("%w: more than %d filesystem entries", ErrTreeTooLarge, maxReviewEntries)
-		}
-		if !safeArchivePath(name) || len(name) > maxReviewPathBytes {
-			return reviewedTree{}, fmt.Errorf("%w: invalid archive path", ErrUnsafeTree)
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return reviewedTree{}, fmt.Errorf("%w: duplicate archive path %q", ErrUnsafeTree, name)
-		}
-		seen[name] = struct{}{}
-		if hasVCSComponent(name) {
-			return reviewedTree{}, fmt.Errorf("%w: hidden VCS state %q", ErrUnsafeTree, name)
-		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			continue
-		case tar.TypeReg:
-		default:
-			return reviewedTree{}, fmt.Errorf("%w: special archive entry %q", ErrUnsafeTree, name)
-		}
-		if header.Mode&0o111 != 0 {
-			return reviewedTree{}, fmt.Errorf("%w: executable file %q", ErrUnsafeTree, name)
-		}
-		if len(files)+1 > maxReviewFiles {
-			return reviewedTree{}, fmt.Errorf("%w: more than %d files", ErrTreeTooLarge, maxReviewFiles)
-		}
-		if header.Size < 0 || header.Size > maxReviewBytes-totalBytes {
-			return reviewedTree{}, fmt.Errorf("%w: more than %d bytes", ErrTreeTooLarge, maxReviewBytes)
-		}
-		data, err := io.ReadAll(io.LimitReader(reader, header.Size+1))
-		if err != nil || int64(len(data)) != header.Size {
-			return reviewedTree{}, fmt.Errorf("%w: truncated archive file %q", ErrUnsafeTree, name)
-		}
-		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
-			return reviewedTree{}, fmt.Errorf("%w: binary or NUL content in %q", ErrUnsafeTree, name)
-		}
-		totalBytes += int64(len(data))
-		files = append(files, newReviewedFile(name, data))
-	}
-	if !rootSeen {
-		return reviewedTree{}, fmt.Errorf("%w: missing exact GitHub archive root", ErrCommitMismatch)
-	}
-	return reviewedTreeFromFiles(files)
+	return reviewedTreeFromTar(archive, expectedRoot, false)
 }
 
 func gitArchiveCommit(ctx context.Context, archive []byte, privateHome string) (string, error) {
@@ -415,10 +341,24 @@ func gitArchiveCommit(ctx context.Context, archive []byte, privateHome string) (
 }
 
 func reviewedTreeFromArchive(archive []byte) (reviewedTree, error) {
-	reader := tar.NewReader(bytes.NewReader(archive))
+	return reviewedTreeFromTar(bytes.NewReader(archive), "", true)
+}
+
+// reviewedTreeFromTar walks a tar archive and returns its reviewed,
+// safety-checked file tree. When rootPrefix is non-empty, every entry must
+// live under that single top-level directory (as GitHub's codeload archives
+// do); the prefix is stripped from each resulting path and the directory
+// itself must appear exactly once. When allowPAXHeaders is false, PAX
+// extended headers are rejected outright instead of merely skipping global
+// ones; GitHub's codeload archives are held to that stricter standard, while
+// plain `git archive` output (which does not use PAX extensions) only needs
+// its global headers skipped.
+func reviewedTreeFromTar(archive io.Reader, rootPrefix string, allowPAXHeaders bool) (reviewedTree, error) {
+	reader := tar.NewReader(archive)
 	files := make([]reviewedFile, 0)
 	seen := make(map[string]struct{})
 	entriesSeen := 0
+	rootSeen := rootPrefix == ""
 	var totalBytes int64
 	for {
 		header, err := reader.Next()
@@ -426,16 +366,34 @@ func reviewedTreeFromArchive(archive []byte) (reviewedTree, error) {
 			break
 		}
 		if err != nil {
-			return reviewedTree{}, fmt.Errorf("%w: read Git archive", ErrUnsafeTree)
+			return reviewedTree{}, fmt.Errorf("%w: read archive", ErrUnsafeTree)
 		}
-		if header.Typeflag == tar.TypeXGlobalHeader {
+		if !allowPAXHeaders && (len(header.PAXRecords) != 0 || header.Typeflag == tar.TypeXHeader ||
+			header.Typeflag == tar.TypeXGlobalHeader) {
+			return reviewedTree{}, fmt.Errorf("%w: unexpected archive metadata", ErrUnsafeTree)
+		}
+		if allowPAXHeaders && header.Typeflag == tar.TypeXGlobalHeader {
 			continue
+		}
+		name := strings.TrimSuffix(header.Name, "/")
+		if rootPrefix != "" {
+			if name == rootPrefix && header.Typeflag == tar.TypeDir {
+				if rootSeen {
+					return reviewedTree{}, fmt.Errorf("%w: duplicate archive root", ErrUnsafeTree)
+				}
+				rootSeen = true
+				continue
+			}
+			prefix := rootPrefix + "/"
+			if !strings.HasPrefix(name, prefix) {
+				return reviewedTree{}, fmt.Errorf("%w: unexpected archive root", ErrCommitMismatch)
+			}
+			name = strings.TrimPrefix(name, prefix)
 		}
 		entriesSeen++
 		if entriesSeen > maxReviewEntries {
 			return reviewedTree{}, fmt.Errorf("%w: more than %d filesystem entries", ErrTreeTooLarge, maxReviewEntries)
 		}
-		name := strings.TrimSuffix(header.Name, "/")
 		if !safeArchivePath(name) || len(name) > maxReviewPathBytes {
 			return reviewedTree{}, fmt.Errorf("%w: invalid archive path", ErrUnsafeTree)
 		}
@@ -471,6 +429,9 @@ func reviewedTreeFromArchive(archive []byte) (reviewedTree, error) {
 		}
 		totalBytes += int64(len(data))
 		files = append(files, newReviewedFile(name, data))
+	}
+	if rootPrefix != "" && !rootSeen {
+		return reviewedTree{}, fmt.Errorf("%w: missing exact archive root", ErrCommitMismatch)
 	}
 	return reviewedTreeFromFiles(files)
 }

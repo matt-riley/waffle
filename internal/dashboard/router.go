@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
 )
@@ -82,7 +83,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeChatError(w, err, "open_failed")
 			return
 		}
-		writeChatJSON(w, http.StatusOK, struct {
+		writeJSON(w, http.StatusOK, struct {
 			ClientID string     `json:"client_id"`
 			State    chat.State `json:"state"`
 		}{ClientID: clientID, State: safeChatState(state)})
@@ -99,7 +100,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeChatError(w, err, "turn_failed")
 			return
 		}
-		writeChatJSON(w, http.StatusOK, struct{}{})
+		writeJSON(w, http.StatusOK, struct{}{})
 	})))
 	mux.Handle("POST /api/v1/desk/chat/command", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -114,7 +115,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeChatError(w, err, "command_failed")
 			return
 		}
-		writeChatJSON(w, http.StatusOK, safeChatResult(result))
+		writeJSON(w, http.StatusOK, safeChatResult(result))
 	})))
 	for _, route := range []struct {
 		path string
@@ -135,25 +136,57 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 				writeChatError(w, err, "chat_failed")
 				return
 			}
-			writeChatJSON(w, http.StatusOK, struct{}{})
+			writeJSON(w, http.StatusOK, struct{}{})
 		})))
 	}
 }
 
 func decodeChatRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	return decodeStrictJSON(w, r, target, func(w http.ResponseWriter) {
+		http.Error(w, "invalid_request", http.StatusBadRequest)
+	})
+}
+
+// decodeStrictJSON decodes exactly one JSON object into target, rejecting
+// unknown fields and any trailing data. onInvalid writes the domain-specific
+// error response when decoding fails.
+func decodeStrictJSON(w http.ResponseWriter, r *http.Request, target any, onInvalid func(http.ResponseWriter)) bool {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		http.Error(w, "invalid_request", http.StatusBadRequest)
+		onInvalid(w)
 		return false
 	}
 	return true
 }
 
-func writeChatJSON(w http.ResponseWriter, status int, value any) {
+// errorResponse is the shared {code, message} shape returned by every Desk
+// mutation and read endpoint on failure.
+type errorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// writeJSON writes value as the JSON response body with the given status.
+func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// preserveResponseType restores the JSON Content-Type on a response that was
+// replayed through an intermediate capture (e.g. an idempotency handler)
+// without changing that shared primitive's status/body-only contract.
+func preserveResponseType(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capture := newResponseCapture()
+		next.ServeHTTP(capture, r)
+		if json.Valid(capture.body.Bytes()) {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(capture.status)
+		_, _ = w.Write(capture.body.Bytes())
+	})
 }
 
 func writeChatError(w http.ResponseWriter, err error, fallback string) {
@@ -174,10 +207,7 @@ func writeChatError(w http.ResponseWriter, err error, fallback string) {
 			status, code, message = http.StatusConflict, "session_active", "chat session is already active"
 		}
 	}
-	writeChatJSON(w, status, struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}{Code: code, Message: message})
+	writeJSON(w, status, errorResponse{Code: code, Message: message})
 }
 
 // NewMutationHandler adds request-bound idempotency to one exact dashboard
@@ -188,6 +218,32 @@ func NewMutationHandler(
 	store *IdempotencyStore,
 	maxBodyBytes int64,
 	next http.Handler,
+	observers ...MutationOutcomeObserver,
+) http.Handler {
+	return newMutationHandler(security, store, maxBodyBytes, next, 0, observers...)
+}
+
+// NewDetachedMutationHandler behaves like NewMutationHandler, except the
+// mutation runs with a context detached from client disconnect: it keeps
+// running (and its response gets cached for replay) for up to timeout after
+// the request context is cancelled, instead of being abandoned mid-write.
+func NewDetachedMutationHandler(
+	security *Security,
+	store *IdempotencyStore,
+	maxBodyBytes int64,
+	next http.Handler,
+	timeout time.Duration,
+	observers ...MutationOutcomeObserver,
+) http.Handler {
+	return newMutationHandler(security, store, maxBodyBytes, next, timeout, observers...)
+}
+
+func newMutationHandler(
+	security *Security,
+	store *IdempotencyStore,
+	maxBodyBytes int64,
+	next http.Handler,
+	detachTimeout time.Duration,
 	observers ...MutationOutcomeObserver,
 ) http.Handler {
 	return security.RequireMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +262,7 @@ func NewMutationHandler(
 		operation := r.Method + " " + r.URL.Path
 		var capture *responseCapture
 		executed := false
-		status, responseBody, doErr := store.Do(r.Context(), r.Header.Get("Idempotency-Key"), operation, hex.EncodeToString(digest[:]), func(ctx context.Context) (int, []byte) {
+		run := func(ctx context.Context) (int, []byte) {
 			executed = true
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			capture = newResponseCapture()
@@ -224,7 +280,18 @@ func NewMutationHandler(
 				return http.StatusInternalServerError, []byte("mutation_response_unavailable")
 			}
 			return capture.status, envelope
-		})
+		}
+		var status int
+		var responseBody []byte
+		var doErr error
+		key, digestHex := r.Header.Get("Idempotency-Key"), hex.EncodeToString(digest[:])
+		if detachTimeout > 0 {
+			runCtx, cancel := detachedTimeoutContext(r.Context(), detachTimeout)
+			defer cancel()
+			status, responseBody, doErr = store.DoDetached(r.Context(), runCtx, key, operation, digestHex, run)
+		} else {
+			status, responseBody, doErr = store.Do(r.Context(), key, operation, digestHex, run)
+		}
 		if doErr != nil && status == 0 {
 			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
 			return

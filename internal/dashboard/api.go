@@ -63,10 +63,7 @@ func newBootstrapHandler(config APIConfig) http.Handler {
 			http.Error(w, "bootstrap_unavailable", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(bootstrap); err != nil {
-			return
-		}
+		writeJSON(w, http.StatusOK, bootstrap)
 	})
 }
 

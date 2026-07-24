@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -28,8 +27,6 @@ const (
 	WorkspaceResumedEvent  = "workspace.resumed"
 	WorkspaceClosedEvent   = "workspace.closed"
 )
-
-var workspaceRepositoryPart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 var ErrWorkspaceStateConflict = errors.New("workspace state conflict")
 
@@ -112,7 +109,7 @@ func (s *WorkspacesService) Read(ctx context.Context) (WorkspaceSnapshot, error)
 func (s *WorkspacesService) Open(ctx context.Context, repository, profile string) (WorkspaceMutationResponse, error) {
 	repository = strings.TrimSpace(repository)
 	profile = strings.TrimSpace(profile)
-	if !validWorkspaceRepository(repository) || (profile != "" && !config.ValidProfileName(profile)) {
+	if !workspace.ValidRepository(repository) || (profile != "" && !config.ValidProfileName(profile)) {
 		return WorkspaceMutationResponse{}, fmt.Errorf("invalid workspace input")
 	}
 	if s == nil || s.operations == nil || s.operations.Workspaces == nil {
@@ -313,22 +310,6 @@ func (s *WorkspacesService) publish(eventType string, view WorkspaceView) {
 	})
 }
 
-func validWorkspaceRepository(repository string) bool {
-	if len(repository) == 0 || len(repository) > 255 || strings.TrimSpace(repository) != repository {
-		return false
-	}
-	parts := strings.Split(repository, "/")
-	if len(parts) != 2 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." || !workspaceRepositoryPart.MatchString(part) {
-			return false
-		}
-	}
-	return true
-}
-
 func resolveWorkspaceEgressLabel(egress string) string {
 	switch strings.TrimSpace(egress) {
 	case "full":
@@ -376,7 +357,7 @@ func RegisterWorkspaceRoutes(mux *http.ServeMux, routeConfig WorkspaceRouteConfi
 			workspaceMutationMaxBodyBytes,
 			next,
 		)
-		return preserveWorkspaceResponseType(protected)
+		return preserveResponseType(protected)
 	}
 	mux.Handle("POST /api/v1/desk/workspaces/open", mutation(newWorkspaceOpenHandler(service)))
 	mux.Handle("POST /api/v1/desk/workspaces/{id}/select", mutation(newWorkspaceSelectHandler(service)))
@@ -393,7 +374,7 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 			writeWorkspaceError(w, http.StatusServiceUnavailable, "workspaces_unavailable", "workspaces are temporarily unavailable")
 			return
 		}
-		writeWorkspaceJSON(w, http.StatusOK, snapshot)
+		writeJSON(w, http.StatusOK, snapshot)
 	})
 }
 
@@ -406,7 +387,7 @@ func newWorkspaceOpenHandler(service *WorkspacesService) http.Handler {
 		if !decodeWorkspaceRequest(w, r, &request) {
 			return
 		}
-		if !validWorkspaceRepository(strings.TrimSpace(request.Repository)) ||
+		if !workspace.ValidRepository(strings.TrimSpace(request.Repository)) ||
 			(strings.TrimSpace(request.Profile) != "" && !config.ValidProfileName(strings.TrimSpace(request.Profile))) {
 			writeWorkspaceError(w, http.StatusUnprocessableEntity, "invalid_workspace", "repository or profile is invalid")
 			return
@@ -416,7 +397,7 @@ func newWorkspaceOpenHandler(service *WorkspacesService) http.Handler {
 			writeWorkspaceServiceError(w, err, false)
 			return
 		}
-		writeWorkspaceJSON(w, http.StatusCreated, response)
+		writeJSON(w, http.StatusCreated, response)
 	})
 }
 
@@ -452,7 +433,7 @@ func workspaceEmptyMutationHandler(
 			writeWorkspaceServiceError(w, err, true)
 			return
 		}
-		writeWorkspaceJSON(w, http.StatusOK, response)
+		writeJSON(w, http.StatusOK, response)
 	})
 }
 
@@ -467,7 +448,7 @@ func newWorkspaceClosePreviewHandler(service *WorkspacesService) http.Handler {
 			writeWorkspaceServiceError(w, err, false)
 			return
 		}
-		writeWorkspaceJSON(w, http.StatusOK, preview)
+		writeJSON(w, http.StatusOK, preview)
 	})
 }
 
@@ -488,7 +469,7 @@ func newWorkspaceCloseHandler(service *WorkspacesService) http.Handler {
 			var refusal *workspaceCloseRefusal
 			if errors.As(err, &refusal) {
 				dirty, unpushed := workspaceCloseEvidence(refusal.report)
-				writeWorkspaceJSON(w, http.StatusConflict, WorkspaceCloseConflict{
+				writeJSON(w, http.StatusConflict, WorkspaceCloseConflict{
 					Code: "workspace_not_clean", Message: "workspace has unsaved or unpushed work",
 					Dirty: dirty, Unpushed: unpushed,
 				})
@@ -497,7 +478,7 @@ func newWorkspaceCloseHandler(service *WorkspacesService) http.Handler {
 			writeWorkspaceServiceError(w, err, false)
 			return
 		}
-		writeWorkspaceJSON(w, http.StatusOK, response)
+		writeJSON(w, http.StatusOK, response)
 	})
 }
 
@@ -531,26 +512,5 @@ func writeWorkspaceServiceError(w http.ResponseWriter, err error, stateConflict 
 }
 
 func writeWorkspaceError(w http.ResponseWriter, status int, code, message string) {
-	writeWorkspaceJSON(w, status, struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}{Code: code, Message: message})
-}
-
-func writeWorkspaceJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func preserveWorkspaceResponseType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capture := newResponseCapture()
-		next.ServeHTTP(capture, r)
-		if json.Valid(capture.body.Bytes()) {
-			w.Header().Set("Content-Type", "application/json")
-		}
-		w.WriteHeader(capture.status)
-		_, _ = w.Write(capture.body.Bytes())
-	})
+	writeJSON(w, status, errorResponse{Code: code, Message: message})
 }
