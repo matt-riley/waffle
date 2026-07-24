@@ -193,6 +193,50 @@ func TestTaskScheduleInvalidUpdateDoesNotMutateOrPublish(t *testing.T) {
 	}
 }
 
+func TestTaskScheduleUnrelatedEditPreservesExactRedactedFields(t *testing.T) {
+	harness := newTaskRouteHarness(t)
+	const secret = "AGE-SECRET-KEY-original-secret"
+	job, err := harness.schedules.Add(context.Background(), "Sensitive", "0 8 * * *", secret, "telegram:"+secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := NewTasksService(&Operations{
+		Jobs: harness.schedules, Runs: taskRunReader{},
+		Sessions: taskSessionReader{}, Usage: taskUsageReader{},
+	}).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := taskByID(t, snapshot.Tasks, job.ID)
+	if view.Prompt == secret || view.Deliver == "telegram:"+secret {
+		t.Fatalf("test fixture was not redacted: %+v", view)
+	}
+	body, err := json.Marshal(map[string]any{
+		"name": "Renamed", "cron": view.Cron, "prompt": view.Prompt,
+		"deliver": view.Deliver, "profile": view.Profile, "enabled": view.Enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := harness.request(http.MethodPost, "/api/v1/desk/tasks/schedules/"+job.ID, string(body), "safe-round-trip", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := harness.schedules.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != "Renamed" || stored.Prompt != secret || stored.Deliver != "telegram:"+secret {
+		t.Fatalf("unrelated edit corrupted exact fields: %+v", stored)
+	}
+	for _, value := range []string{stored.Name, stored.Prompt, stored.Deliver} {
+		if strings.Contains(value, "[redacted]") {
+			t.Fatalf("stored redaction placeholder: %+v", stored)
+		}
+	}
+}
+
 func TestTaskScheduleRoutesRejectStrictJSONAndOversizedBodies(t *testing.T) {
 	harness := newTaskRouteHarness(t)
 	for _, body := range []string{

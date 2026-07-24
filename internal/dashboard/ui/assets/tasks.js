@@ -26,6 +26,7 @@ if (root) {
     tasks: [],
     requestToken: document.body.dataset.requestToken || "",
     pendingIntent: null,
+    redactedEditFields: new Set(),
   };
 
   async function readJSON(response) {
@@ -191,15 +192,21 @@ if (root) {
     elements.cancel.hidden = true;
     elements.submit.textContent = "Create schedule";
     state.pendingIntent = null;
+    state.redactedEditFields.clear();
   }
 
   function beginEdit(task) {
+    state.redactedEditFields = new Set(
+      Array.isArray(task.redacted_fields) ? task.redacted_fields : [],
+    );
+    const editableValue = (field) =>
+      state.redactedEditFields.has(field) ? "" : task[field] || "";
     elements.id.value = task.id || "";
-    elements.name.value = task.name || "";
-    elements.cron.value = task.cron || "";
-    elements.prompt.value = task.prompt || "";
-    elements.deliver.value = task.deliver || "";
-    elements.profile.value = task.profile || "";
+    elements.name.value = editableValue("name");
+    elements.cron.value = editableValue("cron");
+    elements.prompt.value = editableValue("prompt");
+    elements.deliver.value = editableValue("deliver");
+    elements.profile.value = editableValue("profile");
     elements.enabled.checked = Boolean(task.enabled);
     elements.enabledRow.hidden = false;
     elements.cancel.hidden = false;
@@ -227,6 +234,21 @@ if (root) {
   async function saveSchedule(event) {
     event.preventDefault();
     const editing = elements.id.value !== "";
+    const fields = {
+      name: elements.name,
+      cron: elements.cron,
+      prompt: elements.prompt,
+      deliver: elements.deliver,
+      profile: elements.profile,
+    };
+    if (
+      editing &&
+      [...state.redactedEditFields].some((field) => !fields[field]?.value)
+    ) {
+      elements.status.textContent =
+        "Re-enter every redacted schedule field before saving.";
+      return;
+    }
     const body = {
       name: elements.name.value,
       cron: elements.cron.value,

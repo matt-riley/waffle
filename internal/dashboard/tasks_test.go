@@ -242,6 +242,39 @@ func TestTasksSanitizesScheduleFailureEvidence(t *testing.T) {
 	}
 }
 
+func TestTasksMarksRedactedEditableFieldsWithoutExposingExactValues(t *testing.T) {
+	const secret = "AGE-SECRET-KEY-original-secret"
+	operations := &Operations{
+		Jobs: taskJobReader{jobs: []schedule.Job{{
+			ID:      "job-redacted",
+			Name:    "Review " + secret,
+			Cron:    "0 9 * * *",
+			Prompt:  "Summarize " + secret,
+			Deliver: "telegram:" + secret,
+			Enabled: true,
+		}}},
+		Runs:     taskRunReader{},
+		Sessions: taskSessionReader{},
+		Usage:    taskUsageReader{},
+	}
+
+	snapshot, err := NewTasksService(operations).Read(context.Background(), TaskFilterAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := snapshot.Tasks[0]
+	if got, want := strings.Join(task.RedactedFields, ","), "name,prompt,deliver"; got != want {
+		t.Fatalf("redacted fields = %q, want %q", got, want)
+	}
+	public, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), "original-secret") {
+		t.Fatalf("task view exposed exact editable value: %s", public)
+	}
+}
+
 func TestTasksKeepsRunWhenSessionHandoffCheckFails(t *testing.T) {
 	secret := errors.New("session store token=super-secret")
 	operations := &Operations{

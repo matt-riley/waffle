@@ -81,7 +81,7 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-function createHarness() {
+function createHarness({ snapshotOverrides = {} } = {}) {
   const selectors = [
     ".tasks",
     "#tasks-attention-count",
@@ -154,6 +154,7 @@ function createHarness() {
         },
       ],
     },
+    ...snapshotOverrides,
   };
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
@@ -228,4 +229,45 @@ test("filters tasks and sends protected create mutations with a fresh intent key
   );
   assert.equal(harness.elements["#task-schedule-status"].textContent, "Schedule created.");
   assert.equal(harness.calls.at(-1).path, "/api/v1/desk/tasks?filter=attention");
+});
+
+test("redacted editable fields require re-entry and are never posted as placeholders", async () => {
+  const harness = createHarness({
+    snapshotOverrides: {
+      all: {
+        filter: "all",
+        attention_count: 0,
+        errors: [],
+        tasks: [{
+          id: "job-sensitive",
+          kind: "schedule",
+          name: "Sensitive",
+          source: "schedule",
+          cron: "0 9 * * *",
+          prompt: "Summarize [redacted]",
+          deliver: "telegram:[redacted]",
+          enabled: true,
+          redacted_fields: ["prompt", "deliver"],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          retry: { attempt: 0, max_attempts: 1 },
+          evidence_label: "Not run yet",
+        }],
+      },
+    },
+  });
+  await settle();
+  const edit = descendants(harness.elements["#tasks-list"])
+    .find((element) => element.dataset.action === "edit-schedule");
+  await edit.emit("click");
+
+  assert.equal(harness.elements["#task-schedule-prompt"].value, "");
+  assert.equal(harness.elements["#task-schedule-deliver"].value, "");
+  harness.elements["#task-schedule-name"].value = "Renamed";
+  await harness.elements["#task-schedule-form"].emit("submit");
+  assert.equal(harness.calls.filter((call) => call.options.method === "POST").length, 0);
+  assert.match(harness.elements["#task-schedule-status"].textContent, /re-enter/i);
+  assert.doesNotMatch(
+    JSON.stringify(harness.calls),
+    /\[redacted\]/,
+  );
 });

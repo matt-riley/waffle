@@ -115,6 +115,12 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 		if !decodeTaskRequest(w, r, &input) {
 			return
 		}
+		current, err := store.Get(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeTaskStoreError(w, err)
+			return
+		}
+		restoreRedactedTaskScheduleFields(current, &input)
 		job, err := store.Update(r.Context(), r.PathValue("id"), input)
 		if err != nil {
 			writeTaskStoreError(w, err)
@@ -126,6 +132,22 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 			Task TaskView `json:"task"`
 		}{Task: view})
 	})
+}
+
+func restoreRedactedTaskScheduleFields(current *schedule.Job, input *schedule.Update) {
+	if current == nil || input == nil {
+		return
+	}
+	restore := func(exact string, candidate *string) {
+		if exact != sanitizeDashboardString(exact) && *candidate == sanitizeDashboardString(exact) {
+			*candidate = exact
+		}
+	}
+	restore(current.Name, &input.Name)
+	restore(current.Cron, &input.Cron)
+	restore(current.Prompt, &input.Prompt)
+	restore(current.Deliver, &input.Deliver)
+	restore(current.Profile, &input.Profile)
 }
 
 func decodeTaskRequest(w http.ResponseWriter, r *http.Request, target any) bool {

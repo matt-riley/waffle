@@ -66,26 +66,27 @@ type TaskRetry struct {
 // TaskView is the stable, sanitized public shape shared by the Tasks API,
 // events, and browser client.
 type TaskView struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Name          string     `json:"name,omitempty"`
-	Source        string     `json:"source"`
-	Phase         string     `json:"phase,omitempty"`
-	Profile       string     `json:"profile,omitempty"`
-	SessionID     string     `json:"session,omitempty"`
-	ElapsedMS     int64      `json:"elapsed_ms,omitempty"`
-	RuntimeMS     int64      `json:"runtime_ms,omitempty"`
-	Usage         TaskUsage  `json:"usage"`
-	Outcome       string     `json:"outcome,omitempty"`
-	Retry         TaskRetry  `json:"retry"`
-	EvidenceLabel string     `json:"evidence_label"`
-	Attention     bool       `json:"attention"`
-	OpenAtDesk    bool       `json:"open_at_desk,omitempty"`
-	Cron          string     `json:"cron,omitempty"`
-	Prompt        string     `json:"prompt,omitempty"`
-	Deliver       string     `json:"deliver,omitempty"`
-	Enabled       bool       `json:"enabled,omitempty"`
-	LastRun       *time.Time `json:"last_run,omitempty"`
+	ID             string     `json:"id"`
+	Kind           string     `json:"kind"`
+	Name           string     `json:"name,omitempty"`
+	Source         string     `json:"source"`
+	Phase          string     `json:"phase,omitempty"`
+	Profile        string     `json:"profile,omitempty"`
+	SessionID      string     `json:"session,omitempty"`
+	ElapsedMS      int64      `json:"elapsed_ms,omitempty"`
+	RuntimeMS      int64      `json:"runtime_ms,omitempty"`
+	Usage          TaskUsage  `json:"usage"`
+	Outcome        string     `json:"outcome,omitempty"`
+	Retry          TaskRetry  `json:"retry"`
+	EvidenceLabel  string     `json:"evidence_label"`
+	Attention      bool       `json:"attention"`
+	OpenAtDesk     bool       `json:"open_at_desk,omitempty"`
+	Cron           string     `json:"cron,omitempty"`
+	Prompt         string     `json:"prompt,omitempty"`
+	Deliver        string     `json:"deliver,omitempty"`
+	Enabled        bool       `json:"enabled,omitempty"`
+	LastRun        *time.Time `json:"last_run,omitempty"`
+	RedactedFields []string   `json:"redacted_fields,omitempty"`
 }
 
 type TasksSnapshot struct {
@@ -238,9 +239,29 @@ func scheduleTaskView(job schedule.Job) TaskView {
 		Enabled: job.Enabled,
 		LastRun: taskTimePointer(job.LastRun),
 	}
+	view.RedactedFields = redactedTaskScheduleFields(job)
 	view.Attention = TaskNeedsAttention(job, nil)
 	view.EvidenceLabel = scheduleEvidenceLabel(job)
 	return view
+}
+
+func redactedTaskScheduleFields(job schedule.Job) []string {
+	fields := make([]string, 0, 5)
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "name", value: job.Name},
+		{name: "cron", value: job.Cron},
+		{name: "prompt", value: job.Prompt},
+		{name: "deliver", value: job.Deliver},
+		{name: "profile", value: job.Profile},
+	} {
+		if sanitizeDashboardString(field.value) != field.value {
+			fields = append(fields, field.name)
+		}
+	}
+	return fields
 }
 
 func activeTaskView(run observability.ActiveRun, usageBySession map[string]TaskUsage) TaskView {
