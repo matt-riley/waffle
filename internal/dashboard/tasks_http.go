@@ -3,16 +3,20 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/schedule"
 )
 
 const (
-	taskMutationMaxBodyBytes = 64 << 10
+	taskMutationMaxBodyBytes   = 64 << 10
+	defaultTaskMutationTimeout = 30 * time.Second
 
 	TaskScheduleCreatedEvent = "task.schedule.created"
 	TaskScheduleUpdatedEvent = "task.schedule.updated"
@@ -32,6 +36,9 @@ type TaskRouteConfig struct {
 	Security    *Security
 	Idempotency *IdempotencyStore
 	Events      *EventHub
+	// MutationTimeout bounds admitted schedule mutations. Zero uses the
+	// production default.
+	MutationTimeout time.Duration
 }
 
 // RegisterTaskRoutes mounts only the exact Tasks endpoints. The shared router
@@ -47,24 +54,199 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 		events = config.Operations.Events
 	}
 	mutation := func(next http.Handler) http.Handler {
-		protected := NewMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, next)
-		return preserveTaskResponseType(completeTaskMutation(protected))
+		timeout := config.MutationTimeout
+		if timeout <= 0 {
+			timeout = defaultTaskMutationTimeout
+		}
+		protected := newTaskMutationHandler(
+			config.Security,
+			taskMutationExecutor{store: config.Idempotency, timeout: timeout},
+			taskMutationMaxBodyBytes,
+			next,
+		)
+		return preserveTaskResponseType(protected)
 	}
 	mux.Handle("POST /api/v1/desk/tasks/schedules", mutation(newTaskScheduleCreateHandler(config.Schedules, events)))
 	mux.Handle("POST /api/v1/desk/tasks/schedules/{id}", mutation(newTaskScheduleUpdateHandler(config.Schedules, events)))
 }
 
-// completeTaskMutation keeps a Tasks mutation alive once its request has
-// reached the mutation boundary. This lets the shared idempotency store retain
-// a response when the client disconnects after storage has committed.
-func completeTaskMutation(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+type taskMutationExecutor struct {
+	store   *IdempotencyStore
+	timeout time.Duration
+}
+
+type taskMutationResult struct {
+	status int
+	body   []byte
+}
+
+func newTaskMutationHandler(
+	security *Security,
+	executor taskMutationExecutor,
+	maxBodyBytes int64,
+	next http.Handler,
+) http.Handler {
+	return security.RequireMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
-			next.ServeHTTP(w, r)
+			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithoutCancel(r.Context())))
-	})
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "request_body_too_large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "invalid_request_body", http.StatusBadRequest)
+			return
+		}
+		if r.Context().Err() != nil {
+			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		digest := sha256.Sum256(body)
+		operation := r.Method + " " + r.URL.Path
+		status, responseBody, doErr := executor.Do(
+			r.Context(),
+			r.Header.Get("Idempotency-Key"),
+			operation,
+			hex.EncodeToString(digest[:]),
+			func(ctx context.Context) (int, []byte) {
+				mutationRequest := r.Clone(ctx)
+				mutationRequest.Body = io.NopCloser(bytes.NewReader(body))
+				recorder := newResponseCapture()
+				next.ServeHTTP(recorder, mutationRequest)
+				return recorder.status, recorder.body.Bytes()
+			},
+		)
+		if doErr != nil && status == 0 {
+			http.Error(w, "mutation_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(responseBody)
+	}))
+}
+
+func (e taskMutationExecutor) Do(
+	requestCtx context.Context,
+	key, operation, requestDigest string,
+	run func(context.Context) (status int, body []byte),
+) (status int, body []byte, err error) {
+	if err := requestCtx.Err(); err != nil {
+		return 0, nil, err
+	}
+
+	store := e.store
+	store.mu.Lock()
+	store.pruneExpiredLocked()
+	if entry, ok := store.entries[key]; ok {
+		if entry.operation != operation || entry.digest != requestDigest {
+			store.mu.Unlock()
+			return http.StatusConflict, []byte("idempotency_conflict"), nil
+		}
+		if entry.ready == nil {
+			status, body = entry.status, append([]byte(nil), entry.body...)
+			store.mu.Unlock()
+			return status, body, nil
+		}
+		ready := entry.ready
+		store.mu.Unlock()
+		return waitForTaskMutation(requestCtx, store, entry, ready)
+	}
+	if !store.makeSpaceLocked() {
+		store.mu.Unlock()
+		return http.StatusServiceUnavailable, []byte("idempotency_unavailable"), errIdempotencyCapacity
+	}
+	entry := &idempotencyEntry{
+		operation: operation,
+		digest:    requestDigest,
+		ready:     make(chan struct{}),
+	}
+	store.entries[key] = entry
+	ready := entry.ready
+	store.mu.Unlock()
+
+	completionCtx, cancel := taskMutationCompletionContext(requestCtx, e.timeout)
+	go e.complete(key, entry, completionCtx, cancel, run)
+	<-ready
+	store.mu.Lock()
+	status, body = entry.status, append([]byte(nil), entry.body...)
+	store.mu.Unlock()
+	return status, body, nil
+}
+
+func taskMutationCompletionContext(requestCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(requestCtx)
+	hardDeadline := time.Now().Add(timeout)
+	deadline := hardDeadline
+	if inherited, ok := requestCtx.Deadline(); ok && inherited.Before(deadline) {
+		deadline = inherited
+	}
+	return context.WithDeadline(base, deadline)
+}
+
+func (e taskMutationExecutor) complete(
+	key string,
+	entry *idempotencyEntry,
+	ctx context.Context,
+	cancel context.CancelFunc,
+	run func(context.Context) (status int, body []byte),
+) {
+	defer cancel()
+	result := make(chan taskMutationResult, 1)
+	go func() {
+		status, body := run(ctx)
+		result <- taskMutationResult{status: status, body: body}
+	}()
+
+	var completed taskMutationResult
+	select {
+	case completed = <-result:
+	case <-ctx.Done():
+		select {
+		case completed = <-result:
+		default:
+			completed = taskMutationResult{
+				status: http.StatusServiceUnavailable,
+				body:   []byte("{\"code\":\"schedule_unavailable\",\"message\":\"schedule could not be saved\"}\n"),
+			}
+		}
+	}
+
+	store := e.store
+	store.mu.Lock()
+	if store.entries[key] == entry && entry.ready != nil {
+		ready := entry.ready
+		entry.status = completed.status
+		entry.body = append([]byte(nil), completed.body...)
+		entry.expiresAt = store.now().Add(store.ttl)
+		entry.ready = nil
+		close(ready)
+	}
+	store.mu.Unlock()
+}
+
+func waitForTaskMutation(
+	ctx context.Context,
+	store *IdempotencyStore,
+	entry *idempotencyEntry,
+	ready <-chan struct{},
+) (status int, body []byte, err error) {
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		select {
+		case <-ready:
+		default:
+			return 0, nil, ctx.Err()
+		}
+	}
+	store.mu.Lock()
+	status, body = entry.status, append([]byte(nil), entry.body...)
+	store.mu.Unlock()
+	return status, body, nil
 }
 
 func newTasksReadHandler(service *TasksService) http.Handler {

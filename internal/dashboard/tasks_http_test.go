@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,6 +210,121 @@ func TestTaskScheduleLateCancellationReplaysCommittedUpdate(t *testing.T) {
 	}
 	if events.Cursor() != 1 {
 		t.Fatalf("event cursor = %d, want one publication", events.Cursor())
+	}
+}
+
+func TestTaskMutationRejectsCancellationBeforeAdmission(t *testing.T) {
+	schedules := newControlledTaskUpdateStore()
+	events := NewEventHub(4)
+	handler, security := newTaskMutationTestHandler(t, schedules, events, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rec := serveTaskUpdate(handler, security, ctx, "cancel-before-admission")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	if gets, updates := schedules.counts(); gets != 0 || updates != 0 {
+		t.Fatalf("store calls = get:%d update:%d, want zero", gets, updates)
+	}
+	if events.Cursor() != 0 {
+		t.Fatal("pre-admission cancellation published an event")
+	}
+}
+
+func TestTaskMutationCompletionPreservesInheritedDeadlineAndHardBound(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestTimeout time.Duration
+		hardTimeout    time.Duration
+		wantMaximum    time.Duration
+	}{
+		{name: "inherited deadline", requestTimeout: 35 * time.Millisecond, hardTimeout: time.Second, wantMaximum: 200 * time.Millisecond},
+		{name: "hard completion bound", hardTimeout: 40 * time.Millisecond, wantMaximum: 200 * time.Millisecond},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			schedules := newDeadlineTaskUpdateStore()
+			events := NewEventHub(4)
+			handler, security := newTaskMutationTestHandler(t, schedules, events, test.hardTimeout)
+			ctx := context.Background()
+			var cancel context.CancelFunc = func() {}
+			if test.requestTimeout > 0 {
+				ctx, cancel = context.WithTimeout(ctx, test.requestTimeout)
+			}
+			defer cancel()
+			requestDeadline, inherited := ctx.Deadline()
+			started := time.Now()
+
+			rec := serveTaskUpdate(handler, security, ctx, "bounded-"+test.name)
+			elapsed := time.Since(started)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
+			}
+			if elapsed > test.wantMaximum {
+				t.Fatalf("mutation took %v, want at most %v", elapsed, test.wantMaximum)
+			}
+			seen := <-schedules.deadline
+			if seen.IsZero() {
+				t.Fatal("store context had no completion deadline")
+			}
+			if inherited && !seen.Equal(requestDeadline) {
+				t.Fatalf("store deadline = %v, want inherited %v", seen, requestDeadline)
+			}
+			if events.Cursor() != 0 {
+				t.Fatal("timed-out mutation published an event")
+			}
+		})
+	}
+}
+
+func TestTaskMutationCanceledReplayWaiterDoesNotCancelAdmittedMutation(t *testing.T) {
+	schedules := newControlledTaskUpdateStore()
+	events := NewEventHub(4)
+	handler, security := newTaskMutationTestHandler(t, schedules, events, time.Second)
+
+	ownerDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		ownerDone <- serveTaskUpdate(handler, security, context.Background(), "join-in-flight")
+	}()
+	<-schedules.started
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		waiterDone <- serveTaskUpdate(handler, security, waiterCtx, "join-in-flight")
+	}()
+	time.AfterFunc(20*time.Millisecond, cancelWaiter)
+	select {
+	case waiter := <-waiterDone:
+		if waiter.Code != http.StatusServiceUnavailable {
+			t.Fatalf("waiter status = %d, want 503: %s", waiter.Code, waiter.Body.String())
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(schedules.release)
+		<-ownerDone
+		t.Fatal("canceled replay waiter remained blocked")
+	}
+	select {
+	case owner := <-ownerDone:
+		t.Fatalf("waiter cancellation ended owner early: %d %s", owner.Code, owner.Body.String())
+	default:
+	}
+
+	close(schedules.release)
+	owner := <-ownerDone
+	replay := serveTaskUpdate(handler, security, context.Background(), "join-in-flight")
+	if owner.Code != http.StatusOK || replay.Code != http.StatusOK {
+		t.Fatalf("statuses = %d/%d: %s / %s", owner.Code, replay.Code, owner.Body.String(), replay.Body.String())
+	}
+	if !bytes.Equal(owner.Body.Bytes(), replay.Body.Bytes()) {
+		t.Fatalf("completed replay differs: %q / %q", owner.Body.Bytes(), replay.Body.Bytes())
+	}
+	if _, updates := schedules.counts(); updates != 1 {
+		t.Fatalf("updates = %d, want one", updates)
+	}
+	if events.Cursor() != 1 {
+		t.Fatalf("event cursor = %d, want one", events.Cursor())
 	}
 }
 
@@ -488,6 +604,145 @@ type cancelAfterTaskUpdateStore struct {
 	cancel  context.CancelFunc
 	job     schedule.Job
 	updates int
+}
+
+func newTaskMutationTestHandler(
+	t *testing.T,
+	schedules TaskScheduleStore,
+	events *EventHub,
+	timeout time.Duration,
+) (http.Handler, *Security) {
+	t.Helper()
+	security := mustSecurity(t, "127.0.0.1:8422")
+	mux := http.NewServeMux()
+	RegisterTaskRoutes(mux, TaskRouteConfig{
+		Operations: &Operations{
+			Jobs: taskJobReader{}, Runs: taskRunReader{},
+			Sessions: taskSessionReader{}, Usage: taskUsageReader{},
+		},
+		Schedules: schedules, Security: security,
+		Idempotency:     NewIdempotencyStore(nil, 8, time.Minute),
+		Events:          events,
+		MutationTimeout: timeout,
+	})
+	return mux, security
+}
+
+func serveTaskUpdate(
+	handler http.Handler,
+	security *Security,
+	ctx context.Context,
+	key string,
+) *httptest.ResponseRecorder {
+	body := `{"name":"Edited","cron":"0 9 * * *","prompt":"Changed","deliver":"","profile":"","enabled":true}`
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1:8422/api/v1/desk/tasks/schedules/job-control", strings.NewReader(body))
+	req = req.WithContext(ctx)
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", key)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+type controlledTaskUpdateStore struct {
+	mu      sync.Mutex
+	job     schedule.Job
+	gets    int
+	updates int
+	started chan struct{}
+	release chan struct{}
+}
+
+func newControlledTaskUpdateStore() *controlledTaskUpdateStore {
+	return &controlledTaskUpdateStore{
+		job: schedule.Job{
+			ID: "job-control", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *controlledTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
+	return nil, errors.New("unexpected create")
+}
+
+func (s *controlledTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets++
+	job := s.job
+	return &job, nil
+}
+
+func (s *controlledTaskUpdateStore) Update(ctx context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
+	s.mu.Lock()
+	s.updates++
+	if s.updates == 1 {
+		close(s.started)
+	}
+	s.mu.Unlock()
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.job.Name = input.Name
+	s.job.Cron = input.Cron
+	s.job.Prompt = input.Prompt
+	s.job.Deliver = input.Deliver
+	s.job.Profile = input.Profile
+	s.job.Enabled = input.Enabled
+	job := s.job
+	return &job, nil
+}
+
+func (s *controlledTaskUpdateStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets, s.updates
+}
+
+type deadlineTaskUpdateStore struct {
+	job      schedule.Job
+	deadline chan time.Time
+}
+
+func newDeadlineTaskUpdateStore() *deadlineTaskUpdateStore {
+	return &deadlineTaskUpdateStore{
+		job: schedule.Job{
+			ID: "job-control", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
+		},
+		deadline: make(chan time.Time, 1),
+	}
+}
+
+func (s *deadlineTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
+	return nil, errors.New("unexpected create")
+}
+
+func (s *deadlineTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error) {
+	job := s.job
+	return &job, nil
+}
+
+func (s *deadlineTaskUpdateStore) Update(ctx context.Context, _ string, _ schedule.Update) (*schedule.Job, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		s.deadline <- time.Time{}
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+		return nil, errors.New("missing deadline")
+	}
+	s.deadline <- deadline
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func (s *cancelAfterTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
