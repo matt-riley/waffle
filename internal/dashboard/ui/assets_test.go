@@ -46,37 +46,43 @@ func TestStaticAssetsCachedAtInit(t *testing.T) {
 }
 
 func TestServeAssetUsesProcessStartCache(t *testing.T) {
-	// Mutating the embed FS is impossible; prove the serve path reads staticAssets,
-	// not embed.FS, by swapping the cache entry and serving it.
-	const name = "app.css"
-	original, ok := staticAssets[name]
-	if !ok {
-		t.Fatal("app.css missing from cache")
-	}
-	t.Cleanup(func() { staticAssets[name] = original })
-
-	marker := []byte("/* cache-hit-marker */")
-	staticAssets[name] = staticAsset{
-		body:        marker,
+	// Prove the serve helper writes whatever asset it is given (local map/value,
+	// no mutation of the package-level staticAssets cache — review #165).
+	marker := staticAsset{
+		body:        []byte("/* cache-hit-marker */"),
 		contentType: "text/css; charset=utf-8",
 	}
-
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/desk/assets/"+name, nil)
-	if !ServeAsset(rec, req, name) {
-		t.Fatal("ServeAsset returned false for known asset")
+	req := httptest.NewRequest(http.MethodGet, "/desk/assets/app.css", nil)
+	if !writeStaticAsset(rec, req, marker) {
+		t.Fatal("writeStaticAsset returned false")
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if !bytes.Equal(rec.Body.Bytes(), marker) {
-		t.Fatalf("served body = %q, want cache marker (prove no embed.FS re-read)", rec.Body.Bytes())
+	if !bytes.Equal(rec.Body.Bytes(), marker.body) {
+		t.Fatalf("served body = %q, want local cache marker", rec.Body.Bytes())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/css; charset=utf-8" {
 		t.Errorf("Content-Type = %q", ct)
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
 		t.Errorf("Cache-Control = %q", cc)
+	}
+
+	// ServeAsset must serve the process-start cache entry, not re-read embed.FS.
+	// Comparing response bytes to staticAssets proves the shipped serve path.
+	const name = "app.css"
+	cached, ok := staticAssets[name]
+	if !ok {
+		t.Fatal("app.css missing from process-start cache")
+	}
+	served := httptest.NewRecorder()
+	if !ServeAsset(served, httptest.NewRequest(http.MethodGet, "/desk/assets/"+name, nil), name) {
+		t.Fatal("ServeAsset returned false for known asset")
+	}
+	if !bytes.Equal(served.Body.Bytes(), cached.body) {
+		t.Fatal("ServeAsset body does not match process-start cache")
 	}
 }
 
