@@ -274,6 +274,28 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		cancel()
 		t.Fatalf("GET /desk/ did not render Desk shell: %q", body)
 	}
+	for _, endpoint := range []string{
+		"/api/v1/desk/tasks",
+		"/api/v1/desk/workspaces",
+		"/api/v1/desk/memory?query=anything",
+		"/api/v1/desk/capabilities",
+	} {
+		response, requestErr := client.Get("http://" + addr + endpoint)
+		if requestErr != nil {
+			cancel()
+			t.Fatalf("GET %s: %v", endpoint, requestErr)
+		}
+		responseBody, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil {
+			cancel()
+			t.Fatalf("read %s: %v", endpoint, readErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			cancel()
+			t.Fatalf("GET %s status = %d body=%q, want 200", endpoint, response.StatusCode, responseBody)
+		}
+	}
 	cancel()
 	select {
 	case err := <-done:

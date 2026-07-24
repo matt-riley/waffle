@@ -731,6 +731,10 @@ func providerList(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 func defaultProviderManager() (providerManager, error) {
+	return defaultProviderManagerConcrete()
+}
+
+func defaultProviderManagerConcrete() (*providerconfig.Manager, error) {
 	id, err := secret.LoadIdentity()
 	if err != nil {
 		return nil, err
@@ -739,6 +743,11 @@ func defaultProviderManager() (providerManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	configureDefaultProviderManager(manager)
+	return manager, nil
+}
+
+func configureDefaultProviderManager(manager *providerconfig.Manager) {
 	manager.Probe = probeProviderModel
 	manager.Restart = func(ctx context.Context) error { return runSystemctl(ctx, "restart", "waffle.service") }
 	manager.Health = providerServiceHealth
@@ -750,7 +759,6 @@ func defaultProviderManager() (providerManager, error) {
 		}
 		return runSystemctl(ctx, "stop", "waffle.service")
 	}
-	return manager, nil
 }
 
 func providerServiceActive(ctx context.Context) (bool, error) {

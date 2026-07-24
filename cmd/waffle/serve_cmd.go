@@ -34,6 +34,7 @@ import (
 	"github.com/matt-riley/waffle/internal/localsocket"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
@@ -110,6 +111,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			err = cerr
 		}
 	}()
+	log := slog.New(slog.NewTextHandler(stderr, nil))
 	sessionOwners := newChatSessionOwners()
 	runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
 		runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
@@ -123,60 +125,45 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	if err != nil {
 		return fmt.Errorf("status listener cannot bind %s: %w", cfg.Gateway.StatusListen, err)
 	}
+	statusListener = &cachedCloseListener{Listener: statusListener}
+	defer func() { _ = statusListener.Close() }()
 	obs := observability.New(st, nil)
 	statusMux := http.NewServeMux()
 	observability.RegisterRoutes(statusMux, obs)
 	statusHandler := http.Handler(statusMux)
+	var dashboardSecurity *dashboard.Security
+	var dashboardHub *dashboard.EventHub
 	var dashboardClients *dashboard.ChatClients
+	var dashboardGeneration string
 	if cfg.Dashboard.Enabled {
 		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, dashboardRandom)
 		if err != nil {
-			_ = statusListener.Close()
 			return fmt.Errorf("dashboard security: %w", err)
 		}
-		hub := dashboard.NewEventHub(256)
-		dashboardClients = dashboard.NewChatClients(runtimeFactory, rand.Reader)
-		dashboardClients.SetEventHub(hub)
-		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
-			Observability: obs,
-			Security:      security,
-			Hub:           hub,
-			ChatClients:   dashboardClients,
-			Idempotency:   dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
-			Version:       version,
-			Now:           time.Now,
-		})
-		statusHandler = security.Wrap(statusHandler)
-	}
-	statusDone := make(chan error, 1)
-	go func() {
-		if err := observability.ServeHandler(ctx, statusListener, statusHandler); err != nil {
-			slog.New(slog.NewTextHandler(stderr, nil)).Error("status listener stopped", "err", err)
-			statusDone <- err
-			return
+		dashboardSecurity = security
+		dashboardGeneration, err = newDashboardProcessGeneration(dashboardRandom)
+		if err != nil {
+			return err
 		}
-		statusDone <- nil
-	}()
-	defer func() {
-		stop()
-		<-statusDone
-	}()
-	if dashboardClients != nil {
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			if shutdownErr := dashboardClients.Shutdown(shutdownCtx); err == nil && shutdownErr != nil {
-				err = fmt.Errorf("dashboard chat shutdown: %w", shutdownErr)
-			}
-		}()
+		dashboardHub = dashboard.NewEventHub(256)
+		dashboardClients = dashboard.NewChatClients(runtimeFactory, rand.Reader)
+		dashboardClients.SetEventHub(dashboardHub)
 	}
 
 	sessions := session.New(st)
 	entities := entity.New(st, sessions)
+	scheduleStore := schedule.NewStore(st)
+	usageStore := usagepkg.New(st)
+	wsStore := &workset.Store{DB: st.DB}
 
 	ws, skills, err := loadWorkspaceWithStore(st)
 	if err != nil {
 		return err
+	}
+	notesIndex := &memory.NotesIndex{DB: st.DB}
+	ws.Notes = notesIndex
+	if err := notesIndex.SyncWorkspace(ctx, memory.DefaultAgent, ws); err != nil {
+		return fmt.Errorf("sync memory search index: %w", err)
 	}
 	chatListener, _, err := openChatListener(cfg.Chat.Socket)
 	if err != nil {
@@ -198,7 +185,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	}
 	defer cleanup()
 
-	log := slog.New(slog.NewTextHandler(stderr, nil))
 	var serveBroker *broker.Broker
 	var brokerDone <-chan struct{}
 	if cfg.Broker.Listen != "" {
@@ -210,8 +196,12 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		}
 		upstreams := brokerUpstreams(cfg)
 		b := broker.New(st, upstreams)
+		if err := configureWorkspaceBroker(cfg, st, b); err != nil {
+			_ = ln.Close()
+			return err
+		}
 		serveBroker = b
-		b.Usage = usagepkg.New(st)
+		b.Usage = usageStore
 		b.Limits = brokerLimits(cfg, config.GroupMain)
 		done := make(chan struct{})
 		brokerDone = done
@@ -251,14 +241,87 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	// perform explicit operations but never start a background reaper.
 	lifecycleCtx, lifecycleCancel := context.WithCancel(ctx)
 	defer lifecycleCancel()
-	wsManager := newWorkspaceManager(cfg, st, nil)
-	if serveBroker != nil {
-		limits := brokerLimits(cfg, config.GroupMain)
-		wsManager.MintToken = func(mintCtx context.Context, sessionID string) (string, error) {
-			return serveBroker.MintScoped(mintCtx, sessionID, sessionID, limits)
+	wsManager := newWorkspaceManager(cfg, st, serveBroker)
+	configureServeWorkspaceManager(cfg, wsManager, serveBrokerURL(cfg.Broker.Listen))
+
+	var dashboardProviders *providerconfig.Manager
+	if cfg.Dashboard.Enabled {
+		dashboardProviders, err = defaultDashboardProviderManager()
+		if err != nil {
+			return fmt.Errorf("dashboard provider manager: %w", err)
 		}
-		wsManager.RevokeSession = serveBroker.RevokeSession
-		wsManager.BindGitScope = serveBroker.BindGitRepo
+		catalogue, err := defaultProviderCatalogue()
+		if err != nil {
+			return fmt.Errorf("dashboard provider catalogue: %w", err)
+		}
+		capabilities, err := newDashboardCapabilities(cfg, st, ws, sessions, dashboardProviders, catalogue)
+		if err != nil {
+			return fmt.Errorf("dashboard capabilities: %w", err)
+		}
+		operations := &dashboard.Operations{
+			Runs:       obs,
+			Jobs:       scheduleStore,
+			Workspaces: wsManager,
+			Sessions:   sessions,
+			Notes:      notesIndex,
+			Workset:    wsStore,
+			Usage:      usageStore,
+			Previews:   dashboard.NewPreviewStore(time.Now, rand.Reader),
+			Events:     dashboardHub,
+			Now:        time.Now,
+		}
+		restart := dashboardRestartScheduler()
+		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
+			Observability:   obs,
+			Security:        dashboardSecurity,
+			Hub:             dashboardHub,
+			ChatClients:     dashboardClients,
+			Idempotency:     dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
+			Operations:      operations,
+			Schedules:       scheduleStore,
+			Memory:          ws,
+			WorkspaceEgress: cfg.Workspace.Egress,
+			Capabilities:    capabilities,
+			Restart:         restart,
+			RestartOutcome: func(outcome dashboard.RestartScheduleOutcome) {
+				log.Info("dashboard restart outcome",
+					"scheduled", outcome.Scheduled,
+					"code", outcome.Code,
+					"message", outcome.Message,
+				)
+			},
+			Version:           version,
+			ProcessGeneration: dashboardGeneration,
+			Now:               time.Now,
+		})
+		statusHandler = dashboardSecurity.Wrap(statusHandler)
+	}
+	statusDone := make(chan error, 1)
+	go func() {
+		if err := observability.ServeHandler(ctx, statusListener, statusHandler); err != nil {
+			log.Error("status listener stopped", "err", err)
+			statusDone <- err
+			return
+		}
+		statusDone <- nil
+	}()
+	defer func() {
+		stop()
+		<-statusDone
+	}()
+	if dashboardClients != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if shutdownErr := dashboardClients.Shutdown(shutdownCtx); err == nil && shutdownErr != nil {
+				err = fmt.Errorf("dashboard chat shutdown: %w", shutdownErr)
+			}
+		}()
+	}
+	if dashboardProviders != nil {
+		if err := dashboardProviders.FinalizeDeferred(ctx); err != nil {
+			return fmt.Errorf("finalize deferred dashboard capability transaction: %w", err)
+		}
 	}
 	idleTimeout := parseOptionalDuration(cfg.Workspace.IdleTimeout)
 	if idleTimeout > 0 {
@@ -280,7 +343,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		return nil
 	}}
 	retention := session.RetentionSweep{Store: sessions, Retain: parseOptionalDuration(cfg.Store.Retain)}
-	wsStore := &workset.Store{DB: st.DB}
 	go func() {
 		tick := time.NewTicker(time.Minute)
 		defer tick.Stop()
@@ -315,7 +377,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		Adapters:          adapters,
 		Log:               log,
 		Observability:     obs,
-		Usage:             usagepkg.New(st),
+		Usage:             usageStore,
 		ReflectEveryTurns: cfg.Memory.ReflectEveryTurns,
 	}
 
@@ -355,7 +417,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	// through the same channel adapters. Runs on the restricted cron agent
 	// (or a named profile built against the cron tier when Job.Profile is set).
 	sched := &schedule.Scheduler{
-		Store: schedule.NewStore(st),
+		Store: scheduleStore,
 		Runner: &schedule.Runner{
 			Agent:           cronAgent,
 			AgentsByProfile: profilesCron,
@@ -368,7 +430,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			},
 		},
 		Log:    log,
-		Usage:  usagepkg.New(st),
+		Usage:  usageStore,
 		Health: obs,
 		Policy: schedule.RetryPolicy{
 			MaxAttempts:  cfg.Jobs.MaxAttempts,
