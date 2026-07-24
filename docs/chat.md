@@ -59,6 +59,23 @@ reports that path and the service/socket units; it does not fall back to direct
 mode or open local state. The managed wrapper always selects
 `/run/waffle/chat.sock` and rejects attempts to override it.
 
+### Waffle Desk browser companion
+
+Waffle Desk is a browser companion to `waffle chat`, not a replacement for the
+terminal interface. Enable the dashboard, run `waffle serve`, and open
+`http://127.0.0.1:8422/desk/` on the same machine. The browser and terminal
+paths share Waffle's session ownership, so they cannot mutate one session at
+the same time.
+
+If another client already owns the session, the Desk reports that the chat
+session is active instead of creating a second runtime. Finish or close the
+other client, then use the Desk's explicit refresh action. The Desk never
+retries a submitted turn automatically.
+
+The Desk model picker uses the existing `/model <alias>` command. Like the
+terminal command, it persists the alias for the current session only and does
+not change Waffle's global default.
+
 The complete invocation is:
 
 ```text
@@ -148,11 +165,18 @@ the model.
 | `/usage` | Show current and persisted request/token usage. |
 | `/permissions` | Show the effective sandbox and tool allow/deny policy. |
 | `/skill <name> [args]` | Invoke a configured skill. |
+| `/skills [attach <name>\|detach <name>]` | List active/session skills, attach an active skill to this session, or detach it without deactivating it. |
 | `/repo <owner/repo>` | Open and bind a repository workspace. |
 | `/workset [list\|replace <id> <text>\|drop <id>\|clear]` | Inspect or correct the session working set. |
 
 Outside the table's Markdown escaping, the exact working-set syntax is
 `/workset [list|replace <id> <text>|drop <id>|clear]`.
+The exact session-skill syntax is
+`/skills [attach <name>|detach <name>]`. Attached active skills are restored
+with the session and forced into its system context, with a 256 KiB combined
+attachment-block limit. An attachment that was removed or deactivated remains
+visible as unavailable until it is restored or detached; unavailable skills
+are never injected.
 
 The selected `/model` alias is stored on the current session. `/resume
 [session]` and `waffle chat --continue` restore that session's model instead

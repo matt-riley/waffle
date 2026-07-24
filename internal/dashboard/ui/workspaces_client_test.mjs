@@ -1,0 +1,305 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import vm from "node:vm";
+
+const source = await readFile(
+  new URL("./assets/workspaces.js", import.meta.url),
+  "utf8",
+);
+
+class FakeElement {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase();
+    this.childNodes = [];
+    this.dataset = {};
+    this.listeners = {};
+    this.attributes = {};
+    this.hidden = false;
+    this.disabled = false;
+    this.open = false;
+    this.value = "";
+    this.className = "";
+    this._textContent = "";
+    this.focused = false;
+  }
+
+  get children() {
+    return this.childNodes;
+  }
+
+  get textContent() {
+    return this._textContent;
+  }
+
+  set textContent(value) {
+    this._textContent = String(value);
+    this.childNodes = [];
+  }
+
+  append(...nodes) {
+    this.childNodes.push(...nodes);
+  }
+
+  replaceChildren(...nodes) {
+    this.childNodes = [...nodes];
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  getAttribute(name) {
+    return this.attributes[name];
+  }
+
+  addEventListener(name, listener) {
+    this.listeners[name] = listener;
+  }
+
+  async dispatch(name, extra = {}) {
+    return this.listeners[name]?.({
+      preventDefault() {},
+      currentTarget: this,
+      target: this,
+      ...extra,
+    });
+  }
+
+  showModal() {
+    this.open = true;
+  }
+
+  close() {
+    this.open = false;
+  }
+
+  focus() {
+    this.focused = true;
+  }
+}
+
+function response(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return body;
+    },
+  };
+}
+
+function findAction(node, action) {
+  if (node?.dataset?.action === action) {
+    return node;
+  }
+  for (const child of node?.childNodes || []) {
+    const match = findAction(child, action);
+    if (match) return match;
+  }
+  return null;
+}
+
+function createHarness(fetchResponses) {
+  const selectors = [
+    ".workspaces",
+    "#workspaces-list",
+    "#workspaces-errors",
+    "#workspaces-empty",
+    "#workspace-open-button",
+    "#workspace-open-dialog",
+    "#workspace-open-form",
+    "#workspace-repository",
+    "#workspace-profile",
+    "#workspace-open-cancel",
+    "#workspace-open-status",
+    "#workspace-close-dialog",
+    "#workspace-close-title",
+    "#workspace-close-dirty",
+    "#workspace-close-unpushed",
+    "#workspace-close-status",
+    "#workspace-close-cancel",
+    "#workspace-close-confirm",
+  ];
+  const elements = Object.fromEntries(
+    selectors.map((selector) => [selector, new FakeElement()]),
+  );
+  elements[".workspaces"].dataset = {};
+  const requests = [];
+  const navigations = [];
+  let uuid = 0;
+  const context = {
+    console,
+    crypto: { randomUUID: () => `uuid-${++uuid}` },
+    document: {
+      body: { dataset: { requestToken: "desk-token" } },
+      createElement: (tag) => new FakeElement(tag),
+      querySelector: (selector) => elements[selector] || null,
+    },
+    fetch: async (path, options = {}) => {
+      requests.push({ path, options });
+      const next = fetchResponses.shift();
+      if (!next) throw new Error(`unexpected fetch ${path}`);
+      return next;
+    },
+    window: {
+      location: {
+        assign: (target) => navigations.push(target),
+      },
+    },
+    URL,
+    URLSearchParams,
+    setTimeout,
+    clearTimeout,
+  };
+  vm.runInNewContext(source, context, { filename: "workspaces.js" });
+  return { elements, requests, navigations };
+}
+
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("workspace client uses exact guarded endpoints and safe DOM APIs", () => {
+  for (const required of [
+    "/api/v1/desk/workspaces",
+    "/close-preview",
+    '"X-Waffle-Desk-Token"',
+    '"Idempotency-Key"',
+    "crypto.randomUUID()",
+    "textContent",
+    "createElement",
+  ]) {
+    assert.ok(source.includes(required), `missing ${required}`);
+  }
+  for (const forbidden of ["innerHTML", "insertAdjacentHTML", "force"]) {
+    assert.equal(source.includes(forbidden), false, `contains ${forbidden}`);
+  }
+});
+
+test("workspace client renders state actions and selects the exact Today session", async () => {
+  const harness = createHarness([
+    response({
+      workspaces: [{
+        id: "ws-1",
+        repository: "matt-riley/waffle",
+        session: "session-workspace",
+        status: "open",
+        profile: "reviewer",
+        image: "bookworm",
+        egress: "No network egress",
+      }],
+    }),
+    response({
+      workspace: {
+        id: "ws-1",
+        repository: "matt-riley/waffle",
+        session: "session-workspace",
+        status: "open",
+        profile: "reviewer",
+        image: "bookworm",
+        egress: "No network egress",
+      },
+      today_url: "/desk/?section=today&session_id=session-workspace",
+    }),
+  ]);
+  await settle();
+
+  const card = harness.elements["#workspaces-list"].childNodes[0];
+  assert.ok(card, "workspace card was not rendered");
+  const select = findAction(card, "select");
+  assert.ok(select, "open workspace did not render Select");
+  assert.ok(findAction(card, "idle"), "open workspace did not render Idle");
+  assert.ok(findAction(card, "close-preview"), "workspace did not render Close");
+  await select.dispatch("click");
+  await settle();
+
+  assert.equal(harness.requests[1].path, "/api/v1/desk/workspaces/ws-1/select");
+  assert.equal(harness.requests[1].options.method, "POST");
+  assert.equal(harness.requests[1].options.body, "{}");
+  assert.deepEqual(harness.navigations, [
+    "/desk/?section=today&session_id=session-workspace",
+  ]);
+});
+
+test("dirty close preview shows evidence and cannot confirm", async () => {
+  const harness = createHarness([
+    response({
+      workspaces: [{
+        id: "ws-1",
+        repository: "matt-riley/waffle",
+        session: "session-workspace",
+        status: "idle",
+        image: "bookworm",
+        egress: "No network egress",
+      }],
+    }),
+    response({
+      workspace: {
+        id: "ws-1",
+        repository: "matt-riley/waffle",
+        session: "session-workspace",
+        status: "idle",
+        image: "bookworm",
+        egress: "No network egress",
+      },
+      preview_token: "preview-token",
+      expires_in_seconds: 60,
+      eligible: false,
+      dirty: "M main.go",
+      unpushed: "abc123 local commit",
+    }),
+  ]);
+  await settle();
+
+  const card = harness.elements["#workspaces-list"].childNodes[0];
+  assert.ok(findAction(card, "resume"), "idle workspace did not render Resume");
+  const close = findAction(card, "close-preview");
+  await close.dispatch("click");
+  await settle();
+
+  assert.equal(harness.requests[1].path, "/api/v1/desk/workspaces/ws-1/close-preview");
+  assert.equal(harness.requests[1].options.body, "{}");
+  assert.equal(harness.elements["#workspace-close-dialog"].open, true);
+  assert.equal(harness.elements["#workspace-close-dirty"].textContent, "M main.go");
+  assert.equal(harness.elements["#workspace-close-unpushed"].textContent, "abc123 local commit");
+  assert.equal(harness.elements["#workspace-close-confirm"].disabled, true);
+  await harness.elements["#workspace-close-cancel"].dispatch("click");
+  assert.equal(close.focused, true, "Cancel did not restore focus to its opener");
+});
+
+test("open forwards owner/repo and profile with one fresh idempotency key", async () => {
+  const harness = createHarness([
+    response({ workspaces: [] }),
+    response({
+      workspace: {
+        id: "ws-1",
+        repository: "matt-riley/waffle",
+        session: "session-workspace",
+        status: "open",
+        profile: "reviewer",
+        image: "bookworm",
+        egress: "No network egress",
+      },
+    }, 201),
+    response({ workspaces: [] }),
+  ]);
+  await settle();
+
+  await harness.elements["#workspace-open-button"].dispatch("click");
+  harness.elements["#workspace-repository"].value = "matt-riley/waffle";
+  harness.elements["#workspace-profile"].value = "reviewer";
+  await harness.elements["#workspace-open-form"].dispatch("submit");
+  await settle();
+
+  const request = harness.requests[1];
+  assert.equal(request.path, "/api/v1/desk/workspaces/open");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    repository: "matt-riley/waffle",
+    profile: "reviewer",
+  });
+  assert.equal(request.options.headers["X-Waffle-Desk-Token"], "desk-token");
+  assert.equal(request.options.headers["Idempotency-Key"], "uuid-1");
+  assert.equal(harness.elements["#workspace-open-dialog"].open, false);
+});

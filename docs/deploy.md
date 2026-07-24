@@ -175,6 +175,43 @@ listener on loopback. The `/healthz` endpoint is liveness only; `/status` is
 the local run-introspection surface owned by the same listener. The endpoint
 is intentionally not a remote monitoring API.
 
+### Waffle Desk
+
+Waffle Desk is the local browser companion included in the Waffle binary.
+See the [Waffle Desk rollout guide](waffle-desk.md) for access boundaries,
+release checks, and rollback.
+
+Enable it in the service configuration:
+
+```toml
+[dashboard]
+enabled = true
+```
+
+Start the ordinary host process, then open the Desk locally:
+
+```sh
+waffle serve
+open http://127.0.0.1:8422/desk/
+```
+
+The Desk stays on the loopback listener. To reach a managed host, forward that
+loopback port explicitly from your local machine:
+
+```sh
+ssh -N -L 8422:127.0.0.1:8422 user@host
+open http://127.0.0.1:8422/desk/
+```
+
+Do not expose the Desk through a public bind, hostname, or reverse proxy.
+It remains behind the existing loopback/admin security boundary and reuses the
+configured provider, workspace, session, and memory services owned by
+`waffle serve`; it is not a public administration surface or a separate
+deployment. Desk can archive Waffle-owned notes, but it does not delete
+provider logs, delivered messages, backups, or provider-side data. Its
+schedule, workspace, and memory workflows and limits are documented in the
+[usage guide](usage-guide.md#waffle-desk-operations).
+
 ## Headless secrets
 
 The login keychain is often unavailable to a service context. Set

@@ -277,6 +277,20 @@ func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Wor
 	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg))
 }
 
+type agentCleanupContext func(context.Context) error
+
+func cleanupWithoutContext(cleanup agentCleanupContext) func() {
+	return func() {
+		if cleanup != nil {
+			_ = cleanup(context.Background())
+		}
+	}
+}
+
+func buildAgentWithProfileContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string) (*agent.Agent, agentCleanupContext, error) {
+	return buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg))
+}
+
 var (
 	syncedWorkspacesMu sync.Mutex
 	syncedWorkspaces   = map[string]bool{}
@@ -301,7 +315,12 @@ func syncWorkspaceOnce(notesIdx *memory.NotesIndex, agentName string, ws memory.
 }
 
 func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver) (*agent.Agent, func(), error) {
-	cleanup := func() {}
+	built, cleanup, err := buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, runtime)
+	return built, cleanupWithoutContext(cleanup), err
+}
+
+func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver) (*agent.Agent, agentCleanupContext, error) {
+	cleanup := agentCleanupContext(func(context.Context) error { return nil })
 	pol := cfg.AgentPolicy(group)
 	profileName = strings.TrimSpace(profileName)
 	profile, ok := cfg.Profile(profileName)
@@ -365,11 +384,28 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 			engine.ObserveSuccess(session.IDFromContext(ctx), name, input)
 		}
 	}
-	var closers []func()
-	cleanup = func() {
+	var (
+		cleanupMu sync.Mutex
+		closers   []agentCleanupContext
+	)
+	cleanup = func(ctx context.Context) error {
+		cleanupMu.Lock()
+		defer cleanupMu.Unlock()
+		var cleanupErr error
 		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
+			if closers[i] == nil {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return errors.Join(cleanupErr, err)
+			}
+			if err := closers[i](ctx); err != nil {
+				cleanupErr = errors.Join(cleanupErr, err)
+				continue
+			}
+			closers[i] = nil
 		}
+		return cleanupErr
 	}
 
 	spillStore := &spill.Store{DB: sessions.DB()}
@@ -449,7 +485,12 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("start sandbox: %w", err)
 		}
-		closers = append(closers, func() { _ = executor.Close() })
+		closers = append(closers, func(cleanupCtx context.Context) error {
+			if _, hasDeadline := cleanupCtx.Deadline(); !hasDeadline {
+				return executor.Close()
+			}
+			return executor.CloseContext(cleanupCtx)
+		})
 		execTools = executor
 	default:
 		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q for agent group %q (want \"host\" or \"docker\")", pol.Mode, group)
@@ -503,7 +544,12 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 			}
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
 		}
-		closers = append(closers, func() { _ = client.Close() })
+		closers = append(closers, func(cleanupCtx context.Context) error {
+			if _, hasDeadline := cleanupCtx.Deadline(); !hasDeadline {
+				return client.Close()
+			}
+			return client.CloseContext(cleanupCtx)
+		})
 		tb, err := client.Toolbox(ctx)
 		if err != nil {
 			_ = client.Close()

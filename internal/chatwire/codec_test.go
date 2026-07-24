@@ -5,12 +5,90 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
 )
+
+func TestChatEventJSONRoundTripsAttachedSkills(t *testing.T) {
+	t.Parallel()
+	want := chat.State{
+		SessionID: "01SKILLS",
+		Skills: []chat.SkillRef{
+			{Name: "reviewer", Description: "review changes", Attached: true},
+			{Name: "removed", Attached: true, Missing: true},
+		},
+	}
+	tests := []struct {
+		name      string
+		frameType string
+		payload   any
+		decode    func(Frame) chat.State
+	}{
+		{
+			name: "ready", frameType: TypeReady, payload: want,
+			decode: func(frame Frame) chat.State {
+				var state chat.State
+				if err := decodePayload(frame, &state); err != nil {
+					t.Fatal(err)
+				}
+				return state
+			},
+		},
+		{
+			name: "state_event", frameType: TypeState,
+			payload: chat.Event{Kind: chat.EventState, State: &want},
+			decode: func(frame Frame) chat.State {
+				var event chat.Event
+				if err := decodePayload(frame, &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.State == nil {
+					t.Fatal("decoded event state is nil")
+				}
+				return *event.State
+			},
+		},
+		{
+			name: "command_result", frameType: TypeCommandResult,
+			payload: chat.Result{Title: "Skills", State: &want},
+			decode: func(frame Frame) chat.State {
+				var result chat.Result
+				if err := decodePayload(frame, &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.State == nil {
+					t.Fatal("decoded result state is nil")
+				}
+				return *result.State
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			frame, err := newFrame(tt.frameType, "skills-1", tt.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire bytes.Buffer
+			if err := NewServerCodec(nil, &wire).Encode(frame); err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := NewClientCodec(&wire, nil).Decode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tt.decode(decoded); !reflect.DeepEqual(got.Skills, want.Skills) {
+				t.Fatalf("skills = %+v, want %+v", got.Skills, want.Skills)
+			}
+		})
+	}
+}
 
 func TestCodecRoundTripsAllowedFrames(t *testing.T) {
 	t.Parallel()

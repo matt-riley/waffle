@@ -99,6 +99,62 @@ waffle cron rm <id>         # remove
 omit it and the reply is only logged. `--profile` scopes the job to one of
 your agent profiles the same way `waffle chat --profile` does.
 
+## Waffle Desk operations
+
+Waffle Desk provides local browser views of the same runs, schedules,
+workspaces, sessions, and memory used by the CLI. It is not a second task
+database. Open the **Tasks**, **Workspaces**, or **Memory** destination from
+the Desk navigation.
+
+See the [Waffle Desk rollout guide](waffle-desk.md) for enablement, access,
+security, release checks, and rollback.
+
+### Tasks and schedules
+
+Tasks combines scheduled jobs with active and recent cron runs. The available
+filters are **All**, **Active**, **Scheduled**, **Completed**, and
+**Attention**. Attention means a schedule or run has the canonical
+`failed`, `error`, or `stalled` state; arbitrary text containing those words
+does not qualify. **Open at desk** is shown only when the run names a session
+that is still persisted. Following it selects that exact session in Today.
+
+Schedule changes are validated before the stored job changes. Names and
+prompts must be non-empty, cron uses the standard five-field format, profiles
+must use the valid profile-name format, and an optional delivery target must
+use `channel:chat_id` syntax. An invalid create or update leaves the previous
+stored definition unchanged.
+
+### Workspaces
+
+Open accepts a repository in `owner/repo` form and an optional valid profile.
+A new workspace creates its own persisted session; it does not inherit the
+session of a failed run from Attention. The workspace keeps its session through
+select, idle, and resume, while the UI shows its configured profile and
+network-egress policy. Selecting a workspace opens that exact session in Today.
+
+Close is deliberately guarded. Desk reinspects the workspace, displays dirty
+and unpushed evidence, and issues a single-use confirmation that expires after
+60 seconds. Confirmation closes only a workspace that is still eligible;
+there is no force-close control in Desk.
+
+### Memory
+
+Memory search combines persisted turn excerpts, session summaries, and
+Waffle-owned notes. Results retain their source kind, source ID, timestamp,
+excerpt, archived state, and provenance. Attaching a result resolves it again
+server-side and adds one pinned, user-sourced fact to the explicitly selected
+session.
+
+The session working set holds at most 32 entries and 8 KiB in total, and each
+entry is at most 1 KiB. Reaching a count or byte limit rejects the new
+attachment without evicting or partially writing another entry.
+
+Forgetting a note is a preview followed by a single-use confirmation that
+expires after 60 seconds. Cancel sends no confirmation request and changes
+nothing. Confirm archives only the selected Waffle-owned note; it cannot erase
+provider logs, delivered messages, or previous backups, and it does not offer
+a provider-side delete or Undo action.
+
 ## Self-learning
 
 This is the "waffle learns from its own failures" loop

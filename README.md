@@ -56,6 +56,9 @@ What's here, by capability:
   endpoint follows `[gateway] status_listen`, which defaults to
   `127.0.0.1:8422`; keep it loopback-only. Start `waffle serve` before using
   the command.
+- **Waffle Desk** — the embedded, loopback-only personal cockpit for Today,
+  Tasks, Workspaces, Memory, and Capabilities. It ships in the normal binary;
+  see the [Waffle Desk rollout guide](docs/waffle-desk.md).
 - **Isolation** — `[sandbox] mode = "docker"` runs tools inside any image
   via the bind-mounted `waffle runner` over a single-writer SQLite queue
   pair; host-enforced tool allow/deny policy; the credential broker fronts

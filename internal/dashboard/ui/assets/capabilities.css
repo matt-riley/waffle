@@ -1,0 +1,189 @@
+.capabilities {
+  margin: 0 auto;
+  max-width: 82rem;
+}
+
+.capabilities-header {
+  align-items: start;
+  border-bottom: 1px solid var(--rule-dark);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+}
+
+.capability-status {
+  border: 1px solid var(--rule-dark);
+  margin: 0;
+  max-width: 24rem;
+  padding: 0.6rem 0.75rem;
+}
+
+.capability-restart {
+  background: var(--ink);
+  color: var(--cream);
+  display: grid;
+  gap: 0.3rem;
+  margin-bottom: 1rem;
+  padding: 0.85rem 1rem;
+}
+
+.capability-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.capability-tabs a {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  padding: 0.55rem 0.75rem;
+  text-decoration: none;
+}
+
+.capability-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.capability-panel {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: var(--shadow);
+  min-width: 0;
+  padding: 1rem;
+}
+
+.capability-panel form,
+.capability-form-grid,
+.capability-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.capability-panel form {
+  border-top: 1px solid var(--rule);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.capability-panel input {
+  background: #fff;
+  border: 1px solid var(--ink);
+  min-height: 2.75rem;
+  padding: 0.65rem 0.75rem;
+  width: 100%;
+}
+
+.capability-card {
+  border-bottom: 1px solid var(--rule);
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.65rem 0;
+}
+
+.capability-card:last-child {
+  border-bottom: 0;
+}
+
+.capability-card p,
+.scope-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.connection-list {
+  border-top: 1px solid var(--rule);
+  margin-top: 0.8rem;
+}
+
+.connection-card {
+  min-width: 0;
+}
+
+.connection-card > strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.connection-detail {
+  overflow-wrap: anywhere;
+}
+
+.connection-guidance {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.capability-catalogue-search {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.8rem;
+}
+
+#capability-catalogue-results {
+  border: 1px solid var(--rule);
+  margin-top: 0.8rem;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 0 0.7rem;
+}
+
+.skill-review {
+  border: 1px dashed var(--rule-dark);
+  margin-top: 1rem;
+  padding: 0.8rem;
+}
+
+.skill-review pre {
+  background: var(--cream);
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+}
+
+.session-skill-field {
+  border-top: 1px solid var(--rule);
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.session-skill-field p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+@media (max-width: 70rem) {
+  .capability-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  #capability-connections-panel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 48rem) {
+  .capabilities-header,
+  .capability-tabs {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .capability-grid {
+    grid-template-columns: 1fr;
+  }
+
+  #capability-connections-panel {
+    grid-column: auto;
+  }
+}

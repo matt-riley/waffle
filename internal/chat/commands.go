@@ -21,6 +21,7 @@ const (
 	CommandUsage       Name = "usage"
 	CommandPermissions Name = "permissions"
 	CommandSkill       Name = "skill"
+	CommandSkills      Name = "skills"
 	CommandRepo        Name = "repo"
 	CommandWorkset     Name = "workset"
 )
@@ -52,6 +53,7 @@ var commandRegistry = [...]Command{
 	{Name: CommandUsage, Usage: "/usage", Description: "show token and request usage"},
 	{Name: CommandPermissions, Usage: "/permissions", Description: "show effective sandbox and tool policy"},
 	{Name: CommandSkill, Usage: "/skill <name> [args]", Description: "invoke a skill"},
+	{Name: CommandSkills, Usage: "/skills [attach <name>|detach <name>]", Description: "list or change session skills"},
 	{Name: CommandRepo, Usage: "/repo <owner/repo>", Description: "open a repository workspace"},
 	{Name: CommandWorkset, Usage: "/workset [list|replace <id> <text>|drop <id>|clear]", Description: "inspect or correct the working set"},
 }
@@ -96,9 +98,20 @@ func ParseInput(input string) (parsed ParsedCommand, ok bool, err error) {
 		if args == "" && (command.Name == CommandSkill || command.Name == CommandRepo) {
 			return parsed, true, fmt.Errorf("usage: %s", command.Usage)
 		}
+		if command.Name == CommandSkills && !validSkillsArgs(args) {
+			return parsed, true, fmt.Errorf("usage: %s", command.Usage)
+		}
 		return parsed, true, nil
 	}
 	return ParsedCommand{}, false, nil
+}
+
+func validSkillsArgs(args string) bool {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return true
+	}
+	return len(fields) == 2 && (fields[0] == "attach" || fields[0] == "detach")
 }
 
 func splitFirstToken(input string) (string, string) {

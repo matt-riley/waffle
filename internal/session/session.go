@@ -437,6 +437,13 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 			if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &updated, &h.Snippet); err != nil {
 				return nil, err
 			}
+			if updated != "" {
+				parsed, parseErr := time.Parse(time.RFC3339Nano, updated)
+				if parseErr != nil {
+					return nil, fmt.Errorf("parse summary updated_at: %w", parseErr)
+				}
+				h.CreatedAt = parsed
+			}
 			if h.Snippet == "" {
 				h.Snippet = h.Summary
 			}

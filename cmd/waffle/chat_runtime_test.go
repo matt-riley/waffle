@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/dashboard"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
@@ -52,6 +55,444 @@ func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
 	resumed, err := second.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID})
 	if err != nil || resumed.ModelAlias != "gpt" {
 		t.Fatalf("resumed = %+v, %v", resumed, err)
+	}
+}
+
+func TestSkillsCommandAttachesIdempotentlyAndDetachesWithoutDeactivation(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	reviewerPath := writeRuntimeSkill(t, "reviewer", "review every change", skill.StatusActive, "Review every changed file.")
+	writeRuntimeSkill(t, "alpha", "first skill", skill.StatusActive, "Start with the smallest risk.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	if got := skillRefNames(state.Skills); !reflect.DeepEqual(got, []string{"alpha", "reviewer"}) {
+		t.Fatalf("open skills = %v", got)
+	}
+
+	listed, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.State == nil || listed.Title != "Session skills" || !strings.Contains(listed.Text, "reviewer") {
+		t.Fatalf("list result = %+v", listed)
+	}
+
+	var events []chatpkg.Event
+	attached, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, func(event chatpkg.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBlock := "\n<attached_skills>\n<attached_skill name=\"reviewer\">\nReview every changed file.\n</attached_skill>\n</attached_skills>"
+	if runtime.agent.System != baseSystem+wantBlock {
+		t.Fatalf("system = %q, want clean base plus exact block", runtime.agent.System)
+	}
+	if attached.State == nil || !attachedSkillRef(attached.State.Skills, "reviewer").Attached {
+		t.Fatalf("attach state = %+v", attached.State)
+	}
+	if len(events) != 1 || events[0].Kind != chatpkg.EventState || events[0].State == nil {
+		t.Fatalf("attach events = %+v", events)
+	}
+
+	firstSystem := runtime.agent.System
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != firstSystem {
+		t.Fatal("idempotent attach accumulated another system block")
+	}
+
+	before, err := os.ReadFile(reviewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(reviewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != baseSystem || detached.State == nil || attachedSkillRef(detached.State.Skills, "reviewer").Attached {
+		t.Fatalf("detach state=%+v system=%q", detached.State, runtime.agent.System)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("detach rewrote or deactivated SKILL.md")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil); err != nil {
+		t.Fatalf("idempotent detach: %v", err)
+	}
+}
+
+func TestSkillsCommandRejectsInactiveMissingAndOversizeAtomically(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	writeRuntimeSkill(t, "draft", "not ready", skill.StatusInactive, "Do not load.")
+	writeRuntimeSkill(t, "huge", "too large", skill.StatusActive, strings.Repeat("x", maxAttachedSkillContextBytes+1))
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	attachments := &skill.Attachments{DB: runtime.st.DB}
+	for _, name := range []string{"draft", "missing", "huge"} {
+		_, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach " + name}, nil)
+		if err == nil {
+			t.Fatalf("attach %q succeeded", name)
+		}
+		if runtime.agent.System != baseSystem {
+			t.Fatalf("attach %q mutated prompt", name)
+		}
+		got, listErr := attachments.List(ctx, state.SessionID)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(got) != 0 {
+			t.Fatalf("attach %q persisted rows %v", name, got)
+		}
+	}
+}
+
+func TestSkillsCommandPersistenceFailuresLeavePromptAndStateUnchanged(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+	if _, err := runtime.st.DB.ExecContext(ctx, `
+		CREATE TRIGGER reject_session_skill_insert
+		BEFORE INSERT ON session_skills
+		BEGIN SELECT RAISE(ABORT, 'attachment write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err == nil {
+		t.Fatal("attach succeeded despite database trigger")
+	}
+	if runtime.agent.System != baseSystem || attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("failed attach mutated runtime state")
+	}
+	if _, err := runtime.st.DB.ExecContext(ctx, `DROP TRIGGER reject_session_skill_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	attachedSystem := runtime.agent.System
+	if _, err := runtime.st.DB.ExecContext(ctx, `
+		CREATE TRIGGER reject_session_skill_delete
+		BEFORE DELETE ON session_skills
+		BEGIN SELECT RAISE(ABORT, 'attachment delete failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil); err == nil {
+		t.Fatal("detach succeeded despite database trigger")
+	}
+	if runtime.agent.System != attachedSystem || !attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("failed detach mutated runtime state")
+	}
+	names, err := (&skill.Attachments{DB: runtime.st.DB}).List(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"reviewer"}) {
+		t.Fatalf("persisted attachments = %v", names)
+	}
+}
+
+func TestAttachedSkillOpenResumeAndMissingState(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	current, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := sessions.Create(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &skill.Attachments{DB: runtime.st.DB}
+	if err := attachments.Attach(ctx, target.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	baseSystem := runtime.agent.System
+
+	resumed, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: target.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State == nil || !attachedSkillRef(resumed.State.Skills, "reviewer").Attached ||
+		strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 {
+		t.Fatalf("resumed state=%+v system=%q", resumed.State, runtime.agent.System)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: current.SessionID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.agent.System != baseSystem || attachedSkillRef(runtime.stateLocked(nil).Skills, "reviewer").Attached {
+		t.Fatal("resuming original session retained target attachments")
+	}
+
+	reopened := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	state, err := reopened.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attachedSkillRef(state.Skills, "reviewer").Attached || !strings.Contains(reopened.agent.System, "Review every changed file.") {
+		t.Fatalf("reopened state=%+v system=%q", state, reopened.agent.System)
+	}
+	if err := skill.SetSkillStatus(ctx, runtime.st.DB, "reviewer", skill.StatusInactive, "test"); err != nil {
+		t.Fatal(err)
+	}
+	missing := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	missingState, err := missing.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := attachedSkillRef(missingState.Skills, "reviewer")
+	if !ref.Attached || !ref.Missing || strings.Contains(missing.agent.System, "Review every changed file.") {
+		t.Fatalf("missing state=%+v system=%q", missingState, missing.agent.System)
+	}
+	listed, err := missing.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.Text, "unavailable") || !strings.Contains(listed.Text, "/skills detach reviewer") {
+		t.Fatalf("missing guidance = %q", listed.Text)
+	}
+}
+
+func TestAttachedSkillTransitionsReplacePromptAtomically(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	skillPath := writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+	opened, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil); err != nil || !result.Confirm {
+		t.Fatalf("request new = %+v, %v", result, err)
+	}
+	created, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew, Args: chatNewConfirmArg}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State == nil || attachedSkillRef(created.State.Skills, "reviewer").Attached ||
+		strings.Contains(runtime.agent.System, "<attached_skills>") {
+		t.Fatalf("new state=%+v system=%q", created.State, runtime.agent.System)
+	}
+
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&skill.Attachments{DB: runtime.st.DB}).Attach(ctx, target.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider, Tools: tool.NewRegistry(runtimeNamedTool("host")),
+			System: "clean repo profile", Model: "claude", Profile: "main",
+		}, func() {}, nil
+	}
+	repoResult, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "repo", Repo: "owner/repo", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace")), client: &runtimeTestCloser{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoResult.State == nil || !attachedSkillRef(repoResult.State.Skills, "reviewer").Attached ||
+		strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 ||
+		!strings.HasPrefix(runtime.agent.System, "clean repo profile") {
+		t.Fatalf("repo state=%+v system=%q", repoResult.State, runtime.agent.System)
+	}
+
+	oldSession, oldSystem := runtime.current, runtime.agent.System
+	failedTarget, err := sessions.Create(ctx, "unreadable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&skill.Attachments{DB: runtime.st.DB}).Attach(ctx, failedTarget.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(skillPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandResume, Args: failedTarget.ID}, nil); err == nil {
+		t.Fatal("resume with unreadable attached skill succeeded")
+	}
+	if runtime.current != oldSession || runtime.agent.System != oldSystem || runtime.current.ID == opened.SessionID {
+		t.Fatal("failed resume mutated session or prompt")
+	}
+}
+
+func TestSkillsCommandSocketParity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review changes", skill.StatusActive, "Review every changed file.")
+
+	socketDir, err := os.MkdirTemp("/tmp", "waffle-chat-skills-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	listener, err := net.Listen("unix", filepath.Join(socketDir, "chat.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- chatwire.Serve(ctx, listener, func(context.Context) (chatpkg.Backend, error) { return runtime, nil }, nil)
+	}()
+	client, err := chatwire.Dial(ctx, filepath.Join(socketDir, "chat.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := client.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref := attachedSkillRef(ready.Skills, "reviewer"); ref.Name == "" || ref.Attached {
+		t.Fatalf("ready skills = %+v", ready.Skills)
+	}
+	var events []chatpkg.Event
+	result, err := client.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, func(event chatpkg.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || !attachedSkillRef(result.State.Skills, "reviewer").Attached {
+		t.Fatalf("socket result = %+v", result)
+	}
+	if len(events) != 1 || events[0].State == nil || !attachedSkillRef(events[0].State.Skills, "reviewer").Attached {
+		t.Fatalf("socket events = %+v", events)
+	}
+	if strings.Count(runtime.agent.System, `<attached_skill name="reviewer">`) != 1 {
+		t.Fatalf("socket runtime system = %q", runtime.agent.System)
+	}
+	if err := client.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	_ = listener.Close()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chatwire serve did not stop")
+	}
+}
+
+func TestAttachedSkillOpenDoesNotHoldRuntimeLockDuringSkillRead(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	path := filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main", "skills", "slow", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Open(context.Background(), chatpkg.OpenOptions{})
+		openDone <- err
+	}()
+	select {
+	case err := <-openDone:
+		t.Fatalf("Open returned before blocked skill read: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	closeDone := make(chan error, 1)
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), time.Second)
+	defer cancelClose()
+	go func() { closeDone <- runtime.Close(closeCtx) }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close during skill read: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err == nil {
+			_, _ = writer.WriteString("---\nname: slow\nstatus: active\n---\n\nslow\n")
+			_ = writer.Close()
+		}
+		<-openDone
+		<-closeDone
+		t.Fatal("Close blocked on runtime mutex during skill body read")
+	}
+
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString("---\nname: slow\nstatus: active\n---\n\nslow\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-openDone; err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Open after concurrent Close error = %v", err)
+	}
+}
+
+func TestAttachedSkillNewDoesNotHoldRuntimeLockDuringPersistence(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := runtime.st.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.resetSession(context.Background())
+		resetDone <- err
+	}()
+	select {
+	case err := <-resetDone:
+		_ = tx.Rollback()
+		t.Fatalf("reset returned before blocked persistence: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancelDone := make(chan struct{})
+	go func() {
+		runtime.Cancel()
+		close(cancelDone)
+	}()
+	select {
+	case <-cancelDone:
+	case <-time.After(250 * time.Millisecond):
+		_ = tx.Rollback()
+		<-resetDone
+		<-cancelDone
+		t.Fatal("Cancel blocked on runtime mutex during new-session persistence")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -160,6 +601,166 @@ func TestChatRuntimeConsecutiveRepoInstallsUseCleanProfileBaselines(t *testing.T
 	if cleanups[1] != 1 || cleanups[2] != 0 || clientA.closed != 1 || clientB.closed != 0 {
 		t.Fatalf("cleanup after repo B: agents=%v clients=(%d,%d)", cleanups, clientA.closed, clientB.closed)
 	}
+}
+
+func TestChatRuntimeRepoSwapCancellationRetainsOldResourcesUntilCloseRetry(t *testing.T) {
+	ctx := context.Background()
+	owners := newChatSessionOwners()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	runtime.sessionOwners = owners
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	originalCleanup := runtime.agentCleanupContext
+	oldAgentCalls := 0
+	liveCleanupAttempts := 0
+	retryErr := errors.New("old agent cleanup needs retry")
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
+		oldAgentCalls++
+		if err := cleanupCtx.Err(); err != nil {
+			return err
+		}
+		liveCleanupAttempts++
+		if liveCleanupAttempts == 1 {
+			return retryErr
+		}
+		return originalCleanup(cleanupCtx)
+	}
+	swapCtx, cancelSwap := context.WithCancel(ctx)
+	oldClient := &runtimeContextTestCloser{beforeClose: cancelSwap}
+	runtime.wsClient = oldClient
+
+	replacementCleanupCalls := 0
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools:    tool.NewRegistry(runtimeNamedTool("replacement")),
+			System:   "replacement",
+			Model:    "claude",
+			Profile:  "main",
+		}, func() { replacementCleanupCalls++ }, nil
+	}
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newClient := &runtimeTestCloser{}
+	if _, err := runtime.installRepo(swapCtx, repoInstall{
+		workspace: &workspace.Workspace{ID: "target", Repo: "owner/target", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_target")),
+		client:    newClient,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldClient.calls != 1 || oldClient.closed {
+		t.Fatalf("cancelled immediate client cleanup calls=%d closed=%t, want 1 false", oldClient.calls, oldClient.closed)
+	}
+	if oldAgentCalls != 1 {
+		t.Fatalf("cancelled immediate agent cleanup calls = %d, want 1", oldAgentCalls)
+	}
+
+	if err := runtime.Close(ctx); !errors.Is(err, retryErr) {
+		t.Fatalf("first final Close error = %v, want retryable old cleanup error", err)
+	}
+	if oldClient.calls != 2 || !oldClient.closed {
+		t.Fatalf("first final client cleanup calls=%d closed=%t, want 2 true", oldClient.calls, oldClient.closed)
+	}
+	if oldAgentCalls != 2 {
+		t.Fatalf("first final agent cleanup calls = %d, want 2", oldAgentCalls)
+	}
+	if newClient.closed != 1 || replacementCleanupCalls != 1 {
+		t.Fatalf("active replacement cleanup client=%d agent=%d, want 1 1", newClient.closed, replacementCleanupCalls)
+	}
+
+	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	contender.sessionOwners = owners
+	if _, err := contender.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("session ownership released before retired cleanup succeeded: %v", err)
+	}
+
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatalf("explicit final cleanup retry: %v", err)
+	}
+	if oldClient.calls != 2 {
+		t.Fatalf("successful old client cleanup repeated: calls = %d, want 2", oldClient.calls)
+	}
+	if oldAgentCalls != 3 {
+		t.Fatalf("old agent cleanup calls after retry = %d, want 3", oldAgentCalls)
+	}
+	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	reacquired.sessionOwners = owners
+	if _, err := reacquired.Open(ctx, chatpkg.OpenOptions{SessionID: target.ID}); err != nil {
+		t.Fatalf("reacquire after retired cleanup succeeded: %v", err)
+	}
+}
+
+func TestChatRuntimeRepoSwapPartialRetiredCleanupDoesNotRepeatSuccess(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldClientCloses := 0
+	runtime.wsClient = runtimeNonComparableCloser{&oldClientCloses}
+	originalCleanup := runtime.agentCleanupContext
+	oldAgentCalls := 0
+	retryErr := errors.New("retry old agent cleanup")
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
+		oldAgentCalls++
+		if oldAgentCalls == 1 {
+			return retryErr
+		}
+		return originalCleanup(cleanupCtx)
+	}
+	runtime.profileAgentBuilder = func(context.Context, string) (*agent.Agent, func(), error) {
+		return &agent.Agent{
+			Provider: runtime.agent.Provider,
+			Tools:    tool.NewRegistry(runtimeNamedTool("replacement")),
+			System:   "replacement",
+			Model:    "claude",
+			Profile:  "main",
+		}, func() {}, nil
+	}
+	target, err := sessions.Create(ctx, "repo target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.installRepo(ctx, repoInstall{
+		workspace: &workspace.Workspace{ID: "target", Repo: "owner/target", Image: "test", SessionID: target.ID},
+		tools:     tool.NewRegistry(runtimeNamedTool("workspace_target")),
+		client:    &runtimeTestCloser{},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldClientCloses != 1 || oldAgentCalls != 1 {
+		t.Fatalf("immediate retired cleanup client=%d agent=%d, want 1 1", oldClientCloses, oldAgentCalls)
+	}
+
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatalf("final Close retry: %v", err)
+	}
+	if oldClientCloses != 1 {
+		t.Fatalf("completed retired client cleanup repeated: %d", oldClientCloses)
+	}
+	if oldAgentCalls != 2 {
+		t.Fatalf("retired agent cleanup calls = %d, want 2", oldAgentCalls)
+	}
+	runtime.mu.Lock()
+	if len(runtime.retiredCleanup) != 0 {
+		retiredCount := len(runtime.retiredCleanup)
+		runtime.mu.Unlock()
+		t.Fatalf("completed retired cleanup entries = %d, want 0", retiredCount)
+	}
+	backing := runtime.retiredCleanup[:cap(runtime.retiredCleanup)]
+	for i, cleanup := range backing {
+		if cleanup != nil {
+			runtime.mu.Unlock()
+			t.Fatalf("completed retired cleanup retained in backing slot %d", i)
+		}
+	}
+	runtime.mu.Unlock()
 }
 
 func TestChatRuntimeUnboundRepoUsesOriginalChatProfileAfterBoundRepo(t *testing.T) {
@@ -834,7 +1435,10 @@ func TestChatRuntimeExitWarnsOnReflectionFailureAndCleansUpOnce(t *testing.T) {
 	closed := 0
 	runtime.wsClient = closeFunc(func() error { closed++; return nil })
 	cleaned := 0
-	runtime.agentCleanup = func() { cleaned++ }
+	runtime.agentCleanupContext = func(context.Context) error {
+		cleaned++
+		return nil
+	}
 	var events []chatpkg.Event
 	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandExit}, func(event chatpkg.Event) { events = append(events, event) })
 	if err != nil {
@@ -891,6 +1495,20 @@ func TestRedactChatStateDoesNotMutateHistoryAndCoversToolPayloads(t *testing.T) 
 	}
 	if history[0].Blocks[0].Text != secret || history[0].Blocks[0].ToolUse.ID != secret || !strings.Contains(string(history[0].Blocks[0].ToolUse.Input), secret) || history[0].Blocks[1].ToolResult.Content != secret {
 		t.Fatalf("redaction mutated runtime history: %+v", history)
+	}
+}
+
+func TestAttachedSkillStateRedactionDoesNotMutateRuntimeRefs(t *testing.T) {
+	const secret = "opaque-skill-description-canary-8264"
+	state := chatpkg.State{Skills: []chatpkg.SkillRef{{Name: "reviewer", Description: secret, Attached: true}}}
+	redacted := redactChatState(state, func(value string) string {
+		return strings.ReplaceAll(value, secret, "[redacted:test]")
+	})
+	if redacted.Skills[0].Description != "[redacted:test]" {
+		t.Fatalf("redacted skills = %+v", redacted.Skills)
+	}
+	if state.Skills[0].Description != secret {
+		t.Fatalf("redaction mutated source skills = %+v", state.Skills)
 	}
 }
 
@@ -1185,7 +1803,7 @@ func TestChatRuntimeRepoCommandCancelAndCloseOwnCommandContext(t *testing.T) {
 	}
 }
 
-func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testing.T) {
+func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndRequiresExplicitCleanupRetry(t *testing.T) {
 	ctx := context.Background()
 	owners := newChatSessionOwners()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
@@ -1197,14 +1815,14 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 	}
 
 	var cleanupCalls atomic.Int32
-	originalCleanup := runtime.agentCleanup
+	originalCleanup := runtime.agentCleanupContext
 	cleanupStarted := make(chan struct{})
 	allowCleanup := make(chan struct{})
-	runtime.agentCleanup = func() {
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
 		cleanupCalls.Add(1)
 		close(cleanupStarted)
 		<-allowCleanup
-		originalCleanup()
+		return originalCleanup(cleanupCtx)
 	}
 	resourceDone := runtime.resourceCtx.Done()
 	started := make(chan struct{})
@@ -1247,31 +1865,10 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
 	contender.sessionOwners = owners
 	if _, err := contender.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID}); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("contender Open while cleanup deferred error = %v", err)
+		t.Fatalf("contender Open before cleanup retry error = %v", err)
 	}
 
 	close(release)
-	select {
-	case <-cleanupStarted:
-	case <-time.After(time.Second):
-		t.Fatal("deferred cleanup did not start after repo command returned")
-	}
-	lateCloseDone := make([]chan error, 2)
-	for i := range lateCloseDone {
-		lateCloseDone[i] = make(chan error, 1)
-		go func(done chan<- error) { done <- runtime.Close(ctx) }(lateCloseDone[i])
-	}
-	close(allowCleanup)
-	for i, done := range lateCloseDone {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("concurrent Close %d after command exit = %v", i+1, err)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("concurrent Close %d did not observe deferred cleanup", i+1)
-		}
-	}
 	select {
 	case commandErr := <-commandDone:
 		if !errors.Is(commandErr, context.Canceled) {
@@ -1281,12 +1878,38 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 		t.Fatal("released repo command did not return")
 	}
 	select {
+	case <-cleanupStarted:
+		t.Fatal("timed-out Close started an untracked background finalizer")
+	case <-time.After(50 * time.Millisecond):
+	}
+	lateCloseDone := make([]chan error, 2)
+	for i := range lateCloseDone {
+		lateCloseDone[i] = make(chan error, 1)
+		go func(done chan<- error) { done <- runtime.Close(ctx) }(lateCloseDone[i])
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("explicit Close retry did not start cleanup")
+	}
+	close(allowCleanup)
+	for i, done := range lateCloseDone {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("concurrent Close %d after command exit = %v", i+1, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("concurrent Close %d did not observe explicit cleanup", i+1)
+		}
+	}
+	select {
 	case <-resourceDone:
 	case <-time.After(time.Second):
-		t.Fatal("deferred cleanup did not cancel shared resources")
+		t.Fatal("explicit cleanup did not cancel shared resources")
 	}
 	if err := runtime.Close(ctx); err != nil {
-		t.Fatalf("Close after deferred cleanup = %v", err)
+		t.Fatalf("Close after explicit cleanup = %v", err)
 	}
 	if cleanupCalls.Load() != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls.Load())
@@ -1295,7 +1918,154 @@ func TestChatRuntimeCloseBoundsUncooperativeRepoCommandAndDefersCleanup(t *testi
 	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
 	reacquired.sessionOwners = owners
 	if _, err := reacquired.Open(ctx, chatpkg.OpenOptions{SessionID: state.SessionID}); err != nil {
-		t.Fatalf("reacquire after deferred cleanup: %v", err)
+		t.Fatalf("reacquire after explicit cleanup: %v", err)
+	}
+}
+
+func TestChatRuntimeClosePreservesEarlierDeadlineWithoutBackgroundFinalizer(t *testing.T) {
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	runtime.closeTimeout = 250 * time.Millisecond
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var cleanupCalls atomic.Int32
+	originalCleanup := runtime.agentCleanupContext
+	cleanupStarted := make(chan struct{}, 1)
+	runtime.agentCleanupContext = func(cleanupCtx context.Context) error {
+		cleanupCalls.Add(1)
+		cleanupStarted <- struct{}{}
+		return originalCleanup(cleanupCtx)
+	}
+	commandStarted := make(chan struct{})
+	releaseCommand := make(chan struct{})
+	runtime.repoOpener = func(context.Context, string, string) (repoInstall, error) {
+		close(commandStarted)
+		<-releaseCommand
+		return repoInstall{}, context.Canceled
+	}
+	commandDone := make(chan error, 1)
+	go func() {
+		_, err := runtime.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandRepo, Args: "owner/repo"}, nil)
+		commandDone <- err
+	}()
+	<-commandStarted
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer closeCancel()
+	started := time.Now()
+	closeErr := runtime.Close(closeCtx)
+	elapsed := time.Since(started)
+	close(releaseCommand)
+	if err := <-commandDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("command error = %v, want context canceled", err)
+	}
+
+	backgroundCleanup := false
+	select {
+	case <-cleanupStarted:
+		backgroundCleanup = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	if closeErr == nil || !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("Close error = %v, want deadline exceeded", closeErr)
+	}
+	if elapsed > 120*time.Millisecond {
+		t.Fatalf("Close discarded earlier caller deadline: %v", elapsed)
+	}
+	if backgroundCleanup {
+		t.Fatal("timed-out Close launched an untracked background finalizer")
+	}
+
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("explicit cleanup retry: %v", err)
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("explicit cleanup retry did not finalize runtime")
+	}
+	if cleanupCalls.Load() != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls.Load())
+	}
+}
+
+func TestChatClientsShutdownBoundsRuntimeFinalCleanupAndRetriesOwnershipRelease(t *testing.T) {
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	owners := newChatSessionOwners()
+	runtime.sessionOwners = owners
+	clients := dashboard.NewChatClients(
+		func(context.Context) (chatpkg.Backend, error) { return runtime, nil },
+		nil,
+	)
+	id, state, err := clients.Open(context.Background(), chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalCleanup := runtime.agentCleanupContext
+	cleanupStarted := make(chan struct{})
+	var cleanupCalls atomic.Int32
+	runtime.agentCleanupContext = func(ctx context.Context) error {
+		if cleanupCalls.Add(1) == 1 {
+			close(cleanupStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return originalCleanup(ctx)
+	}
+	resourceDone := runtime.resourceCtx.Done()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer shutdownCancel()
+	shutdownDone := make(chan error, 1)
+	started := time.Now()
+	go func() { shutdownDone <- clients.Shutdown(shutdownCtx) }()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not reach final agent/Docker-shaped cleanup")
+	}
+	err = <-shutdownDone
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("Shutdown exceeded the single global deadline: %v", elapsed)
+	}
+	select {
+	case <-resourceDone:
+		t.Fatal("failed final cleanup released runtime resources")
+	default:
+	}
+	if calls := cleanupCalls.Load(); calls != 1 {
+		t.Fatalf("cleanup calls after first Shutdown = %d, want 1", calls)
+	}
+	if err := clients.Turn(context.Background(), id, "must not run"); err == nil {
+		t.Fatal("retiring client accepted a turn after failed cleanup")
+	}
+
+	contender := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	contender.sessionOwners = owners
+	if _, err := contender.Open(context.Background(), chatpkg.OpenOptions{SessionID: state.SessionID}); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("session ownership released before successful cleanup retry: %v", err)
+	}
+
+	if err := clients.Shutdown(context.Background()); err != nil {
+		t.Fatalf("explicit Shutdown retry: %v", err)
+	}
+	if calls := cleanupCalls.Load(); calls != 2 {
+		t.Fatalf("cleanup calls after retry = %d, want 2", calls)
+	}
+	select {
+	case <-resourceDone:
+	default:
+		t.Fatal("successful cleanup retry retained runtime resources")
+	}
+	reacquired := newRuntimeAgainstSameStore(t, runtime.cfg, sessions)
+	reacquired.sessionOwners = owners
+	if _, err := reacquired.Open(context.Background(), chatpkg.OpenOptions{SessionID: state.SessionID}); err != nil {
+		t.Fatalf("reacquire session after successful cleanup retry: %v", err)
 	}
 }
 
@@ -1522,6 +2292,37 @@ func (c *runtimeTestCloser) Close() error {
 	return nil
 }
 
+type runtimeContextTestCloser struct {
+	beforeClose func()
+	calls       int
+	closed      bool
+}
+
+func (c *runtimeContextTestCloser) Close() error {
+	return c.CloseContext(context.Background())
+}
+
+func (c *runtimeContextTestCloser) CloseContext(ctx context.Context) error {
+	c.calls++
+	if c.beforeClose != nil {
+		beforeClose := c.beforeClose
+		c.beforeClose = nil
+		beforeClose()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.closed = true
+	return nil
+}
+
+type runtimeNonComparableCloser []*int
+
+func (c runtimeNonComparableCloser) Close() error {
+	*c[0]++
+	return nil
+}
+
 func hasTool(box tool.Toolbox, name string) bool {
 	for _, def := range box.Defs() {
 		if def.Name == name {
@@ -1588,4 +2389,34 @@ func newRuntimeAgainstSameStore(t *testing.T, cfg config.Config, sessions *sessi
 	}
 	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	return runtime
+}
+
+func writeRuntimeSkill(t *testing.T, name, description, status, body string) string {
+	t.Helper()
+	path := filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main", "skills", name, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: %s\n---\n\n%s\n", name, description, status, body)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func skillRefNames(refs []chatpkg.SkillRef) []string {
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = ref.Name
+	}
+	return names
+}
+
+func attachedSkillRef(refs []chatpkg.SkillRef, name string) chatpkg.SkillRef {
+	for _, ref := range refs {
+		if ref.Name == name {
+			return ref
+		}
+	}
+	return chatpkg.SkillRef{Name: name}
 }

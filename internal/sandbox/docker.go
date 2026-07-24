@@ -311,7 +311,17 @@ func (d *DockerExecutor) Run(ctx context.Context, name string, input json.RawMes
 func (d *DockerExecutor) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = d.client.Shutdown(ctx)
+	return d.CloseContext(ctx)
+}
+
+// CloseContext stops the runner and removes the container under the caller's
+// cleanup deadline. It creates no replacement timeout, so a chat manager's
+// single shutdown window reaches the concrete Docker commands unchanged.
+func (d *DockerExecutor) CloseContext(ctx context.Context) error {
+	var closeErr error
+	if err := d.client.Shutdown(ctx); err != nil && ctx.Err() != nil {
+		closeErr = errors.Join(closeErr, ctx.Err())
+	}
 	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", d.container).CombinedOutput()
 	if err != nil && strings.Contains(string(out), "No such container:") {
 		err = nil
@@ -319,7 +329,7 @@ func (d *DockerExecutor) Close() error {
 		err = fmt.Errorf("sandbox: docker rm: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 	RemoveSessionToken(d.queueDir)
-	return errors.Join(err, d.client.Close())
+	return errors.Join(closeErr, err, d.client.CloseContext(ctx))
 }
 
 var _ tool.Toolbox = (*DockerExecutor)(nil)

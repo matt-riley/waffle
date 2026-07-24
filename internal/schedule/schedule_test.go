@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -62,6 +63,28 @@ func TestAddValidatesCron(t *testing.T) {
 	}
 }
 
+func TestAddReturnsCanonicalCommittedJob(t *testing.T) {
+	jobs := NewStore(newTestStore(t))
+	created, err := jobs.AddWithProfile(
+		context.Background(), "brief", "0 9 * * *", "summarize", "telegram:900", "researcher",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := jobs.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.ID != stored.ID || created.Name != stored.Name ||
+		created.Cron != stored.Cron || created.Prompt != stored.Prompt ||
+		created.Deliver != stored.Deliver || created.Profile != stored.Profile ||
+		created.Enabled != stored.Enabled || created.CreatedAt != stored.CreatedAt ||
+		created.MaxAttempts != stored.MaxAttempts || created.BaseBackoff != stored.BaseBackoff ||
+		created.MaxBackoff != stored.MaxBackoff || created.StallTimeout != stored.StallTimeout {
+		t.Fatalf("created job is not canonical: created=%+v stored=%+v", created, stored)
+	}
+}
+
 func TestJobProfileField(t *testing.T) {
 	ctx := context.Background()
 	s := NewStore(newTestStore(t))
@@ -83,6 +106,184 @@ func TestJobProfileField(t *testing.T) {
 	other.Profile = "other"
 	if sameDefinition(*got, other) {
 		t.Fatal("profile change should break sameDefinition")
+	}
+}
+
+func TestUpdateValidatesBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	jobs := NewStore(st)
+	job, err := jobs.AddWithProfile(ctx, "morning brief", "0 9 * * 1-5", "summarize", "telegram:900", "researcher")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		update Update
+	}{
+		{
+			name:   "invalid cron",
+			update: Update{Name: "edited", Cron: "not cron", Prompt: "changed", Deliver: "telegram:901", Profile: "reviewer", Enabled: false},
+		},
+		{
+			name:   "empty name",
+			update: Update{Name: " \t", Cron: "0 10 * * *", Prompt: "changed", Deliver: "", Profile: "", Enabled: true},
+		},
+		{
+			name:   "empty prompt",
+			update: Update{Name: "edited", Cron: "0 10 * * *", Prompt: "\n ", Deliver: "", Profile: "", Enabled: true},
+		},
+		{
+			name:   "malformed delivery",
+			update: Update{Name: "edited", Cron: "0 10 * * *", Prompt: "changed", Deliver: "telegram", Profile: "", Enabled: true},
+		},
+		{
+			name:   "invalid profile",
+			update: Update{Name: "edited", Cron: "0 10 * * *", Prompt: "changed", Deliver: "", Profile: "../admin", Enabled: true},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := jobs.Update(ctx, job.ID, test.update); !errors.Is(err, ErrInvalidUpdate) {
+				t.Fatal("invalid update succeeded")
+			}
+			got, err := jobs.Get(ctx, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != job.Name || got.Cron != job.Cron || got.Prompt != job.Prompt ||
+				got.Deliver != job.Deliver || got.Profile != job.Profile || got.Enabled != job.Enabled {
+				t.Fatalf("failed update mutated stored job: got %+v, want %+v", got, job)
+			}
+		})
+	}
+}
+
+func TestUpdatePreservesExecutionBookkeeping(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	jobs := NewStore(st)
+	job, err := jobs.Add(ctx, "old", "0 9 * * *", "old prompt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastRun := time.Date(2026, time.July, 24, 8, 0, 0, 0, time.UTC)
+	nextRetry := lastRun.Add(15 * time.Minute)
+	if _, err := st.DB.ExecContext(ctx, `UPDATE jobs SET
+		last_run=?, last_status=?, attempt=?, next_retry=?, max_attempts=?,
+		base_backoff=?, max_backoff=?, stall_timeout=?
+		WHERE id=?`,
+		lastRun.Format(time.RFC3339Nano), "failed: canary", 3,
+		nextRetry.Format(time.RFC3339Nano), 3, "15s", "15m", "7m", job.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := jobs.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := jobs.Update(ctx, job.ID, Update{
+		Name: "new", Cron: "30 10 * * 1-5", Prompt: "new prompt",
+		Deliver: "telegram:901", Profile: "reviewer", Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Name != "new" || got.Cron != "30 10 * * 1-5" || got.Prompt != "new prompt" ||
+		got.Deliver != "telegram:901" || got.Profile != "reviewer" || got.Enabled {
+		t.Fatalf("updated definition = %+v", got)
+	}
+	if got.LastRun != before.LastRun || got.LastStatus != before.LastStatus ||
+		got.CreatedAt != before.CreatedAt || got.Attempt != before.Attempt ||
+		got.NextRetry != before.NextRetry || got.MaxAttempts != before.MaxAttempts ||
+		got.BaseBackoff != before.BaseBackoff || got.MaxBackoff != before.MaxBackoff ||
+		got.StallTimeout != before.StallTimeout {
+		t.Fatalf("bookkeeping changed: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestUpdateMissingJobReturnsStableNotFound(t *testing.T) {
+	jobs := NewStore(newTestStore(t))
+	_, err := jobs.Update(context.Background(), "job-missing", Update{
+		Name: "valid", Cron: "0 9 * * *", Prompt: "valid", Enabled: true,
+	})
+	if !errors.Is(err, ErrJobNotFound) || !strings.Contains(err.Error(), "job not found") {
+		t.Fatalf("error = %v, want stable not found", err)
+	}
+}
+
+func TestStoreOperationsHonorDeadlineWithoutCommitting(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Store, string) error
+	}{
+		{
+			name: "add",
+			run: func(ctx context.Context, jobs *Store, _ string) error {
+				_, err := jobs.Add(ctx, "new", "0 10 * * *", "new prompt", "")
+				return err
+			},
+		},
+		{
+			name: "get",
+			run: func(ctx context.Context, jobs *Store, jobID string) error {
+				_, err := jobs.Get(ctx, jobID)
+				return err
+			},
+		},
+		{
+			name: "update",
+			run: func(ctx context.Context, jobs *Store, jobID string) error {
+				_, err := jobs.Update(ctx, jobID, Update{
+					Name: "new", Cron: "0 10 * * *", Prompt: "new prompt", Enabled: true,
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := newTestStore(t)
+			jobs := NewStore(st)
+			job, err := jobs.Add(context.Background(), "old", "0 9 * * *", "old prompt", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			held, err := st.DB.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			started := time.Now()
+			err = test.run(ctx, jobs, job.ID)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				_ = held.Rollback()
+				t.Fatalf("error = %v, want deadline exceeded", err)
+			}
+			if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+				_ = held.Rollback()
+				t.Fatalf("operation returned after %v", elapsed)
+			}
+			if err := held.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+
+			stored, err := jobs.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Name != "old" || stored.Cron != "0 9 * * *" || stored.Prompt != "old prompt" {
+				t.Fatalf("deadline operation changed stored job: %+v", stored)
+			}
+			rows, err := jobs.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("jobs = %d, want only original job", len(rows))
+			}
+		})
 	}
 }
 

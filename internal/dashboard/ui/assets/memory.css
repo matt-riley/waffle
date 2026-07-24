@@ -1,0 +1,241 @@
+.memory {
+  --memory-ink: #2d251f;
+  --memory-muted: #73665c;
+  --memory-line: rgba(61, 46, 35, 0.14);
+  --memory-paper: rgba(255, 252, 246, 0.82);
+  color: var(--memory-ink);
+  padding: clamp(1.25rem, 3vw, 3rem);
+}
+
+.memory-header,
+.memory-layout,
+.memory-search-row,
+.memory-hit-metadata,
+.memory-hit-actions,
+.memory-dialog-actions {
+  display: flex;
+}
+
+.memory-header {
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.memory-header h1 {
+  font-size: clamp(2.4rem, 6vw, 5.5rem);
+  letter-spacing: -0.06em;
+  line-height: 0.9;
+  margin: 0.3rem 0 0.8rem;
+}
+
+.memory-header > div > p:last-child {
+  color: var(--memory-muted);
+  max-width: 46rem;
+}
+
+.memory-conversation-link {
+  border-bottom: 1px solid currentColor;
+  color: inherit;
+  flex: none;
+  padding-bottom: 0.2rem;
+  text-decoration: none;
+}
+
+.memory-layout {
+  align-items: flex-start;
+  gap: clamp(1rem, 3vw, 2.5rem);
+}
+
+.memory-search-panel {
+  flex: 1 1 42rem;
+  min-width: 0;
+}
+
+.memory-attach-panel {
+  background: #2d251f;
+  border-radius: 1.4rem;
+  color: #fffaf2;
+  flex: 0 1 21rem;
+  padding: 1.4rem;
+  position: sticky;
+  top: 1rem;
+}
+
+.memory-attach-panel h2 {
+  margin: 0.25rem 0 0.7rem;
+}
+
+.memory-attach-panel label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 1.4rem 0 0.45rem;
+  text-transform: uppercase;
+}
+
+.memory-attach-panel input {
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.75rem;
+  color: inherit;
+  padding: 0.8rem;
+  width: 100%;
+}
+
+.memory-search-form label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 0.55rem;
+}
+
+.memory-search-row {
+  gap: 0.65rem;
+}
+
+.memory-search-row input {
+  background: var(--memory-paper);
+  border: 1px solid var(--memory-line);
+  border-radius: 999px;
+  flex: 1;
+  min-width: 0;
+  padding: 0.9rem 1.2rem;
+}
+
+.memory-search-row button,
+.memory-hit-actions button,
+.memory-dialog-actions button {
+  border: 1px solid var(--memory-line);
+  border-radius: 999px;
+  cursor: pointer;
+  padding: 0.75rem 1rem;
+}
+
+.memory-search-row button {
+  background: #f47b35;
+  border-color: #f47b35;
+  color: #1d1713;
+  font-weight: 750;
+}
+
+.memory-status {
+  color: var(--memory-muted);
+  min-height: 1.4em;
+}
+
+.memory-results {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.memory-hit {
+  background: var(--memory-paper);
+  border: 1px solid var(--memory-line);
+  border-radius: 1.15rem;
+  padding: 1rem;
+}
+
+.memory-hit.is-archived {
+  background: rgba(238, 232, 224, 0.62);
+  opacity: 0.78;
+}
+
+.memory-hit-metadata {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.memory-source-chip,
+.memory-archive-chip {
+  border: 1px solid var(--memory-line);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  padding: 0.3rem 0.55rem;
+  text-transform: uppercase;
+}
+
+.memory-source-chip {
+  background: #ffd8b9;
+}
+
+.memory-archive-chip {
+  background: #e4ddd4;
+}
+
+.memory-source-id,
+.memory-provenance {
+  color: var(--memory-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+
+.memory-excerpt {
+  font-size: clamp(1rem, 2vw, 1.15rem);
+  line-height: 1.5;
+  margin: 0.9rem 0;
+}
+
+.memory-hit-actions {
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.memory-hit-actions button {
+  background: transparent;
+}
+
+.memory-hit-actions .memory-forget-button,
+.memory-dialog-actions .danger-button {
+  border-color: #a13d31;
+  color: #8b2d24;
+}
+
+.memory-forget-dialog {
+  border: 0;
+  border-radius: 1.2rem;
+  box-shadow: 0 1.5rem 5rem rgba(35, 25, 18, 0.3);
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 1.5rem;
+}
+
+.memory-forget-dialog::backdrop {
+  background: rgba(34, 27, 22, 0.62);
+}
+
+.memory-dialog-actions {
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.4rem;
+}
+
+@media (max-width: 900px) {
+  .memory-header,
+  .memory-layout {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memory-attach-panel {
+    flex-basis: auto;
+    position: static;
+  }
+
+  .memory-search-panel {
+    flex-basis: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .memory-search-row {
+    flex-direction: column;
+  }
+
+  .memory-search-row button {
+    width: 100%;
+  }
+}

@@ -1,0 +1,71 @@
+package ui
+
+templ Tasks(view ShellView) {
+	<section class="tasks" data-section={ view.ActiveSection } aria-labelledby="tasks-title">
+		<header class="tasks-header">
+			<div>
+				<p class="eyebrow">Tasks / scheduled work</p>
+				<h1 id="tasks-title">What Waffle is carrying</h1>
+			</div>
+			<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
+		</header>
+		<div class="task-filters" aria-label="Filter tasks">
+			<button class="task-filter" type="button" data-task-filter="all" aria-pressed="true">All</button>
+			<button class="task-filter" type="button" data-task-filter="active" aria-pressed="false">Active</button>
+			<button class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false">Scheduled</button>
+			<button class="task-filter" type="button" data-task-filter="completed" aria-pressed="false">Completed</button>
+			<button class="task-filter" type="button" data-task-filter="attention" aria-pressed="false">Attention</button>
+		</div>
+		<div class="tasks-errors" id="tasks-errors" role="status" aria-live="polite" hidden></div>
+		<div class="tasks-layout">
+			<section class="tasks-board" aria-labelledby="tasks-board-title">
+				<div class="panel-heading">
+					<div>
+						<p class="panel-index">01 / evidence</p>
+						<h2 id="tasks-board-title">Runs and schedules</h2>
+					</div>
+				</div>
+				<div class="task-list" id="tasks-list" aria-live="polite"></div>
+				<p class="tasks-empty" id="tasks-empty">Loading task evidence…</p>
+			</section>
+			<aside class="schedule-editor" aria-labelledby="schedule-editor-title">
+				<div class="panel-heading">
+					<div>
+						<p class="panel-index">02 / schedule</p>
+						<h2 id="schedule-editor-title">Set the next rhythm</h2>
+					</div>
+				</div>
+				<form id="task-schedule-form">
+					<input id="task-schedule-id" name="id" type="hidden"/>
+					<label for="task-schedule-name">Name</label>
+					<input id="task-schedule-name" name="name" required/>
+					<label for="task-schedule-cron">Cron schedule</label>
+					<input id="task-schedule-cron" name="cron" placeholder="0 9 * * 1-5" required/>
+					<label for="task-schedule-prompt">Prompt</label>
+					<textarea id="task-schedule-prompt" name="prompt" rows="5" required></textarea>
+					<label for="task-schedule-deliver">Delivery target <span>(optional)</span></label>
+					<input id="task-schedule-deliver" name="deliver" placeholder="telegram:900"/>
+					<label id="task-schedule-deliver-clear-row" for="task-schedule-deliver-clear" hidden class="schedule-enabled schedule-clear">
+						<input id="task-schedule-deliver-clear" type="checkbox"/>
+						Clear stored delivery target
+					</label>
+					<label for="task-schedule-profile">Profile <span>(optional)</span></label>
+					<input id="task-schedule-profile" name="profile" placeholder="researcher"/>
+					<label id="task-schedule-profile-clear-row" for="task-schedule-profile-clear" hidden class="schedule-enabled schedule-clear">
+						<input id="task-schedule-profile-clear" type="checkbox"/>
+						Clear stored profile
+					</label>
+					<label id="task-schedule-enabled-row" for="task-schedule-enabled" hidden class="schedule-enabled">
+						<input id="task-schedule-enabled" name="enabled" type="checkbox" checked/>
+						Enabled
+					</label>
+					<div class="schedule-actions">
+						<button id="task-schedule-cancel" type="button" hidden>Cancel edit</button>
+						<button id="task-schedule-submit" class="send-button" type="submit">Create schedule</button>
+					</div>
+					<p id="task-schedule-status" class="schedule-status" aria-live="polite"></p>
+				</form>
+			</aside>
+		</div>
+	</section>
+}
