@@ -43,9 +43,18 @@ func (StandaloneRestartScheduler) Schedule(context.Context, string) error {
 	return ErrManualRestartRequired
 }
 
+// RestartScheduleOutcome is the sanitized, operator-actionable result returned
+// to the coordinator after the response is already visible to the client.
+type RestartScheduleOutcome struct {
+	Scheduled bool   `json:"scheduled"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+}
+
 // AfterResponseWriter is supplied by the coordinator-owned mutation wrapper.
 // Its callbacks run once only after the response has been copied to the real
-// writer and flushed. Cached idempotency replays must not register callbacks.
+// writer and flushed. The wrapper must observe the returned outcome. Cached
+// idempotency replays must not register callbacks.
 type AfterResponseWriter interface {
-	AfterResponse(func())
+	AfterResponse(func() RestartScheduleOutcome)
 }

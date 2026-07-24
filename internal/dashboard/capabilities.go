@@ -54,7 +54,14 @@ type CapabilitySkills interface {
 }
 
 type CapabilityCatalogue interface {
-	Refresh(context.Context, string) (modelcatalog.Result, error)
+	Refresh(context.Context, string) (CapabilityCatalogueResult, error)
+}
+
+// CapabilityCatalogueResult keeps the private values supplied to a catalogue
+// fetch beside its untrusted result so the public boundary can redact them.
+type CapabilityCatalogueResult struct {
+	Result        modelcatalog.Result
+	PrivateValues []string
 }
 
 type CapabilitySkill struct {
@@ -180,17 +187,41 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 	if err != nil {
 		return CapabilityCatalogueView{}, err
 	}
-	models := append([]modelcatalog.Model(nil), result.Models...)
+	models := redactCapabilityCatalogueModels(result.Result.Models, result.PrivateValues...)
 	if models == nil {
 		models = make([]modelcatalog.Model, 0)
 	}
 	return CapabilityCatalogueView{
-		Connection: result.Connection.Name,
-		FetchedAt:  result.FetchedAt,
-		Stale:      result.Stale,
-		Warning:    result.Warning,
+		Connection: redactCapabilityCatalogueText(result.Result.Connection.Name, result.PrivateValues...),
+		FetchedAt:  result.Result.FetchedAt,
+		Stale:      result.Result.Stale,
+		Warning:    redactCapabilityCatalogueText(result.Result.Warning, result.PrivateValues...),
 		Models:     models,
 	}, nil
+}
+
+func redactCapabilityCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {
+	redacted := make([]modelcatalog.Model, len(models))
+	for index, model := range models {
+		model.ID = redactCapabilityCatalogueText(model.ID, private...)
+		model.DisplayName = redactCapabilityCatalogueText(model.DisplayName, private...)
+		model.Owner = redactCapabilityCatalogueText(model.Owner, private...)
+		model.Capabilities = append([]string(nil), model.Capabilities...)
+		for capabilityIndex := range model.Capabilities {
+			model.Capabilities[capabilityIndex] = redactCapabilityCatalogueText(model.Capabilities[capabilityIndex], private...)
+		}
+		redacted[index] = model
+	}
+	return redacted
+}
+
+func redactCapabilityCatalogueText(value string, private ...string) string {
+	for _, privateValue := range private {
+		if privateValue != "" {
+			value = strings.ReplaceAll(value, privateValue, "[REDACTED]")
+		}
+	}
+	return value
 }
 
 func (c *Capabilities) AttachSkill(ctx context.Context, sessionID, name string) error {
@@ -513,10 +544,28 @@ func activateSkillHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc 
 }
 
 func deferRestart(after AfterResponseWriter, scheduler RestartScheduler, transactionID string) {
-	after.AfterResponse(func() {
+	after.AfterResponse(func() RestartScheduleOutcome {
 		ctx, cancel := context.WithTimeout(context.Background(), restartScheduleTimeout)
 		defer cancel()
-		_ = scheduler.Schedule(ctx, transactionID)
+		err := scheduler.Schedule(ctx, transactionID)
+		switch {
+		case err == nil:
+			return RestartScheduleOutcome{
+				Scheduled: true,
+				Code:      "restart_scheduled",
+				Message:   "Waffle restart was scheduled.",
+			}
+		case errors.Is(err, ErrManualRestartRequired):
+			return RestartScheduleOutcome{
+				Code:    "manual_restart_required",
+				Message: ErrManualRestartRequired.Error(),
+			}
+		default:
+			return RestartScheduleOutcome{
+				Code:    "restart_schedule_failed",
+				Message: "restart could not be scheduled; restart waffle serve to apply the change",
+			}
+		}
 	})
 }
 

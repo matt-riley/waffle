@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/memory"
@@ -150,6 +152,55 @@ func TestCapabilitiesSessionSkillMutationRequiresExistingSession(t *testing.T) {
 	}
 	if skills.attachCalls != 1 || skills.detachCalls != 1 {
 		t.Fatalf("skill mutations attach=%d detach=%d", skills.attachCalls, skills.detachCalls)
+	}
+}
+
+func TestCapabilitiesCatalogueRedactsPrivateFetchValuesAcrossEveryPublicString(t *testing.T) {
+	const (
+		apiKey  = "sk-catalogue-canary"
+		scopeID = "scope-catalogue-canary"
+	)
+	capabilities := &Capabilities{
+		Catalogue: fakeCapabilityCatalogue{result: CapabilityCatalogueResult{
+			Result: modelcatalog.Result{
+				Record: modelcatalog.Record{
+					Connection: modelcatalog.Connection{Name: "primary-" + apiKey},
+					FetchedAt:  time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC),
+					Models: []modelcatalog.Model{{
+						ID:            "model-" + apiKey,
+						DisplayName:   "display-" + scopeID,
+						Owner:         "owner-" + apiKey,
+						ContextWindow: 128_000,
+						Capabilities:  []string{"text-" + apiKey, "tools-" + scopeID},
+					}},
+				},
+				Warning: "warning-" + scopeID,
+			},
+			PrivateValues: []string{apiKey, scopeID},
+		}},
+	}
+
+	view, err := capabilities.RefreshCatalogue(t.Context(), "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{apiKey, scopeID} {
+		if bytes.Contains(public, []byte(private)) {
+			t.Fatalf("catalogue response leaked %q: %s", private, public)
+		}
+	}
+	if view.Connection != "primary-[REDACTED]" ||
+		view.Warning != "warning-[REDACTED]" ||
+		len(view.Models) != 1 ||
+		view.Models[0].ID != "model-[REDACTED]" ||
+		view.Models[0].DisplayName != "display-[REDACTED]" ||
+		view.Models[0].Owner != "owner-[REDACTED]" ||
+		!reflect.DeepEqual(view.Models[0].Capabilities, []string{"text-[REDACTED]", "tools-[REDACTED]"}) {
+		t.Fatalf("redacted catalogue = %#v", view)
 	}
 }
 
@@ -326,6 +377,82 @@ func TestCapabilitiesRestartSchedulesOnlyAfterResponseAndNeverOnReplayData(t *te
 	}
 }
 
+func TestCapabilitiesRestartOutcomeIsSanitizedAndOperatorActionable(t *testing.T) {
+	tests := []struct {
+		name          string
+		scheduler     RestartScheduler
+		wantScheduled bool
+		wantCode      string
+		wantMessage   string
+	}{
+		{
+			name:          "managed schedule succeeds",
+			scheduler:     fakeRestartScheduler{},
+			wantScheduled: true,
+			wantCode:      "restart_scheduled",
+			wantMessage:   "Waffle restart was scheduled.",
+		},
+		{
+			name:          "standalone requires operator restart",
+			scheduler:     StandaloneRestartScheduler{},
+			wantScheduled: false,
+			wantCode:      "manual_restart_required",
+			wantMessage:   "restart waffle serve to apply the change",
+		},
+		{
+			name:          "scheduler failure is sanitized",
+			scheduler:     failingRestartScheduler{err: errors.New("systemd exposed " + capabilityCredentialCanary)},
+			wantScheduled: false,
+			wantCode:      "restart_schedule_failed",
+			wantMessage:   "restart could not be scheduled; restart waffle serve to apply the change",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providers := &fakeCapabilityProviders{
+				result: providerconfig.MutationResult{RestartRequired: true, TransactionID: "txn-private-diagnostic"},
+			}
+			mux := http.NewServeMux()
+			RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+				Service:  &Capabilities{Providers: providers},
+				Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+				Restart:  tt.scheduler,
+			})
+			response := newAfterResponseRecorder()
+
+			mux.ServeHTTP(response, httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/desk/models/default",
+				strings.NewReader(`{"alias":"gpt"}`),
+			))
+
+			if response.Code != http.StatusAccepted || len(response.after) != 1 || len(response.outcomes) != 0 {
+				t.Fatalf("before flush status=%d callbacks=%d outcomes=%d body=%s",
+					response.Code, len(response.after), len(response.outcomes), response.Body.String())
+			}
+			response.RunAfterResponse()
+			if len(response.outcomes) != 1 {
+				t.Fatalf("outcomes = %#v, want one observable result", response.outcomes)
+			}
+			outcome := response.outcomes[0]
+			if outcome.Scheduled != tt.wantScheduled ||
+				outcome.Code != tt.wantCode ||
+				outcome.Message != tt.wantMessage {
+				t.Fatalf("outcome = %#v", outcome)
+			}
+			public, err := json.Marshal(outcome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(public, []byte(capabilityCredentialCanary)) ||
+				bytes.Contains(public, []byte("txn-private-diagnostic")) {
+				t.Fatalf("outcome leaked private diagnostics: %s", public)
+			}
+		})
+	}
+}
+
 func TestRegisterCapabilitiesRoutesHasNoRemovalEndpoints(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
@@ -447,17 +574,21 @@ func (f *fakeCapabilitySkills) Activate(context.Context, string) error {
 }
 
 type fakeCapabilityCatalogue struct {
-	result modelcatalog.Result
+	result CapabilityCatalogueResult
 	err    error
 }
 
-func (f fakeCapabilityCatalogue) Refresh(context.Context, string) (modelcatalog.Result, error) {
+func (f fakeCapabilityCatalogue) Refresh(context.Context, string) (CapabilityCatalogueResult, error) {
 	return f.result, f.err
 }
 
 type fakeRestartScheduler struct{}
 
 func (fakeRestartScheduler) Schedule(context.Context, string) error { return nil }
+
+type failingRestartScheduler struct{ err error }
+
+func (s failingRestartScheduler) Schedule(context.Context, string) error { return s.err }
 
 type recordingRestartScheduler struct {
 	calls         int
@@ -472,15 +603,16 @@ func (s *recordingRestartScheduler) Schedule(_ context.Context, transactionID st
 
 type afterResponseRecorder struct {
 	*httptest.ResponseRecorder
-	after []func()
-	ran   bool
+	after    []func() RestartScheduleOutcome
+	outcomes []RestartScheduleOutcome
+	ran      bool
 }
 
 func newAfterResponseRecorder() *afterResponseRecorder {
 	return &afterResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
 }
 
-func (r *afterResponseRecorder) AfterResponse(callback func()) {
+func (r *afterResponseRecorder) AfterResponse(callback func() RestartScheduleOutcome) {
 	r.after = append(r.after, callback)
 }
 
@@ -490,7 +622,7 @@ func (r *afterResponseRecorder) RunAfterResponse() {
 	}
 	r.ran = true
 	for _, callback := range r.after {
-		callback()
+		r.outcomes = append(r.outcomes, callback())
 	}
 }
 
