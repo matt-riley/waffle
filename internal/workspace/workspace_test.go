@@ -142,6 +142,17 @@ func (f *fakeRuntime) log(e string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeRuntime) hasEventPrefix(prefix string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, event := range f.events {
+		if strings.HasPrefix(event, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) error {
 	f.mu.Lock()
 	f.opts = append(f.opts, opts)
@@ -1129,7 +1140,7 @@ func TestCloseWithoutForceReusesInspectClose(t *testing.T) {
 	}
 }
 
-func TestInspectCloseClosedWorkspaceIsNoOp(t *testing.T) {
+func TestInspectCloseClosedWorkspaceIsExplicit(t *testing.T) {
 	ctx := context.Background()
 	mgr, _ := newTestManager(t, &scriptedBash{})
 	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
@@ -1143,8 +1154,114 @@ func TestInspectCloseClosedWorkspaceIsNoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err := mgr.InspectClose(ctx, ws.ID)
-	if err != nil || report == nil || report.Dirty != "" || report.Unpushed != "" {
+	if !errors.Is(err, ErrWorkspaceAlreadyClosed) || report == nil || report.Dirty != "" || report.Unpushed != "" {
 		t.Fatalf("InspectClose(closed) = %+v, %v", report, err)
+	}
+}
+
+func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T) {
+	ctx := context.Background()
+	mgr, rt := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	acceptStarted := make(chan struct{})
+	releaseAccept := make(chan struct{})
+	inspectDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.InspectCloseGuarded(ctx, ws.ID, func(report *CloseReport) error {
+			if report.Dirty != "" || report.Unpushed != "" {
+				return errors.New("unexpected close evidence")
+			}
+			close(acceptStarted)
+			<-releaseAccept
+			return nil
+		})
+		inspectDone <- err
+	}()
+	<-acceptStarted
+
+	closer := &Manager{
+		DB:           mgr.DB,
+		Sessions:     mgr.Sessions,
+		Runtime:      mgr.Runtime,
+		QueueRoot:    mgr.QueueRoot,
+		DefaultImage: mgr.DefaultImage,
+		Network:      mgr.Network,
+		ExecTimeout:  mgr.ExecTimeout,
+		MintToken:    mgr.MintToken,
+		BrokerURL:    mgr.BrokerURL,
+	}
+	type closeResult struct {
+		transitioned bool
+		err          error
+	}
+	closeDone := make(chan closeResult, 1)
+	go func() {
+		_, transitioned, err := closer.CloseTransition(ctx, ws.ID, true)
+		closeDone <- closeResult{transitioned: transitioned, err: err}
+	}()
+	time.Sleep(500 * time.Millisecond)
+	if rt.hasEventPrefix("rm ") {
+		t.Fatal("CloseTransition from a second manager escaped guarded preview")
+	}
+
+	close(releaseAccept)
+	if err := <-inspectDone; err != nil {
+		t.Fatalf("InspectCloseGuarded: %v", err)
+	}
+	result := <-closeDone
+	if result.err != nil || !result.transitioned {
+		t.Fatalf("CloseTransition after preview = %+v", result)
+	}
+}
+
+func TestCloseTransitionReportsExactlyOneConcurrentTransition(t *testing.T) {
+	ctx := context.Background()
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		transitioned bool
+		err          error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, transitioned, err := mgr.CloseTransition(ctx, ws.ID, false)
+			results <- result{transitioned: transitioned, err: err}
+		}()
+	}
+	close(start)
+
+	var transitioned int
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("CloseTransition: %v", result.err)
+		}
+		if result.transitioned {
+			transitioned++
+		}
+	}
+	if transitioned != 1 {
+		t.Fatalf("concurrent transitioned count = %d, want one", transitioned)
+	}
+	if report, err := mgr.Close(ctx, ws.ID, false); err != nil || report != nil {
+		t.Fatalf("backward-compatible Close(closed) = %+v, %v", report, err)
 	}
 }
 

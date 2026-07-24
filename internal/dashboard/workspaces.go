@@ -205,8 +205,19 @@ func (s *WorkspacesService) PreviewClose(ctx context.Context, id string) (Worksp
 	if s.operations.Previews == nil {
 		return WorkspaceClosePreview{}, ErrOperationsDependencyUnavailable
 	}
-	report, err := s.operations.Workspaces.InspectClose(ctx, id)
+	lifecycle, ok := s.operations.Workspaces.(WorkspaceCloseLifecycle)
+	if !ok {
+		return WorkspaceClosePreview{}, ErrOperationsDependencyUnavailable
+	}
+	var previewToken string
+	report, err := lifecycle.InspectCloseGuarded(ctx, id, func(*workspace.CloseReport) error {
+		previewToken = s.operations.Previews.Issue(workspaceCloseOperation, id, workspaceClosePreviewTTL)
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) {
+			return WorkspaceClosePreview{}, ErrWorkspaceStateConflict
+		}
 		return WorkspaceClosePreview{}, err
 	}
 	if report == nil {
@@ -215,7 +226,7 @@ func (s *WorkspacesService) PreviewClose(ctx context.Context, id string) (Worksp
 	dirty, unpushed := workspaceCloseEvidence(report)
 	return WorkspaceClosePreview{
 		Workspace:        s.view(*ws),
-		PreviewToken:     s.operations.Previews.Issue(workspaceCloseOperation, id, workspaceClosePreviewTTL),
+		PreviewToken:     previewToken,
 		ExpiresInSeconds: int(workspaceClosePreviewTTL / time.Second),
 		Eligible:         dirty == "" && unpushed == "",
 		Dirty:            dirty,
@@ -234,10 +245,14 @@ func (s *WorkspacesService) ConfirmClose(ctx context.Context, id, previewToken s
 	if ws.Status == workspace.StatusClosed {
 		return WorkspaceMutationResponse{}, ErrWorkspaceStateConflict
 	}
+	lifecycle, ok := s.operations.Workspaces.(WorkspaceCloseLifecycle)
+	if !ok {
+		return WorkspaceMutationResponse{}, ErrOperationsDependencyUnavailable
+	}
 	if err := s.operations.Previews.Consume(previewToken, workspaceCloseOperation, id); err != nil {
 		return WorkspaceMutationResponse{}, err
 	}
-	report, err := s.operations.Workspaces.Close(ctx, id, false)
+	report, transitioned, err := lifecycle.CloseTransition(ctx, id, false)
 	if err != nil {
 		dirty, unpushed := workspaceCloseEvidence(report)
 		if dirty != "" || unpushed != "" {
@@ -246,6 +261,9 @@ func (s *WorkspacesService) ConfirmClose(ctx context.Context, id, previewToken s
 			}, cause: err}
 		}
 		return WorkspaceMutationResponse{}, err
+	}
+	if !transitioned {
+		return WorkspaceMutationResponse{}, ErrWorkspaceStateConflict
 	}
 	closed, err := s.get(ctx, id)
 	if err != nil {

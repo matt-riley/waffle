@@ -34,6 +34,16 @@ import (
 // "no workspace" and churn duplicate containers/volumes.
 var ErrWorkspaceNotFound = errors.New("workspace not found")
 
+// ErrWorkspaceAlreadyClosed distinguishes an inspection that observed a
+// closed row from a clean, closeable workspace.
+var ErrWorkspaceAlreadyClosed = errors.New("workspace already closed")
+
+// workspaceLifecycleLocks coordinates lifecycle transitions across Manager
+// instances in this process. Workspace IDs are globally unique, so the keyed
+// locks safely serialize CLI, reaper, and dashboard actors that use separate
+// managers over the same store.
+var workspaceLifecycleLocks sync.Map
+
 // Workspace is one repo workspace.
 type Workspace struct {
 	ID         string
@@ -663,6 +673,13 @@ func (m *Manager) devcontainerImage(ctx context.Context, client *sandbox.Client,
 
 // Idle stops the container; the volume (and queue) persist.
 func (m *Manager) Idle(ctx context.Context, id string) error {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return m.idle(ctx, id)
+}
+
+func (m *Manager) idle(ctx context.Context, id string) error {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return err
@@ -679,6 +696,13 @@ func (m *Manager) Idle(ctx context.Context, id string) error {
 
 // Resume restarts an idle workspace's container and reconnects the queue.
 func (m *Manager) Resume(ctx context.Context, id string) (*Workspace, *sandbox.Client, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return m.resume(ctx, id)
+}
+
+func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.Client, error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return nil, nil, err
@@ -824,13 +848,43 @@ type CloseReport struct {
 // lifecycle state. Idle workspaces are temporarily started and restored to
 // their stopped state without refreshing credentials or timestamps.
 func (m *Manager) InspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
+	return m.InspectCloseGuarded(ctx, id, nil)
+}
+
+// InspectCloseGuarded keeps the per-workspace lifecycle lock held through
+// accept. This lets a caller atomically accept inspection evidence, for
+// example by issuing a short-lived confirmation token, before another actor
+// can idle, resume, inspect, or close the same workspace. accept must not call
+// workspace lifecycle methods for this ID.
+func (m *Manager) InspectCloseGuarded(
+	ctx context.Context,
+	id string,
+	accept func(*CloseReport) error,
+) (report *CloseReport, err error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	report, err = m.inspectClose(ctx, id)
+	if err != nil {
+		return report, err
+	}
+	if accept != nil {
+		if err := accept(report); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+func (m *Manager) inspectClose(ctx context.Context, id string) (report *CloseReport, err error) {
 	ws, err := m.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	report = &CloseReport{}
 	if ws.Status == StatusClosed {
-		return report, nil
+		return report, ErrWorkspaceAlreadyClosed
 	}
 
 	wasIdle := ws.Status == StatusIdle
@@ -876,35 +930,47 @@ func (m *Manager) InspectClose(ctx context.Context, id string) (report *CloseRep
 // dirty or has unpushed commits, it refuses and reports instead.
 // before_remove runs best-effort after safety checks and before teardown.
 func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseReport, error) {
+	report, _, err := m.CloseTransition(ctx, id, force)
+	return report, err
+}
+
+// CloseTransition closes a workspace and reports whether this invocation
+// performed the durable non-closed to closed transition. Existing Close
+// callers retain their no-op compatibility for rows already closed.
+func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*CloseReport, bool, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
 	ws, err := m.Get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if ws.Status == StatusClosed {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	report := &CloseReport{}
 	if !force {
-		report, err = m.InspectClose(ctx, id)
+		report, err = m.inspectClose(ctx, id)
 		if err != nil {
-			return report, err
+			return report, false, err
 		}
 		if report.Dirty != "" || report.Unpushed != "" {
-			return report, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
+			return report, false, fmt.Errorf("workspace %s has unsaved work (close with force to discard)", id)
 		}
 	}
 
 	wasIdle := ws.Status == StatusIdle
 	var client *sandbox.Client
 	if wasIdle {
-		resumed, resumedClient, err := m.Resume(ctx, id)
+		resumed, resumedClient, err := m.resume(ctx, id)
 		if err != nil {
 			if force {
 				// Force-close without a live container when resume fails.
 				goto teardown
 			}
-			return report, fmt.Errorf("resume workspace for safety check: %w", err)
+			return report, false, fmt.Errorf("resume workspace for safety check: %w", err)
 		}
 		ws = resumed
 		client = resumedClient
@@ -914,7 +980,7 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 			if force {
 				goto teardown
 			}
-			return report, fmt.Errorf("connect workspace for safety check: %w", err)
+			return report, false, fmt.Errorf("connect workspace for safety check: %w", err)
 		}
 	}
 	defer func() {
@@ -932,13 +998,21 @@ func (m *Manager) Close(ctx context.Context, id string, force bool) (*CloseRepor
 
 teardown:
 	if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
-		return report, err
+		return report, false, err
 	}
 	if err := m.Runtime.RemoveVolume(ctx, ws.Volume); err != nil {
-		return report, err
+		return report, false, err
 	}
 	m.revokeSession(ws.SessionID)
-	return report, m.setStatus(ctx, id, StatusClosed)
+	if err := m.setStatus(ctx, id, StatusClosed); err != nil {
+		return report, false, err
+	}
+	return report, true, nil
+}
+
+func workspaceLifecycleLock(id string) *sync.Mutex {
+	lock, _ := workspaceLifecycleLocks.LoadOrStore(id, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func (m *Manager) revokeSession(sessionID string) {

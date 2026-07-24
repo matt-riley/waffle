@@ -63,14 +63,23 @@ type WorkspaceManager interface {
 	Close(context.Context, string, bool) (*workspace.CloseReport, error)
 }
 
+// WorkspaceCloseLifecycle is the narrower close coordination contract used by
+// Waffle Desk. It linearizes preview acceptance with close transitions and
+// reports whether this caller actually changed the workspace state.
+type WorkspaceCloseLifecycle interface {
+	InspectCloseGuarded(context.Context, string, func(*workspace.CloseReport) error) (*workspace.CloseReport, error)
+	CloseTransition(context.Context, string, bool) (*workspace.CloseReport, bool, error)
+}
+
 var (
-	_ RunReader        = (*observability.Service)(nil)
-	_ JobStore         = (*schedule.Store)(nil)
-	_ SessionStore     = (*session.Store)(nil)
-	_ NotesSearcher    = (*memory.NotesIndex)(nil)
-	_ WorksetStore     = (*workset.Store)(nil)
-	_ UsageReader      = (*usage.Store)(nil)
-	_ WorkspaceManager = (*workspace.Manager)(nil)
+	_ RunReader               = (*observability.Service)(nil)
+	_ JobStore                = (*schedule.Store)(nil)
+	_ SessionStore            = (*session.Store)(nil)
+	_ NotesSearcher           = (*memory.NotesIndex)(nil)
+	_ WorksetStore            = (*workset.Store)(nil)
+	_ UsageReader             = (*usage.Store)(nil)
+	_ WorkspaceManager        = (*workspace.Manager)(nil)
+	_ WorkspaceCloseLifecycle = (*workspace.Manager)(nil)
 )
 
 // SectionError is a sanitized public error for one independently readable
