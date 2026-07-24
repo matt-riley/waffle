@@ -37,8 +37,39 @@ func NewIdempotencyStore(now func() time.Time, capacity int, ttl time.Duration) 
 
 // Do runs a mutation once for an idempotency key, replaying its completed
 // response to identical requests and rejecting key reuse for another request.
+// If ctx is cancelled while run is in flight, the result is discarded so the
+// key can be retried.
 func (s *IdempotencyStore) Do(
 	ctx context.Context,
+	key, operation, requestDigest string,
+	run func(context.Context) (status int, body []byte),
+) (status int, body []byte, err error) {
+	return s.do(ctx, ctx, true, key, operation, requestDigest, run)
+}
+
+// DoDetached behaves like Do, except the mutation itself runs with runCtx
+// rather than ctx, so it can finish even after ctx (typically an HTTP
+// request context) is cancelled by client disconnect. Whatever run returns
+// is cached as the authoritative, terminal result regardless of runCtx's
+// state by the time run returns — callers that need a bounded runtime must
+// enforce it themselves (e.g. via runCtx's own deadline) rather than relying
+// on the result being discarded here. This includes a timeout or error
+// response produced because runCtx expired mid-mutation: that response is
+// cached too and gets replayed verbatim to every later request reusing the
+// same idempotency key, until the entry's TTL elapses — it is not retried
+// automatically. Waiting for an already in-flight duplicate request is still
+// bound by ctx.
+func (s *IdempotencyStore) DoDetached(
+	ctx, runCtx context.Context,
+	key, operation, requestDigest string,
+	run func(context.Context) (status int, body []byte),
+) (status int, body []byte, err error) {
+	return s.do(ctx, runCtx, false, key, operation, requestDigest, run)
+}
+
+func (s *IdempotencyStore) do(
+	ctx, runCtx context.Context,
+	discardOnRunCancel bool,
 	key, operation, requestDigest string,
 	run func(context.Context) (status int, body []byte),
 ) (status int, body []byte, err error) {
@@ -94,15 +125,17 @@ func (s *IdempotencyStore) Do(
 			panic(recovered)
 		}
 	}()
-	status, body = run(ctx)
-	if err := ctx.Err(); err != nil {
-		s.mu.Lock()
-		if s.entries[key] == entry {
-			delete(s.entries, key)
-			close(entry.ready)
+	status, body = run(runCtx)
+	if discardOnRunCancel {
+		if err := runCtx.Err(); err != nil {
+			s.mu.Lock()
+			if s.entries[key] == entry {
+				delete(s.entries, key)
+				close(entry.ready)
+			}
+			s.mu.Unlock()
+			return 0, nil, err
 		}
-		s.mu.Unlock()
-		return 0, nil, err
 	}
 
 	s.mu.Lock()

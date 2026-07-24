@@ -1,9 +1,7 @@
 package dashboard
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 
@@ -40,7 +38,7 @@ func RegisterMemoryRoutes(mux *http.ServeMux, config MemoryRouteConfig) {
 			memoryMutationMaxBodyBytes,
 			next,
 		)
-		return preserveMemoryResponseType(protected)
+		return preserveResponseType(protected)
 	}
 	mux.Handle("POST /api/v1/desk/memory/attach", mutation(newMemoryAttachHandler(service)))
 	mux.Handle("POST /api/v1/desk/memory/{noteID}/forget-preview", mutation(newMemoryForgetPreviewHandler(service)))
@@ -60,7 +58,7 @@ func newMemorySearchHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeMemoryJSON(w, http.StatusOK, struct {
+		writeJSON(w, http.StatusOK, struct {
 			Hits []MemoryHit `json:"hits"`
 		}{Hits: hits})
 	})
@@ -77,7 +75,7 @@ func newMemoryAttachHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeMemoryJSON(w, http.StatusOK, struct {
+		writeJSON(w, http.StatusOK, struct {
 			Entry *workset.Entry `json:"entry"`
 		}{Entry: entry})
 	})
@@ -96,7 +94,7 @@ func newMemoryForgetPreviewHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeMemoryJSON(w, http.StatusOK, preview)
+		writeJSON(w, http.StatusOK, preview)
 	})
 }
 
@@ -113,73 +111,44 @@ func newMemoryForgetHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeMemoryJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, result)
 	})
 }
 
 func decodeMemoryRequest(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		writeMemoryJSON(w, http.StatusBadRequest, memoryErrorResponse{
+	return decodeStrictJSON(w, r, target, func(w http.ResponseWriter) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Code: "invalid_request", Message: "memory request is invalid",
 		})
-		return false
-	}
-	return true
-}
-
-type memoryErrorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	})
 }
 
 func writeMemoryError(w http.ResponseWriter, err error) {
 	status := http.StatusServiceUnavailable
-	response := memoryErrorResponse{
+	response := errorResponse{
 		Code: "memory_unavailable", Message: "memory request could not be completed",
 	}
 	switch {
 	case errors.Is(err, ErrMemoryInvalidQuery):
 		status = http.StatusBadRequest
-		response = memoryErrorResponse{Code: "invalid_query", Message: "memory query is invalid"}
+		response = errorResponse{Code: "invalid_query", Message: "memory query is invalid"}
 	case errors.Is(err, ErrMemoryInvalidSource):
 		status = http.StatusBadRequest
-		response = memoryErrorResponse{Code: "invalid_source", Message: "memory source is invalid"}
+		response = errorResponse{Code: "invalid_source", Message: "memory source is invalid"}
 	case errors.Is(err, ErrMemoryHitNotFound):
 		status = http.StatusNotFound
-		response = memoryErrorResponse{Code: "memory_not_found", Message: "memory result was not found"}
+		response = errorResponse{Code: "memory_not_found", Message: "memory result was not found"}
 	case errors.Is(err, ErrMemorySessionNotFound):
 		status = http.StatusNotFound
-		response = memoryErrorResponse{Code: "session_not_found", Message: "target session was not found"}
+		response = errorResponse{Code: "session_not_found", Message: "target session was not found"}
 	case errors.Is(err, ErrMemoryWorksetConflict):
 		status = http.StatusConflict
-		response = memoryErrorResponse{Code: "workset_full", Message: "session working set cannot accept this memory"}
+		response = errorResponse{Code: "workset_full", Message: "session working set cannot accept this memory"}
 	case errors.Is(err, ErrMemoryConfirmation):
 		status = http.StatusConflict
-		response = memoryErrorResponse{Code: "confirmation_invalid", Message: "forget confirmation is invalid or expired"}
+		response = errorResponse{Code: "confirmation_invalid", Message: "forget confirmation is invalid or expired"}
 	case errors.Is(err, ErrMemoryForgetUnavailable):
-		response = memoryErrorResponse{Code: "forget_unavailable", Message: "memory note could not be forgotten"}
+		response = errorResponse{Code: "forget_unavailable", Message: "memory note could not be forgotten"}
 	}
-	writeMemoryJSON(w, status, response)
-}
-
-func writeMemoryJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-// NewMutationHandler replays status and body only. Restore the safe JSON
-// response type without changing the shared primitive.
-func preserveMemoryResponseType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capture := newResponseCapture()
-		next.ServeHTTP(capture, r)
-		if json.Valid(capture.body.Bytes()) {
-			w.Header().Set("Content-Type", "application/json")
-		}
-		w.WriteHeader(capture.status)
-		_, _ = w.Write(capture.body.Bytes())
-	})
+	writeJSON(w, status, response)
 }

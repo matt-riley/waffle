@@ -1,11 +1,9 @@
 package skillinstall
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -209,30 +207,7 @@ func (i *Installer) readInstallProvenance(stageID string) (installProvenanceReco
 	if !stageIDPattern.MatchString(stageID) {
 		return installProvenanceRecord{}, false, ErrStageNotFound
 	}
-	path := i.installProvenancePath(stageID)
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return installProvenanceRecord{}, false, nil
-	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Size() < 0 || info.Size() > maxStageRecord {
-		return installProvenanceRecord{}, false, ErrStageChanged
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return installProvenanceRecord{}, false, ErrStageChanged
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	var record installProvenanceRecord
-	if err := decoder.Decode(&record); err != nil {
-		return installProvenanceRecord{}, false, ErrStageChanged
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return installProvenanceRecord{}, false, ErrStageChanged
-	}
-	return record, true, nil
+	return readBoundedJSONFile[installProvenanceRecord](i.installProvenancePath(stageID), maxStageRecord)
 }
 
 func (i *Installer) writeInstallProvenance(record installProvenanceRecord) (retErr error) {

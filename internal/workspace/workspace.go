@@ -194,7 +194,26 @@ func NewManager(st *store.Store, sessions *session.Store, rt Runtime, queueRoot 
 	}
 }
 
-var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+var repoSegmentRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// ValidRepository reports whether repository has the exact "owner/name"
+// shape accepted throughout workspace and Desk requests: two non-empty
+// segments, neither "." nor "..", drawn from a conservative character set.
+func ValidRepository(repository string) bool {
+	if len(repository) == 0 || len(repository) > 255 || strings.TrimSpace(repository) != repository {
+		return false
+	}
+	parts := strings.Split(repository, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || !repoSegmentRE.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
 
 // normalizeRepo accepts "owner/name" or a full https URL.
 // gitHostFromURL returns the lowercase hostname of an https git URL, or "".
@@ -208,14 +227,14 @@ func gitHostFromURL(raw string) string {
 
 func normalizeRepo(arg string) (repo, url string, err error) {
 	arg = strings.TrimSuffix(strings.TrimSpace(arg), ".git")
-	if repoRE.MatchString(arg) {
+	if ValidRepository(arg) {
 		return arg, "https://github.com/" + arg + ".git", nil
 	}
 	if strings.HasPrefix(arg, "https://") {
 		u, err := neturl.Parse(arg)
 		if err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" {
 			repoPath := strings.Trim(u.Path, "/")
-			if repoRE.MatchString(repoPath) {
+			if ValidRepository(repoPath) {
 				return repoPath, "https://" + u.Host + "/" + repoPath + ".git", nil
 			}
 		}

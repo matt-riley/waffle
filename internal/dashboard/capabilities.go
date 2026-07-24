@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -321,7 +319,7 @@ func capabilitiesSnapshotHandler(service *Capabilities) http.Handler {
 					writeCapabilityError(w, err)
 					return
 				}
-				writeCapabilityJSON(w, http.StatusOK, snapshot)
+				writeJSON(w, http.StatusOK, snapshot)
 				return
 			}
 			timer := time.NewTimer(capabilitySnapshotRetryDelay)
@@ -349,7 +347,7 @@ func sessionModelHandler(service *Capabilities) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeCapabilityJSON(w, http.StatusOK, struct{}{})
+		writeJSON(w, http.StatusOK, struct{}{})
 	}
 }
 
@@ -380,7 +378,7 @@ func globalAliasHandler(routeConfig CapabilitiesRouteConfig, utility bool) http.
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeCapabilityJSON(w, http.StatusAccepted, result)
+		writeJSON(w, http.StatusAccepted, result)
 	}
 }
 
@@ -397,7 +395,7 @@ func catalogueRefreshHandler(service *Capabilities) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeCapabilityJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -430,7 +428,7 @@ func addModelHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc {
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeCapabilityJSON(w, http.StatusAccepted, result)
+		writeJSON(w, http.StatusAccepted, result)
 	}
 }
 
@@ -476,7 +474,7 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeCapabilityJSON(w, http.StatusAccepted, result)
+		writeJSON(w, http.StatusAccepted, result)
 	}
 }
 
@@ -499,7 +497,7 @@ func sessionSkillHandler(service *Capabilities, attach bool) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeCapabilityJSON(w, http.StatusOK, struct{}{})
+		writeJSON(w, http.StatusOK, struct{}{})
 	}
 }
 
@@ -522,7 +520,7 @@ func stageSkillHandler(service *Capabilities) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeCapabilityJSON(w, http.StatusOK, manifest)
+		writeJSON(w, http.StatusOK, manifest)
 	}
 }
 
@@ -540,7 +538,7 @@ func installSkillHandler(service *Capabilities) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeCapabilityJSON(w, http.StatusOK, installed)
+		writeJSON(w, http.StatusOK, installed)
 	}
 }
 
@@ -557,7 +555,7 @@ func activateSkillHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc 
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeCapabilityJSON(w, http.StatusAccepted, result)
+		writeJSON(w, http.StatusAccepted, result)
 	}
 }
 
@@ -588,26 +586,17 @@ func deferRestart(after AfterResponseWriter, scheduler RestartScheduler, transac
 }
 
 func decodeCapabilityRequest(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		writeCapabilityJSON(w, http.StatusBadRequest, capabilityError{
+	return decodeStrictJSON(w, r, target, func(w http.ResponseWriter) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Code:    "invalid_request",
 			Message: "capability request is invalid",
 		})
-		return false
-	}
-	return true
-}
-
-type capabilityError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	})
 }
 
 func writeCapabilityError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
-	response := capabilityError{
+	response := errorResponse{
 		Code:    "capability_failed",
 		Message: "capability request could not be completed",
 	}
@@ -625,11 +614,5 @@ func writeCapabilityError(w http.ResponseWriter, err error) {
 		status = http.StatusServiceUnavailable
 		response.Code, response.Message = "capabilities_unavailable", "capabilities are unavailable"
 	}
-	writeCapabilityJSON(w, status, response)
-}
-
-func writeCapabilityJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	writeJSON(w, status, response)
 }

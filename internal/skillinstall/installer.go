@@ -512,26 +512,44 @@ func writeStageRecord(stagePath string, record persistedStage) error {
 }
 
 func readStageRecord(path string) (persistedStage, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Size() < 0 || info.Size() > maxStageRecord {
-		return persistedStage{}, ErrStageChanged
-	}
-	body, err := os.ReadFile(path)
+	record, present, err := readBoundedJSONFile[persistedStage](path, maxStageRecord)
 	if err != nil {
-		return persistedStage{}, ErrStageChanged
+		return persistedStage{}, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	var record persistedStage
-	if err := decoder.Decode(&record); err != nil {
-		return persistedStage{}, ErrStageChanged
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	if !present {
 		return persistedStage{}, ErrStageChanged
 	}
 	return record, nil
+}
+
+// readBoundedJSONFile strictly decodes a single JSON object from path,
+// rejecting anything but a regular, non-symlink file no larger than maxSize
+// plus any trailing data after the object. present is false only when the
+// file does not exist; any other problem is reported as ErrStageChanged so
+// callers treat a tampered-with or oversized record the same as a missing one.
+func readBoundedJSONFile[T any](path string, maxSize int64) (value T, present bool, err error) {
+	info, statErr := os.Lstat(path)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return value, false, nil
+	}
+	if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Size() < 0 || info.Size() > maxSize {
+		return value, false, ErrStageChanged
+	}
+	body, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return value, false, ErrStageChanged
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return value, false, ErrStageChanged
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return value, false, ErrStageChanged
+	}
+	return value, true, nil
 }
 
 func treeMatchesManifest(tree reviewedTree, manifest Manifest) bool {
