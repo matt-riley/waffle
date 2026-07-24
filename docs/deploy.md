@@ -201,6 +201,13 @@ open http://127.0.0.1:8422/desk/
 ```
 
 Do not expose the Desk through a public bind, hostname, or reverse proxy.
+It remains behind the existing loopback/admin security boundary and reuses the
+configured provider, workspace, session, and memory services owned by
+`waffle serve`; it is not a public administration surface or a separate
+deployment. Desk can archive Waffle-owned notes, but it does not delete
+provider logs, delivered messages, backups, or provider-side data. Its
+schedule, workspace, and memory workflows and limits are documented in the
+[usage guide](usage-guide.md#waffle-desk-operations).
 
 ## Headless secrets
 
