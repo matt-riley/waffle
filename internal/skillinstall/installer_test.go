@@ -1,11 +1,15 @@
 package skillinstall
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -483,6 +487,9 @@ func TestStageRejectsUnsafeGitRequestsBeforeFetch(t *testing.T) {
 		{name: "userinfo", url: "https://token@github.com/acme/skill.git", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
 		{name: "query", url: "https://github.com/acme/skill.git?ref=main", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
 		{name: "fragment", url: "https://github.com/acme/skill.git#main", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
+		{name: "GitHub extra path", url: "https://github.com/acme/skill/extra", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
+		{name: "GitHub invalid owner", url: "https://github.com/-acme/skill.git", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
+		{name: "GitHub empty repository", url: "https://github.com/acme/.git", commit: pinnedCommit, wantErr: ErrSourceNotAllowed},
 		{name: "disallowed host", url: "https://example.com/acme/skill.git", commit: pinnedCommit, wantErr: ErrGitHostNotAllowed},
 		{name: "missing commit", url: "https://github.com/acme/skill.git", wantErr: ErrCommitRequired},
 		{name: "short commit", url: "https://github.com/acme/skill.git", commit: "0123456", wantErr: ErrCommitRequired},
@@ -539,6 +546,39 @@ func TestGitEnvironmentDisablesCredentialAndRewriteConfiguration(t *testing.T) {
 	}
 	if values["HOME"] != privateHome || values["XDG_CONFIG_HOME"] != privateHome {
 		t.Fatalf("Git homes = (%q, %q), want private %q", values["HOME"], values["XDG_CONFIG_HOME"], privateHome)
+	}
+}
+
+func TestGitCommandIgnoresEnclosingRepositoryConfiguration(t *testing.T) {
+	outer := filepath.Join(t.TempDir(), "outer")
+	if err := os.Mkdir(outer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run := func(arguments ...string) {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = outer
+		command.Env = gitEnvironment(t.TempDir())
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", arguments, err, output)
+		}
+	}
+	run("init", "--quiet")
+	run("config", "url.file:///private/tmp/hostile.git.insteadOf", "https://github.com/acme/reviewed-skill.git")
+	t.Chdir(outer)
+
+	privateHome := filepath.Join(outer, "private-git-home")
+	if err := os.Mkdir(privateHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "ls-remote", "--get-url", "https://github.com/acme/reviewed-skill.git")
+	isolateGitCommand(command, privateHome)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(output)); got != "https://github.com/acme/reviewed-skill.git" {
+		t.Fatalf("Git URL = %q, want approved URL unchanged", got)
 	}
 }
 
@@ -706,6 +746,425 @@ func TestCommandGitFetcherFailsClosedWhenRemoteArchiveCannotServeExactCommit(t *
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unsupported remote materialized destination: %v", err)
 	}
+}
+
+type httpDoFunc func(*http.Request) (*http.Response, error)
+
+func (function httpDoFunc) Do(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func TestCommandGitFetcherUsesBoundedExactGitHubArchive(t *testing.T) {
+	const gitURL = "https://github.com/acme/reviewed-skill.git"
+	expectedURL := "https://codeload.github.com/acme/reviewed-skill/tar.gz/" + pinnedCommit
+	archive := githubArchive(t, "reviewed-skill-"+pinnedCommit, map[string]string{
+		"SKILL.md":  "---\nname: reviewed-skill\ndescription: Fetched safely.\n---\n",
+		"guide.txt": "Review fetched changes.\n",
+	})
+	client := httpDoFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.String() != expectedURL {
+			t.Fatalf("request = %s %s, want GET %s", request.Method, request.URL, expectedURL)
+		}
+		for _, header := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+			if value := request.Header.Get(header); value != "" {
+				t.Fatalf("%s = %q, want no credential header", header, value)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/x-gzip"}},
+			Body:       io.NopCloser(bytes.NewReader(archive)),
+			Request:    request,
+		}, nil
+	})
+	destination := filepath.Join(t.TempDir(), "fetched")
+
+	err := (commandGitFetcher{client: client}).Fetch(context.Background(), gitURL, pinnedCommit, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(destination, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "name: reviewed-skill") {
+		t.Fatalf("materialized SKILL.md = %q", body)
+	}
+	if _, err := os.Lstat(filepath.Join(destination, "reviewed-skill-"+pinnedCommit)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GitHub archive root was materialized: %v", err)
+	}
+}
+
+func TestCommandGitFetcherRejectsUnsafeGitHubResponses(t *testing.T) {
+	validArchive := githubArchive(t, "reviewed-skill-"+pinnedCommit, map[string]string{
+		"SKILL.md": "---\nname: reviewed-skill\ndescription: Fetched safely.\n---\n",
+	})
+	oversizedCompressed := gzipBody(t, bytes.Repeat([]byte{'x'}, maxGitArchiveBytes), gzip.NoCompression)
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        []byte
+		responseURL string
+		contentSize int64
+		wantErr     error
+	}{
+		{
+			name:        "redirect",
+			status:      http.StatusFound,
+			contentType: "text/html",
+			body:        []byte("redirect"),
+			wantErr:     ErrBoundedGitUnsupported,
+		},
+		{
+			name:        "unexpected response host",
+			status:      http.StatusOK,
+			contentType: "application/x-gzip",
+			body:        validArchive,
+			responseURL: "https://codeload.github.com.evil.invalid/acme/reviewed-skill/tar.gz/" + pinnedCommit,
+			wantErr:     ErrBoundedGitUnsupported,
+		},
+		{
+			name:        "private or auth required",
+			status:      http.StatusUnauthorized,
+			contentType: "application/json",
+			body:        []byte(`{"message":"Requires authentication"}`),
+			wantErr:     ErrBoundedGitUnsupported,
+		},
+		{
+			name:        "unexpected content type",
+			status:      http.StatusOK,
+			contentType: "text/html",
+			body:        validArchive,
+			wantErr:     ErrBoundedGitUnsupported,
+		},
+		{
+			name:        "declared compressed oversize",
+			status:      http.StatusOK,
+			contentType: "application/x-gzip",
+			body:        validArchive,
+			contentSize: maxGitArchiveBytes + 1,
+			wantErr:     ErrTreeTooLarge,
+		},
+		{
+			name:        "actual compressed oversize",
+			status:      http.StatusOK,
+			contentType: "application/x-gzip",
+			body:        oversizedCompressed,
+			wantErr:     ErrTreeTooLarge,
+		},
+		{
+			name:        "corrupt gzip",
+			status:      http.StatusOK,
+			contentType: "application/x-gzip",
+			body:        []byte("not gzip"),
+			wantErr:     ErrUnsafeTree,
+		},
+		{
+			name:        "truncated gzip",
+			status:      http.StatusOK,
+			contentType: "application/x-gzip",
+			body:        validArchive[:len(validArchive)-4],
+			wantErr:     ErrUnsafeTree,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "fetched")
+			client := httpDoFunc(func(request *http.Request) (*http.Response, error) {
+				responseRequest := request
+				if test.responseURL != "" {
+					spoofed, err := http.NewRequest(http.MethodGet, test.responseURL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					responseRequest = spoofed
+				}
+				return &http.Response{
+					StatusCode:    test.status,
+					Header:        http.Header{"Content-Type": []string{test.contentType}},
+					Body:          io.NopCloser(bytes.NewReader(test.body)),
+					ContentLength: test.contentSize,
+					Request:       responseRequest,
+				}, nil
+			})
+
+			err := (commandGitFetcher{client: client}).Fetch(
+				context.Background(),
+				"https://github.com/acme/reviewed-skill.git",
+				pinnedCommit,
+				destination,
+			)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsafe response materialized destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommandGitFetcherRejectsUnsafeGitHubArchiveEntries(t *testing.T) {
+	root := "reviewed-skill-" + pinnedCommit
+	validSkill := "---\nname: reviewed-skill\ndescription: Fetched safely.\n---\n"
+	tests := []struct {
+		name    string
+		entries []githubArchiveEntry
+		wantErr error
+	}{
+		{
+			name: "wrong commit root",
+			entries: []githubArchiveEntry{
+				{name: "reviewed-skill-" + strings.Repeat("f", 40) + "/", typeflag: tar.TypeDir},
+				{name: "reviewed-skill-" + strings.Repeat("f", 40) + "/SKILL.md", body: validSkill},
+			},
+			wantErr: ErrCommitMismatch,
+		},
+		{
+			name: "duplicate stripped path",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/SKILL.md", body: validSkill},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "duplicate root",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "path traversal",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/../escape.txt", body: "escape"},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "symlink",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/link", typeflag: tar.TypeSymlink, linkname: "SKILL.md"},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "hard link",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/hard", typeflag: tar.TypeLink, linkname: root + "/SKILL.md"},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "device",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/device", typeflag: tar.TypeChar},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "PAX metadata",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill, pax: map[string]string{"comment": "surprise"}},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+		{
+			name: "sparse entry",
+			entries: []githubArchiveEntry{
+				{name: root + "/", typeflag: tar.TypeDir},
+				{name: root + "/SKILL.md", body: validSkill},
+				{name: root + "/sparse", typeflag: tar.TypeGNUSparse},
+			},
+			wantErr: ErrUnsafeTree,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := githubArchiveEntries(t, test.entries)
+			client := fixedGitHubClient(http.StatusOK, "application/x-gzip", archive)
+			destination := filepath.Join(t.TempDir(), "fetched")
+
+			err := (commandGitFetcher{client: client}).Fetch(
+				context.Background(),
+				"https://github.com/acme/reviewed-skill.git",
+				pinnedCommit,
+				destination,
+			)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsafe archive materialized destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommandGitFetcherBoundsDecompressedGitHubArchive(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(bytes.Repeat([]byte{'x'}, maxGitArchiveBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "fetched")
+
+	err := (commandGitFetcher{
+		client: fixedGitHubClient(http.StatusOK, "application/x-gzip", compressed.Bytes()),
+	}).Fetch(
+		context.Background(),
+		"https://github.com/acme/reviewed-skill.git",
+		pinnedCommit,
+		destination,
+	)
+	if !errors.Is(err, ErrTreeTooLarge) {
+		t.Fatalf("error = %v, want ErrTreeTooLarge", err)
+	}
+}
+
+func TestCommandGitFetcherCancelsGitHubArchiveRequest(t *testing.T) {
+	client := httpDoFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err := (commandGitFetcher{client: client}).Fetch(
+		ctx,
+		"https://github.com/acme/reviewed-skill.git",
+		pinnedCommit,
+		filepath.Join(t.TempDir(), "fetched"),
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestGitHubHTTPClientRejectsRedirectsAndHasTimeout(t *testing.T) {
+	client := newGitHubHTTPClient()
+	if client.Timeout != gitHubRequestTimeout {
+		t.Fatalf("timeout = %s, want %s", client.Timeout, gitHubRequestTimeout)
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://example.invalid/redirect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(request, nil); err == nil {
+		t.Fatal("redirect was accepted")
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want dedicated HTTP transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("GitHub client inherited ambient proxy configuration")
+	}
+	if !transport.DisableCompression {
+		t.Fatal("GitHub client may transparently decompress before compressed-byte accounting")
+	}
+}
+
+type githubArchiveEntry struct {
+	name     string
+	body     string
+	typeflag byte
+	linkname string
+	pax      map[string]string
+}
+
+func githubArchive(t *testing.T, root string, files map[string]string) []byte {
+	t.Helper()
+	entries := []githubArchiveEntry{{name: root + "/", typeflag: tar.TypeDir}}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		entries = append(entries, githubArchiveEntry{name: root + "/" + name, body: files[name]})
+	}
+	return githubArchiveEntries(t, entries)
+}
+
+func githubArchiveEntries(t *testing.T, entries []githubArchiveEntry) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressed)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, entry := range entries {
+		typeflag := entry.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		body := []byte(entry.body)
+		if err := tarWriter.WriteHeader(&tar.Header{
+			Name:       entry.name,
+			Mode:       0o600,
+			Size:       int64(len(body)),
+			Typeflag:   typeflag,
+			Linkname:   entry.linkname,
+			PAXRecords: entry.pax,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) > 0 {
+			if _, err := tarWriter.Write(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func gzipBody(t *testing.T, body []byte, level int) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&compressed, level)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func fixedGitHubClient(status int, contentType string, body []byte) httpDoer {
+	return httpDoFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{contentType}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
 }
 
 func newLocalGitSkill(t *testing.T, build func(*testing.T, string)) (string, string) {
