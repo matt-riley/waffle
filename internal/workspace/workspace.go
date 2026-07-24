@@ -943,17 +943,14 @@ func (m *Manager) inspectCloseOpt(ctx context.Context, id string, restoreIdle bo
 	}
 
 	wasIdle := ws.Status == StatusIdle
-	startedForInspection := false
 	if wasIdle {
 		startedAt := time.Now().UTC()
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			return report, fmt.Errorf("start idle workspace for inspection: %w", err)
 		}
-		startedForInspection = true
+		// Defer is registered only after a successful start, so restore always
+		// applies to a container we started here.
 		defer func() {
-			if !startedForInspection {
-				return
-			}
 			// Restore stopped state when the caller asked, or when this
 			// inspection cannot hand a live container to teardown.
 			shouldRestore := restoreIdle
@@ -1023,8 +1020,11 @@ func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*
 
 	report := &CloseReport{}
 	wasIdle := ws.Status == StatusIdle
-	// Idle close reuses the single container start from inspection so we do
-	// not StartContainer (or MintToken resume) a second time (#148).
+	// Idle clean close reuses the single container start from inspection so we
+	// do not StartContainer a second time (#148). Trade-off: this path does
+	// not call resume/MintToken, so before_remove runs against the existing
+	// inspection container credentials (already best-effort; hooks that need
+	// a refreshed broker token should not rely on this path).
 	idleKeptRunning := false
 	if !force {
 		report, err = m.inspectCloseOpt(ctx, id, !wasIdle)
@@ -1041,6 +1041,7 @@ func (m *Manager) CloseTransition(ctx context.Context, id string, force bool) (*
 	switch {
 	case idleKeptRunning:
 		// Inspection already started the idle container and left it running.
+		// Prefer reusing it over resume (no second start / no MintToken).
 		client, err = m.newInspectionClient(ws)
 		if err != nil {
 			return report, false, fmt.Errorf("connect workspace for safety check: %w", err)
