@@ -458,6 +458,86 @@ func TestMemoryNotesMigrationOnPopulatedDB(t *testing.T) {
 	}
 }
 
+func TestMigrationsSessionSkillsOnPopulatedDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO sessions (id, title, created_at, updated_at)
+		VALUES ('pre', 'pre-change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO skill_status (name, status, source, created_at, activated_at)
+		VALUES ('reviewer', 'inactive', 'learn', '2026-01-01T00:00:00Z', '')`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS session_skills`,
+		`CREATE TABLE skill_status_pre (
+			name TEXT NOT NULL PRIMARY KEY,
+			status TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			activated_at TEXT NOT NULL DEFAULT ''
+		) STRICT`,
+		`INSERT INTO skill_status_pre (name, status, source, created_at, activated_at)
+		 SELECT name, status, source, created_at, activated_at FROM skill_status`,
+		`DROP TABLE skill_status`,
+		`ALTER TABLE skill_status_pre RENAME TO skill_status`,
+		`DELETE FROM schema_migrations WHERE version = 24`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after 0024: %v", err)
+	}
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO session_skills (session_id, skill_name, attached_at)
+		VALUES ('pre', 'reviewer', '2026-01-02T00:00:00Z')`); err != nil {
+		t.Fatalf("insert session skill after migration: %v", err)
+	}
+	var sourceRef, contentDigest string
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT source_ref, content_digest
+		FROM skill_status
+		WHERE name = 'reviewer'`).Scan(&sourceRef, &contentDigest); err != nil {
+		t.Fatal(err)
+	}
+	if sourceRef != "" || contentDigest != "" {
+		t.Fatalf("legacy provenance = (%q, %q), want empty", sourceRef, contentDigest)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s3, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("second reopen after 0024: %v", err)
+	}
+	t.Cleanup(func() { _ = s3.Close() })
+	var applied int
+	if err := s3.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 24`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 {
+		t.Fatalf("migration 24 records = %d, want 1", applied)
+	}
+}
+
 func TestFTSSurvivesTurnUpdate(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
