@@ -28,17 +28,14 @@ func (s *WorkspaceCapabilitySkills) List(ctx context.Context, sessionID string) 
 	if s == nil {
 		return nil, ErrCapabilitiesUnavailable
 	}
+	// One directory walk: Discover once, then filter active membership (#149).
 	all, err := skill.Discover(s.Workspace.SkillsDir())
 	if err != nil {
 		return nil, err
 	}
-	active, err := skill.DiscoverActive(s.Workspace.SkillsDir(), s.DB)
+	activeNames, err := skill.ActiveNames(all, s.DB)
 	if err != nil {
 		return nil, err
-	}
-	activeNames := make(map[string]struct{}, len(active))
-	for _, item := range active {
-		activeNames[item.Name] = struct{}{}
 	}
 	attachedNames := make(map[string]struct{})
 	if sessionID != "" {
