@@ -1,17 +1,23 @@
 package dashboard
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -21,8 +27,8 @@ import (
 
 func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.T) {
 	const (
-		selectedSession = "session-workspace"
-		otherSession    = "session-other"
+		failedSession = "session-failed"
+		otherSession  = "session-other"
 	)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 
@@ -35,7 +41,7 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 			t.Errorf("close store: %v", err)
 		}
 	})
-	for _, id := range []string{selectedSession, otherSession} {
+	for _, id := range []string{failedSession, otherSession} {
 		if _, err := st.DB.ExecContext(
 			t.Context(),
 			`INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)`,
@@ -48,12 +54,13 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		}
 	}
 
+	sessionStore := session.New(st)
 	memoryWorkspace := memory.Workspace{
 		Dir:   t.TempDir(),
 		Agent: memory.DefaultAgent,
 	}
 	liveNotes := strings.Join([]string{
-		"- [id=notea] 2026-07-24 [trust=owner_stated source=owner session=session-workspace channel=desk untrusted=false]: waffle primary fact",
+		"- [id=notea] 2026-07-24 [trust=owner_stated source=owner session=session-failed channel=desk untrusted=false]: waffle primary fact",
 		"- [id=noteb] 2026-07-24 [trust=owner_stated source=owner session=session-other channel=desk untrusted=false]: waffle companion fact",
 		"",
 	}, "\n")
@@ -66,21 +73,35 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		t.Fatal(err)
 	}
 
-	sessionStore := session.New(st)
-	workspaceManager := &recordingWorkspaceManager{
-		t:          t,
+	workspaceManager := &acceptanceWorkspaceManager{
+		sessions:   sessionStore,
 		workspaces: make(map[string]workspace.Workspace),
 	}
 	worksets := &workset.Store{DB: st.DB, MaxEntries: 1, MaxBytes: workset.MaxEntryBytes}
 	events := NewEventHub(32)
 	security := mustSecurity(t, "127.0.0.1:8422")
 	idempotency := NewIdempotencyStore(func() time.Time { return now }, 64, time.Minute)
+	schedules := schedule.NewStore(st)
+	chatRecorder := &acceptanceChatRecorder{}
+	chatClients := NewChatClients(
+		func(context.Context) (chat.Backend, error) {
+			return &acceptanceChatBackend{recorder: chatRecorder}, nil
+		},
+		bytes.NewReader(append(bytes.Repeat([]byte{7}, 16), bytes.Repeat([]byte{8}, 16)...)),
+	)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := chatClients.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown chat clients: %v", err)
+		}
+	})
 	operations := &Operations{
 		Runs: taskRunReader{snapshot: observability.Snapshot{
 			Recent: []observability.RecentRun{
 				{
 					ID:        "run-failed",
-					SessionID: selectedSession,
+					SessionID: failedSession,
 					Source:    "cron",
 					Phase:     "turn",
 					Outcome:   "failed",
@@ -94,7 +115,7 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 				},
 			},
 		}},
-		Jobs:       schedule.NewStore(st),
+		Jobs:       schedules,
 		Workspaces: workspaceManager,
 		Sessions:   sessionStore,
 		Notes:      notes,
@@ -106,15 +127,20 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 	}
 
 	mux := http.NewServeMux()
-	RegisterTaskRoutes(mux, TaskRouteConfig{Operations: operations})
-	RegisterWorkspaceRoutes(mux, WorkspaceRouteConfig{
-		Operations: operations, Security: security, Idempotency: idempotency,
-		Events: events, Egress: "none",
+	RegisterRoutes(mux, APIConfig{
+		Security:          security,
+		Hub:               events,
+		ChatClients:       chatClients,
+		Idempotency:       idempotency,
+		Operations:        operations,
+		Schedules:         schedules,
+		Memory:            memoryWorkspace,
+		WorkspaceEgress:   "none",
+		Version:           "acceptance",
+		ProcessGeneration: "acceptance-process",
+		Now:               func() time.Time { return now },
 	})
-	RegisterMemoryRoutes(mux, MemoryRouteConfig{
-		Operations: operations, Workspace: memoryWorkspace, Security: security,
-		Idempotency: idempotency, Events: events,
-	})
+	handler := security.Wrap(mux)
 	request := func(method, target, body, key string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, "http://127.0.0.1:8422"+target, strings.NewReader(body))
@@ -124,7 +150,7 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 			req.Header.Set("Idempotency-Key", key)
 		}
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		handler.ServeHTTP(rec, req)
 		return rec
 	}
 
@@ -138,10 +164,22 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 	}
 	if len(tasks.Tasks) != 1 ||
 		tasks.Tasks[0].ID != "run-failed" ||
-		tasks.Tasks[0].SessionID != selectedSession ||
+		tasks.Tasks[0].SessionID != failedSession ||
 		!tasks.Tasks[0].OpenAtDesk {
 		t.Fatalf("attention tasks = %+v", tasks.Tasks)
 	}
+	attentionTodayURL := acceptanceTodayURL(tasks.Tasks[0].SessionID)
+	if attentionTodayURL != "/desk/?section=today&session_id=session-failed" {
+		t.Fatalf("Attention Today URL = %q", attentionTodayURL)
+	}
+	acceptanceOpenToday(
+		t,
+		request,
+		chatRecorder,
+		attentionTodayURL,
+		failedSession,
+		"attention-open-at-desk",
+	)
 
 	opened := request(
 		http.MethodPost,
@@ -149,7 +187,33 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		`{"repository":"owner/repo","profile":"reviewer"}`,
 		"workspace-open",
 	)
-	assertAcceptanceWorkspaceSession(t, opened, http.StatusCreated, selectedSession, "")
+	openedWorkspace := acceptanceWorkspaceResponse(t, opened, http.StatusCreated)
+	workspaceID := openedWorkspace.Workspace.ID
+	workspaceSession := openedWorkspace.Workspace.SessionID
+	if workspaceID == "" || workspaceSession == "" {
+		t.Fatalf("opened workspace = %+v", openedWorkspace.Workspace)
+	}
+	if workspaceSession == failedSession || workspaceSession == otherSession {
+		t.Fatalf("new workspace reused existing session %q", workspaceSession)
+	}
+	if openedWorkspace.TodayURL != "" {
+		t.Fatalf("workspace open Today URL = %q, want empty until select", openedWorkspace.TodayURL)
+	}
+	persistedWorkspaceSession, err := sessionStore.Get(t.Context(), workspaceSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedWorkspaceSession == nil || persistedWorkspaceSession.ID != workspaceSession {
+		t.Fatalf("persisted workspace session = %+v, want %q", persistedWorkspaceSession, workspaceSession)
+	}
+	if workspaceManager.openProfile != "reviewer" || workspaceManager.openRepository != "owner/repo" {
+		t.Fatalf(
+			"workspace open forwarded repository=%q profile=%q",
+			workspaceManager.openRepository,
+			workspaceManager.openProfile,
+		)
+	}
+	workspaceTodayURL := acceptanceTodayURL(workspaceSession)
 	for _, transition := range []struct {
 		name       string
 		path       string
@@ -157,29 +221,42 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		wantURL    string
 	}{
 		{
-			name: "select", path: "/api/v1/desk/workspaces/ws-1/select",
+			name: "select", path: "/api/v1/desk/workspaces/" + workspaceID + "/select",
 			wantStatus: "open",
-			wantURL:    "/desk/?section=today&session_id=" + selectedSession,
+			wantURL:    workspaceTodayURL,
 		},
-		{name: "idle", path: "/api/v1/desk/workspaces/ws-1/idle", wantStatus: "idle"},
-		{name: "resume", path: "/api/v1/desk/workspaces/ws-1/resume", wantStatus: "open"},
+		{
+			name: "idle", path: "/api/v1/desk/workspaces/" + workspaceID + "/idle",
+			wantStatus: "idle",
+		},
+		{
+			name: "resume", path: "/api/v1/desk/workspaces/" + workspaceID + "/resume",
+			wantStatus: "open",
+		},
 	} {
 		response := request(http.MethodPost, transition.path, `{}`, "workspace-"+transition.name)
-		assertAcceptanceWorkspaceSession(
-			t,
-			response,
-			http.StatusOK,
-			selectedSession,
-			transition.wantURL,
-		)
-		var payload WorkspaceMutationResponse
-		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-			t.Fatal(err)
+		payload := acceptanceWorkspaceResponse(t, response, http.StatusOK)
+		if payload.Workspace.SessionID != workspaceSession || payload.TodayURL != transition.wantURL {
+			t.Fatalf(
+				"%s response = %+v, want session %q URL %q",
+				transition.name,
+				payload,
+				workspaceSession,
+				transition.wantURL,
+			)
 		}
 		if payload.Workspace.Status != transition.wantStatus {
 			t.Fatalf("%s status = %q, want %q", transition.name, payload.Workspace.Status, transition.wantStatus)
 		}
 	}
+	acceptanceOpenToday(
+		t,
+		request,
+		chatRecorder,
+		workspaceTodayURL,
+		workspaceSession,
+		"workspace-open-at-desk",
+	)
 
 	search := request(http.MethodGet, "/api/v1/desk/memory?query=waffle", "", "")
 	if search.Code != http.StatusOK {
@@ -196,25 +273,43 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		t.Fatalf("memory hits = %+v", searchPayload.Hits)
 	}
 
+	attachABody, err := json.Marshal(MemoryAttachRequest{
+		SessionID: workspaceSession,
+		Query:     "waffle",
+		Source:    MemorySourceNote,
+		SourceID:  "notea",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	attachA := request(
 		http.MethodPost,
 		"/api/v1/desk/memory/attach",
-		`{"session_id":"session-workspace","query":"waffle","source":"note","source_id":"notea"}`,
+		string(attachABody),
 		"memory-attach-a",
 	)
 	if attachA.Code != http.StatusOK {
 		t.Fatalf("attach A status = %d: %s", attachA.Code, attachA.Body.String())
 	}
+	attachBBody, err := json.Marshal(MemoryAttachRequest{
+		SessionID: workspaceSession,
+		Query:     "waffle",
+		Source:    MemorySourceNote,
+		SourceID:  "noteb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	attachB := request(
 		http.MethodPost,
 		"/api/v1/desk/memory/attach",
-		`{"session_id":"session-workspace","query":"waffle","source":"note","source_id":"noteb"}`,
+		string(attachBBody),
 		"memory-attach-b",
 	)
 	if attachB.Code != http.StatusConflict {
 		t.Fatalf("attach B status = %d, want 409: %s", attachB.Code, attachB.Body.String())
 	}
-	entries, err := worksets.List(t.Context(), selectedSession)
+	entries, err := worksets.List(t.Context(), workspaceSession)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +317,16 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 		entries[0].Kind != workset.KindFact ||
 		entries[0].Source != workset.SourceUser ||
 		!entries[0].Pinned ||
+		len(entries[0].Body) > workset.MaxEntryBytes ||
 		!strings.Contains(entries[0].Body, "notea") {
-		t.Fatalf("selected-session workset = %+v", entries)
+		t.Fatalf("workspace-session workset = %+v", entries)
+	}
+	failedEntries, err := worksets.List(t.Context(), failedSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failedEntries) != 0 {
+		t.Fatalf("failed-run session workset = %+v", failedEntries)
 	}
 	otherEntries, err := worksets.List(t.Context(), otherSession)
 	if err != nil {
@@ -290,13 +393,11 @@ func TestOperationsFlowPreservesSessionAndRequiresForgetConfirmation(t *testing.
 	}
 }
 
-func assertAcceptanceWorkspaceSession(
+func acceptanceWorkspaceResponse(
 	t *testing.T,
 	response *httptest.ResponseRecorder,
 	wantCode int,
-	wantSession string,
-	wantURL string,
-) {
+) WorkspaceMutationResponse {
 	t.Helper()
 	if response.Code != wantCode {
 		t.Fatalf("workspace status = %d, want %d: %s", response.Code, wantCode, response.Body.String())
@@ -305,8 +406,53 @@ func assertAcceptanceWorkspaceSession(
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Workspace.SessionID != wantSession || payload.TodayURL != wantURL {
-		t.Fatalf("workspace response = %+v, want session %q URL %q", payload, wantSession, wantURL)
+	return payload
+}
+
+func acceptanceTodayURL(sessionID string) string {
+	return "/desk/?section=today&session_id=" + url.QueryEscape(sessionID)
+}
+
+func acceptanceOpenToday(
+	t *testing.T,
+	request func(string, string, string, string) *httptest.ResponseRecorder,
+	recorder *acceptanceChatRecorder,
+	todayURL string,
+	wantSession string,
+	key string,
+) {
+	t.Helper()
+	parsed, err := url.Parse(todayURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionValues := parsed.Query()["session_id"]
+	if parsed.Path != "/desk/" ||
+		parsed.Query().Get("section") != "today" ||
+		len(sessionValues) != 1 ||
+		sessionValues[0] != wantSession {
+		t.Fatalf("Today URL %q does not select session %q", todayURL, wantSession)
+	}
+	body, err := json.Marshal(chat.OpenOptions{SessionID: sessionValues[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(http.MethodPost, "/api/v1/desk/chat/open", string(body), key)
+	if response.Code != http.StatusOK {
+		t.Fatalf("open Today status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		State chat.State `json:"state"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.State.SessionID != wantSession {
+		t.Fatalf("opened Today session = %q, want %q", payload.State.SessionID, wantSession)
+	}
+	options, ok := recorder.last()
+	if !ok || options.SessionID != wantSession || options.Continue {
+		t.Fatalf("chat open options = %+v, want exact session %q", options, wantSession)
 	}
 }
 
@@ -339,4 +485,153 @@ func acceptanceHitState(hits []MemoryHit, id string, archived bool) bool {
 		}
 	}
 	return false
+}
+
+type acceptanceWorkspaceManager struct {
+	sessions       *session.Store
+	workspaces     map[string]workspace.Workspace
+	openRepository string
+	openProfile    string
+}
+
+func (m *acceptanceWorkspaceManager) List(context.Context) ([]workspace.Workspace, error) {
+	result := make([]workspace.Workspace, 0, len(m.workspaces))
+	for _, ws := range m.workspaces {
+		result = append(result, ws)
+	}
+	return result, nil
+}
+
+func (m *acceptanceWorkspaceManager) Get(
+	_ context.Context,
+	id string,
+) (*workspace.Workspace, error) {
+	ws, ok := m.workspaces[id]
+	if !ok {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	copy := ws
+	return &copy, nil
+}
+
+func (m *acceptanceWorkspaceManager) OpenWithProfile(
+	ctx context.Context,
+	repository string,
+	profile string,
+) (*workspace.Workspace, *sandbox.Client, error) {
+	persisted, err := m.sessions.Create(ctx, "workspace "+repository)
+	if err != nil {
+		return nil, nil, err
+	}
+	m.openRepository = repository
+	m.openProfile = profile
+	ws := workspace.Workspace{
+		ID:        "ws-acceptance",
+		Repo:      repository,
+		SessionID: persisted.ID,
+		Status:    workspace.StatusOpen,
+		Image:     "bookworm",
+		Profile:   profile,
+	}
+	m.workspaces[ws.ID] = ws
+	copy := ws
+	return &copy, nil, nil
+}
+
+func (m *acceptanceWorkspaceManager) Idle(_ context.Context, id string) error {
+	ws, ok := m.workspaces[id]
+	if !ok {
+		return workspace.ErrWorkspaceNotFound
+	}
+	ws.Status = workspace.StatusIdle
+	m.workspaces[id] = ws
+	return nil
+}
+
+func (m *acceptanceWorkspaceManager) Resume(
+	_ context.Context,
+	id string,
+) (*workspace.Workspace, *sandbox.Client, error) {
+	ws, ok := m.workspaces[id]
+	if !ok {
+		return nil, nil, workspace.ErrWorkspaceNotFound
+	}
+	ws.Status = workspace.StatusOpen
+	m.workspaces[id] = ws
+	copy := ws
+	return &copy, nil, nil
+}
+
+func (m *acceptanceWorkspaceManager) InspectClose(
+	_ context.Context,
+	id string,
+) (*workspace.CloseReport, error) {
+	if _, ok := m.workspaces[id]; !ok {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	return &workspace.CloseReport{}, nil
+}
+
+func (m *acceptanceWorkspaceManager) Close(
+	_ context.Context,
+	id string,
+	_ bool,
+) (*workspace.CloseReport, error) {
+	ws, ok := m.workspaces[id]
+	if !ok {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	ws.Status = workspace.StatusClosed
+	m.workspaces[id] = ws
+	return &workspace.CloseReport{}, nil
+}
+
+type acceptanceChatRecorder struct {
+	mu      sync.Mutex
+	options []chat.OpenOptions
+}
+
+func (r *acceptanceChatRecorder) record(options chat.OpenOptions) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.options = append(r.options, options)
+}
+
+func (r *acceptanceChatRecorder) last() (chat.OpenOptions, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.options) == 0 {
+		return chat.OpenOptions{}, false
+	}
+	return r.options[len(r.options)-1], true
+}
+
+type acceptanceChatBackend struct {
+	recorder *acceptanceChatRecorder
+}
+
+func (b *acceptanceChatBackend) Open(
+	_ context.Context,
+	options chat.OpenOptions,
+) (chat.State, error) {
+	b.recorder.record(options)
+	return chat.State{SessionID: options.SessionID}, nil
+}
+
+func (*acceptanceChatBackend) Turn(context.Context, string, func(chat.Event)) error {
+	return nil
+}
+
+func (*acceptanceChatBackend) Command(
+	context.Context,
+	chat.ParsedCommand,
+	func(chat.Event),
+) (chat.Result, error) {
+	return chat.Result{}, nil
+}
+
+func (*acceptanceChatBackend) Cancel() {}
+
+func (*acceptanceChatBackend) Close(context.Context) error {
+	return nil
 }

@@ -124,9 +124,10 @@ stored definition unchanged.
 ### Workspaces
 
 Open accepts a repository in `owner/repo` form and an optional valid profile.
-The returned workspace keeps its persisted session through open, select, idle,
-and resume, while the UI shows its configured profile and network-egress
-policy. Selecting a workspace opens that exact session in Today.
+A new workspace creates its own persisted session; it does not inherit the
+session of a failed run from Attention. The workspace keeps its session through
+select, idle, and resume, while the UI shows its configured profile and
+network-egress policy. Selecting a workspace opens that exact session in Today.
 
 Close is deliberately guarded. Desk reinspects the workspace, displays dirty
 and unpushed evidence, and issues a single-use confirmation that expires after
@@ -141,10 +142,9 @@ excerpt, archived state, and provenance. Attaching a result resolves it again
 server-side and adds one pinned, user-sourced fact to the explicitly selected
 session.
 
-The session working set is bounded: by default it holds at most 32 entries and
-8 KiB in total, and each entry is at most 1 KiB. A configured lower limit also
-applies. Reaching a count or byte limit rejects the new attachment without
-evicting or partially writing another entry.
+The session working set holds at most 32 entries and 8 KiB in total, and each
+entry is at most 1 KiB. Reaching a count or byte limit rejects the new
+attachment without evicting or partially writing another entry.
 
 Forgetting a note is a preview followed by a single-use confirmation that
 expires after 60 seconds. Cancel sends no confirmation request and changes
