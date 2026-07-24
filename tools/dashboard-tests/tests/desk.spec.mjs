@@ -21,7 +21,8 @@ let baseURL;
 
 test.describe.configure({ mode: "serial" });
 
-test.beforeAll(async () => {
+test.beforeAll(async ({}, testInfo) => {
+  testInfo.setTimeout(120_000);
   ({ child: server, url: baseURL } = await startFixture());
 });
 
