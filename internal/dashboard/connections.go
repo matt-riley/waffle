@@ -77,9 +77,15 @@ func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) Conne
 		profileNames[name] = struct{}{}
 	}
 	for _, name := range sortedMapKeys(profileNames) {
+		// Groups resolve via AgentPolicy(name). Profiles without a same-named
+		// group inherit the main interactive group (matches chat runtime), then
+		// apply an explicit profile sandbox override. Never force GroupMain over
+		// a real group of the same name (#155).
 		mode := cfg.AgentPolicy(name).Mode
 		if profile, exists := cfg.Agent.Profiles[name]; exists {
-			mode = cfg.AgentPolicy(config.GroupMain).Mode
+			if _, isGroup := cfg.Agent.Groups[name]; !isGroup {
+				mode = cfg.AgentPolicy(config.GroupMain).Mode
+			}
 			if profile.Sandbox != "" {
 				mode = profile.Sandbox
 			}
