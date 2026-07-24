@@ -171,10 +171,12 @@ type ChatClients struct {
 	idleTTL     time.Duration
 	shutdownTTL time.Duration
 	events      *EventHub
-	// Redact replaces known secret values with placeholders. Production wiring
-	// supplies secret.Redactor.Redact so free-form chat text never relies on
-	// format-guessing regexes at the Desk boundary (#153).
-	Redact           func(string) string
+	// redact replaces known secret values with placeholders. Production wiring
+	// supplies secret.Redactor.Redact via SetRedactor so free-form chat text
+	// never relies on format-guessing regexes at the Desk boundary (#153).
+	// Unexported so concurrent event reads always go through redactExact under
+	// the mutex rather than a racy direct field write.
+	redact           func(string) string
 	shutting         bool
 	shutdownDone     chan struct{}
 	shutdownErr      error
@@ -208,10 +210,11 @@ func (c *ChatClients) SetEventHub(events *EventHub) {
 }
 
 // SetRedactor installs the exact-value secret redactor used on chat projections.
+// The sole write path for the redactor; callers must not assign a field.
 func (c *ChatClients) SetRedactor(redact func(string) string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Redact = redact
+	c.redact = redact
 }
 
 // Open creates and opens one isolated backend for a browser client.
@@ -586,8 +589,14 @@ func (c *ChatClients) redactExact(value string) string {
 	if value == "" {
 		return value
 	}
-	if c != nil && c.Redact != nil {
-		value = c.Redact(value)
+	var redact func(string) string
+	if c != nil {
+		c.mu.Lock()
+		redact = c.redact
+		c.mu.Unlock()
+	}
+	if redact != nil {
+		value = redact(value)
 	}
 	// Identity env name is configuration surface, not a secret-format guess.
 	return strings.ReplaceAll(value, "WAFFLE_AGE_IDENTITY", "[redacted]")

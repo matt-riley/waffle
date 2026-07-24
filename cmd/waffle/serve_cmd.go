@@ -148,10 +148,13 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		dashboardHub = dashboard.NewEventHub(256)
 		dashboardClients = dashboard.NewChatClients(runtimeFactory, rand.Reader)
 		dashboardClients.SetEventHub(dashboardHub)
-		if store, err := secret.TryOpen(); err == nil {
-			if redactor, err := secret.NewRedactor(store); err == nil {
-				dashboardClients.SetRedactor(redactor.Redact)
-			}
+		secretStore, openErr := secret.TryOpen()
+		if openErr != nil {
+			log.Warn("dashboard chat secret redactor unavailable", "err", openErr)
+		} else if redactor, redactorErr := secret.NewRedactor(secretStore); redactorErr != nil {
+			log.Warn("dashboard chat secret redactor unavailable", "err", redactorErr)
+		} else {
+			dashboardClients.SetRedactor(redactor.Redact)
 		}
 	}
 
