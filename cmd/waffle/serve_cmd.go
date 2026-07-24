@@ -140,6 +140,8 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		if err != nil {
 			return fmt.Errorf("dashboard security: %w", err)
 		}
+		// Desk mutations write to the shared policy_audit table (#152).
+		security.SetPolicyAuditDB(st.DB)
 		dashboardSecurity = security
 		dashboardGeneration, err = newDashboardProcessGeneration(dashboardRandom)
 		if err != nil {

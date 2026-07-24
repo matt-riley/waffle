@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ const contentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancest
 type Security struct {
 	token        string
 	allowedHosts map[string]struct{}
+	// policyAuditDB, when set, receives policy_audit rows for admitted Desk mutations.
+	policyAuditDB *sql.DB
 }
 
 // NewSecurity creates a process-scoped CSRF token and derives the only Hosts
@@ -53,6 +56,23 @@ func isLoopbackHost(host string) bool {
 // Token returns the process-scoped request token for same-origin mutations.
 func (s *Security) Token() string {
 	return s.token
+}
+
+// SetPolicyAuditDB attaches the shared policy_audit database used by Desk mutations.
+// Passing nil disables audit writes (tests without a store).
+func (s *Security) SetPolicyAuditDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.policyAuditDB = db
+}
+
+// PolicyAuditDB returns the optional policy_audit destination for mutations.
+func (s *Security) PolicyAuditDB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.policyAuditDB
 }
 
 // Wrap validates request metadata and applies response hardening headers.

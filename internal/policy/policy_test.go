@@ -350,3 +350,28 @@ func TestNewEngineRejectsEmptySelectors(t *testing.T) {
 		t.Fatalf("error should name the rule: %v", err)
 	}
 }
+
+func TestLogMutationAlwaysWritesAuditRow(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "mutation-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	if err := LogMutation(ctx, st.DB, "sess-desk", "desk.mutation", "POST /api/v1/desk/memory/attach", "status=200"); err != nil {
+		t.Fatal(err)
+	}
+	var tool, command, rule, verdict, detail string
+	if err := st.DB.QueryRowContext(ctx, `
+		SELECT tool, command, rule, verdict, detail FROM policy_audit WHERE session = ?`, "sess-desk").
+		Scan(&tool, &command, &rule, &verdict, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if tool != "desk.mutation" || command != "POST /api/v1/desk/memory/attach" || rule != "desk.mutation" || verdict != ActionAllow {
+		t.Fatalf("audit row = tool=%q command=%q rule=%q verdict=%q", tool, command, rule, verdict)
+	}
+	if detail != "status=200" {
+		t.Fatalf("detail = %q", detail)
+	}
+}

@@ -9,9 +9,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/policy"
 )
 
 const dashboardChatMaxBodyBytes = 64 << 10
@@ -303,6 +305,11 @@ func newMutationHandler(
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write(responseBody)
+		// Record only first-execution mutations (not idempotent replays) so the
+		// policy_audit trail matches real state changes on this surface.
+		if executed {
+			auditDeskMutation(r.Context(), security, operation, status)
+		}
 		if !executed || capture == nil || len(capture.afterResponse) == 0 {
 			return
 		}
@@ -318,6 +325,19 @@ func newMutationHandler(
 			}
 		}
 	}))
+}
+
+// auditDeskMutation writes one policy_audit row for an executed Desk mutation.
+func auditDeskMutation(ctx context.Context, security *Security, operation string, status int) {
+	if security == nil {
+		return
+	}
+	db := security.PolicyAuditDB()
+	if db == nil {
+		return
+	}
+	detail := "status=" + strconv.Itoa(status)
+	_ = policy.LogMutation(ctx, db, "", "desk.mutation", operation, detail)
 }
 
 func copyResponseHeader(destination, source http.Header) {
