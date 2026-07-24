@@ -242,6 +242,42 @@ func TestTaskScheduleInvalidUpdateDoesNotMutateOrPublish(t *testing.T) {
 	}
 }
 
+func TestTaskScheduleUpdateRequiresObjectAndExplicitEnabled(t *testing.T) {
+	tests := map[string]string{
+		"null":            `null`,
+		"array":           `[]`,
+		"string":          `"schedule"`,
+		"omitted enabled": `{"name":"Edited","cron":"0 9 * * *","prompt":"changed","deliver":"","profile":""}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			harness := newTaskRouteHarness(t)
+			job, err := harness.schedules.Add(context.Background(), "Old", "0 8 * * *", "Old prompt", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rec := harness.request(http.MethodPost, "/api/v1/desk/tasks/schedules/"+job.ID,
+				body, "strict-update-"+strings.ReplaceAll(name, " ", "-"), true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			assertTaskError(t, rec.Body.Bytes(), "invalid_request")
+			stored, err := harness.schedules.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Name != "Old" || stored.Cron != "0 8 * * *" ||
+				stored.Prompt != "Old prompt" || !stored.Enabled {
+				t.Fatalf("rejected request mutated schedule: %+v", stored)
+			}
+			if harness.events.Cursor() != 0 {
+				t.Fatal("rejected request published an event")
+			}
+		})
+	}
+}
+
 func TestTaskScheduleUnrelatedEditPreservesExactRedactedFields(t *testing.T) {
 	harness := newTaskRouteHarness(t)
 	const secret = "AGE-SECRET-KEY-original-secret"

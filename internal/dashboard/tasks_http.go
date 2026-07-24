@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,15 @@ type createTaskScheduleRequest struct {
 	Profile string `json:"profile"`
 }
 
+type updateTaskScheduleRequest struct {
+	Name    string `json:"name"`
+	Cron    string `json:"cron"`
+	Prompt  string `json:"prompt"`
+	Deliver string `json:"deliver"`
+	Profile string `json:"profile"`
+	Enabled *bool  `json:"enabled"`
+}
+
 func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request createTaskScheduleRequest
@@ -124,9 +134,17 @@ func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) htt
 
 func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var input schedule.Update
-		if !decodeTaskRequest(w, r, &input) {
+		var request updateTaskScheduleRequest
+		if !decodeTaskRequest(w, r, &request) {
 			return
+		}
+		if request.Enabled == nil {
+			writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
+			return
+		}
+		input := schedule.Update{
+			Name: request.Name, Cron: request.Cron, Prompt: request.Prompt,
+			Deliver: request.Deliver, Profile: request.Profile, Enabled: *request.Enabled,
 		}
 		current, err := store.Get(r.Context(), r.PathValue("id"))
 		if err != nil {
@@ -164,7 +182,18 @@ func restoreRedactedTaskScheduleFields(current *schedule.Job, input *schedule.Up
 }
 
 func decodeTaskRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	var raw json.RawMessage
 	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&raw); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
+		return false
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
+		return false
+	}
+	decoder = json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
