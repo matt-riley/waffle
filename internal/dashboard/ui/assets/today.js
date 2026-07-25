@@ -25,6 +25,38 @@ function requestedSessionID() {
 }
 
 const initialSessionID = requestedSessionID();
+const ownerStorageKey = "waffle.desk.today.owner.v1";
+
+function readStoredOwner() {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(ownerStorageKey);
+    if (!raw) {
+      return null;
+    }
+    const owner = JSON.parse(raw);
+    if (
+      typeof owner?.client_id !== "string" ||
+      owner.client_id === "" ||
+      typeof owner?.reattach_token !== "string" ||
+      owner.reattach_token === "" ||
+      typeof owner?.session_id !== "string"
+    ) {
+      globalThis.sessionStorage?.removeItem(ownerStorageKey);
+      return null;
+    }
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function forgetStoredOwner() {
+  try {
+    globalThis.sessionStorage?.removeItem(ownerStorageKey);
+  } catch {
+    // Storage is a recovery optimization; the server lease remains authoritative.
+  }
+}
 
 const elements = {
   shell: document.querySelector(".desk-shell"),
@@ -53,8 +85,23 @@ const elements = {
   profile: document.querySelector("#desk-profile"),
   workspace: document.querySelector("#desk-workspace"),
   provider: document.querySelector("#desk-provider"),
+  sandbox: document.querySelector("#desk-sandbox"),
+  modelErrorRow: document.querySelector("#desk-model-error-row"),
+  modelError: document.querySelector("#desk-model-error"),
+  newConversation: document.querySelector("#desk-new"),
+  sessionRefresh: document.querySelector("#desk-session-refresh"),
+  sessions: document.querySelector("#desk-sessions"),
+  usageRefresh: document.querySelector("#desk-usage-refresh"),
+  usage: document.querySelector("#desk-usage"),
+  permissionsRefresh: document.querySelector("#desk-permissions-refresh"),
+  permissions: document.querySelector("#desk-permissions"),
+  worksetRefresh: document.querySelector("#desk-workset-refresh"),
+  workset: document.querySelector("#desk-workset"),
+  helpRefresh: document.querySelector("#desk-help-refresh"),
+  help: document.querySelector("#desk-help"),
 };
 
+const storedOwner = readStoredOwner();
 const state = {
   currentPhase: phase.opening,
   clientID: "",
@@ -75,6 +122,11 @@ const state = {
   reconnectTimer: null,
   streamGeneration: 0,
   pendingTurn: null,
+  reattachToken: "",
+  storedOwner,
+  streamingText: "",
+  toolRows: new Map(),
+  toolSequence: 0,
 };
 
 function pushRailConnection(railState) {
@@ -156,6 +208,18 @@ function updateControls() {
   elements.skill.disabled = !idle || state.skills.length === 0;
   elements.skillToggle.disabled = !idle || state.skills.length === 0;
   elements.refresh.disabled = state.currentPhase !== phase.disconnected;
+  for (const control of [
+    elements.newConversation,
+    elements.sessionRefresh,
+    elements.usageRefresh,
+    elements.permissionsRefresh,
+    elements.worksetRefresh,
+    elements.helpRefresh,
+  ]) {
+    if (control) {
+      control.disabled = !idle;
+    }
+  }
 }
 
 function clearNode(node) {
@@ -204,6 +268,127 @@ function clearControlErrors() {
   setStatusMessage(elements.composerStatus, "", false, "composer");
 }
 
+function appendInlineMarkdown(node, text) {
+  const pattern = /`([^`\n]+)`/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) {
+      node.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+    }
+    const code = document.createElement("code");
+    code.textContent = match[1];
+    node.appendChild(code);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) {
+    node.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+async function copyCode(text, button) {
+  try {
+    if (globalThis.navigator?.clipboard?.writeText) {
+      await globalThis.navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      document.body.appendChild(textarea);
+      textarea.select();
+      if (!document.execCommand?.("copy")) {
+        throw new Error("copy_unavailable");
+      }
+      textarea.remove();
+    }
+    button.textContent = "Copied";
+  } catch {
+    button.textContent = "Copy unavailable";
+  }
+}
+
+function renderMarkdown(node, text) {
+  clearNode(node);
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.startsWith("```")) {
+      const language = line.slice(3).trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      const block = document.createElement("div");
+      block.className = "code-block";
+      const copy = document.createElement("button");
+      copy.className = "code-copy";
+      copy.type = "button";
+      copy.textContent = "Copy";
+      const codeText = codeLines.join("\n");
+      copy.addEventListener("click", () => copyCode(codeText, copy));
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (language) {
+        code.setAttribute("data-language", language);
+      }
+      code.textContent = codeText;
+      pre.appendChild(code);
+      block.append(copy, pre);
+      node.appendChild(block);
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (heading) {
+      const element = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(element, heading[2]);
+      node.appendChild(element);
+      index += 1;
+      continue;
+    }
+    const listMatch = /^(\s*)([-*+]|\d+\.)\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = /\d+\./.test(listMatch[2]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const item = /^(\s*)([-*+]|\d+\.)\s+(.+)$/.exec(lines[index]);
+        if (!item || /\d+\./.test(item[2]) !== ordered) {
+          break;
+        }
+        const listItem = document.createElement("li");
+        appendInlineMarkdown(listItem, item[3]);
+        list.appendChild(listItem);
+        index += 1;
+      }
+      node.appendChild(list);
+      continue;
+    }
+    if (line.trim() === "") {
+      index += 1;
+      continue;
+    }
+    const paragraphLines = [line];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() !== "" &&
+      !lines[index].startsWith("```") &&
+      !/^(#{1,6})\s+/.test(lines[index]) &&
+      !/^(\s*)([-*+]|\d+\.)\s+/.test(lines[index])
+    ) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    const paragraph = document.createElement("p");
+    appendInlineMarkdown(paragraph, paragraphLines.join("\n"));
+    node.appendChild(paragraph);
+  }
+}
+
 function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   if (!text && !allowEmpty) {
     return null;
@@ -217,9 +402,13 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   const label = document.createElement("p");
   label.className = "message-author";
   label.textContent = role === "user" ? "You" : "Waffle";
-  const body = document.createElement("p");
+  const body = document.createElement("div");
   body.className = "message-body";
-  body.appendChild(document.createTextNode(text));
+  if (role === "user") {
+    body.appendChild(document.createTextNode(text));
+  } else {
+    renderMarkdown(body, text);
+  }
   article.append(label, body);
   if (beforeNode) {
     elements.transcript.insertBefore(article, beforeNode);
@@ -236,10 +425,13 @@ function appendDelta(text) {
   }
   if (!state.streamingMessage) {
     state.streamingMessage = appendMessage("assistant", "", null, true);
+    state.streamingText = "";
   }
-  state.streamingMessage
-    .querySelector(".message-body")
-    .appendChild(document.createTextNode(text));
+  state.streamingText += text;
+  renderMarkdown(
+    state.streamingMessage.querySelector(".message-body"),
+    state.streamingText,
+  );
 }
 
 function appendToolActivity(kind, data) {
@@ -247,12 +439,33 @@ function appendToolActivity(kind, data) {
     elements.emptyActivity.remove();
     elements.emptyActivity = null;
   }
-  const row = document.createElement("p");
-  row.className = "activity-row";
   const tool = data.tool_name || "Tool";
-  const status = kind === "tool_started" ? "started" : "finished";
-  row.textContent = `${tool} ${status}`;
-  elements.activity.appendChild(row);
+  const callID =
+    data.tool_call_id || `unpaired-${tool}-${++state.toolSequence}`;
+  let entry = state.toolRows.get(callID);
+  if (!entry) {
+    const row = document.createElement("details");
+    row.className = "activity-row";
+    const summary = document.createElement("summary");
+    const detail = document.createElement("p");
+    row.append(summary, detail);
+    elements.activity.appendChild(row);
+    entry = { row, summary, detail };
+    state.toolRows.set(callID, entry);
+  }
+  if (kind === "tool_started") {
+    entry.row.classList.remove("is-error");
+    entry.row.classList.remove("is-success");
+    entry.summary.textContent = `${tool} · running`;
+    entry.detail.textContent = "Tool call is in progress.";
+    return;
+  }
+  const duration = Math.max(0, Number(data.duration_ms) || 0);
+  const outcome = data.is_error ? "failed" : "succeeded";
+  entry.row.classList.toggle("is-error", Boolean(data.is_error));
+  entry.row.classList.toggle("is-success", !data.is_error);
+  entry.summary.textContent = `${tool} · ${duration} ms · ${outcome}`;
+  entry.detail.textContent = `${Math.max(0, Number(data.byte_count) || 0)} bytes returned.`;
 }
 
 function messageText(message) {
@@ -269,6 +482,7 @@ function renderHistory(history) {
   clearNode(elements.transcript);
   elements.emptyTranscript = null;
   state.streamingMessage = null;
+  state.streamingText = "";
   for (const message of history) {
     appendMessage(message.role === "user" ? "user" : "assistant", messageText(message));
   }
@@ -278,6 +492,23 @@ function renderHistory(history) {
     empty.textContent = "The desk is ready. What are we working on?";
     elements.transcript.appendChild(empty);
     elements.emptyTranscript = empty;
+  }
+}
+
+function persistOwner() {
+  if (!state.clientID || !state.reattachToken) {
+    return;
+  }
+  const owner = {
+    client_id: state.clientID,
+    reattach_token: state.reattachToken,
+    session_id: state.sessionID || "",
+  };
+  state.storedOwner = owner;
+  try {
+    globalThis.sessionStorage?.setItem(ownerStorageKey, JSON.stringify(owner));
+  } catch {
+    // A denied storage write only removes reload recovery, not server authority.
   }
 }
 
@@ -349,6 +580,15 @@ function renderCanonicalState(chatState, includeHistory) {
   elements.profile.textContent = chatState.profile || "Default";
   elements.workspace.textContent = chatState.workspace || "No workspace";
   elements.provider.textContent = chatState.provider_label || "Not reported";
+  if (elements.sandbox) {
+    elements.sandbox.textContent = chatState.sandbox_mode || "Not reported";
+  }
+  if (elements.modelErrorRow && elements.modelError) {
+    const modelError = chatState.model_error || "";
+    elements.modelErrorRow.hidden = modelError === "";
+    elements.modelError.textContent = modelError;
+    elements.modelError.classList.toggle("is-error", modelError !== "");
+  }
   renderModels(chatState.models, chatState.model_alias);
   renderSkills(chatState.skills);
   if (chatState.model_alias) {
@@ -360,6 +600,7 @@ function renderCanonicalState(chatState, includeHistory) {
   if (includeHistory && Array.isArray(chatState.history)) {
     renderHistory(chatState.history);
   }
+  persistOwner();
 }
 
 function restoreModelSelection() {
@@ -434,6 +675,7 @@ async function postMutation(path, body, options = {}) {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
+      keepalive: Boolean(options.keepalive),
       headers,
       body: JSON.stringify(body),
     });
@@ -652,8 +894,6 @@ function openEventStream() {
 }
 
 async function openDesk() {
-  const recovering = state.currentPhase === phase.disconnected;
-  const staleClientID = state.clientID;
   clearReconnectTimer();
   state.generation += 1;
   state.streamGeneration += 1;
@@ -677,10 +917,25 @@ async function openDesk() {
     }
     state.requestToken = bootstrap.requestToken;
     state.eventCursor = bootstrap.eventCursor;
-    if (recovering && staleClientID) {
+    const requested = state.sessionID || initialSessionID;
+    let owner =
+      state.clientID && state.reattachToken
+        ? {
+            client_id: state.clientID,
+            reattach_token: state.reattachToken,
+            session_id: state.sessionID || "",
+          }
+        : state.storedOwner || readStoredOwner();
+    if (
+      owner &&
+      requested &&
+      owner.session_id &&
+      owner.session_id !== requested
+    ) {
       try {
         await postMutation("/api/v1/desk/chat/close", {
-          client_id: staleClientID,
+          client_id: owner.client_id,
+          reattach_token: owner.reattach_token,
         });
       } catch (error) {
         if (error.safeCode !== "chat_client_not_found") {
@@ -691,20 +946,46 @@ async function openDesk() {
         return;
       }
       state.clientID = "";
+      state.reattachToken = "";
+      state.storedOwner = null;
+      forgetStoredOwner();
+      owner = null;
     }
-    const sessionID = state.sessionID || initialSessionID;
-    const opened = await postMutation("/api/v1/desk/chat/open", {
-      continue: sessionID === "",
-      session_id: sessionID,
+    const openBody = {
+      continue: requested === "",
+      session_id: requested,
       profile: "",
       capabilities: [],
-    });
+    };
+    if (owner) {
+      openBody.reattach_client_id = owner.client_id;
+      openBody.reattach_token = owner.reattach_token;
+    }
+    let opened;
+    try {
+      opened = await postMutation("/api/v1/desk/chat/open", openBody);
+    } catch (error) {
+      if (!owner || error.safeCode !== "chat_client_not_found") {
+        throw error;
+      }
+      state.clientID = "";
+      state.reattachToken = "";
+      state.storedOwner = null;
+      forgetStoredOwner();
+      opened = await postMutation("/api/v1/desk/chat/open", {
+        continue: requested === "",
+        session_id: requested,
+        profile: "",
+        capabilities: [],
+      });
+    }
     if (generation !== state.generation) {
       return;
     }
     state.clientID = opened.client_id || "";
-    if (!state.clientID) {
-      throw new Error("missing_client_id");
+    state.reattachToken = opened.reattach_token || "";
+    if (!state.clientID || !state.reattachToken) {
+      throw new Error("missing_client_lease");
     }
     renderCanonicalState(opened.state, true);
     openEventStream();
@@ -736,6 +1017,7 @@ function settleTurn(turn) {
     return;
   }
   state.streamingMessage = null;
+  state.streamingText = "";
   state.activeTurn = null;
   state.activeOperation = null;
   state.pendingTurn = null;
@@ -859,6 +1141,196 @@ async function cancelTurn() {
   }
 }
 
+async function runCommandOperation(label, operation) {
+  if (state.currentPhase !== phase.idle) {
+    return null;
+  }
+  const generation = state.generation;
+  state.activeOperation = "command";
+  setPhase(phase.sending);
+  elements.phase.textContent = label;
+  setStatusMessage(elements.composerStatus, "", false, "composer");
+  try {
+    const result = await operation();
+    if (generation !== state.generation) {
+      return null;
+    }
+    state.activeOperation = null;
+    if (state.currentPhase !== phase.disconnected) {
+      setPhase(phase.idle);
+    }
+    return result;
+  } catch (error) {
+    if (generation !== state.generation || state.currentPhase === phase.disconnected) {
+      return null;
+    }
+    state.activeOperation = null;
+    setPhase(phase.idle);
+    setStatusMessage(
+      elements.composerStatus,
+      error.safeMessage || "The command could not be completed.",
+      true,
+      "composer",
+    );
+    return null;
+  }
+}
+
+function commandMutation(name, args = "") {
+  return postMutation("/api/v1/desk/chat/command", {
+    client_id: state.clientID,
+    command: { name, args },
+  });
+}
+
+async function newConversation() {
+  await runCommandOperation("Starting conversation", async () => {
+    const preview = await commandMutation("new");
+    if (preview.confirm) {
+      const confirmed = globalThis.confirm?.(
+        preview.text || "Start a new conversation?",
+      );
+      if (!confirmed) {
+        return preview;
+      }
+    }
+    const result = preview.confirm
+      ? await commandMutation("new", "confirm")
+      : preview;
+    if (result.state) {
+      renderCanonicalState(result.state, true);
+    }
+    return result;
+  });
+}
+
+function formatSessionUpdated(value) {
+  const updated = new Date(value);
+  if (Number.isNaN(updated.getTime())) {
+    return "Update time unavailable";
+  }
+  return updated.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+async function resumeSession(sessionID) {
+  await runCommandOperation("Resuming conversation", async () => {
+    const result = await commandMutation("resume", sessionID);
+    if (result.state) {
+      renderCanonicalState(result.state, true);
+    }
+    return result;
+  });
+}
+
+function renderSessions(sessions) {
+  clearNode(elements.sessions);
+  const available = Array.isArray(sessions) ? sessions : [];
+  if (available.length === 0) {
+    elements.sessions.textContent = "No recent conversations.";
+    return;
+  }
+  for (const session of available) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "session-choice";
+    button.textContent = `${session.title || "Untitled conversation"} · ${formatSessionUpdated(
+      session.updated_at,
+    )}`;
+    button.addEventListener("click", () => resumeSession(session.id || ""));
+    elements.sessions.appendChild(button);
+  }
+}
+
+async function refreshSessions() {
+  const result = await runCommandOperation("Loading conversations", () =>
+    commandMutation("sessions"),
+  );
+  if (result) {
+    renderSessions(result.sessions);
+  }
+}
+
+function renderUsage(rows) {
+  clearNode(elements.usage);
+  const usage = Array.isArray(rows) ? rows : [];
+  if (usage.length === 0) {
+    elements.usage.textContent = "No usage recorded.";
+    return;
+  }
+  for (const row of usage) {
+    const item = document.createElement("p");
+    item.textContent = `${row.period || "usage"} · ${row.requests || 0} requests · ${
+      row.input_tokens || 0
+    } in · ${row.output_tokens || 0} out · ${row.reserved_tokens || 0} reserved`;
+    elements.usage.appendChild(item);
+  }
+}
+
+function renderPermissions(permissions) {
+  clearNode(elements.permissions);
+  if (!permissions) {
+    elements.permissions.textContent = "No permission policy reported.";
+    return;
+  }
+  const rows = [
+    ["Sandbox", permissions.sandbox_mode || "Not reported"],
+    ["Allow", (permissions.allow || []).join(", ") || "None"],
+    ["Deny", (permissions.deny || []).join(", ") || "None"],
+    ["Deny prefixes", (permissions.deny_prefixes || []).join(", ") || "None"],
+  ];
+  for (const [label, value] of rows) {
+    const item = document.createElement("p");
+    item.textContent = `${label}: ${value}`;
+    elements.permissions.appendChild(item);
+  }
+}
+
+function renderWorkset(items) {
+  clearNode(elements.workset);
+  const workset = Array.isArray(items) ? items : [];
+  if (workset.length === 0) {
+    elements.workset.textContent = "The working set is empty.";
+    return;
+  }
+  const list = document.createElement("ul");
+  for (const item of workset) {
+    const row = document.createElement("li");
+    row.textContent = `${item.id || "item"} · ${item.text || ""}`;
+    list.appendChild(row);
+  }
+  elements.workset.appendChild(list);
+}
+
+function renderHelp(commands) {
+  clearNode(elements.help);
+  const available = Array.isArray(commands) ? commands : [];
+  if (available.length === 0) {
+    elements.help.textContent = "No commands reported.";
+    return;
+  }
+  const list = document.createElement("ul");
+  for (const command of available) {
+    const item = document.createElement("li");
+    item.textContent = `${command.usage || `/${command.name || ""}`} · ${
+      command.description || ""
+    }`;
+    list.appendChild(item);
+  }
+  elements.help.appendChild(list);
+}
+
+async function refreshResultPanel(name, label, render) {
+  const result = await runCommandOperation(label, () => commandMutation(name));
+  if (result) {
+    render(result[name]);
+  }
+}
+
 async function selectModel() {
   if (state.currentPhase !== phase.idle) {
     return;
@@ -947,13 +1419,62 @@ async function toggleSkill() {
   }
 }
 
+function handleComposerKeydown(event) {
+  if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) {
+    return;
+  }
+  event.preventDefault();
+  void submitTurn({ preventDefault() {} });
+}
+
+function closeOwnerOnPageHide() {
+  if (!state.clientID || !state.reattachToken || !state.requestToken) {
+    return;
+  }
+  const lease = {
+    client_id: state.clientID,
+    reattach_token: state.reattachToken,
+  };
+  void postMutation("/api/v1/desk/chat/close", lease, { keepalive: true }).catch(
+    () => {
+      // Navigation cleanup is best effort. The rotated lease and idle reaper
+      // remain the recovery paths after a dropped keepalive request.
+    },
+  );
+}
+
 if (elements.form) {
   elements.form.addEventListener("submit", submitTurn);
   elements.message.addEventListener("input", updateControls);
+  elements.message.addEventListener("keydown", handleComposerKeydown);
   elements.cancel.addEventListener("click", cancelTurn);
   elements.model.addEventListener("change", selectModel);
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
+  elements.newConversation?.addEventListener("click", newConversation);
+  elements.sessionRefresh?.addEventListener("click", refreshSessions);
+  elements.usageRefresh?.addEventListener("click", () =>
+    refreshResultPanel("usage", "Loading usage", renderUsage),
+  );
+  elements.permissionsRefresh?.addEventListener("click", () =>
+    refreshResultPanel(
+      "permissions",
+      "Loading permissions",
+      renderPermissions,
+    ),
+  );
+  elements.worksetRefresh?.addEventListener("click", () =>
+    refreshResultPanel("workset", "Loading working set", renderWorkset),
+  );
+  elements.helpRefresh?.addEventListener("click", async () => {
+    const result = await runCommandOperation("Loading commands", () =>
+      commandMutation("help"),
+    );
+    if (result) {
+      renderHelp(result.commands);
+    }
+  });
+  globalThis.addEventListener?.("pagehide", closeOwnerOnPageHide);
   void openDesk();
 }

@@ -155,7 +155,7 @@ func TestSharedDTOsUseStableJSONFieldNames(t *testing.T) {
 		{WorkItem{ID: "w", Text: "work"}, []string{"id", "text"}},
 		{SkillRef{Name: "reviewer", Description: "review changes", Attached: true, Missing: false}, []string{"name", "description", "attached", "missing"}},
 		{State{SessionID: "s", Title: "t", ModelAlias: "a", ModelError: "missing", ProviderLabel: "p", Profile: "default", ConnectionMode: "direct", SandboxMode: "read-only", Workspace: "w", History: []llm.Message{{}}, Models: []Model{{Alias: "a"}}, Skills: []SkillRef{{Name: "reviewer"}}, Capabilities: []string{"c"}}, []string{"session_id", "title", "model_alias", "model_error", "provider_label", "profile", "connection_mode", "sandbox_mode", "workspace", "history", "models", "skills", "capabilities"}},
-		{Event{Kind: EventNotice, Text: "text", ToolName: "tool", IsError: true, ByteCount: 2, Usage: llm.Usage{InputTokens: 1}, State: &State{SessionID: "s"}}, []string{"kind", "text", "tool_name", "is_error", "byte_count", "usage", "state"}},
+		{Event{Kind: EventNotice, Text: "text", ToolName: "tool", ToolCallID: "call-1", IsError: true, ByteCount: 2, DurationMS: 3, Usage: llm.Usage{InputTokens: 1}, State: &State{SessionID: "s"}}, []string{"kind", "text", "tool_name", "tool_call_id", "is_error", "byte_count", "duration_ms", "usage", "state"}},
 		{Result{Title: "t", Text: "x", Commands: []Command{{Name: CommandHelp}}, Models: []Model{{Alias: "a"}}, Sessions: []Session{{ID: "s"}}, Usage: []UsageRow{{Requests: 1}}, Permissions: &PermissionView{SandboxMode: "read-only"}, Workset: []WorkItem{{ID: "w"}}, State: &State{SessionID: "s"}, Confirm: true, ShouldClose: true}, []string{"title", "text", "commands", "models", "sessions", "usage", "permissions", "workset", "state", "confirm", "should_close"}},
 		{Command{Name: CommandExit, Usage: "/exit", Aliases: []string{"quit"}, Description: "close"}, []string{"name", "usage", "aliases", "description"}},
 		{ParsedCommand{Name: CommandModel, Args: "a"}, []string{"name", "args"}},
@@ -183,8 +183,10 @@ func TestSharedDTOsUseStableJSONFieldNames(t *testing.T) {
 
 func TestEventUsageUsesSnakeCaseAndRoundTrips(t *testing.T) {
 	want := Event{
-		Kind:  EventTurnDone,
-		Usage: llm.Usage{InputTokens: 12, OutputTokens: 34},
+		Kind:       EventToolFinished,
+		ToolCallID: "tool-7",
+		DurationMS: 14,
+		Usage:      llm.Usage{InputTokens: 12, OutputTokens: 34},
 	}
 	data, err := json.Marshal(want)
 	if err != nil {

@@ -1001,6 +1001,21 @@ func TestChatRuntimeTurnEmitsHooksAndPersistsHistory(t *testing.T) {
 			t.Fatalf("events = %+v, missing %s", events, want)
 		}
 	}
+	var started, finished chatpkg.Event
+	for _, event := range events {
+		switch event.Kind {
+		case chatpkg.EventToolStarted:
+			started = event
+		case chatpkg.EventToolFinished:
+			finished = event
+		}
+	}
+	if started.ToolCallID == "" || finished.ToolCallID != started.ToolCallID {
+		t.Fatalf("tool events = start %+v finish %+v, want one stable opaque call ID", started, finished)
+	}
+	if finished.DurationMS < 0 {
+		t.Fatalf("tool duration = %dms, want a non-negative server measurement", finished.DurationMS)
+	}
 	done := events[len(events)-1]
 	if done.Kind != chatpkg.EventTurnDone || done.Usage != (llm.Usage{InputTokens: 5, OutputTokens: 12}) {
 		t.Fatalf("turn_done = %+v", done)

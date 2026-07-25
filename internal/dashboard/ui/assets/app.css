@@ -411,7 +411,68 @@ h3 {
   line-height: 1.55;
   margin: 0;
   padding: 0.75rem 0.85rem;
-  white-space: pre-wrap;
+}
+
+.message-body > :first-child {
+  margin-top: 0;
+}
+
+.message-body > :last-child {
+  margin-bottom: 0;
+}
+
+.message-body p,
+.message-body ul,
+.message-body ol,
+.message-body pre {
+  margin: 0.65rem 0;
+}
+
+.message-body h1,
+.message-body h2,
+.message-body h3,
+.message-body h4,
+.message-body h5,
+.message-body h6 {
+  font-family: "Avenir Next Rounded", "Avenir Next", Avenir, sans-serif;
+  line-height: 1.2;
+  margin: 0.9rem 0 0.45rem;
+}
+
+.message-body code {
+  background: #eadfce;
+  border: 1px solid var(--rule);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86em;
+  padding: 0.08rem 0.25rem;
+}
+
+.code-block {
+  position: relative;
+}
+
+.code-block pre {
+  background: var(--ink);
+  color: var(--paper);
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.code-block pre code {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.code-copy {
+  background: var(--paper);
+  font-size: 0.68rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.5rem;
+  position: absolute;
+  right: 0.45rem;
+  top: 0.45rem;
 }
 
 .user-message {
@@ -426,6 +487,7 @@ h3 {
 .user-message .message-body {
   background: #f7ddbf;
   border-color: #c98957;
+  white-space: pre-wrap;
 }
 
 .tool-ledger {
@@ -463,6 +525,24 @@ h3 {
   border: 1px solid var(--rule);
   color: var(--ink);
   padding: 0.35rem 0.5rem;
+}
+
+.activity-row summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.activity-row p {
+  margin: 0.35rem 0 0;
+}
+
+.activity-row.is-success {
+  border-color: #477d56;
+}
+
+.activity-row.is-error {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .composer {
@@ -521,6 +601,30 @@ h3 {
   gap: 0.45rem;
 }
 
+.conversation-actions {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0.75rem;
+}
+
+.session-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+}
+
+.session-list p {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+.session-choice {
+  min-height: 2.75rem;
+  text-align: left;
+}
+
 .context-list {
   display: grid;
   gap: 0;
@@ -543,6 +647,42 @@ h3 {
 .context-list dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.context-list dd.is-error {
+  color: var(--danger);
+}
+
+.context-panels {
+  border-top: 2px solid var(--ink);
+  display: grid;
+}
+
+.context-panels details {
+  border-bottom: 1px solid var(--rule);
+  padding: 0.65rem 0;
+}
+
+.context-panels summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.context-panels button {
+  margin-top: 0.55rem;
+  width: 100%;
+}
+
+.context-panel-result {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.context-panel-result p,
+.context-panel-result ul {
+  margin: 0.55rem 0 0;
+  padding-left: 1rem;
 }
 
 .quick-actions {

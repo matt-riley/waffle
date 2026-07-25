@@ -1388,6 +1388,12 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	}()
 
 	var emitMu sync.Mutex
+	type activeToolCall struct {
+		id      string
+		started time.Time
+	}
+	activeToolCalls := make(map[string]activeToolCall)
+	nextToolCall := 0
 	emitEvent := func(event chatpkg.Event) {
 		if emit == nil {
 			return
@@ -1402,12 +1408,38 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 			emitEvent(chatpkg.Event{Kind: chatpkg.EventTextDelta, Text: delta})
 		},
 		OnToolStart: func(use llm.ToolUse) {
-			emitEvent(chatpkg.Event{Kind: chatpkg.EventToolStarted, ToolName: use.Name})
+			emitMu.Lock()
+			nextToolCall++
+			call := activeToolCall{
+				id:      fmt.Sprintf("tool-%d", nextToolCall),
+				started: time.Now(),
+			}
+			activeToolCalls[use.ID] = call
+			emitMu.Unlock()
+			emitEvent(chatpkg.Event{
+				Kind:       chatpkg.EventToolStarted,
+				ToolName:   use.Name,
+				ToolCallID: call.id,
+			})
 		},
 		OnToolDone: func(use llm.ToolUse, result llm.ToolResult) {
+			emitMu.Lock()
+			call, ok := activeToolCalls[use.ID]
+			if ok {
+				delete(activeToolCalls, use.ID)
+			} else {
+				nextToolCall++
+				call = activeToolCall{id: fmt.Sprintf("tool-%d", nextToolCall), started: time.Now()}
+			}
+			duration := time.Since(call.started).Milliseconds()
+			emitMu.Unlock()
 			emitEvent(chatpkg.Event{
-				Kind: chatpkg.EventToolFinished, ToolName: use.Name,
-				IsError: result.IsError, ByteCount: len(result.Content),
+				Kind:       chatpkg.EventToolFinished,
+				ToolName:   use.Name,
+				ToolCallID: call.id,
+				IsError:    result.IsError,
+				ByteCount:  len(result.Content),
+				DurationMS: duration,
 			})
 		},
 		OnUsage: func(value llm.Usage) {

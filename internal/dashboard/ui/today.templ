@@ -43,7 +43,7 @@ templ Today(view ShellView) {
 				<form class="composer" id="desk-composer" action="/desk/" method="post">
 					<label for="desk-message">Message Waffle</label>
 					<textarea id="desk-message" name="message" rows="4" placeholder="Ask Waffle to help…" required></textarea>
-					<p class="composer-hint">Enter adds a new line. Send when the thought is ready.</p>
+					<p class="composer-hint">Enter adds a new line. Ctrl/Cmd+Enter sends.</p>
 					<p id="desk-composer-status" class="composer-status" role="status" aria-live="polite" hidden></p>
 					<div class="composer-actions">
 						<button id="desk-cancel" type="button" class="cancel-button" disabled>Cancel turn</button>
@@ -57,6 +57,13 @@ templ Today(view ShellView) {
 						<p class="panel-index">02 / context</p>
 						<h2 id="context-title">What Waffle is carrying</h2>
 					</div>
+				</div>
+				<div class="conversation-actions">
+					<button type="button" id="desk-new" disabled>New conversation</button>
+					<button type="button" id="desk-session-refresh" disabled>Recent conversations</button>
+				</div>
+				<div class="session-list" id="desk-sessions" aria-live="polite">
+					<p>Load recent conversations to switch sessions.</p>
 				</div>
 				<div class="model-field">
 					<label for="desk-model">Session model</label>
@@ -88,7 +95,37 @@ templ Today(view ShellView) {
 						<dt>Provider</dt>
 						<dd id="desk-provider">—</dd>
 					</div>
+					<div>
+						<dt>Sandbox</dt>
+						<dd id="desk-sandbox">—</dd>
+					</div>
+					<div id="desk-model-error-row" hidden>
+						<dt>Model error</dt>
+						<dd id="desk-model-error"></dd>
+					</div>
 				</dl>
+				<div class="context-panels">
+					<details>
+						<summary>Usage</summary>
+						<button type="button" id="desk-usage-refresh" disabled>Load usage</button>
+						<div id="desk-usage" class="context-panel-result" aria-live="polite"></div>
+					</details>
+					<details>
+						<summary>Permissions</summary>
+						<button type="button" id="desk-permissions-refresh" disabled>Load permissions</button>
+						<div id="desk-permissions" class="context-panel-result" aria-live="polite"></div>
+					</details>
+					<details>
+						<summary>Working set</summary>
+						<button type="button" id="desk-workset-refresh" disabled>Load working set</button>
+						<div id="desk-workset" class="context-panel-result" aria-live="polite"></div>
+					</details>
+					<details>
+						<summary>Commands</summary>
+						<button type="button" id="desk-help-refresh" disabled>Load commands</button>
+						<div id="desk-help" class="context-panel-result" aria-live="polite"></div>
+					</details>
+				</div>
 				<nav class="quick-actions" aria-label="Today quick actions">
 					<p class="panel-index">03 / quick moves</p>
 					<a href="/desk/?section=tasks">Review tasks</a>

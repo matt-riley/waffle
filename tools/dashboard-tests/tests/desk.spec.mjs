@@ -173,6 +173,85 @@ test("Today sends a streamed reply and confirms cancellation", async ({ page }) 
   await expect(cancel).toBeDisabled();
 });
 
+test("Today renders Markdown, keyboard send, and paired tool evidence", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the rich transcript flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Show markdown");
+  await message.press("Control+Enter");
+
+  const reply = page.locator(".waffle-message .message-body");
+  await expect(reply.getByRole("heading", { name: "Fixture markdown" })).toBeVisible();
+  await expect(reply.locator("li")).toHaveCount(2);
+  await expect(reply.locator("pre code")).toContainText('fmt.Println("fixture")');
+  await expect(reply.locator("code")).toContainText(["mise", 'fmt.Println("fixture")']);
+  await expect(reply.getByRole("button", { name: "Copy" })).toBeVisible();
+
+  const tool = page.locator("#desk-tool-activity .activity-row");
+  await expect(tool).toHaveCount(1);
+  await expect(tool).toContainText("fixture_read · 18 ms · succeeded");
+  await expect(tool).toHaveClass(/is-success/);
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
+test("Today exposes existing commands and resumes a recent session in place", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the command surface once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  await expect(page.locator("#desk-session-title")).toHaveText("Fresh conversation");
+  await expect(page.locator("#desk-transcript")).toContainText("Fresh start");
+
+  await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
+  await page.getByRole("button", { name: /Release review ·/ }).click();
+  await expect(page.locator("#desk-session-title")).toHaveText("Release review");
+
+  for (const [summary, button, result] of [
+    ["Usage", "Load usage", /3 requests · 120 in · 45 out · 10 reserved/],
+    ["Permissions", "Load permissions", /Sandbox: workspace-write/],
+    ["Working set", "Load working set", /Verify the Today experience/],
+    ["Commands", "Load commands", /\/new · Start a conversation/],
+  ]) {
+    const panel = page.locator(".context-panels details").filter({ hasText: summary });
+    await panel.locator("summary").click();
+    await panel.getByRole("button", { name: button, exact: true }).click();
+    await expect(panel.locator(".context-panel-result")).toContainText(result);
+  }
+  await expect(page.locator("#desk-sandbox")).toHaveText("workspace-write");
+});
+
+test("Today reload and navigate-away recovery returns to a usable single desk", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the ownership lifecycle once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const before = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("waffle.desk.today.owner.v1")),
+  );
+  expect(before.client_id).toBeTruthy();
+  expect(before.reattach_token).toBeTruthy();
+
+  await page.reload();
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await expect(page.getByLabel("Message Waffle")).toBeEnabled();
+  const after = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("waffle.desk.today.owner.v1")),
+  );
+  expect(after.reattach_token).not.toBe(before.reattach_token);
+
+  await page.getByRole("link", { name: "Tasks", exact: true }).click();
+  await expect(page).toHaveURL(/section=tasks/);
+  await page.getByRole("link", { name: "Today", exact: true }).click();
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Usable after navigation");
+  await message.press("Control+Enter");
+  await expect(page.locator(".waffle-message .message-body")).toContainText("Fixture reply");
+});
+
 test("Today reconnects after SSE drop without tearing down the desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the recovery flow once.");
 
