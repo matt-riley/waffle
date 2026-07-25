@@ -127,6 +127,30 @@ func (s *PostureService) Read(profileName string) PostureView {
 	}
 	profileName = strings.TrimSpace(profileName)
 	profile, known := s.cfg.Profile(profileName)
+	return s.project(profileName, profile, known)
+}
+
+// ReadCandidate projects the posture a profile *would* have, without writing
+// anything. The profile editor uses it for the "after" side of its preview
+// (#194 AC3), so the preview and the runtime agree on what a save would mean.
+func (s *PostureService) ReadCandidate(profileName string, profile config.AgentProfile) PostureView {
+	if s == nil {
+		return PostureView{Layers: []PostureLayerView{}}
+	}
+	return s.project(strings.TrimSpace(profileName), profile, true)
+}
+
+// Config exposes the snapshot the posture view resolves against, so callers
+// that must validate a candidate against the same tiers do not load a second,
+// possibly newer, config.
+func (s *PostureService) Config() config.Config {
+	if s == nil {
+		return config.Config{}
+	}
+	return s.cfg
+}
+
+func (s *PostureService) project(profileName string, profile config.AgentProfile, known bool) PostureView {
 	resolved := profileName
 	if resolved == "" {
 		resolved = s.cfg.Agent.DefaultProfile
@@ -158,7 +182,7 @@ func (s *PostureService) Read(profileName string) PostureView {
 
 	// Repo policy is nil here: a profile read from Desk is not scoped to a
 	// checkout, so claiming a WAFFLE.md layer applies would be a lie.
-	layered := s.cfg.LayeredAgentPolicy(group, resolved, nil)
+	layered := s.cfg.LayeredAgentPolicyFor(group, profile, nil)
 	view.Layers = make([]PostureLayerView, 0, len(layered.Layers)+1)
 	for _, layer := range layered.Layers {
 		view.Layers = append(view.Layers, PostureLayerView{

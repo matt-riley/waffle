@@ -1559,12 +1559,50 @@ func (d *tomlDocument) setOptionalInt(table, key string, value int) {
 	d.setValue(table, key, strconv.Itoa(value))
 }
 
+// setOptionalStrings writes a TOML string array, deleting the key when the
+// list is empty so a profile never keeps an empty policy list behind (#194).
+func (d *tomlDocument) setOptionalStrings(table, key string, values []string) {
+	if len(values) == 0 {
+		d.deleteValue(table, key)
+		return
+	}
+	d.setValue(table, key, renderStringArray(values))
+}
+
 func (d *tomlDocument) deleteTable(table string) {
 	start, end, ok := d.tableSpan(table)
 	if !ok {
 		return
 	}
 	d.lines = append(d.lines[:start], d.lines[end:]...)
+}
+
+// deleteTableTree removes a table and every sub-table beneath it. Deleting
+// only [agent.profile.x] would leave [agent.profile.x.tools] behind, and TOML
+// resurrects the parent from the orphan on the next load (#194).
+func (d *tomlDocument) deleteTableTree(table string) {
+	d.deleteTable(table)
+	prefix := table + "."
+	for {
+		name, ok := d.firstTableWithPrefix(prefix)
+		if !ok {
+			return
+		}
+		d.deleteTable(name)
+	}
+}
+
+func (d *tomlDocument) firstTableWithPrefix(prefix string) (string, bool) {
+	for _, line := range d.lines {
+		match := tableHeaderRE.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		if name := strings.TrimSpace(match[1]); strings.HasPrefix(name, prefix) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func inlineComment(line string) string {

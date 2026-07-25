@@ -1,0 +1,87 @@
+package ui
+
+// ProfileAssets loads the structured agent-profile editor (#194).
+templ ProfileAssets(view ShellView) {
+	<link rel="stylesheet" href={ AssetURL("profiles.css", view.AssetVersion) }/>
+	<script type="module" src={ AssetURL("profiles.js", view.AssetVersion) }></script>
+}
+
+// ProfileEditor is a typed form over one agent profile. Every control maps to
+// exactly one config key; there is deliberately no free-text TOML field.
+templ ProfileEditor() {
+	<section class="capability-panel" id="profile-editor" aria-labelledby="profile-editor-title">
+		<header class="panel-heading">
+			<div>
+				<p class="panel-index">04 / agent profiles</p>
+				<h2 id="profile-editor-title">Agent profiles</h2>
+				<p class="posture-note">A profile may only narrow its agent group. Changes take effect after Waffle restarts.</p>
+			</div>
+			<button id="profile-new" type="button">New profile</button>
+		</header>
+		<div class="profile-errors" id="profile-errors" role="status" aria-live="polite" hidden></div>
+		<div class="profile-list" id="profile-list"></div>
+
+		<form id="profile-form" class="profile-form" aria-describedby="profile-form-status">
+			<h3 id="profile-form-title">New profile</h3>
+			<label for="profile-name">Name</label>
+			<input id="profile-name" name="name" placeholder="reviewer" autocomplete="off" required/>
+
+			<label for="profile-system">System prompt</label>
+			<textarea id="profile-system" name="system" rows="6" placeholder="Inline text, or @prompts/reviewer.md"></textarea>
+
+			<label for="profile-model">Model alias <span>(optional)</span></label>
+			<input id="profile-model" name="model" autocomplete="off"/>
+
+			<label for="profile-sandbox">Sandbox</label>
+			<select id="profile-sandbox" name="sandbox">
+				<option value="">Inherit from the group</option>
+				<option value="docker">Docker sandbox</option>
+				<option value="host">Host tools</option>
+			</select>
+
+			<label for="profile-allow">Allowed tools <span>(comma separated)</span></label>
+			<input id="profile-allow" name="allow" autocomplete="off" placeholder="read_file, search"/>
+
+			<label for="profile-deny">Denied tools <span>(comma separated)</span></label>
+			<input id="profile-deny" name="deny" autocomplete="off" placeholder="bash"/>
+
+			<label for="profile-deny-prefixes">Denied command prefixes <span>(one per line)</span></label>
+			<textarea id="profile-deny-prefixes" name="deny_prefixes" rows="3" placeholder="git push"></textarea>
+
+			<label for="profile-guidance">Guidance <span>(optional)</span></label>
+			<textarea id="profile-guidance" name="guidance" rows="2"></textarea>
+
+			<label for="profile-max-tokens">Max tokens <span>(0 for the provider default)</span></label>
+			<input id="profile-max-tokens" name="max_tokens" type="number" min="0" step="1"/>
+
+			<label for="profile-max-iterations">Max iterations <span>(0 for the agent default)</span></label>
+			<input id="profile-max-iterations" name="max_iterations" type="number" min="0" step="1"/>
+
+			<label for="profile-allowed-children">Allowed subagent profiles <span>(comma separated)</span></label>
+			<input id="profile-allowed-children" name="allowed_children" autocomplete="off"/>
+
+			<p id="profile-form-status" class="profile-form-status" role="status" aria-live="polite"></p>
+			<div class="profile-form-actions">
+				<button type="submit">Review change</button>
+			</div>
+		</form>
+
+		<dialog id="profile-review-dialog" aria-labelledby="profile-review-title">
+			<div class="profile-review-content">
+				<header class="panel-heading">
+					<div>
+						<p class="panel-index">05 / review</p>
+						<h2 id="profile-review-title">Review change</h2>
+						<p class="posture-note">Nothing is written until you confirm.</p>
+					</div>
+				</header>
+				<div id="profile-review-body"></div>
+				<p id="profile-review-status" class="profile-form-status" role="status" aria-live="polite"></p>
+				<div class="profile-form-actions">
+					<button id="profile-review-cancel" type="button">Cancel</button>
+					<button id="profile-review-confirm" type="button" class="workspace-danger">Save profile</button>
+				</div>
+			</div>
+		</dialog>
+	</section>
+}
