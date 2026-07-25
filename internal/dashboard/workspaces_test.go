@@ -556,6 +556,89 @@ func TestWorkspacesServicePublishesCloseOnlyAfterCanonicalTransition(t *testing.
 	}
 }
 
+func TestWriteWorkspaceServiceErrorMapsKnownSentinels(t *testing.T) {
+	cases := []struct {
+		name          string
+		err           error
+		stateConflict bool
+		status        int
+		code          string
+	}{
+		{"workspace_not_found", workspace.ErrWorkspaceNotFound, false, http.StatusNotFound, "workspace_not_found"},
+		{"session_not_found", session.ErrNotFound, false, http.StatusNotFound, "workspace_not_found"},
+		{"invalid_workspace", ErrInvalidWorkspaceInput, false, http.StatusUnprocessableEntity, "invalid_workspace"},
+		{"state_conflict", ErrWorkspaceStateConflict, false, http.StatusConflict, "workspace_state_conflict"},
+		{"already_closed", workspace.ErrWorkspaceAlreadyClosed, false, http.StatusConflict, "workspace_state_conflict"},
+		{"dependency_unavailable", ErrOperationsDependencyUnavailable, false, http.StatusServiceUnavailable, "workspace_unavailable"},
+		{"preview_expired", ErrPreviewExpired, false, http.StatusConflict, "preview_invalid"},
+		{"preview_evicted", ErrPreviewEvicted, false, http.StatusConflict, "preview_invalid"},
+		{"preview_mismatch", ErrPreviewMismatch, false, http.StatusConflict, "preview_invalid"},
+		{"preview_unknown", ErrPreviewUnknown, false, http.StatusConflict, "preview_invalid"},
+		{"preview_used", ErrPreviewUsed, false, http.StatusConflict, "preview_invalid"},
+		{"state_conflict_flag", errors.New("opaque docker failure"), true, http.StatusConflict, "workspace_state_conflict"},
+		{"unknown_fallback", errors.New("docker: secret token-xyz"), false, http.StatusServiceUnavailable, "workspace_unavailable"},
+		{"wrapped_invalid", errors.Join(ErrInvalidWorkspaceInput, errors.New("detail")), false, http.StatusUnprocessableEntity, "invalid_workspace"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeWorkspaceServiceError(recorder, tc.err, tc.stateConflict)
+
+			if recorder.Code != tc.status {
+				t.Fatalf("status = %d, want %d body=%s", recorder.Code, tc.status, recorder.Body.String())
+			}
+			var body errorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Code != tc.code {
+				t.Fatalf("code = %q, want %q", body.Code, tc.code)
+			}
+			if body.Message == "" {
+				t.Fatal("message is empty")
+			}
+			if strings.Contains(body.Message, "token-xyz") || strings.Contains(body.Message, "docker:") {
+				t.Fatalf("message leaked upstream error text: %q", body.Message)
+			}
+			if tc.code != "workspace_unavailable" && body.Message == tc.err.Error() {
+				t.Fatalf("message echoed raw error: %q", body.Message)
+			}
+		})
+	}
+}
+
+func TestWriteWorkspaceServiceErrorTableCoversDeclaredSentinels(t *testing.T) {
+	required := []error{
+		workspace.ErrWorkspaceNotFound,
+		session.ErrNotFound,
+		ErrInvalidWorkspaceInput,
+		ErrWorkspaceStateConflict,
+		workspace.ErrWorkspaceAlreadyClosed,
+		ErrOperationsDependencyUnavailable,
+		ErrPreviewExpired,
+		ErrPreviewEvicted,
+		ErrPreviewMismatch,
+		ErrPreviewUnknown,
+		ErrPreviewUsed,
+	}
+	for _, want := range required {
+		found := false
+		for _, mapping := range workspaceErrorMappings {
+			if mapping.err == want {
+				found = true
+				if mapping.code == "" || mapping.message == "" || mapping.status == 0 {
+					t.Fatalf("incomplete mapping for %v", want)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("workspaceErrorMappings missing %v", want)
+		}
+	}
+}
+
 func issueWorkspacePreview(t *testing.T, harness *workspaceRouteHarness, id, key string) WorkspaceClosePreview {
 	t.Helper()
 	rec := harness.request(

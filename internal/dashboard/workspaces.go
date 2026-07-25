@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,7 +27,12 @@ const (
 	WorkspaceClosedEvent   = "workspace.closed"
 )
 
-var ErrWorkspaceStateConflict = errors.New("workspace state conflict")
+var (
+	ErrWorkspaceStateConflict = errors.New("workspace state conflict")
+	// ErrInvalidWorkspaceInput is returned when repository or profile fails
+	// validation before any runtime work starts.
+	ErrInvalidWorkspaceInput = errors.New("invalid workspace input")
+)
 
 // WorkspaceView is the stable, sanitized workspace shape shared by reads,
 // mutations, events, and the section client.
@@ -110,7 +114,7 @@ func (s *WorkspacesService) Open(ctx context.Context, repository, profile string
 	repository = strings.TrimSpace(repository)
 	profile = strings.TrimSpace(profile)
 	if !workspace.ValidRepository(repository) || (profile != "" && !config.ValidProfileName(profile)) {
-		return WorkspaceMutationResponse{}, fmt.Errorf("invalid workspace input")
+		return WorkspaceMutationResponse{}, ErrInvalidWorkspaceInput
 	}
 	if s == nil || s.operations == nil || s.operations.Workspaces == nil {
 		return WorkspaceMutationResponse{}, ErrOperationsDependencyUnavailable
@@ -492,23 +496,44 @@ func decodeWorkspaceRequest(w http.ResponseWriter, r *http.Request, target any) 
 	return true
 }
 
+// workspaceErrorMapping is one stable, redacted HTTP mapping for a known
+// workspace sentinel. Codes and messages are fixed strings chosen here —
+// never raw upstream error text, paths, URLs, or credential material.
+type workspaceErrorMapping struct {
+	err     error
+	status  int
+	code    string
+	message string
+}
+
+// workspaceErrorMappings is the ordered table of known workspace failures.
+// First matching errors.Is wins. Unmapped errors keep the generic fallback.
+var workspaceErrorMappings = []workspaceErrorMapping{
+	{workspace.ErrWorkspaceNotFound, http.StatusNotFound, "workspace_not_found", "workspace or session was not found"},
+	{session.ErrNotFound, http.StatusNotFound, "workspace_not_found", "workspace or session was not found"},
+	{ErrInvalidWorkspaceInput, http.StatusUnprocessableEntity, "invalid_workspace", "repository or profile is invalid"},
+	{ErrWorkspaceStateConflict, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action"},
+	{workspace.ErrWorkspaceAlreadyClosed, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action"},
+	{ErrOperationsDependencyUnavailable, http.StatusServiceUnavailable, "workspace_unavailable", "workspace services are unavailable"},
+	{ErrPreviewExpired, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired"},
+	{ErrPreviewEvicted, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired"},
+	{ErrPreviewMismatch, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired"},
+	{ErrPreviewUnknown, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired"},
+	{ErrPreviewUsed, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired"},
+}
+
 func writeWorkspaceServiceError(w http.ResponseWriter, err error, stateConflict bool) {
-	switch {
-	case errors.Is(err, workspace.ErrWorkspaceNotFound), errors.Is(err, session.ErrNotFound):
-		writeWorkspaceError(w, http.StatusNotFound, "workspace_not_found", "workspace or session was not found")
-	case errors.Is(err, ErrWorkspaceStateConflict):
-		writeWorkspaceError(w, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action")
-	case errors.Is(err, ErrPreviewExpired),
-		errors.Is(err, ErrPreviewEvicted),
-		errors.Is(err, ErrPreviewMismatch),
-		errors.Is(err, ErrPreviewUnknown),
-		errors.Is(err, ErrPreviewUsed):
-		writeWorkspaceError(w, http.StatusConflict, "preview_invalid", "workspace confirmation is invalid or expired")
-	case stateConflict:
-		writeWorkspaceError(w, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action")
-	default:
-		writeWorkspaceError(w, http.StatusServiceUnavailable, "workspace_unavailable", "workspace request could not be completed")
+	for _, mapping := range workspaceErrorMappings {
+		if errors.Is(err, mapping.err) {
+			writeWorkspaceError(w, mapping.status, mapping.code, mapping.message)
+			return
+		}
 	}
+	if stateConflict {
+		writeWorkspaceError(w, http.StatusConflict, "workspace_state_conflict", "workspace state does not allow that action")
+		return
+	}
+	writeWorkspaceError(w, http.StatusServiceUnavailable, "workspace_unavailable", "workspace request could not be completed")
 }
 
 func writeWorkspaceError(w http.ResponseWriter, status int, code, message string) {
