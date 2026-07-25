@@ -12,6 +12,7 @@ if (root) {
     profile: document.querySelector("#workspace-profile"),
     openCancel: document.querySelector("#workspace-open-cancel"),
     openStatus: document.querySelector("#workspace-open-status"),
+    openPrerequisite: document.querySelector("#workspace-open-prerequisite"),
     closeDialog: document.querySelector("#workspace-close-dialog"),
     closeTitle: document.querySelector("#workspace-close-title"),
     closeDirty: document.querySelector("#workspace-close-dirty"),
@@ -25,6 +26,10 @@ if (root) {
     requestToken: document.body.dataset.requestToken || "",
     workspaces: [],
     close: null,
+    // Assume git auth is configured until Desk says otherwise: a failed
+    // readiness read must not invent a prerequisite that does not exist.
+    githubReady: true,
+    githubGuidance: "",
   };
 
   async function readJSON(response) {
@@ -44,6 +49,15 @@ if (root) {
       throw error;
     }
     return payload;
+  }
+
+  async function read(path) {
+    return readJSON(await fetch(path, {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    }));
   }
 
   async function mutate(path, body) {
@@ -95,6 +109,65 @@ if (root) {
     return button;
   }
 
+  function pluralFiles(count) {
+    return count === 1 ? "1 uncommitted file" : `${count} uncommitted files`;
+  }
+
+  // renderGit projects the read-only git status returned by Desk. It never
+  // triggers a lifecycle change: an idle or closed workspace simply reports
+  // why its state is unavailable.
+  function renderGit(container, git) {
+    container.replaceChildren();
+    if (!git || git.available !== true) {
+      appendText(
+        container,
+        "p",
+        "workspace-git-unavailable",
+        (typeof git?.reason === "string" && git.reason) ||
+          "Git status is unavailable for this workspace.",
+      );
+      return;
+    }
+    const facts = document.createElement("dl");
+    facts.className = "workspace-facts workspace-git-facts";
+    appendFact(
+      facts,
+      "Branch",
+      git.detached === true ? "Detached HEAD" : git.branch || "Unknown branch",
+    );
+    const dirtyFiles = Number.isFinite(git.dirty_files) ? git.dirty_files : 0;
+    appendFact(facts, "Working tree", git.dirty === true ? pluralFiles(dirtyFiles) : "Clean");
+    appendFact(
+      facts,
+      "Tracking",
+      git.tracking === true
+        ? `${Number(git.ahead) || 0} ahead · ${Number(git.behind) || 0} behind`
+        : "No upstream branch",
+    );
+    appendFact(
+      facts,
+      "Last commit",
+      git.commit ? `${git.commit} ${git.subject || ""}`.trim() : "No commits yet",
+    );
+    container.append(facts);
+  }
+
+  async function loadGitStatus(workspace, container) {
+    container.replaceChildren();
+    appendText(container, "p", "workspace-git-pending", "Reading git status…");
+    try {
+      renderGit(
+        container,
+        await read(`/api/v1/desk/workspaces/${encodeURIComponent(workspace.id)}/git`),
+      );
+    } catch (error) {
+      renderGit(container, {
+        available: false,
+        reason: error.safeMessage || "Git status could not be read.",
+      });
+    }
+  }
+
   function renderWorkspace(workspace) {
     const card = document.createElement("article");
     card.className = "workspace-card";
@@ -113,6 +186,14 @@ if (root) {
     appendFact(facts, "Image", workspace.image || "default");
     appendFact(facts, "Network", workspace.egress || "No network egress");
     card.append(facts);
+
+    let git = null;
+    if (workspace.status !== "closed") {
+      git = document.createElement("section");
+      git.className = "workspace-git";
+      git.dataset.workspaceGit = workspace.id || "";
+      card.append(git);
+    }
 
     const actions = document.createElement("div");
     actions.className = "workspace-actions";
@@ -146,6 +227,11 @@ if (root) {
         await loadWorkspaces();
       }));
     }
+    if (git) {
+      actions.append(actionButton("Refresh git", "git-refresh", async () => {
+        await loadGitStatus(workspace, git);
+      }));
+    }
     if (workspace.status !== "closed") {
       actions.append(actionButton("Review close", "close-preview", async (opener) => {
         await previewClose(workspace, opener);
@@ -154,15 +240,21 @@ if (root) {
     if (actions.children.length > 0) {
       card.append(actions);
     }
-    return card;
+    return { card, git, workspace };
   }
 
   function render(snapshot) {
     state.workspaces = Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
-    elements.list.replaceChildren(...state.workspaces.map(renderWorkspace));
+    const entries = state.workspaces.map(renderWorkspace);
+    elements.list.replaceChildren(...entries.map((entry) => entry.card));
     elements.empty.hidden = state.workspaces.length !== 0;
     elements.empty.textContent =
       state.workspaces.length === 0 ? "No workspaces are open or retained." : "";
+    return Promise.all(
+      entries
+        .filter((entry) => entry.git)
+        .map((entry) => loadGitStatus(entry.workspace, entry.git)),
+    );
   }
 
   async function loadWorkspaces() {
@@ -175,12 +267,49 @@ if (root) {
         cache: "no-store",
         headers: { Accept: "application/json" },
       });
-      render(await readJSON(response));
+      await render(await readJSON(response));
       clearError();
     } catch (error) {
       showError(error.safeMessage || "Workspaces could not be loaded.");
       elements.empty.hidden = true;
     }
+  }
+
+  // loadGitHubReadiness names the git-auth prerequisite before the user
+  // submits the open dialog, instead of letting the open attempt fail with a
+  // generic message (#182).
+  async function loadGitHubReadiness() {
+    try {
+      const records = await read("/api/v1/desk/connections");
+      const github = Array.isArray(records)
+        ? records.find((record) => record?.kind === "github")
+        : null;
+      state.githubReady = !github || github.status !== "unconfigured";
+      state.githubGuidance =
+        typeof github?.guidance === "string" ? github.guidance : "";
+    } catch {
+      state.githubReady = true;
+      state.githubGuidance = "";
+    }
+    renderGitHubPrerequisite();
+  }
+
+  function renderGitHubPrerequisite() {
+    if (!elements.openPrerequisite) {
+      return;
+    }
+    if (state.githubReady) {
+      elements.openPrerequisite.hidden = true;
+      elements.openPrerequisite.textContent = "";
+      return;
+    }
+    elements.openPrerequisite.hidden = false;
+    elements.openPrerequisite.textContent = [
+      "GitHub App credentials are not configured, so Waffle cannot authenticate git for a new workspace.",
+      state.githubGuidance,
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
 
   function showError(message) {
@@ -286,4 +415,5 @@ if (root) {
   });
   elements.closeConfirm.addEventListener("click", confirmClose);
   void loadWorkspaces();
+  void loadGitHubReadiness();
 }

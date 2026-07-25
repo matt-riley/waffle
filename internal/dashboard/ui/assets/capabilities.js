@@ -711,11 +711,14 @@ if (root) {
       adapter: "Adapter",
       mcp: "MCP",
       profile: "Profile",
+      github: "GitHub",
+      intake: "Issue intake",
     };
     const statusLabels = {
       configured: "Configured",
       healthy: "Healthy",
       stale: "Stale",
+      unconfigured: "Not configured",
     };
     const sandboxLabels = {
       host: "Host tools",
@@ -745,6 +748,12 @@ if (root) {
       }
       if (egressLabels[item?.egress]) {
         summary.push(egressLabels[item.egress]);
+      }
+      if (typeof item?.label === "string" && item.label) {
+        summary.push(`Label ${item.label}`);
+      }
+      if (Number.isFinite(item?.concurrency) && item.concurrency > 0) {
+        summary.push(`Concurrency ${item.concurrency}`);
       }
       details.textContent = summary.join(" · ");
       card.appendChild(title);

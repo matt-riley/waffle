@@ -203,7 +203,20 @@ func main() {
 			},
 		},
 		Workspace: config.Workspace{Egress: "allowlist"},
-	}, nil))
+		GitHub: config.GitHub{App: config.GitHubApp{
+			AppID:          4242,
+			InstallationID: 8484,
+			PrivateKey:     "secret://desk-github-key-canary",
+			BaseURL:        "https://github.example.invalid/api/v3",
+		}},
+		Intake: config.Intake{GitHub: []config.GitHubWatch{{
+			Repo:           "fixture/board",
+			Label:          "waffle",
+			MaxConcurrency: 2,
+			Deliver:        "telegram:canary",
+			Token:          "secret://desk-intake-token-canary",
+		}}},
+	}, nil, nil))
 
 	server := &http.Server{
 		Handler:           security.Wrap(mux),
@@ -480,6 +493,26 @@ func (w *fixtureWorkspaces) Resume(_ context.Context, id string) (*workspace.Wor
 	}
 	item, err := w.Get(context.Background(), id)
 	return item, nil, err
+}
+
+func (w *fixtureWorkspaces) InspectGit(_ context.Context, id string) (*workspace.GitStatus, error) {
+	item, err := w.Get(context.Background(), id)
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != workspace.StatusOpen {
+		return nil, workspace.ErrWorkspaceNotRunning
+	}
+	if id == "workspace-dirty" {
+		return &workspace.GitStatus{
+			Branch: "feature/dirty", DirtyFiles: 1, Tracking: true, Ahead: 1,
+			CommitSHA: "abc1234", Subject: "local commit",
+		}, nil
+	}
+	return &workspace.GitStatus{
+		Branch: "main", Tracking: true,
+		CommitSHA: "def5678", Subject: "chore: release",
+	}, nil
 }
 
 func (w *fixtureWorkspaces) InspectClose(_ context.Context, id string) (*workspace.CloseReport, error) {

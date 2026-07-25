@@ -773,6 +773,45 @@ test("connections load read-only and render every allowlisted field as text", as
   );
 });
 
+test("github and intake connections render their allowlisted labels only", async () => {
+  const harness = createHarness({
+    connectionResponse: response([
+      {
+        name: "github",
+        kind: "github",
+        status: "unconfigured",
+        guidance: "Configure [github.app] to give workspaces git access.",
+      },
+      { name: "github", kind: "github", status: "stale" },
+      { name: "github", kind: "github", status: "healthy" },
+      {
+        name: "owner/board",
+        kind: "intake",
+        status: "configured",
+        label: "waffle",
+        concurrency: 2,
+        guidance: "Issues matching this label are picked up by the issue profile.",
+      },
+    ]),
+  });
+  await flush();
+
+  const cards = harness.elements["#capability-connections"].childNodes;
+  assert.equal(cards.length, 4);
+  assert.equal(cards[0].childNodes[1].textContent, "GitHub · Not configured");
+  assert.equal(
+    cards[0].childNodes[2].textContent,
+    "Configure [github.app] to give workspaces git access.",
+  );
+  assert.equal(cards[1].childNodes[1].textContent, "GitHub · Stale");
+  assert.equal(cards[2].childNodes[1].textContent, "GitHub · Healthy");
+  assert.equal(cards[3].childNodes[0].textContent, "owner/board");
+  assert.equal(
+    cards[3].childNodes[1].textContent,
+    "Issue intake · Configured · Label waffle · Concurrency 2",
+  );
+});
+
 test("connections use a stable accessible empty state", async () => {
   const harness = createHarness({ connectionResponse: response(null) });
   await flush();

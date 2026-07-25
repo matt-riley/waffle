@@ -69,6 +69,13 @@ type WorkspaceManager interface {
 	Close(context.Context, string, bool) (*workspace.CloseReport, error)
 }
 
+// WorkspaceGitReader is the read-only git projection seam used by Waffle
+// Desk. Implementations must not start containers or change workspace state
+// (#181).
+type WorkspaceGitReader interface {
+	InspectGit(context.Context, string) (*workspace.GitStatus, error)
+}
+
 // WorkspaceCloseLifecycle is the narrower close coordination contract used by
 // Waffle Desk. It linearizes preview acceptance with close transitions and
 // reports whether this caller actually changed the workspace state.
@@ -88,6 +95,7 @@ var (
 	_ UsageReader             = (*usage.Store)(nil)
 	_ WorkspaceManager        = (*workspace.Manager)(nil)
 	_ WorkspaceCloseLifecycle = (*workspace.Manager)(nil)
+	_ WorkspaceGitReader      = (*workspace.Manager)(nil)
 )
 
 // SectionError is a sanitized public error for one independently readable

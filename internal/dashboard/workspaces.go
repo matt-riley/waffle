@@ -50,6 +50,27 @@ type WorkspaceSnapshot struct {
 	Workspaces []WorkspaceView `json:"workspaces"`
 }
 
+// WorkspaceGitView is the read-only git projection for one workspace card.
+// It is deliberately narrow: branch, working-tree size, tracking distance,
+// and the last commit. Remotes, URLs, and paths never cross this boundary
+// (#181).
+type WorkspaceGitView struct {
+	WorkspaceID string `json:"workspace"`
+	Available   bool   `json:"available"`
+	// Reason explains an unavailable projection in fixed, redacted text.
+	Reason string `json:"reason,omitempty"`
+
+	Branch     string `json:"branch,omitempty"`
+	Detached   bool   `json:"detached,omitempty"`
+	Dirty      bool   `json:"dirty"`
+	DirtyFiles int    `json:"dirty_files"`
+	Tracking   bool   `json:"tracking"`
+	Ahead      int    `json:"ahead"`
+	Behind     int    `json:"behind"`
+	CommitSHA  string `json:"commit,omitempty"`
+	Subject    string `json:"subject,omitempty"`
+}
+
 type WorkspaceMutationResponse struct {
 	Workspace WorkspaceView `json:"workspace"`
 	TodayURL  string        `json:"today_url,omitempty"`
@@ -193,6 +214,66 @@ func (s *WorkspacesService) Resume(ctx context.Context, id string) (WorkspaceMut
 	response := WorkspaceMutationResponse{Workspace: s.view(*ws)}
 	s.publish(WorkspaceResumedEvent, response.Workspace)
 	return response, nil
+}
+
+// GitStatus projects read-only git state for one workspace. It performs no
+// state change and cannot transition or close the workspace: a workspace that
+// is not already running reports unavailable rather than being started (#181).
+func (s *WorkspacesService) GitStatus(ctx context.Context, id string) (WorkspaceGitView, error) {
+	if s == nil || s.operations == nil || s.operations.Workspaces == nil {
+		return WorkspaceGitView{}, ErrOperationsDependencyUnavailable
+	}
+	ws, err := s.get(ctx, id)
+	if err != nil {
+		return WorkspaceGitView{}, err
+	}
+	view := WorkspaceGitView{WorkspaceID: sanitizeDashboardString(ws.ID)}
+	reader, ok := s.operations.Workspaces.(WorkspaceGitReader)
+	if !ok {
+		return WorkspaceGitView{}, ErrOperationsDependencyUnavailable
+	}
+	status, err := reader.InspectGit(ctx, id)
+	if err != nil {
+		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
+			return WorkspaceGitView{}, err
+		}
+		view.Reason = workspaceGitUnavailableReason(err, ws.Status)
+		return view, nil
+	}
+	if status == nil {
+		view.Reason = "Git status is unavailable for this workspace."
+		return view, nil
+	}
+	view.Available = true
+	view.Branch = sanitizeDashboardString(strings.TrimSpace(status.Branch))
+	view.Detached = status.Detached
+	view.DirtyFiles = max(status.DirtyFiles, 0)
+	view.Dirty = view.DirtyFiles > 0
+	view.Tracking = status.Tracking
+	view.Ahead = max(status.Ahead, 0)
+	view.Behind = max(status.Behind, 0)
+	view.CommitSHA = sanitizeDashboardString(strings.TrimSpace(status.CommitSHA))
+	view.Subject = sanitizeDashboardString(strings.TrimSpace(status.Subject))
+	return view, nil
+}
+
+// workspaceGitUnavailableReason maps an inspection failure to fixed, redacted
+// text. Upstream error strings can carry paths, remote URLs, or command
+// output and are never surfaced.
+func workspaceGitUnavailableReason(err error, status string) string {
+	if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) || status == workspace.StatusClosed {
+		return "The workspace is closed."
+	}
+	if errors.Is(err, workspace.ErrWorkspaceNotRunning) {
+		switch status {
+		case workspace.StatusIdle:
+			return "The workspace is idle. Resume it to read git status."
+		case workspace.StatusFailed:
+			return "The workspace is not running."
+		}
+		return "The workspace is not running."
+	}
+	return "Git status could not be read from this workspace."
 }
 
 func (s *WorkspacesService) PreviewClose(ctx context.Context, id string) (WorkspaceClosePreview, error) {
@@ -351,6 +432,9 @@ func RegisterWorkspaceRoutes(mux *http.ServeMux, routeConfig WorkspaceRouteConfi
 	}
 	service := NewWorkspacesService(routeConfig.Operations, routeConfig.Egress)
 	mux.Handle("GET /api/v1/desk/workspaces", newWorkspaceListHandler(service))
+	// Git status is a GET: it changes nothing, so it carries no preview token
+	// and is not wrapped in the mutation guard (#181).
+	mux.Handle("GET /api/v1/desk/workspaces/{id}/git", newWorkspaceGitHandler(service))
 	if routeConfig.Security == nil || routeConfig.Idempotency == nil {
 		return
 	}
@@ -379,6 +463,17 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)
+	})
+}
+
+func newWorkspaceGitHandler(service *WorkspacesService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		view, err := service.GitStatus(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeWorkspaceServiceError(w, err, false)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
 	})
 }
 
