@@ -928,7 +928,9 @@ func setFrontmatterStatus(raw, status string) string {
 
 // DiscoverActive returns skills that are active (frontmatter status active or
 // missing; inactive filtered out). When db is non-nil, skill_status overrides
-// frontmatter for known names.
+// frontmatter for known names. If skill_status cannot be read, DiscoverActive
+// returns an error (fail closed) rather than silently treating inactive skills
+// as active.
 func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 	all, err := Discover(dir)
 	if err != nil {
@@ -940,19 +942,16 @@ func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 // FilterActive returns the active subset of an already-discovered skill list.
 // Callers that also need the full list should Discover once and filter, rather
 // than calling Discover and DiscoverActive (which walks the directory twice).
+//
+// When db is non-nil, skill_status rows override frontmatter. A missing row is
+// not an error: legacy skills without a status row fall back to frontmatter
+// (missing status defaults to active, preserving #65). A failed query, Scan, or
+// rows.Err is an error — no skill is reported active when the override table
+// cannot be read (deny-by-default).
 func FilterActive(all []Skill, db *sql.DB) ([]Skill, error) {
-	statusOverride := map[string]string{}
-	if db != nil {
-		rows, err := db.Query(`SELECT name, status FROM skill_status`)
-		if err == nil {
-			defer func() { _ = rows.Close() }()
-			for rows.Next() {
-				var n, s string
-				if err := rows.Scan(&n, &s); err == nil {
-					statusOverride[n] = s
-				}
-			}
-		}
+	statusOverride, err := loadSkillStatusOverrides(db)
+	if err != nil {
+		return nil, err
 	}
 	var out []Skill
 	for _, s := range all {
@@ -967,6 +966,43 @@ func FilterActive(all []Skill, db *sql.DB) ([]Skill, error) {
 		if st == StatusActive {
 			out = append(out, s)
 		}
+	}
+	return out, nil
+}
+
+// loadSkillStatusOverrides reads name→status from skill_status. A nil db means
+// no overrides (frontmatter-only). Query/scan/iteration failures return an
+// error so callers fail closed instead of activating inactive skills.
+func loadSkillStatusOverrides(db *sql.DB) (map[string]string, error) {
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.Query(`SELECT name, status FROM skill_status`)
+	if err != nil {
+		return nil, fmt.Errorf("skill_status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanSkillStatusRows(rows)
+}
+
+// skillStatusRows is the *sql.Rows subset used when loading overrides.
+type skillStatusRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+func scanSkillStatusRows(rows skillStatusRows) (map[string]string, error) {
+	out := map[string]string{}
+	for rows.Next() {
+		var n, s string
+		if err := rows.Scan(&n, &s); err != nil {
+			return nil, fmt.Errorf("skill_status scan: %w", err)
+		}
+		out[n] = s
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("skill_status iterate: %w", err)
 	}
 	return out, nil
 }
