@@ -988,7 +988,6 @@ async function openDesk() {
       throw new Error("missing_client_lease");
     }
     renderCanonicalState(opened.state, true);
-    persistOwner();
     openEventStream();
     setPhase(phase.idle);
     elements.message.focus();

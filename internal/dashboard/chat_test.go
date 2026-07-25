@@ -93,6 +93,9 @@ func TestTodayClientStaticContract(t *testing.T) {
 	if got := strings.Count(source, `postMutation("/api/v1/desk/chat/cancel"`); got != 1 {
 		t.Errorf("cancel mutation call sites = %d, want exactly 1", got)
 	}
+	if got := strings.Count(source, "persistOwner();"); got != 1 {
+		t.Errorf("persistOwner call sites = %d, want exactly 1", got)
+	}
 	cancelStart := strings.Index(source, "async function cancelTurn")
 	commandStart := strings.Index(source, "async function runCommandOperation")
 	if cancelStart == -1 || commandStart <= cancelStart {
@@ -100,6 +103,30 @@ func TestTodayClientStaticContract(t *testing.T) {
 	}
 	if strings.Contains(source[cancelStart:commandStart], "setPhase(phase.idle)") {
 		t.Fatal("cancel must wait for turn_done instead of restoring idle itself")
+	}
+}
+
+func TestCloneChatStateCopiesToolPointers(t *testing.T) {
+	original := chat.State{History: []llm.Message{{Blocks: []llm.Block{
+		{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "use-1", Name: "bash"}},
+		{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "use-1", Content: "ok"}},
+	}}}}
+
+	cloned := cloneChatState(original)
+	if cloned.History[0].Blocks[0].ToolUse == original.History[0].Blocks[0].ToolUse {
+		t.Fatal("clone shares ToolUse pointer with original state")
+	}
+	if cloned.History[0].Blocks[1].ToolResult == original.History[0].Blocks[1].ToolResult {
+		t.Fatal("clone shares ToolResult pointer with original state")
+	}
+
+	cloned.History[0].Blocks[0].ToolUse.Name = "changed"
+	cloned.History[0].Blocks[1].ToolResult.Content = "changed"
+	if got := original.History[0].Blocks[0].ToolUse.Name; got != "bash" {
+		t.Fatalf("original ToolUse name = %q, want bash", got)
+	}
+	if got := original.History[0].Blocks[1].ToolResult.Content; got != "ok" {
+		t.Fatalf("original ToolResult content = %q, want ok", got)
 	}
 }
 

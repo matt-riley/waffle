@@ -662,6 +662,16 @@ func cloneChatState(state chat.State) chat.State {
 	cloned.History = append([]llm.Message(nil), state.History...)
 	for i := range cloned.History {
 		cloned.History[i].Blocks = append([]llm.Block(nil), state.History[i].Blocks...)
+		for j, block := range cloned.History[i].Blocks {
+			if block.ToolUse != nil {
+				cp := *block.ToolUse
+				cloned.History[i].Blocks[j].ToolUse = &cp
+			}
+			if block.ToolResult != nil {
+				cp := *block.ToolResult
+				cloned.History[i].Blocks[j].ToolResult = &cp
+			}
+		}
 	}
 	cloned.Models = append([]chat.Model(nil), state.Models...)
 	cloned.Skills = append([]chat.SkillRef(nil), state.Skills...)
