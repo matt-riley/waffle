@@ -188,6 +188,23 @@ globalThis.waffleDeskRail = Object.freeze({
   getState: () => ({ ...railState }),
 });
 
+// Hash navigation alone does not reliably move focus; make the skip link do so.
+// Guard for unit harnesses that only stub a subset of document APIs.
+if (typeof document.querySelectorAll === "function") {
+  document.querySelectorAll("a.skip-link[href^='#']").forEach((link) => {
+    link.addEventListener("click", () => {
+      const id = link.getAttribute("href")?.slice(1);
+      if (!id) {
+        return;
+      }
+      const target = document.getElementById(id);
+      if (target && typeof target.focus === "function") {
+        target.focus();
+      }
+    });
+  });
+}
+
 void hydrateRail();
 
 const section = document.querySelector(".desk-shell")?.dataset.activeSection || "today";

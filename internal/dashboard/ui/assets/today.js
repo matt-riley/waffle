@@ -997,7 +997,18 @@ async function openDesk() {
     renderCanonicalState(opened.state, true);
     openEventStream();
     setPhase(phase.idle);
-    elements.message.focus();
+    // Do not steal focus if the user already moved it (e.g. skip link → main)
+    // while the async open was in flight. Autofocus only when focus is still
+    // on the document default or the composer itself.
+    const active = document.activeElement;
+    if (
+      !active ||
+      active === document.body ||
+      active === document.documentElement ||
+      active === elements.message
+    ) {
+      elements.message.focus();
+    }
   } catch (error) {
     if (generation !== state.generation) {
       return;
