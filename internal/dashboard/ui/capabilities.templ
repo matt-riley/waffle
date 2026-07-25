@@ -82,20 +82,24 @@ templ Capabilities() {
 					<h2 id="capability-skills-title">Reviewed skills</h2>
 				</header>
 				<div id="capability-skills" class="capability-list"></div>
+				<p id="capability-skill-stage-prerequisite" class="capability-form-status" role="status" aria-live="polite" hidden></p>
 				<form id="capability-skill-stage-form" aria-describedby="capability-skill-stage-status">
 					<h3>Add a skill for review</h3>
-					<label for="capability-skill-local-path">Allowed local path</label>
-					<input id="capability-skill-local-path" name="local_path"/>
-					<label for="capability-skill-git-url">Or allowed Git URL</label>
-					<input id="capability-skill-git-url" name="git_url" type="url"/>
-					<label for="capability-skill-commit">Exact Git commit</label>
-					<input id="capability-skill-commit" name="commit"/>
+					<label for="capability-skill-local-path">Local skill path</label>
+					<p id="capability-skill-local-help" class="skill-source-help"></p>
+					<input id="capability-skill-local-path" name="local_path" autocomplete="off"/>
+					<label for="capability-skill-git-url">Git skill URL</label>
+					<p id="capability-skill-git-help" class="skill-source-help"></p>
+					<input id="capability-skill-git-url" name="git_url" type="url" autocomplete="off"/>
+					<label for="capability-skill-commit">Exact Git commit (40 lowercase hex)</label>
+					<input id="capability-skill-commit" name="commit" autocomplete="off"/>
 					<button type="submit">Stage review</button>
 					<p class="capability-form-status" id="capability-skill-stage-status" role="status" aria-live="polite"></p>
 				</form>
 				<section id="capability-skill-review" class="skill-review" aria-labelledby="capability-skill-review-title" hidden>
 					<h3 id="capability-skill-review-title">Review manifest and diff</h3>
-					<pre id="capability-skill-preview"></pre>
+					<div id="capability-skill-preview" class="skill-review-content"></div>
+					<p id="capability-skill-review-expires" class="skill-review-expiry" role="status" aria-live="polite"></p>
 					<button type="button" id="capability-skill-install" aria-describedby="capability-skill-install-status">Install inactive</button>
 					<p class="capability-form-status" id="capability-skill-install-status" role="status" aria-live="polite"></p>
 				</section>

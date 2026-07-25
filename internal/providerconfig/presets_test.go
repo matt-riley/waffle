@@ -1,7 +1,11 @@
 package providerconfig
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"testing"
 )
 
@@ -40,11 +44,42 @@ func TestClassifyProbeErrorSeparatesRejectionsFromUnreachableEndpoints(t *testin
 		{name: "success", err: nil, want: ProbeOutcomeSuccess},
 		{name: "unauthorized", err: errors.New("provider returned 401 unauthorized"), want: ProbeOutcomeAuthentication},
 		{name: "forbidden", err: errors.New("HTTP 403 forbidden"), want: ProbeOutcomeAuthentication},
+		{name: "authentication failed text", err: errors.New("authentication failed"), want: ProbeOutcomeAuthentication},
 		{name: "unknown model", err: errors.New("provider returned 404 not found"), want: ProbeOutcomeRequestFailed},
 		{name: "rate limited", err: errors.New("provider returned 429 too many requests"), want: ProbeOutcomeRequestFailed},
 		{name: "upstream error", err: errors.New("provider returned 502 bad gateway"), want: ProbeOutcomeRequestFailed},
-		{name: "dial failure", err: errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), want: ProbeOutcomeUnreachable},
-		{name: "dns failure", err: errors.New("lookup gateway.example: no such host"), want: ProbeOutcomeUnreachable},
+		{name: "dial failure text", err: errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), want: ProbeOutcomeUnreachable},
+		{name: "dns failure text", err: errors.New("lookup gateway.example: no such host"), want: ProbeOutcomeUnreachable},
+		{
+			name: "deadline mentions authentication proxy",
+			err:  fmt.Errorf("context deadline exceeded reaching authentication proxy: %w", context.DeadlineExceeded),
+			want: ProbeOutcomeUnreachable,
+		},
+		{
+			name: "canceled",
+			err:  fmt.Errorf("probe canceled: %w", context.Canceled),
+			want: ProbeOutcomeUnreachable,
+		},
+		{
+			name: "url timeout",
+			err:  &url.Error{Op: "Get", URL: "https://gateway.example/v1", Err: context.DeadlineExceeded},
+			want: ProbeOutcomeUnreachable,
+		},
+		{
+			name: "op error",
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+			want: ProbeOutcomeUnreachable,
+		},
+		{
+			name: "structured http 401",
+			err:  probeHTTPStatusError{status: 401, message: "rejected"},
+			want: ProbeOutcomeAuthentication,
+		},
+		{
+			name: "structured http 404",
+			err:  probeStatusCodeError{status: 404, message: "missing"},
+			want: ProbeOutcomeRequestFailed,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := ClassifyProbeError(testCase.err); got != testCase.want {
@@ -53,6 +88,22 @@ func TestClassifyProbeErrorSeparatesRejectionsFromUnreachableEndpoints(t *testin
 		})
 	}
 }
+
+type probeHTTPStatusError struct {
+	status  int
+	message string
+}
+
+func (e probeHTTPStatusError) Error() string   { return e.message }
+func (e probeHTTPStatusError) HTTPStatus() int { return e.status }
+
+type probeStatusCodeError struct {
+	status  int
+	message string
+}
+
+func (e probeStatusCodeError) Error() string   { return e.message }
+func (e probeStatusCodeError) StatusCode() int { return e.status }
 
 func TestPresetListValidatesSupportedTypesAndBaseURLRequirements(t *testing.T) {
 	presets := Presets()

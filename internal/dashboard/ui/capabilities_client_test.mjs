@@ -133,6 +133,9 @@ function createHarness({
   utilityResponse = response({ restart_required: false }),
   modelResponse = response({ restart_required: false }),
   catalogueResponse = response({ connection: "primary", models: [] }),
+  stageResponse = response({}, true, 200),
+  installResponse = response({ restart_required: false }),
+  skillLifecycleResponse = response({ restart_required: false }),
   capabilitiesResponse = null,
   connectionResponse = response([]),
   connectionResponses = null,
@@ -185,10 +188,14 @@ function createHarness({
     "#capability-catalogue-results",
     "#capability-skill-stage-form",
     "#capability-skill-stage-status",
+    "#capability-skill-stage-prerequisite",
+    "#capability-skill-local-help",
+    "#capability-skill-git-help",
     "#capability-skill-local-path",
     "#capability-skill-git-url",
     "#capability-skill-commit",
     "#capability-skill-review",
+    "#capability-skill-review-expires",
     "#capability-skill-preview",
     "#capability-skill-install",
     "#capability-skill-install-status",
@@ -363,6 +370,16 @@ function createHarness({
     if (path === "/api/v1/desk/models/catalogue/refresh") {
       return catalogueResponse;
     }
+    if (path === "/api/v1/desk/skills/stage") {
+      return stageResponse;
+    }
+    if (path === "/api/v1/desk/skills/install") {
+      return installResponse;
+    }
+    if (path.startsWith("/api/v1/desk/skills/") &&
+      (path.endsWith("/activate") || path.endsWith("/deactivate") || path.endsWith("/uninstall"))) {
+      return skillLifecycleResponse;
+    }
     if (path === "/api/v1/desk/bootstrap") {
       const generation =
         bootstrapGenerations[Math.min(bootstrapPolls, bootstrapGenerations.length - 1)];
@@ -458,6 +475,207 @@ function findSkillActivateButton(skillsRoot) {
   }
   return null;
 }
+
+function findSkillButton(skillsRoot, dataKey) {
+  for (const card of skillsRoot.childNodes) {
+    for (const child of card.childNodes || []) {
+      if (child.dataset && child.dataset[dataKey] === "true") {
+        return child;
+      }
+    }
+  }
+  return null;
+}
+
+function nodeText(node) {
+  if (!node) return "";
+  return `${node.textContent || ""}${(node.childNodes || []).map(nodeText).join("")}`;
+}
+
+test("skill review renders safe audit, provenance, files, and previews without raw JSON", async () => {
+  const hostilePreview = `<img src=x onerror="steal()">`;
+  const harness = createHarness({
+    clock: true,
+    deferTimers: true,
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [],
+      skill_sources: { local_roots: ["reviewed-skills"], git_hosts: [] },
+    }),
+    stageResponse: response({
+      name: "reviewer",
+      description: "Reviews changes.",
+      source_ref: "local:reviewer",
+      content_digest: "sha256:reviewer",
+      expires_at: "1970-01-01T00:01:01.000Z",
+      audit: { passed: false, flags: ["code:review.py", "network-reference:guide.txt"] },
+      files: [{ path: "SKILL.md", size: 12, sha256: "abc123", preview: hostilePreview }],
+      stage_id: "stage-review",
+    }),
+  });
+  await flush();
+  harness.elements["#capability-skill-local-path"].value = "/imports/reviewer";
+  await harness.elements["#capability-skill-stage-form"].listener("submit")({ preventDefault() {} });
+  await flush();
+
+  const review = harness.elements["#capability-skill-preview"];
+  assert.match(nodeText(review), /local:reviewer/);
+  assert.match(nodeText(review), /sha256:reviewer/);
+  assert.match(nodeText(review), /code:review\.py/);
+  assert.match(nodeText(review), /network-reference:guide\.txt/);
+  assert.match(nodeText(review), /SKILL\.md/);
+  assert.match(nodeText(review), /<img src=x onerror="steal\(\)">/);
+  assert.equal(harness.elements["#capability-skill-install"].hidden, true);
+  assert.equal(source.includes("innerHTML"), false);
+  assert.equal(source.includes("JSON.stringify(state.staged"), false);
+});
+
+test("expired skill review disables install and tells the user to re-stage", async () => {
+  const harness = createHarness({
+    clock: true,
+    deferTimers: true,
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [],
+      skill_sources: { local_roots: ["reviewed-skills"], git_hosts: [] },
+    }),
+    stageResponse: response({
+      name: "reviewer",
+      source_ref: "local:reviewer",
+      content_digest: "sha256:reviewer",
+      expires_at: "1970-01-01T00:00:01.000Z",
+      audit: { passed: true, flags: [] },
+      files: [],
+      stage_id: "stage-expiring",
+    }),
+  });
+  await flush();
+  harness.elements["#capability-skill-local-path"].value = "/imports/reviewer";
+  await harness.elements["#capability-skill-stage-form"].listener("submit")({ preventDefault() {} });
+  await flush();
+  await harness.runTimersUntilIdle();
+
+  assert.equal(harness.elements["#capability-skill-install"].disabled, true);
+  assert.match(harness.elements["#capability-skill-review-expires"].textContent, /re-stage/i);
+  assert.equal(harness.calls.filter((call) => call.path === "/api/v1/desk/skills/install").length, 0);
+});
+
+test("skill source choices explain the deny-by-default state and validate Git input", async () => {
+  const empty = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+  });
+  await flush();
+  assert.equal(empty.elements["#capability-skill-stage-form"].hidden, true);
+  assert.equal(empty.elements["#capability-skill-stage-form"].dataset.disabled, "true");
+  assert.equal(empty.elements["#capability-skill-local-path"].disabled, true);
+  assert.equal(empty.elements["#capability-skill-stage-prerequisite"].hidden, false);
+  assert.match(empty.elements["#capability-skill-stage-prerequisite"].textContent, /skill_import_roots/);
+  assert.match(empty.elements["#capability-skill-stage-prerequisite"].textContent, /skill_git_hosts/);
+
+  const configured = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [],
+      skill_sources: { local_roots: ["reviewed-skills"], git_hosts: ["github.com"] },
+    }),
+  });
+  await flush();
+  assert.match(configured.elements["#capability-skill-local-help"].textContent, /reviewed-skills/);
+  assert.match(configured.elements["#capability-skill-git-help"].textContent, /github\.com/);
+
+  configured.elements["#capability-skill-git-url"].value = "https://github.com/org/reviewer";
+  configured.elements["#capability-skill-commit"].value = "not-a-commit";
+  await configured.elements["#capability-skill-stage-form"].listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.match(configured.elements["#capability-skill-stage-status"].textContent, /40-hex/i);
+  assert.equal(configured.calls.filter((call) => call.path === "/api/v1/desk/skills/stage").length, 0);
+});
+
+test("skill lifecycle controls preserve active gates and use inverse routes", async () => {
+  const active = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [{ name: "reviewer", active: true, attached: false }],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+  });
+  await flush();
+  const deactivate = findSkillButton(active.elements["#capability-skills"], "skillDeactivate");
+  assert.ok(deactivate);
+  await deactivate.listener("click")();
+  await flush();
+  assert.equal(active.calls.filter((call) => call.path === "/api/v1/desk/skills/reviewer/deactivate").length, 1);
+
+  const attached = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [{ name: "reviewer", active: false, attached: true }],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+  });
+  await flush();
+  const uninstall = findSkillButton(attached.elements["#capability-skills"], "skillUninstall");
+  assert.ok(uninstall);
+  assert.equal(uninstall.disabled, true);
+  assert.equal(attached.calls.filter((call) => call.path.endsWith("/uninstall")).length, 0);
+});
+
+test("skill uninstall attachment conflicts clear the intent before retry", async () => {
+  let uninstallHits = 0;
+  const lifecycleResponses = {
+    then(onFulfilled) {
+      uninstallHits += 1;
+      const result = uninstallHits === 1
+        ? response({ code: "skill_attached", message: "skill is attached" }, false, 409)
+        : response({ restart_required: false });
+      return Promise.resolve(result).then(onFulfilled);
+    },
+  };
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [{ name: "reviewer", active: false, attached: false }],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+    skillLifecycleResponse: lifecycleResponses,
+    uuidSequence: ["uninstall-conflict", "uninstall-retry"],
+  });
+  await flush();
+
+  const uninstall = findSkillButton(harness.elements["#capability-skills"], "skillUninstall");
+  assert.ok(uninstall);
+  await uninstall.listener("click")();
+  await flush();
+  await uninstall.listener("click")();
+  await flush();
+
+  const calls = harness.calls.filter((call) => call.path.endsWith("/uninstall"));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.headers["Idempotency-Key"], "uninstall-conflict");
+  assert.equal(
+    calls[1].options.headers["Idempotency-Key"],
+    "uninstall-retry",
+    "attachment conflicts must not replay the stale uninstall intent",
+  );
+});
+
+test("attached missing skills remain visibly actionable without an activate action", async () => {
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [{ name: "reviewer", active: false, attached: true, missing: true }],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+  });
+  await flush();
+  const card = harness.elements["#capability-skills"].childNodes[0];
+  assert.match(nodeText(card), /Missing from the library/);
+  assert.equal(findSkillActivateButton(harness.elements["#capability-skills"]), null);
+});
 
 test("provider credential clears and polling waits for a changed process without replay", async () => {
   const harness = createHarness({

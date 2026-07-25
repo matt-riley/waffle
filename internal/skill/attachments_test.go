@@ -68,6 +68,139 @@ func TestAttachmentsAreUniqueSortedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestAttachmentsNormalizeSkillNamesBeforePersisting(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	sess, err := sessions.Create(ctx, "normalized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+
+	if err := attachments.Attach(ctx, sess.ID, " reviewer \t"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"reviewer"}; !slices.Equal(got, want) {
+		t.Fatalf("attachments = %v, want %v", got, want)
+	}
+	references, err := attachments.References(ctx, " reviewer ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references) != 1 || references[0].SessionID != sess.ID {
+		t.Fatalf("references = %#v, want session %q", references, sess.ID)
+	}
+	if err := attachments.Detach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	got, err = attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("attachments after normalized detach = %v, want empty", got)
+	}
+}
+
+func TestAttachmentsNormalizeLegacyWhitespaceRowsAtSQLBoundary(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	sess, err := sessions.Create(ctx, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+
+	for _, name := range []string{" reviewer ", "reviewer"} {
+		if _, err := st.DB.ExecContext(ctx, `
+			INSERT INTO session_skills (session_id, skill_name, attached_at)
+			VALUES (?, ?, ?)`, sess.ID, name, "2026-07-25T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"reviewer"}; !slices.Equal(got, want) {
+		t.Fatalf("legacy attachments = %v, want %v", got, want)
+	}
+	references, err := attachments.References(ctx, " reviewer ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []AttachmentReference{{SessionID: sess.ID, Title: "legacy"}}; !slices.Equal(references, want) {
+		t.Fatalf("legacy references = %#v, want %#v", references, want)
+	}
+
+	if err := attachments.Attach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM session_skills
+		WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("attachment rows after idempotent legacy attach = %d, want 2", count)
+	}
+
+	if err := attachments.Detach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	got, err = attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("legacy attachments after detach = %v, want empty", got)
+	}
+	references, err = attachments.References(ctx, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references) != 0 {
+		t.Fatalf("legacy references after detach = %#v, want empty", references)
+	}
+}
+
+func TestAttachmentsReferencesReturnStableSessionLabels(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+	if err := attachments.Attach(ctx, second.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachments.Attach(ctx, first.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+
+	references, err := attachments.References(ctx, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []AttachmentReference{
+		{SessionID: first.ID, Title: "first"},
+		{SessionID: second.ID, Title: "second"},
+	}; !slices.Equal(references, want) {
+		t.Fatalf("references = %#v, want %#v", references, want)
+	}
+}
+
 func TestAttachmentsCascadeWithSession(t *testing.T) {
 	ctx := context.Background()
 	st, sessions := openAttachmentTestStore(t)

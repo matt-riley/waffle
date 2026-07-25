@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/dashboard"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
@@ -126,6 +127,56 @@ func TestSkillsCommandAttachesIdempotentlyAndDetachesWithoutDeactivation(t *test
 	}
 	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "detach reviewer"}, nil); err != nil {
 		t.Fatalf("idempotent detach: %v", err)
+	}
+}
+
+func TestSkillsCommandRejectsStaleRuntimeAttachAfterUninstall(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review every change", skill.StatusActive, "Review every changed file.")
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ws := memory.Workspace{Dir: filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main")}
+	if err := skill.DeactivateSkill(ctx, runtime.st.DB, ws, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	guard := runtime.st.SkillLifecycleGuard()
+	attachments := &skill.Attachments{DB: runtime.st.DB, Workspace: ws, Lifecycle: guard}
+	if err := skill.UninstallSkill(ctx, runtime.st.DB, ws, "reviewer", attachments, guard); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer"}, nil)
+	if err == nil {
+		t.Fatal("stale runtime attach succeeded after uninstall")
+	}
+	var count int
+	if err := runtime.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_skills WHERE session_id = ? AND skill_name = ?`, runtime.current.ID, "reviewer").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale runtime created attachment rows = %d, want zero", count)
+	}
+}
+
+func TestSkillsCommandNormalizesAttachmentNameBeforeRuntimePersistence(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review every change", skill.StatusActive, "Review every changed file.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer "}, nil); err != nil {
+		t.Fatal(err)
+	}
+	names, err := (&skill.Attachments{DB: runtime.st.DB}).List(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"reviewer"}) {
+		t.Fatalf("runtime persisted attachments = %v, want [reviewer]", names)
 	}
 }
 

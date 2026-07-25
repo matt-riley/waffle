@@ -43,11 +43,15 @@ if (root) {
     catalogueResults: document.querySelector("#capability-catalogue-results"),
     stageForm: document.querySelector("#capability-skill-stage-form"),
     stageStatus: document.querySelector("#capability-skill-stage-status"),
+    stagePrerequisite: document.querySelector("#capability-skill-stage-prerequisite"),
+    stageLocalHelp: document.querySelector("#capability-skill-local-help"),
+    stageGitHelp: document.querySelector("#capability-skill-git-help"),
     stageLocal: document.querySelector("#capability-skill-local-path"),
     stageGit: document.querySelector("#capability-skill-git-url"),
     stageCommit: document.querySelector("#capability-skill-commit"),
     review: document.querySelector("#capability-skill-review"),
     preview: document.querySelector("#capability-skill-preview"),
+    reviewExpires: document.querySelector("#capability-skill-review-expires"),
     install: document.querySelector("#capability-skill-install"),
     installStatus: document.querySelector("#capability-skill-install-status"),
   };
@@ -68,6 +72,7 @@ if (root) {
     providerState: null,
     providerPresetName: "",
     providerPresetBaseURL: "",
+    reviewGeneration: 0,
   };
 
   function setPageStatus(message) {
@@ -198,7 +203,7 @@ if (root) {
     }
     if (typeof elements.skills.querySelectorAll === "function") {
       const buttons = elements.skills.querySelectorAll(
-        'button[data-skill-activate="true"]',
+        'button[data-skill-activate="true"], button[data-skill-deactivate="true"], button[data-skill-uninstall="true"]',
       );
       // Real DOM returns a NodeList (possibly empty). A fake harness that
       // implements querySelectorAll but stores cards only in childNodes falls
@@ -219,7 +224,11 @@ if (root) {
       if (!node) {
         return;
       }
-      if (node.dataset && node.dataset.skillActivate === "true") {
+      if (node.dataset && (
+        node.dataset.skillActivate === "true" ||
+        node.dataset.skillDeactivate === "true" ||
+        node.dataset.skillUninstall === "true"
+      )) {
         node.disabled = disabled;
       }
       if (Array.isArray(node.childNodes)) {
@@ -280,6 +289,10 @@ if (root) {
           : "Capability request could not be completed.";
       if (typeof payload.field === "string" && payload.field) {
         error.field = payload.field;
+      }
+      error.status = response.status;
+      if (typeof payload.code === "string" && payload.code) {
+        error.code = payload.code;
       }
       throw error;
     }
@@ -644,6 +657,188 @@ if (root) {
     }
   }
 
+  function renderSkillSources(sources) {
+    const localRoots = Array.isArray(sources?.local_roots)
+      ? sources.local_roots.filter((value) => typeof value === "string" && value)
+      : [];
+    const gitHosts = Array.isArray(sources?.git_hosts)
+      ? sources.git_hosts.filter((value) => typeof value === "string" && value)
+      : [];
+    state.skillSources = { localAvailable: localRoots.length > 0, gitAvailable: gitHosts.length > 0 };
+    const available = localRoots.length > 0 || gitHosts.length > 0;
+    if (elements.stagePrerequisite) {
+      elements.stagePrerequisite.hidden = available;
+      elements.stagePrerequisite.textContent = available
+        ? ""
+        : "Skill imports are disabled. Configure [dashboard] skill_import_roots or [dashboard] skill_git_hosts, then restart Waffle.";
+    }
+    if (elements.stageForm) {
+      elements.stageForm.hidden = !available;
+      elements.stageForm.dataset.disabled = available ? "false" : "true";
+      const controls = typeof elements.stageForm.querySelectorAll === "function"
+        ? elements.stageForm.querySelectorAll("input, button, select, textarea")
+        : elements.stageForm.controls || [];
+      for (const control of controls) {
+        control.disabled = !available;
+      }
+    }
+    if (elements.stageLocalHelp) {
+      elements.stageLocalHelp.textContent = localRoots.length
+        ? `Allowed local roots: ${localRoots.join(", ")}`
+        : "No local skill roots are configured.";
+    }
+    if (elements.stageGitHelp) {
+      elements.stageGitHelp.textContent = gitHosts.length
+        ? `Allowed Git hosts: ${gitHosts.join(", ")}`
+        : "No Git hosts are configured.";
+    }
+    updateSkillSourceFields();
+  }
+
+  function updateSkillSourceFields() {
+    const sourceState = state.skillSources || { localAvailable: false, gitAvailable: false };
+    const localSelected = Boolean(elements.stageLocal?.value.trim());
+    const gitSelected = Boolean(elements.stageGit?.value.trim());
+    if (elements.stageLocal) {
+      elements.stageLocal.disabled = !sourceState.localAvailable || gitSelected;
+    }
+    if (elements.stageGit) {
+      elements.stageGit.disabled = !sourceState.gitAvailable || localSelected;
+    }
+    if (elements.stageCommit) {
+      elements.stageCommit.disabled = !sourceState.gitAvailable || localSelected;
+    }
+  }
+
+  function formatReviewDuration(milliseconds) {
+    const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  function stopReviewExpiry() {
+    state.reviewGeneration += 1;
+  }
+
+  function reviewStillInstallable() {
+    if (!state.staged || state.staged.audit?.passed !== true) {
+      return false;
+    }
+    const expiresAt = Date.parse(state.staged.expires_at || "");
+    return Number.isFinite(expiresAt) && expiresAt > Date.now();
+  }
+
+  function appendReviewField(parent, label, value) {
+    const row = document.createElement("p");
+    const strong = document.createElement("strong");
+    strong.textContent = `${label}: `;
+    const text = document.createElement("span");
+    text.textContent = value == null ? "" : String(value);
+    row.appendChild(strong);
+    row.appendChild(text);
+    parent.appendChild(row);
+  }
+
+  function renderSkillReview(manifest) {
+    stopReviewExpiry();
+    clearNode(elements.preview);
+    const audit = manifest && typeof manifest.audit === "object" ? manifest.audit : {};
+    const passed = audit.passed === true;
+    const flags = Array.isArray(audit.flags) ? audit.flags : [];
+    const header = document.createElement("div");
+    header.className = "skill-review-header";
+    appendReviewField(header, "Name", manifest?.name || "Unnamed skill");
+    appendReviewField(header, "Description", manifest?.description || "No description provided.");
+    appendReviewField(header, "Source", manifest?.source_ref || "Unavailable");
+    appendReviewField(header, "Content digest", manifest?.content_digest || "Unavailable");
+    appendReviewField(header, "Files", Array.isArray(manifest?.files) ? manifest.files.length : 0);
+    elements.preview.appendChild(header);
+
+    const auditBlock = document.createElement("div");
+    auditBlock.className = "skill-review-audit";
+    auditBlock.dataset.passed = passed ? "true" : "false";
+    const auditTitle = document.createElement("strong");
+    auditTitle.textContent = passed ? "Audit passed" : "Audit failed — do not install";
+    auditBlock.appendChild(auditTitle);
+    if (flags.length === 0) {
+      const detail = document.createElement("p");
+      detail.textContent = passed ? "No review flags were raised." : "The source could not pass the safety review.";
+      auditBlock.appendChild(detail);
+    } else {
+      const list = document.createElement("ul");
+      for (const flag of flags) {
+        const item = document.createElement("li");
+        item.textContent = String(flag);
+        list.appendChild(item);
+      }
+      auditBlock.appendChild(list);
+    }
+    elements.preview.appendChild(auditBlock);
+
+    const files = document.createElement("table");
+    files.className = "skill-review-files";
+    const caption = document.createElement("caption");
+    caption.textContent = "Reviewed files";
+    files.appendChild(caption);
+    const head = document.createElement("thead");
+    const headingRow = document.createElement("tr");
+    for (const label of ["Path", "Size", "SHA-256", "Preview"]) {
+      const heading = document.createElement("th");
+      heading.scope = "col";
+      heading.textContent = label;
+      headingRow.appendChild(heading);
+    }
+    head.appendChild(headingRow);
+    files.appendChild(head);
+    const body = document.createElement("tbody");
+    for (const file of Array.isArray(manifest?.files) ? manifest.files : []) {
+      const row = document.createElement("tr");
+      row.className = "skill-review-file";
+      const path = document.createElement("td");
+      path.textContent = file.path || "Unnamed file";
+      const size = document.createElement("td");
+      size.textContent = `${file.size || 0} bytes`;
+      const digest = document.createElement("td");
+      digest.textContent = file.sha256 || "Unavailable";
+      const previewCell = document.createElement("td");
+      const entry = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Open preview";
+      entry.appendChild(summary);
+      const preview = document.createElement("pre");
+      preview.textContent = file.preview || "(no preview)";
+      entry.appendChild(preview);
+      previewCell.appendChild(entry);
+      for (const cell of [path, size, digest, previewCell]) row.appendChild(cell);
+      body.appendChild(row);
+    }
+    files.appendChild(body);
+    elements.preview.appendChild(files);
+
+    elements.install.hidden = !passed;
+    elements.install.disabled = !passed;
+    elements.install.textContent = passed ? "Install inactive" : "Install blocked — audit failed";
+    const generation = state.reviewGeneration;
+    const expiresAt = Date.parse(manifest?.expires_at || "");
+    const updateExpiry = () => {
+      if (generation !== state.reviewGeneration) return;
+      if (!Number.isFinite(expiresAt)) {
+        elements.reviewExpires.textContent = "Review expiry unavailable; re-stage before installing.";
+        elements.install.disabled = true;
+        return;
+      }
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        elements.reviewExpires.textContent = "Review expired — re-stage the skill before installing.";
+        elements.install.disabled = true;
+        return;
+      }
+      elements.reviewExpires.textContent = `Review expires in ${formatReviewDuration(remaining)}.`;
+      setTimeout(updateExpiry, 1000);
+    };
+    updateExpiry();
+  }
+
   function renderSkills(skills) {
     clearNode(elements.skills);
     for (const item of Array.isArray(skills) ? skills : []) {
@@ -652,12 +847,47 @@ if (root) {
       const title = document.createElement("strong");
       title.textContent = item.name || "Unnamed skill";
       const detail = document.createElement("p");
-      detail.textContent = item.active
-        ? "Active"
-        : "Installed inactive — review before activation";
+      detail.textContent = item.missing && item.attached
+        ? "Missing from the library — this session still references it"
+        : item.active
+          ? "Active"
+          : "Installed inactive — review before activation";
       card.appendChild(title);
       card.appendChild(detail);
-      if (!item.active && item.name) {
+      if (item.missing && item.attached) {
+        const missing = document.createElement("p");
+        missing.textContent = "Missing from the library — detach or reinstall before this session can use it.";
+        card.appendChild(missing);
+      } else if (item.active && item.name) {
+        const deactivate = document.createElement("button");
+        deactivate.type = "button";
+        deactivate.dataset.skillDeactivate = "true";
+        deactivate.textContent = "Deactivate";
+        deactivate.disabled = state.restarting;
+        deactivate.addEventListener("click", async () => {
+          if (state.restarting || deactivate.disabled) return;
+          deactivate.disabled = true;
+          const original = deactivate.textContent;
+          deactivate.textContent = PENDING_LABEL;
+          try {
+            const result = await postMutation(
+              `/api/v1/desk/skills/${encodeURIComponent(item.name)}/deactivate`,
+              {},
+              `skill-deactivate:${item.name}`,
+            );
+            clearFormIntent(`skill-deactivate:${item.name}`);
+            setPageStatus("Skill deactivated.");
+            if (result.restart_required) await handleRestartRequired(result);
+            else await loadCapabilities();
+          } catch (error) {
+            setPageStatus(error.safeMessage || "Capability request could not be completed.");
+          } finally {
+            deactivate.textContent = original;
+            if (!state.restarting) deactivate.disabled = false;
+          }
+        });
+        card.appendChild(deactivate);
+      } else if (!item.active && item.name) {
         const activate = document.createElement("button");
         activate.type = "button";
         activate.dataset.skillActivate = "true";
@@ -694,6 +924,37 @@ if (root) {
           }
         });
         card.appendChild(activate);
+        const uninstall = document.createElement("button");
+        uninstall.type = "button";
+        uninstall.dataset.skillUninstall = "true";
+        uninstall.textContent = item.attached ? "Uninstall blocked — attached" : "Uninstall";
+        uninstall.disabled = state.restarting || Boolean(item.attached);
+        uninstall.addEventListener("click", async () => {
+          if (state.restarting || uninstall.disabled) return;
+          uninstall.disabled = true;
+          const original = uninstall.textContent;
+          uninstall.textContent = PENDING_LABEL;
+          try {
+            const result = await postMutation(
+              `/api/v1/desk/skills/${encodeURIComponent(item.name)}/uninstall`,
+              {},
+              `skill-uninstall:${item.name}`,
+            );
+            clearFormIntent(`skill-uninstall:${item.name}`);
+            setPageStatus("Skill uninstalled.");
+            if (result.restart_required) await handleRestartRequired(result);
+            else await loadCapabilities();
+          } catch (error) {
+            if (error.status === 409 && error.code === "skill_attached") {
+              clearFormIntent(`skill-uninstall:${item.name}`);
+            }
+            setPageStatus(error.safeMessage || "Capability request could not be completed.");
+          } finally {
+            uninstall.textContent = original;
+            if (!state.restarting) uninstall.disabled = false;
+          }
+        });
+        card.appendChild(uninstall);
       }
       elements.skills.appendChild(card);
     }
@@ -920,6 +1181,7 @@ if (root) {
     state.providerState = snapshot.providers;
     renderModels(snapshot.providers);
     renderProviderPresets(snapshot.provider_presets);
+    renderSkillSources(snapshot.skill_sources);
     renderSkills(snapshot.skills);
     renderConnections(connections);
     setPageStatus("Capabilities are current.");
@@ -1231,6 +1493,16 @@ if (root) {
     renderCatalogue();
   });
 
+  elements.stageLocal?.addEventListener("input", () => {
+    if (elements.stageLocal.value.trim()) elements.stageGit.value = "";
+    updateSkillSourceFields();
+  });
+
+  elements.stageGit?.addEventListener("input", () => {
+    if (elements.stageGit.value.trim()) elements.stageLocal.value = "";
+    updateSkillSourceFields();
+  });
+
   elements.stageForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = elements.stageForm;
@@ -1242,16 +1514,28 @@ if (root) {
       setFormStatus(form, "Provide a local path or Git URL.", "error");
       return;
     }
+    if (localPath && gitURL) {
+      setFieldInvalid(elements.stageLocal);
+      setFieldInvalid(elements.stageGit);
+      setFormStatus(form, "Choose a local path or a Git URL, not both.", "error");
+      return;
+    }
+    const commit = elements.stageCommit.value.trim();
+    if (gitURL && !/^[0-9a-f]{40}$/.test(commit)) {
+      setFieldInvalid(elements.stageCommit);
+      setFormStatus(form, "Git sources require a full 40-hex lowercase commit.", "error");
+      return;
+    }
     const body = {
       local_path: localPath,
       git_url: gitURL,
-      commit: elements.stageCommit.value.trim(),
+      commit: gitURL ? commit : "",
     };
     await withSubmitPending(form, async () => {
       try {
         state.staged = await postMutation("/api/v1/desk/skills/stage", body, "skill-stage");
         clearFormIntent("skill-stage");
-        elements.preview.textContent = JSON.stringify(state.staged, null, 2);
+        renderSkillReview(state.staged);
         elements.review.hidden = false;
         setFormStatus(form, "Review the complete manifest before installing.", "");
       } catch (error) {
@@ -1283,8 +1567,9 @@ if (root) {
       );
       clearFormIntent("skill-install");
       setControlStatus(elements.installStatus, "Skill installed inactive.", "");
+      stopReviewExpiry();
       state.staged = null;
-      elements.preview.textContent = "";
+      clearNode(elements.preview);
       elements.review.hidden = true;
       if (result.restart_required) {
         await handleRestartRequired(result);
@@ -1300,7 +1585,7 @@ if (root) {
     } finally {
       elements.install.textContent = original;
       if (!state.restarting) {
-        elements.install.disabled = false;
+        elements.install.disabled = !reviewStillInstallable();
       }
     }
   });

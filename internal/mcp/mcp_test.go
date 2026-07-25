@@ -624,7 +624,9 @@ func TestCloseContextPreservesCallerDeadlineForContainerCleanup(t *testing.T) {
 	}
 	dir := t.TempDir()
 	fakeDocker := filepath.Join(dir, "docker")
-	script := "#!/usr/bin/env bash\nwhile true; do sleep 0.01; done\n"
+	// Single long sleep: CommandContext can SIGKILL one process cleanly.
+	// A tight sleep loop leaves short-lived children and adds kill latency.
+	script := "#!/usr/bin/env bash\nexec sleep 3600\n"
 	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +649,10 @@ func TestCloseContextPreservesCallerDeadlineForContainerCleanup(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("CloseContext error = %v, want deadline exceeded", err)
 	}
-	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+	// Caller deadline is 30ms; allow process-kill/teardown overhead under -race
+	// and busy CI hosts, but stay far below Close()'s 8s default and the prior
+	// fixed 5s+3s docker cleanup budgets that this regression guards against.
+	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("CloseContext replaced caller deadline: %v", elapsed)
 	}
 }

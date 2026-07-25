@@ -30,6 +30,9 @@ func loadWorkspaceWithStore(st *store.Store) (memory.Workspace, []skill.Skill, e
 	}
 	var skills []skill.Skill
 	if st != nil {
+		if err := skill.RecoverPendingSkillUninstalls(context.Background(), st.DB, ws, st.SkillLifecycleGuard()); err != nil {
+			return memory.Workspace{}, nil, fmt.Errorf("recover pending skill uninstall: %w", err)
+		}
 		skills, err = skill.DiscoverActive(ws.SkillsDir(), st.DB)
 	} else {
 		skills, err = skill.DiscoverActive(ws.SkillsDir(), nil)

@@ -14,7 +14,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/matt-riley/waffle/internal/lifecycle"
 	_ "modernc.org/sqlite" // pure-Go sqlite driver
 )
 
@@ -24,6 +26,24 @@ var migrationFS embed.FS
 // Store wraps the database handle.
 type Store struct {
 	DB *sql.DB
+
+	skillLifecycleMu   sync.Mutex
+	skillLifecyclePath string
+	SkillLifecycle     *lifecycle.Guard
+}
+
+// SkillLifecycleGuard returns the process-wide guard shared by runtime and
+// dashboard skill attachment/uninstall mutations for this store.
+func (s *Store) SkillLifecycleGuard() *lifecycle.Guard {
+	if s == nil {
+		return nil
+	}
+	s.skillLifecycleMu.Lock()
+	defer s.skillLifecycleMu.Unlock()
+	if s.SkillLifecycle == nil {
+		s.SkillLifecycle = lifecycle.NewGuard(s.skillLifecyclePath)
+	}
+	return s.SkillLifecycle
 }
 
 // Open opens (creating if needed) the database at path and applies any
@@ -50,7 +70,23 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{DB: db}, nil
+	lockPath := canonicalDatabasePath(path) + ".skill-lifecycle.lock"
+	return &Store{
+		DB:                 db,
+		SkillLifecycle:     lifecycle.NewGuard(lockPath),
+		skillLifecyclePath: lockPath,
+	}, nil
+}
+
+func canonicalDatabasePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(real)
+	}
+	return filepath.Clean(abs)
 }
 
 // Close closes the underlying database.

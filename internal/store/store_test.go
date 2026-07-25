@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSnapshotMissingSource(t *testing.T) {
@@ -164,6 +165,62 @@ func TestOpenIsIdempotent(t *testing.T) {
 		if err := s.Close(); err != nil {
 			t.Fatalf("Close #%d: %v", i+1, err)
 		}
+	}
+}
+
+func TestOpenSharesLifecycleLockAcrossSymlinkedDatabasePaths(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	realPath := filepath.Join(root, "state", "waffle.db")
+	first, err := Open(ctx, realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+
+	aliasPath := filepath.Join(root, "alias.db")
+	if err := os.Symlink(realPath, aliasPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	second, err := Open(ctx, aliasPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	if err := first.SkillLifecycleGuard().Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	firstLocked := true
+	t.Cleanup(func() {
+		if firstLocked {
+			first.SkillLifecycleGuard().Unlock()
+		}
+	})
+
+	acquired := make(chan error, 1)
+	go func() {
+		if err := second.SkillLifecycleGuard().Lock(ctx); err != nil {
+			acquired <- err
+			return
+		}
+		second.SkillLifecycleGuard().Unlock()
+		acquired <- nil
+	}()
+	select {
+	case err := <-acquired:
+		t.Fatalf("symlinked database acquired lifecycle lock while real path was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	first.SkillLifecycleGuard().Unlock()
+	firstLocked = false
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("symlinked database lock after release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("symlinked database did not acquire lifecycle lock after release")
 	}
 }
 

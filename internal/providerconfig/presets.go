@@ -1,6 +1,7 @@
 package providerconfig
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -157,7 +158,9 @@ const (
 )
 
 var (
-	probeAuthenticationMarkers = []string{"unauthorized", "forbidden", "authentication", " 401", " 403"}
+	// Prefer status codes and clear auth outcomes over the bare word
+	// "authentication", which appears in unrelated network error text.
+	probeAuthenticationMarkers = []string{"unauthorized", "forbidden", "authentication failed", " 401", " 403"}
 	// Markers that only appear once the endpoint answered, so the operator is
 	// told the request was rejected rather than sent to debug connectivity.
 	probeRequestFailedMarkers = []string{
@@ -172,9 +175,20 @@ var (
 // library-specific errors, so recognized auth responses and recognized
 // endpoint rejections are separated, and every remaining failure safely
 // directs the operator to check reachability.
+//
+// Classification prefers typed causes (timeouts, cancellations, network
+// failures, structured HTTP status) before falling back to careful message
+// markers, so text like "authentication proxy" does not misclassify a
+// deadline error as authentication_failed.
 func ClassifyProbeError(err error) ProbeOutcome {
 	if err == nil {
 		return ProbeOutcomeSuccess
+	}
+	if isProbeUnreachableError(err) {
+		return ProbeOutcomeUnreachable
+	}
+	if status, ok := httpStatusFromError(err); ok {
+		return classifyHTTPStatus(status)
 	}
 	message := strings.ToLower(err.Error())
 	if containsAnyMarker(message, probeAuthenticationMarkers) {
@@ -184,6 +198,71 @@ func ClassifyProbeError(err error) ProbeOutcome {
 		return ProbeOutcomeRequestFailed
 	}
 	return ProbeOutcomeUnreachable
+}
+
+func isProbeUnreachableError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// url.Error covers dial/DNS/timeouts and context cancellation on the
+		// transport path; treat the whole class as connectivity.
+		return true
+	}
+	return false
+}
+
+// httpStatusError is the optional structured shape provider stacks may expose.
+type httpStatusError interface {
+	HTTPStatus() int
+}
+
+// statusCodeError is the common StatusCode() int shape used by HTTP clients.
+type statusCodeError interface {
+	StatusCode() int
+}
+
+func httpStatusFromError(err error) (int, bool) {
+	var withHTTP httpStatusError
+	if errors.As(err, &withHTTP) {
+		if status := withHTTP.HTTPStatus(); status > 0 {
+			return status, true
+		}
+	}
+	var withCode statusCodeError
+	if errors.As(err, &withCode) {
+		if status := withCode.StatusCode(); status > 0 {
+			return status, true
+		}
+	}
+	return 0, false
+}
+
+func classifyHTTPStatus(status int) ProbeOutcome {
+	switch status {
+	case 401, 403:
+		return ProbeOutcomeAuthentication
+	case 400, 404, 409, 413, 422, 429, 500, 502, 503, 504:
+		return ProbeOutcomeRequestFailed
+	default:
+		if status >= 400 && status < 600 {
+			return ProbeOutcomeRequestFailed
+		}
+		return ProbeOutcomeUnreachable
+	}
 }
 
 func containsAnyMarker(message string, markers []string) bool {

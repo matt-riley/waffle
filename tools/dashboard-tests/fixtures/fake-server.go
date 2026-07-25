@@ -144,6 +144,9 @@ func main() {
 		Providers: providers,
 		Sessions:  sessions,
 		Skills:    skills,
+		SkillSources: dashboard.CapabilitySkillSources{
+			LocalRoots: []string{"allowed"},
+		},
 		Catalogue: fixtureCatalogue{},
 	}
 
@@ -661,7 +664,7 @@ func (s *fixtureSkills) Stage(context.Context, skillinstall.StageRequest) (skill
 	return skillinstall.Manifest{
 		Name: "fixture-reviewed", Description: "Reviewed fixture skill",
 		SourceRef: "fixture", ContentDigest: "sha256:fixture", StageID: "stage-fixture",
-		ExpiresAt: fixtureNow.Add(time.Minute), Audit: skillinstall.AuditView{Passed: true},
+		ExpiresAt: fixtureNow.Add(7 * 24 * time.Hour), Audit: skillinstall.AuditView{Passed: true},
 		Files: []skillinstall.FileEntry{},
 	}, nil
 }
@@ -682,6 +685,30 @@ func (s *fixtureSkills) Activate(_ context.Context, name string) error {
 	for index := range s.items {
 		if s.items[index].Name == name {
 			s.items[index].Active = true
+			return nil
+		}
+	}
+	return dashboard.ErrCapabilitySkillNotFound
+}
+
+func (s *fixtureSkills) Deactivate(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.items {
+		if s.items[index].Name == name {
+			s.items[index].Active = false
+			return nil
+		}
+	}
+	return dashboard.ErrCapabilitySkillNotFound
+}
+
+func (s *fixtureSkills) Uninstall(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.items {
+		if s.items[index].Name == name {
+			s.items = append(s.items[:index], s.items[index+1:]...)
 			return nil
 		}
 	}

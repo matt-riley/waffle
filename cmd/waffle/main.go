@@ -262,7 +262,7 @@ Commands:
   doctor    run self-checks
   eval      run zero-network agent eval harness (exit 1 on failure);
             waffle eval --history shows recorded runs
-  skills    skill utilities (audit|activate|ls)
+  skills    skill utilities (audit|activate|deactivate|ls)
   learn     mine→propose→validate learning loop (cron-friendly digest)
   upgrade   rebuild and verify waffle, then swap in the new binary
             --no-verify skips vet/tests/lint (unsafe)

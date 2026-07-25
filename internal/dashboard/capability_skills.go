@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/matt-riley/waffle/internal/lifecycle"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/skillinstall"
@@ -20,6 +21,7 @@ type WorkspaceCapabilitySkills struct {
 	Workspace   memory.Workspace
 	Attachments *skill.Attachments
 	Installer   *skillinstall.Installer
+	Lifecycle   *lifecycle.Guard
 
 	mu sync.Mutex
 }
@@ -77,6 +79,11 @@ func (s *WorkspaceCapabilitySkills) Attach(ctx context.Context, sessionID, name 
 	if s == nil || s.Attachments == nil {
 		return ErrCapabilitiesUnavailable
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Attachments.Lifecycle == nil {
+		s.Attachments.Lifecycle = s.Lifecycle
+	}
 	active, err := skill.DiscoverActive(s.Workspace.SkillsDir(), s.DB)
 	if err != nil {
 		return err
@@ -91,6 +98,8 @@ func (s *WorkspaceCapabilitySkills) Detach(ctx context.Context, sessionID, name 
 	if s == nil || s.Attachments == nil {
 		return ErrCapabilitiesUnavailable
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.Attachments.Detach(ctx, sessionID, name)
 }
 
@@ -160,6 +169,8 @@ func (s *WorkspaceCapabilitySkills) Activate(ctx context.Context, name string) e
 	if s == nil {
 		return ErrCapabilitiesUnavailable
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	all, err := skill.Discover(s.Workspace.SkillsDir())
 	if err != nil {
 		return err
@@ -168,6 +179,24 @@ func (s *WorkspaceCapabilitySkills) Activate(ctx context.Context, name string) e
 		return ErrCapabilitySkillNotFound
 	}
 	return skill.ActivateSkill(ctx, s.DB, s.Workspace, name)
+}
+
+func (s *WorkspaceCapabilitySkills) Deactivate(ctx context.Context, name string) error {
+	if s == nil {
+		return ErrCapabilitiesUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return skill.DeactivateSkill(ctx, s.DB, s.Workspace, strings.TrimSpace(name))
+}
+
+func (s *WorkspaceCapabilitySkills) Uninstall(ctx context.Context, name string) error {
+	if s == nil {
+		return ErrCapabilitiesUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return skill.UninstallSkill(ctx, s.DB, s.Workspace, strings.TrimSpace(name), s.Attachments, s.Lifecycle)
 }
 
 var _ CapabilitySkills = (*WorkspaceCapabilitySkills)(nil)

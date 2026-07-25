@@ -102,12 +102,14 @@ func newDashboardCapabilities(
 	// Share the host policy_audit trail with skillinstall mutations (#152).
 	installer.AuditDB = st.DB
 	return &dashboard.Capabilities{
-		Providers: providers,
-		Sessions:  sessions,
+		Providers:    providers,
+		Sessions:     sessions,
+		SkillSources: dashboard.NewCapabilitySkillSources(cfg.Dashboard.SkillImportRoots, cfg.Dashboard.SkillGitHosts),
 		Skills: &dashboard.WorkspaceCapabilitySkills{
 			DB:          st.DB,
 			Workspace:   ws,
-			Attachments: &skill.Attachments{DB: st.DB},
+			Attachments: &skill.Attachments{DB: st.DB, Workspace: ws, Lifecycle: st.SkillLifecycleGuard()},
+			Lifecycle:   st.SkillLifecycleGuard(),
 			Installer:   installer,
 		},
 		Catalogue: dashboardProviderCatalogue{

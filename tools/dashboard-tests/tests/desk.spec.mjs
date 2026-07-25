@@ -487,6 +487,9 @@ test("keyboard navigation reaches every destination and dialog returns focus", a
   ];
   for (const [name, section, root] of destinations) {
     await page.goto(deskURL("today"));
+    // Wait for Today open to settle so async composer autofocus cannot race
+    // the skip-link focus assertion under CI latency.
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
     const skip = page.getByRole("link", { name: "Skip to main content" });
     await skip.focus();
     await page.keyboard.press("Enter");
@@ -538,7 +541,7 @@ test("reduced motion suppresses animation and preserves an overflow-free desk", 
 test("skill installation stays inactive until explicit activation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the staged install flow once.");
   await page.goto(deskURL("capabilities"));
-  await page.getByLabel("Allowed local path").fill("/allowed/fixture-reviewed");
+  await page.getByLabel("Local skill path").fill("/allowed/fixture-reviewed");
   await page.getByRole("button", { name: "Stage review", exact: true }).click();
 
   const review = page.locator("#capability-skill-review");
