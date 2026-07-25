@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -240,6 +239,7 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 			return CapabilityCatalogueView{}, err
 		}
 	}
+	enrolledAliases := enrolledAliasesByUpstreamModel(listing, result.Result.Connection.Name)
 	viewModels := make([]CapabilityCatalogueModel, 0, len(models))
 	for _, model := range models {
 		viewModel := CapabilityCatalogueModel{
@@ -249,18 +249,7 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 		if suggestion, suggestionErr := modelcatalog.AliasFor(model.ID); suggestionErr == nil {
 			viewModel.AliasSuggestion = suggestion
 		}
-		aliases := make([]string, 0, len(listing.Models))
-		for alias := range listing.Models {
-			aliases = append(aliases, alias)
-		}
-		sort.Strings(aliases)
-		for _, alias := range aliases {
-			enrolled := listing.Models[alias]
-			if enrolled.Provider == result.Result.Connection.Name && enrolled.Model == model.ID {
-				viewModel.EnrolledAlias = alias
-				break
-			}
-		}
+		viewModel.EnrolledAlias = enrolledAliases[model.ID]
 		viewModels = append(viewModels, viewModel)
 	}
 	return CapabilityCatalogueView{
@@ -270,6 +259,24 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 		Warning:    redactCapabilityCatalogueText(result.Result.Warning, result.PrivateValues...),
 		Models:     viewModels,
 	}, nil
+}
+
+// enrolledAliasesByUpstreamModel indexes one connection's enrolled aliases by
+// the upstream model they target, so catalogue rendering stays a single pass
+// over the listing instead of one sorted scan per catalogue model. Ties keep
+// the lowest alias, matching the previous sorted first-match behaviour.
+func enrolledAliasesByUpstreamModel(listing providerconfig.Listing, connection string) map[string]string {
+	aliases := make(map[string]string, len(listing.Models))
+	for alias, enrolled := range listing.Models {
+		if enrolled.Provider != connection {
+			continue
+		}
+		if existing, ok := aliases[enrolled.Model]; ok && existing <= alias {
+			continue
+		}
+		aliases[enrolled.Model] = alias
+	}
+	return aliases
 }
 
 func redactCapabilityCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {

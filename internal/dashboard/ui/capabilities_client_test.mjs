@@ -376,7 +376,14 @@ function createHarness({
   };
   const document = {
     body: { dataset: { requestToken: "token" } },
-    createElement: () => new FakeElement(),
+    createElement: (tag) => {
+      const element = new FakeElement({ tagName: String(tag).toUpperCase() });
+      // Real elements expose tagName as a getter-only property, so assigning to
+      // it from a strict-mode module throws. Match that here to keep the client
+      // from relying on a writable tagName that only exists in this harness.
+      Object.defineProperty(element, "tagName", { value: element.tagName, writable: false });
+      return element;
+    },
     querySelector: (selector) => elements[selector] || null,
   };
   const context = vm.createContext({

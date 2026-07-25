@@ -251,6 +251,43 @@ func TestCapabilitiesCatalogueRedactsPrivateFetchValuesAcrossEveryPublicString(t
 	}
 }
 
+func TestCapabilitiesCatalogueEnrolledAliasIgnoresOtherConnectionsAndKeepsLowestAlias(t *testing.T) {
+	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Providers: map[string]providerconfig.ProviderSummary{
+			"router": {Type: "openai"},
+			"other":  {Type: "openai"},
+		},
+		Models: map[string]providerconfig.ModelSummary{
+			"zeta":    {Provider: "router", Model: "anthropic/claude-sonnet-4-6"},
+			"alpha":   {Provider: "router", Model: "anthropic/claude-sonnet-4-6"},
+			"mirrors": {Provider: "other", Model: "openai/gpt-5.4"},
+		},
+	}}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Catalogue: fakeCapabilityCatalogue{result: CapabilityCatalogueResult{Result: modelcatalog.Result{
+			Record: modelcatalog.Record{Connection: modelcatalog.Connection{Name: "router"}, Models: []modelcatalog.Model{
+				{ID: "anthropic/claude-sonnet-4-6"},
+				{ID: "openai/gpt-5.4"},
+			}},
+		}}},
+	}
+
+	view, err := capabilities.RefreshCatalogue(t.Context(), "router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Models) != 2 {
+		t.Fatalf("models = %#v", view.Models)
+	}
+	if view.Models[0].EnrolledAlias != "alpha" {
+		t.Fatalf("duplicate aliases must resolve to the lowest alias, got %#v", view.Models[0])
+	}
+	if view.Models[1].EnrolledAlias != "" {
+		t.Fatalf("another connection's alias must not mark this catalogue model, got %#v", view.Models[1])
+	}
+}
+
 func TestCapabilitiesCatalogueMarksAlreadyEnrolledModelsAndSuggestsAliases(t *testing.T) {
 	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
 		Providers: map[string]providerconfig.ProviderSummary{"router": {Type: "openai"}},

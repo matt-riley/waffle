@@ -106,8 +106,7 @@ func normalizePresetBaseURL(raw string) (string, error) {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("must not include credentials, a query, or a fragment")
 	}
-	host := u.Hostname()
-	if host == "" || (net.ParseIP(host) == nil && strings.Contains(host, " ")) {
+	if !validPresetHost(u.Hostname()) {
 		return "", errors.New("must include a valid host")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
@@ -117,26 +116,81 @@ func normalizePresetBaseURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
+// validPresetHost accepts a literal IP or a hostname whose labels are all
+// non-empty and made of letters, digits, and interior hyphens. url.Parse
+// already rejects the grossly malformed cases; this rejects the shapes it
+// tolerates (empty labels, stray dots, hyphen-edged labels) at enrolment
+// instead of leaving them to fail later at connection time. Underscores stay
+// allowed because container and service hostnames commonly use them.
+func validPresetHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+			if !isLetter && (r < '0' || r > '9') && r != '-' && r != '_' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ProbeOutcome is the safe browser-facing classification of a provider probe.
 type ProbeOutcome string
 
 const (
 	ProbeOutcomeSuccess        ProbeOutcome = "success"
 	ProbeOutcomeAuthentication ProbeOutcome = "authentication_failed"
+	ProbeOutcomeRequestFailed  ProbeOutcome = "request_failed"
 	ProbeOutcomeUnreachable    ProbeOutcome = "unreachable"
 )
 
+var (
+	probeAuthenticationMarkers = []string{"unauthorized", "forbidden", "authentication", " 401", " 403"}
+	// Markers that only appear once the endpoint answered, so the operator is
+	// told the request was rejected rather than sent to debug connectivity.
+	probeRequestFailedMarkers = []string{
+		" 400", " 404", " 409", " 413", " 422", " 429",
+		" 500", " 502", " 503", " 504",
+		"bad request", "not found", "rate limit", "too many requests",
+		"unprocessable", "invalid request", "unsupported",
+	}
+)
+
 // ClassifyProbeError exposes no upstream diagnostics. Runtime providers return
-// library-specific errors, so recognized auth responses are separated and all
-// remaining failures safely direct the operator to check reachability.
+// library-specific errors, so recognized auth responses and recognized
+// endpoint rejections are separated, and every remaining failure safely
+// directs the operator to check reachability.
 func ClassifyProbeError(err error) ProbeOutcome {
 	if err == nil {
 		return ProbeOutcomeSuccess
 	}
 	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "unauthorized") || strings.Contains(message, "forbidden") ||
-		strings.Contains(message, "authentication") || strings.Contains(message, " 401") || strings.Contains(message, " 403") {
+	if containsAnyMarker(message, probeAuthenticationMarkers) {
 		return ProbeOutcomeAuthentication
 	}
+	if containsAnyMarker(message, probeRequestFailedMarkers) {
+		return ProbeOutcomeRequestFailed
+	}
 	return ProbeOutcomeUnreachable
+}
+
+func containsAnyMarker(message string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }

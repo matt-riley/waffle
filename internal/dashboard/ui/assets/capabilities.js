@@ -778,6 +778,7 @@ if (root) {
             const messages = {
               success: "Connection test succeeded.",
               authentication_failed: "Connection test authentication failed.",
+              request_failed: "Connection test reached the endpoint, but the request was rejected.",
               unreachable: "Connection test could not reach the endpoint.",
             };
             setControlStatus(testStatus, messages[result.outcome] || "Connection test could not be completed.", result.outcome === "success" ? "" : "error");
@@ -823,7 +824,6 @@ if (root) {
         card.appendChild(enrolled);
       } else if (model.id) {
         const alias = document.createElement("input");
-        alias.tagName = "INPUT";
         alias.type = "text";
         alias.value = model.alias_suggestion || "";
         alias.setAttribute("aria-label", `Alias for ${model.id}`);
@@ -1113,6 +1113,7 @@ if (root) {
       const messages = {
         success: "Connection test succeeded.",
         authentication_failed: "Connection test authentication failed; check the credential.",
+        request_failed: "Connection test reached the endpoint, but the request was rejected; check the model ID.",
         unreachable: "Connection test could not reach the endpoint.",
       };
       setFormStatus(elements.providerForm, messages[result.outcome] || "Connection test could not be completed.", result.outcome === "success" ? "" : "error");
