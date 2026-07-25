@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.1](https://github.com/matt-riley/waffle/compare/v0.9.0...v0.9.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* **desk:** drive rail connection and model from live state ([#208](https://github.com/matt-riley/waffle/issues/208)) ([1f4cdae](https://github.com/matt-riley/waffle/commit/1f4cdaedb4a4277cfad59000441a63f6e0845c23))
+* **desk:** include inputs in shared control baseline ([#207](https://github.com/matt-riley/waffle/issues/207)) ([344e912](https://github.com/matt-riley/waffle/commit/344e9122842870331e70f90b0d67b87f19647836))
+* **desk:** isolate capability form status and pending state ([#210](https://github.com/matt-riley/waffle/issues/210)) ([beeea8b](https://github.com/matt-riley/waffle/commit/beeea8be819f780588bba4e01bf37c0235b7e115))
+* **desk:** keep Today usable on recoverable failures ([#209](https://github.com/matt-riley/waffle/issues/209)) ([a93dac3](https://github.com/matt-riley/waffle/commit/a93dac30fd7987f1a826e9cdb3097e8c04905336))
+* **desk:** map capability and workspace failures to stable codes ([#206](https://github.com/matt-riley/waffle/issues/206)) ([c9cb392](https://github.com/matt-riley/waffle/commit/c9cb392a90153af0f3e4e6182a038c44e3fb3fe9))
+* **provider:** re-prove readiness at startup instead of stranding Installed ([#211](https://github.com/matt-riley/waffle/issues/211)) ([0c325f9](https://github.com/matt-riley/waffle/commit/0c325f925c3467f45bc06a3567711cbca06dc789))
+* **workspace:** survive queue contention when probing the inspection heartbeat ([#213](https://github.com/matt-riley/waffle/issues/213)) ([feb97bd](https://github.com/matt-riley/waffle/commit/feb97bd4bcda7bf3145c3457fb7ea388544351dc))
+
 ## [0.9.0](https://github.com/matt-riley/waffle/compare/v0.8.5...v0.9.0) (2026-07-25)
 
 
