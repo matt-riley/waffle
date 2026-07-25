@@ -1063,6 +1063,7 @@ if (root) {
           setFormStatus(form, "Provider enrolled.", "");
         } finally {
           // Always clear the credential field after an enroll attempt.
+          clearFormIntent("provider");
           elements.providerCredential.value = "";
         }
         if (result.restart_required) {
@@ -1094,13 +1095,21 @@ if (root) {
     const original = elements.providerTest.textContent;
     elements.providerTest.disabled = true;
     elements.providerTest.textContent = PENDING_LABEL;
+    const formKey = "provider-prospective-test";
+    const body = {
+      connection_name: name,
+      type: elements.providerType.value.trim(),
+      base_url: elements.providerBaseURL.value.trim(),
+      max_tokens: Number.parseInt(elements.providerMaxTokens.value, 10) || 0,
+      model: elements.providerModelID.value.trim(),
+      api_key: elements.providerCredential.value,
+    };
     try {
       const result = await postMutation(
-        `/api/v1/desk/providers/${encodeURIComponent(name)}/test`,
-        {},
-        `provider-test:${name}`,
+        "/api/v1/desk/providers/test",
+        body,
+        formKey,
       );
-      clearFormIntent(`provider-test:${name}`);
       const messages = {
         success: "Connection test succeeded.",
         authentication_failed: "Connection test authentication failed; check the credential.",
@@ -1110,6 +1119,8 @@ if (root) {
     } catch (error) {
       setFormStatus(elements.providerForm, error.safeMessage || "Connection test could not be completed.", "error");
     } finally {
+      clearFormIntent(formKey);
+      elements.providerCredential.value = "";
       elements.providerTest.textContent = original;
       elements.providerTest.disabled = false;
     }

@@ -320,6 +320,41 @@ func TestCapabilitiesProviderTestClassifiesOnlySafeOutcomes(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesProspectiveProviderTestClassifiesOnlySafeOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want providerconfig.ProbeOutcome
+	}{
+		{name: "success", want: providerconfig.ProbeOutcomeSuccess},
+		{name: "authentication", err: errors.New("upstream 401 Unauthorized for " + capabilityCredentialCanary), want: providerconfig.ProbeOutcomeAuthentication},
+		{name: "unreachable", err: context.DeadlineExceeded, want: providerconfig.ProbeOutcomeUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providers := &fakeCapabilityProviders{prospectiveErr: tc.err}
+			result, err := (&Capabilities{Providers: providers}).TestProspectiveProvider(t.Context(), providerconfig.ProspectiveProbeRequest{
+				ConnectionName: "primary",
+				Connection:     config.ProviderConnection{Type: "openai"},
+				Model:          "gpt-test",
+				APIKey:         capabilityCredentialCanary,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != tc.want {
+				t.Fatalf("outcome = %q, want %q", result.Outcome, tc.want)
+			}
+			public, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(public, []byte(capabilityCredentialCanary)) || bytes.Contains(public, []byte("401")) {
+				t.Fatalf("prospective result leaked probe detail: %s", public)
+			}
+		})
+	}
+}
+
 func TestRegisterCapabilitiesRoutesProviderTestKeepsMutationProtectionAndRedactsFailures(t *testing.T) {
 	providers := &fakeCapabilityProviders{testErr: errors.New("provider returned 401 for " + capabilityCredentialCanary)}
 	mux := http.NewServeMux()
@@ -334,6 +369,40 @@ func TestRegisterCapabilitiesRoutesProviderTestKeepsMutationProtectionAndRedacts
 	}
 	if strings.Contains(response.Body.String(), capabilityCredentialCanary) || !strings.Contains(response.Body.String(), "authentication_failed") {
 		t.Fatalf("unsafe or unclassified response: %s", response.Body.String())
+	}
+}
+
+func TestRegisterCapabilitiesRoutesProspectiveProviderTestUsesEnteredInputs(t *testing.T) {
+	providers := &fakeCapabilityProviders{}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Providers: providers},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+	})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/desk/providers/test",
+		strings.NewReader(`{"connection_name":"new-provider","type":"openai-compatible","base_url":"https://gateway.example/v1","max_tokens":321,"model":"vendor/model","api_key":"`+capabilityCredentialCanary+`"}`),
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	want := providerconfig.ProspectiveProbeRequest{
+		ConnectionName: "new-provider",
+		Connection: config.ProviderConnection{
+			Type:      "openai",
+			BaseURL:   "https://gateway.example/v1",
+			MaxTokens: 321,
+		},
+		Model:  "vendor/model",
+		APIKey: capabilityCredentialCanary,
+	}
+	if providers.lastProspective != want {
+		t.Fatalf("prospective request = %#v, want %#v", providers.lastProspective, want)
+	}
+	if strings.Contains(response.Body.String(), capabilityCredentialCanary) {
+		t.Fatalf("response leaked credential: %s", response.Body.String())
 	}
 }
 
@@ -980,15 +1049,17 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 }
 
 type fakeCapabilityProviders struct {
-	snapshot      providerconfig.Listing
-	snapshotErrs  []error
-	snapshotCalls int
-	result        providerconfig.MutationResult
-	mutationErr   error
-	mutations     int
-	lastAPIKey    string
-	testErr       error
-	lastAdd       providerconfig.AddModelRequest
+	snapshot        providerconfig.Listing
+	snapshotErrs    []error
+	snapshotCalls   int
+	result          providerconfig.MutationResult
+	mutationErr     error
+	mutations       int
+	lastAPIKey      string
+	testErr         error
+	lastProspective providerconfig.ProspectiveProbeRequest
+	prospectiveErr  error
+	lastAdd         providerconfig.AddModelRequest
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -1024,6 +1095,11 @@ func (f *fakeCapabilityProviders) ActivateUtilityModelWithMode(context.Context, 
 }
 
 func (f *fakeCapabilityProviders) Test(context.Context, string) error { return f.testErr }
+
+func (f *fakeCapabilityProviders) TestProspective(_ context.Context, request providerconfig.ProspectiveProbeRequest) error {
+	f.lastProspective = request
+	return f.prospectiveErr
+}
 
 func (f *fakeCapabilityProviders) mutationResult() (providerconfig.MutationResult, error) {
 	if f.mutationErr != nil {

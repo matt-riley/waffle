@@ -39,6 +39,7 @@ type CapabilityProviders interface {
 	ActivateModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	ActivateUtilityModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	Test(context.Context, string) error
+	TestProspective(context.Context, providerconfig.ProspectiveProbeRequest) error
 }
 
 type CapabilitySessions interface {
@@ -209,6 +210,16 @@ func (c *Capabilities) TestProvider(ctx context.Context, name string) (Capabilit
 	return CapabilityProviderTestResult{Outcome: providerconfig.ClassifyProbeError(c.Providers.Test(ctx, strings.TrimSpace(name)))}, nil
 }
 
+func (c *Capabilities) TestProspectiveProvider(ctx context.Context, request providerconfig.ProspectiveProbeRequest) (CapabilityProviderTestResult, error) {
+	if c == nil || c.Providers == nil {
+		return CapabilityProviderTestResult{}, ErrCapabilitiesUnavailable
+	}
+	if err := providerconfig.ValidateProspectiveProbe(request); err != nil {
+		return CapabilityProviderTestResult{}, err
+	}
+	return CapabilityProviderTestResult{Outcome: providerconfig.ClassifyProbeError(c.Providers.TestProspective(ctx, request))}, nil
+}
+
 func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) (CapabilityCatalogueView, error) {
 	if c == nil || c.Catalogue == nil {
 		return CapabilityCatalogueView{}, ErrCapabilitiesUnavailable
@@ -361,6 +372,7 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	mux.Handle("POST /api/v1/desk/models/catalogue/refresh", mutation(capabilityMutationMaxBodyBytes, catalogueRefreshHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/models", mutation(capabilityMutationMaxBodyBytes, addModelHandler(routeConfig)))
 	mux.Handle("POST /api/v1/desk/providers", mutation(CapabilityProviderMaxBodyBytes, providerEnrollmentHandler(routeConfig)))
+	mux.Handle("POST /api/v1/desk/providers/test", mutation(CapabilityProviderMaxBodyBytes, providerProspectiveTestHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/providers/{name}/test", mutation(capabilityMutationMaxBodyBytes, providerTestHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/skills/session/attach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, true)))
 	mux.Handle("POST /api/v1/desk/skills/session/detach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, false)))
@@ -547,6 +559,47 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 func providerTestHandler(service *Capabilities) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := service.TestProvider(r.Context(), r.PathValue("name"))
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func providerProspectiveTestHandler(service *Capabilities) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ConnectionName string `json:"connection_name"`
+			Type           string `json:"type"`
+			BaseURL        string `json:"base_url"`
+			MaxTokens      int    `json:"max_tokens"`
+			Model          string `json:"model"`
+			APIKey         string `json:"api_key"`
+		}
+		if !decodeCapabilityRequest(w, r, &request) {
+			return
+		}
+		preset, err := providerconfig.ResolvePreset(request.Type, request.BaseURL)
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		credential := []byte(request.APIKey)
+		defer func() {
+			clear(credential)
+			request.APIKey = ""
+		}()
+		result, err := service.TestProspectiveProvider(r.Context(), providerconfig.ProspectiveProbeRequest{
+			ConnectionName: strings.TrimSpace(request.ConnectionName),
+			Connection: config.ProviderConnection{
+				Type:      preset.RuntimeType,
+				BaseURL:   preset.BaseURL,
+				MaxTokens: request.MaxTokens,
+			},
+			Model:  strings.TrimSpace(request.Model),
+			APIKey: string(credential),
+		})
 		if err != nil {
 			writeCapabilityError(w, err)
 			return

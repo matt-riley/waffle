@@ -418,6 +418,36 @@ func (m *Manager) Test(ctx context.Context, name string) error {
 	return nil
 }
 
+// TestProspective probes unsaved provider inputs directly. It deliberately
+// does not acquire the provider lock or read/write config and secrets.
+func (m *Manager) TestProspective(ctx context.Context, req ProspectiveProbeRequest) error {
+	if err := ValidateProspectiveProbe(req); err != nil {
+		return redactError(err, req.APIKey)
+	}
+	if err := validateNoActiveKeyInDurableStrings(req.APIKey,
+		req.ConnectionName,
+		req.Connection.Type,
+		req.Connection.BaseURL,
+		req.Model,
+	); err != nil {
+		return redactError(err, req.APIKey)
+	}
+	if m.Probe == nil {
+		return errors.New("provider probe is not configured")
+	}
+	target := config.ResolvedModel{
+		Alias:          req.Model,
+		ConnectionName: req.ConnectionName,
+		Connection:     req.Connection,
+		UpstreamModel:  req.Model,
+		MaxTokens:      req.Connection.MaxTokens,
+	}
+	if err := m.Probe(ctx, target, req.APIKey); err != nil {
+		return redactError(fmt.Errorf("probe prospective provider %q model %q: %w", req.ConnectionName, req.Model, err), req.APIKey)
+	}
+	return nil
+}
+
 // CatalogSnapshot returns the private inputs needed to discover one
 // connection's catalogue. Legacy enrollments receive a scope on first access.
 func (m *Manager) CatalogSnapshot(ctx context.Context, name string) (snapshot CatalogSnapshot, err error) {

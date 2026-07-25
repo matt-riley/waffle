@@ -128,6 +128,7 @@ function deferredResponse() {
 function createHarness({
   providerResponse = response({}, true, 202),
   providerTestResponse = response({ outcome: "success" }),
+  providerProspectiveTestResponse = response({ outcome: "success" }),
   defaultResponse = response({ restart_required: false }),
   utilityResponse = response({ restart_required: false }),
   modelResponse = response({ restart_required: false }),
@@ -343,6 +344,9 @@ function createHarness({
     }
     if (path === "/api/v1/desk/providers") {
       return providerResponse;
+    }
+    if (path === "/api/v1/desk/providers/test") {
+      return providerProspectiveTestResponse;
     }
     if (path.startsWith("/api/v1/desk/providers/") && path.endsWith("/test")) {
       return providerTestResponse;
@@ -588,6 +592,7 @@ test("provider credential is cleared after failure and never appears in safe UI"
       code: "capability_failed",
       message: "capability request could not be completed",
     }, false, 400),
+    uuidSequence: ["enrollment-a", "enrollment-b"],
   });
   await flush();
 
@@ -609,6 +614,63 @@ test("provider credential is cleared after failure and never appears in safe UI"
     harness.elements["#capability-default-status"].textContent.includes("capability request could not be completed"),
     false,
     "failure must not leak into another form status",
+  );
+
+  await harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+  const enrollments = harness.calls.filter((call) => call.path === "/api/v1/desk/providers");
+  assert.equal(enrollments.length, 2);
+  assert.equal(enrollments[0].options.headers["Idempotency-Key"], "enrollment-a");
+  assert.equal(
+    enrollments[1].options.headers["Idempotency-Key"],
+    "enrollment-b",
+    "failed sensitive enrollment intents must not retain their idempotency key",
+  );
+});
+
+test("prospective provider test sends entered inputs and clears its sensitive intent after failure", async () => {
+  const prospectiveFailure = {
+    then(onFulfilled) {
+      return Promise.resolve(
+        response({ code: "capability_failed", message: "connection test failed" }, false, 400),
+      ).then(onFulfilled);
+    },
+  };
+  const harness = createHarness({
+    providerProspectiveTestResponse: prospectiveFailure,
+    uuidSequence: ["prospective-a", "prospective-b"],
+  });
+  await flush();
+
+  const testButton = harness.elements["#capability-provider-form"].controls.find(
+    (control) => control.textContent === "Test connection",
+  );
+  await testButton.listener("click")();
+  await flush();
+
+  const tests = harness.calls.filter((call) => call.path === "/api/v1/desk/providers/test");
+  assert.equal(tests.length, 1);
+  assert.deepEqual(JSON.parse(tests[0].options.body), {
+    connection_name: "openai",
+    type: "openai",
+    base_url: "",
+    max_tokens: 0,
+    model: "gpt-test",
+    api_key: "sk-super-private",
+  });
+  assert.equal(tests[0].options.headers["Idempotency-Key"], "prospective-a");
+  assert.equal(harness.elements["#capability-provider-credential"].value, "");
+
+  await testButton.listener("click")();
+  await flush();
+  const repeatedTests = harness.calls.filter((call) => call.path === "/api/v1/desk/providers/test");
+  assert.equal(repeatedTests.length, 2);
+  assert.equal(
+    repeatedTests[1].options.headers["Idempotency-Key"],
+    "prospective-b",
+    "failed sensitive test intents must not retain their idempotency key",
   );
 });
 
@@ -997,7 +1059,7 @@ test("model role and connection pickers use the latest capability snapshot", asy
 test("provider enrollment sends explicit roles and reports a redacted connection test", async () => {
   const harness = createHarness({
     providerResponse: response({ restart_required: false }),
-    providerTestResponse: response({ outcome: "authentication_failed" }),
+    providerProspectiveTestResponse: response({ outcome: "authentication_failed" }),
   });
   harness.elements["#capability-provider-default"].checked = false;
   harness.elements["#capability-provider-utility"].checked = true;
@@ -1025,7 +1087,7 @@ test("provider enrollment sends explicit roles and reports a redacted connection
   await testButton.listener("click")();
   await flush();
   assert.equal(
-    harness.calls.some((call) => call.path === "/api/v1/desk/providers/openai/test"),
+    harness.calls.some((call) => call.path === "/api/v1/desk/providers/test"),
     true,
   );
   assert.match(harness.elements["#capability-provider-status"].textContent, /authentication/i);

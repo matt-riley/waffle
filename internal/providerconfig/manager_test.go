@@ -40,6 +40,43 @@ func TestManagerAddProbeFailureLeavesFilesUnchanged(t *testing.T) {
 	}
 }
 
+func TestManagerProspectiveTestUsesEnteredProviderWithoutMutatingState(t *testing.T) {
+	m := newTestManager(t)
+	beforeConfig := readMaybe(t, m.ConfigPath)
+	beforeSecrets := readMaybe(t, m.SecretsPath)
+	const apiKey = "prospective-provider-key"
+	var gotTarget config.ResolvedModel
+	var gotKey string
+	m.Probe = func(_ context.Context, target config.ResolvedModel, key string) error {
+		gotTarget = target
+		gotKey = key
+		return nil
+	}
+
+	req := ProspectiveProbeRequest{
+		ConnectionName: "new-provider",
+		Connection: config.ProviderConnection{
+			Type:      "openai",
+			BaseURL:   "https://gateway.example/v1",
+			MaxTokens: 321,
+		},
+		Model:  "vendor/model",
+		APIKey: apiKey,
+	}
+	if err := m.TestProspective(context.Background(), req); err != nil {
+		t.Fatalf("TestProspective: %v", err)
+	}
+	if gotTarget.ConnectionName != req.ConnectionName || gotTarget.Connection != req.Connection ||
+		gotTarget.UpstreamModel != req.Model || gotTarget.MaxTokens != req.Connection.MaxTokens {
+		t.Fatalf("probe target = %#v, want entered provider/model = %#v", gotTarget, req)
+	}
+	if gotKey != apiKey {
+		t.Fatalf("probe key = %q, want entered key", gotKey)
+	}
+	assertBytesEqual(t, m.ConfigPath, beforeConfig)
+	assertBytesEqual(t, m.SecretsPath, beforeSecrets)
+}
+
 func TestManagerAddRejectsActiveKeyInEveryDurableRequestString(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/matt-riley/waffle/internal/config"
 )
 
 const OpenRouterBaseURL = "https://openrouter.ai/api/v1"
@@ -16,6 +18,43 @@ type Preset struct {
 	RuntimeType     string `json:"runtime_type"`
 	BaseURL         string `json:"base_url,omitempty"`
 	RequiresBaseURL bool   `json:"requires_base_url"`
+}
+
+// ProspectiveProbeRequest contains the unsaved provider inputs for a protected
+// connection test. APIKey is intentionally never part of durable config.
+type ProspectiveProbeRequest struct {
+	ConnectionName string
+	Connection     config.ProviderConnection
+	Model          string
+	APIKey         string
+}
+
+// ValidateProspectiveProbe checks the credential-free shape that the manager
+// can probe without reading or changing config.toml or the secret store.
+func ValidateProspectiveProbe(req ProspectiveProbeRequest) error {
+	if !config.ValidProviderConnectionName(strings.TrimSpace(req.ConnectionName)) {
+		return fmt.Errorf("invalid connection name %q", strings.TrimSpace(req.ConnectionName))
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		return errors.New("provider model is required")
+	}
+	switch req.Connection.Type {
+	case "anthropic", "openai":
+	default:
+		return fmt.Errorf("unsupported provider type %q", req.Connection.Type)
+	}
+	if req.Connection.MaxTokens < 0 {
+		return errors.New("provider max_tokens must be >= 0")
+	}
+	if req.Connection.APIKey != "" {
+		return errors.New("prospective provider connection must not contain a credential reference")
+	}
+	if req.Connection.BaseURL != "" {
+		if _, err := normalizePresetBaseURL(req.Connection.BaseURL); err != nil {
+			return fmt.Errorf("provider base URL: %w", err)
+		}
+	}
+	return nil
 }
 
 // Presets returns a stable copy of the supported enrollment choices.
