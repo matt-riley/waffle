@@ -411,6 +411,7 @@ test("Capabilities htmx catalogue add, search, and prospective test use fragment
   await results.getByRole("button", { name: "Add as alias", exact: true }).click();
   await added;
   await expect(page.locator("#capability-model-form #capability-model-status")).toContainText("Capability change accepted.");
+  await expect(results.getByRole("button", { name: "Enrolled", exact: true })).toBeDisabled();
 
   await page.locator("#capability-catalogue-search").fill("does-not-match");
   await expect(results.locator(".catalogue-card")).toBeHidden();

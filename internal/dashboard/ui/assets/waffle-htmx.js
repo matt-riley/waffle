@@ -345,6 +345,7 @@
     if (!intent) return;
     inFlight.delete(intent.key);
 	if (event.detail.xhr?.status >= 200 && event.detail.xhr?.status < 300) {
+      const path = config.path || "";
       const form = event.detail.elt?.matches?.("form")
         ? event.detail.elt
         : event.detail.elt?.closest?.("form");
@@ -352,10 +353,17 @@
         for (const input of form.querySelectorAll?.("input[type=password]") || []) {
           input.value = "";
 		}
+		if (path.endsWith("/models")) {
+			const action = form.querySelector?.("[data-waffle-action-id]");
+			if (action?.dataset?.waffleActionId?.startsWith("catalogue-add-")) {
+				action.disabled = true;
+				action.textContent = "Enrolled";
+				action.setAttribute("aria-disabled", "true");
+			}
+		}
 		if (form?.dataset.waffleJsonKind === "task-schedule") resetTaskSchedule(form);
 		if (event.detail.xhr?.responseText?.includes('id="capability-restart-status"')) beginRestartPolling();
       }
-      const path = config.path || "";
       if (path.endsWith("/open") || path.endsWith("/close") || path.endsWith("/forget")) {
         event.detail.elt?.closest?.("dialog")?.close?.();
       }

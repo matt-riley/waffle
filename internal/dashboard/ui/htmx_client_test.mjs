@@ -30,6 +30,8 @@ test("Waffle htmx bridge retains unchanged retry identity and rotates after succ
   assert.match(shim, /intents\.delete\(identity\)/);
   assert.match(shim, /candidate\.key === intent\.key/);
   assert.match(shim, /JSON\.stringify\(body\)/);
+  assert.match(shim, /catalogue-add-/);
+  assert.match(shim, /textContent = "Enrolled"/);
 });
 
 test("the four migrated sections declare server fragments and Today stays bespoke", () => {
