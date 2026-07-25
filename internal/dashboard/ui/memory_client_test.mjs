@@ -1,0 +1,15 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+
+const template = fs.readFileSync(new URL("./memory.templ", import.meta.url), "utf8");
+const fragments = fs.readFileSync(new URL("../fragments.go", import.meta.url), "utf8");
+
+test("Memory search and attachment use server fragments with bounded targets", () => {
+  assert.match(template, /id="memory-search-form"[^>]+hx-get="\/api\/v1\/desk\/memory"/);
+  assert.match(template, /id="memory-results"/);
+  assert.match(fragments, /MemorySearchResponse/);
+  assert.match(fragments, /MemoryAttachResponse/);
+  assert.equal(fs.existsSync(new URL("./assets/memory.js", import.meta.url)), false);
+});
+
