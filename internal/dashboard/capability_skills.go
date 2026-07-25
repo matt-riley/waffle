@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/matt-riley/waffle/internal/lifecycle"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/skillinstall"
@@ -20,6 +21,7 @@ type WorkspaceCapabilitySkills struct {
 	Workspace   memory.Workspace
 	Attachments *skill.Attachments
 	Installer   *skillinstall.Installer
+	Lifecycle   *lifecycle.Guard
 
 	mu sync.Mutex
 }
@@ -79,6 +81,9 @@ func (s *WorkspaceCapabilitySkills) Attach(ctx context.Context, sessionID, name 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.Attachments.Lifecycle == nil {
+		s.Attachments.Lifecycle = s.Lifecycle
+	}
 	active, err := skill.DiscoverActive(s.Workspace.SkillsDir(), s.DB)
 	if err != nil {
 		return err
@@ -191,7 +196,7 @@ func (s *WorkspaceCapabilitySkills) Uninstall(ctx context.Context, name string) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return skill.UninstallSkill(ctx, s.DB, s.Workspace, strings.TrimSpace(name), s.Attachments)
+	return skill.UninstallSkill(ctx, s.DB, s.Workspace, strings.TrimSpace(name), s.Attachments, s.Lifecycle)
 }
 
 var _ CapabilitySkills = (*WorkspaceCapabilitySkills)(nil)

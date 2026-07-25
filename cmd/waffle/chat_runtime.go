@@ -17,6 +17,7 @@ import (
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
@@ -52,6 +53,7 @@ type chatRuntime struct {
 	st                  *store.Store
 	skills              []skill.Skill
 	baseSystem          string
+	skillWorkspace      memory.Workspace
 	attachedSkills      []chatpkg.SkillRef
 	profileName         string
 	chatProfileName     string
@@ -235,7 +237,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		}
 		history = session.Repair(history)
 	}
-	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, current.ID)
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB, Lifecycle: r.st.SkillLifecycleGuard()}).List(ctx, current.ID)
 	if err != nil {
 		return chatpkg.State{}, err
 	}
@@ -276,6 +278,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.attachedSkills = attachedSkills
 	r.agentCleanupContext = cleanup
 	r.skills = skills
+	r.skillWorkspace = ws
 	r.profileName = profileName
 	r.chatProfileName = profileName
 	r.resourceCtx = resourceCtx
@@ -606,7 +609,7 @@ func (r *chatRuntime) commandResume(ctx context.Context, id string, emit func(ch
 			model = target.ModelAlias
 		}
 	}
-	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, target.ID)
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB, Lifecycle: r.st.SkillLifecycleGuard()}).List(ctx, target.ID)
 	if err != nil {
 		return chatpkg.Result{}, err
 	}
@@ -792,10 +795,11 @@ func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name strin
 	activeAgent := r.agent
 	baseSystem := r.baseSystem
 	activeSkills := append([]skill.Skill(nil), r.skills...)
+	skillWorkspace := r.skillWorkspace
 	r.mu.Unlock()
 	defer r.endExclusiveChange()
 
-	attachments := &skill.Attachments{DB: r.st.DB}
+	attachments := &skill.Attachments{DB: r.st.DB, Workspace: skillWorkspace, Lifecycle: r.st.SkillLifecycleGuard()}
 	currentNames, err := attachments.List(ctx, sessionID)
 	if err != nil {
 		return chatpkg.Result{}, err
@@ -1104,7 +1108,7 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 		return chatpkg.Result{}, fmt.Errorf("load workspace session %s: %w", target.ID, err)
 	}
 	history = session.Repair(history)
-	attachedNames, err := (&skill.Attachments{DB: r.st.DB}).List(ctx, target.ID)
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB, Lifecycle: r.st.SkillLifecycleGuard()}).List(ctx, target.ID)
 	if err != nil {
 		return chatpkg.Result{}, err
 	}

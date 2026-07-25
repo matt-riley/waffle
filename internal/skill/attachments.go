@@ -7,11 +7,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/lifecycle"
+	"github.com/matt-riley/waffle/internal/memory"
 )
 
 // Attachments persists the skills explicitly attached to a session.
 type Attachments struct {
-	DB *sql.DB
+	DB        *sql.DB
+	Workspace memory.Workspace
+	Lifecycle *lifecycle.Guard
 }
 
 // AttachmentReference identifies a session that still uses a skill.
@@ -24,6 +29,19 @@ type AttachmentReference struct {
 func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error {
 	if err := a.validate(sessionID, name); err != nil {
 		return err
+	}
+	if a.Lifecycle != nil {
+		a.Lifecycle.Lock()
+		defer a.Lifecycle.Unlock()
+	}
+	if a.Workspace.Dir != "" {
+		active, err := DiscoverActive(a.Workspace.SkillsDir(), a.DB)
+		if err != nil {
+			return fmt.Errorf("check skill before attach: %w", err)
+		}
+		if _, ok := Find(active, strings.TrimSpace(name)); !ok {
+			return fmt.Errorf("%w: skill %q is not active or installed", ErrSkillNotFound, strings.TrimSpace(name))
+		}
 	}
 	_, err := a.DB.ExecContext(ctx, `
 		INSERT INTO session_skills (session_id, skill_name, attached_at)

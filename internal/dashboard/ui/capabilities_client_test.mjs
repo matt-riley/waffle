@@ -624,6 +624,45 @@ test("skill lifecycle controls preserve active gates and use inverse routes", as
   assert.equal(attached.calls.filter((call) => call.path.endsWith("/uninstall")).length, 0);
 });
 
+test("skill uninstall attachment conflicts clear the intent before retry", async () => {
+  let uninstallHits = 0;
+  const lifecycleResponses = {
+    then(onFulfilled) {
+      uninstallHits += 1;
+      const result = uninstallHits === 1
+        ? response({ code: "skill_attached", message: "skill is attached" }, false, 409)
+        : response({ restart_required: false });
+      return Promise.resolve(result).then(onFulfilled);
+    },
+  };
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: {}, models: {} },
+      skills: [{ name: "reviewer", active: false, attached: false }],
+      skill_sources: { local_roots: [], git_hosts: [] },
+    }),
+    skillLifecycleResponse: lifecycleResponses,
+    uuidSequence: ["uninstall-conflict", "uninstall-retry"],
+  });
+  await flush();
+
+  const uninstall = findSkillButton(harness.elements["#capability-skills"], "skillUninstall");
+  assert.ok(uninstall);
+  await uninstall.listener("click")();
+  await flush();
+  await uninstall.listener("click")();
+  await flush();
+
+  const calls = harness.calls.filter((call) => call.path.endsWith("/uninstall"));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.headers["Idempotency-Key"], "uninstall-conflict");
+  assert.equal(
+    calls[1].options.headers["Idempotency-Key"],
+    "uninstall-retry",
+    "attachment conflicts must not replay the stale uninstall intent",
+  );
+});
+
 test("attached missing skills remain visibly actionable without an activate action", async () => {
   const harness = createHarness({
     capabilitiesResponse: response({

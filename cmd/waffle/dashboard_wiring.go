@@ -108,7 +108,8 @@ func newDashboardCapabilities(
 		Skills: &dashboard.WorkspaceCapabilitySkills{
 			DB:          st.DB,
 			Workspace:   ws,
-			Attachments: &skill.Attachments{DB: st.DB},
+			Attachments: &skill.Attachments{DB: st.DB, Workspace: ws, Lifecycle: st.SkillLifecycleGuard()},
+			Lifecycle:   st.SkillLifecycleGuard(),
 			Installer:   installer,
 		},
 		Catalogue: dashboardProviderCatalogue{

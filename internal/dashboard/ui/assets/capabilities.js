@@ -290,6 +290,10 @@ if (root) {
       if (typeof payload.field === "string" && payload.field) {
         error.field = payload.field;
       }
+      error.status = response.status;
+      if (typeof payload.code === "string" && payload.code) {
+        error.code = payload.code;
+      }
       throw error;
     }
     return payload;
@@ -941,6 +945,9 @@ if (root) {
             if (result.restart_required) await handleRestartRequired(result);
             else await loadCapabilities();
           } catch (error) {
+            if (error.status === 409 && error.code === "skill_attached") {
+              clearFormIntent(`skill-uninstall:${item.name}`);
+            }
             setPageStatus(error.safeMessage || "Capability request could not be completed.");
           } finally {
             uninstall.textContent = original;
