@@ -418,6 +418,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			return fmt.Errorf("finalize deferred dashboard capability transaction: %w", err)
 		}
 	}
+	// The ready generation is otherwise only written by provider transactions, so
+	// an out-of-band config.toml edit leaves a healthy host reporting Installed
+	// until an unrelated provider mutation happens to refresh it. This runs
+	// whether or not Desk is enabled, and never blocks startup.
+	verifyProviderReadiness(ctx, log, dashboardProviders)
 	idleTimeout := parseOptionalDuration(cfg.Workspace.IdleTimeout)
 	if idleTimeout > 0 {
 		wsManager.IdleTimeout = idleTimeout

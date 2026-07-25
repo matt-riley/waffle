@@ -51,6 +51,24 @@ encrypted credential, starts Waffle, verifies `/healthz`, and reports
 configuration, secret store, and service state. Cache-write failure after a
 successful commit is only a warning and does not undo the enrolled provider.
 
+### Readiness is proven for one exact configuration
+
+Ready means the health probe passed for the exact `config.toml` on disk. Waffle
+records that as a generation hash beside the provider lock, and reports
+**Installed** whenever the file no longer matches — including after an edit that
+has nothing to do with providers.
+
+`waffle serve` therefore re-proves readiness at startup: when a default model is
+configured and the recorded generation is missing or stale, it runs the same
+health probe and, if it passes, records the current generation. It logs
+`re-proved provider readiness for the current config` when it does. An edited
+config that still comes up healthy is Ready again after a restart, with no
+provider mutation required.
+
+Readiness is never assumed. A failing probe, an unresolvable default model, or a
+concurrent provider transaction all leave the recorded generation untouched and
+the state Installed, and startup continues either way.
+
 ### Managed chat socket
 
 In Ready state, the managed host activates the coupled units in this order:
