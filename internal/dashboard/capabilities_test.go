@@ -478,32 +478,45 @@ func TestCapabilitiesRestartSchedulesOnlyAfterResponseAndNeverOnReplayData(t *te
 
 func TestCapabilitiesRestartOutcomeIsSanitizedAndOperatorActionable(t *testing.T) {
 	tests := []struct {
-		name          string
-		scheduler     RestartScheduler
-		wantScheduled bool
-		wantCode      string
-		wantMessage   string
+		name                string
+		scheduler           RestartScheduler
+		wantScheduled       bool
+		wantCode            string
+		wantMessage         string
+		wantResponseCode    string
+		wantResponseSched   bool
+		wantResponseMessage string
 	}{
 		{
-			name:          "managed schedule succeeds",
-			scheduler:     fakeRestartScheduler{},
-			wantScheduled: true,
-			wantCode:      "restart_scheduled",
-			wantMessage:   "Waffle restart was scheduled.",
+			name:                "managed schedule succeeds",
+			scheduler:           fakeRestartScheduler{},
+			wantScheduled:       true,
+			wantCode:            RestartCodeScheduled,
+			wantMessage:         restartMessageScheduled,
+			wantResponseCode:    RestartCodeScheduled,
+			wantResponseSched:   true,
+			wantResponseMessage: restartMessageScheduled,
 		},
 		{
-			name:          "standalone requires operator restart",
-			scheduler:     StandaloneRestartScheduler{},
-			wantScheduled: false,
-			wantCode:      "manual_restart_required",
-			wantMessage:   "restart waffle serve to apply the change",
+			name:                "standalone requires operator restart",
+			scheduler:           StandaloneRestartScheduler{},
+			wantScheduled:       false,
+			wantCode:            RestartCodeManualRestartRequired,
+			wantMessage:         restartMessageManual,
+			wantResponseCode:    RestartCodeManualRestartRequired,
+			wantResponseSched:   false,
+			wantResponseMessage: restartMessageManual,
 		},
 		{
 			name:          "scheduler failure is sanitized",
 			scheduler:     failingRestartScheduler{err: errors.New("systemd exposed " + capabilityCredentialCanary)},
 			wantScheduled: false,
-			wantCode:      "restart_schedule_failed",
-			wantMessage:   "restart could not be scheduled; restart waffle serve to apply the change",
+			wantCode:      RestartCodeScheduleFailed,
+			wantMessage:   restartMessageFailed,
+			// Failure is only known after Schedule; response is optimistically scheduled.
+			wantResponseCode:    RestartCodeScheduled,
+			wantResponseSched:   true,
+			wantResponseMessage: restartMessageScheduled,
 		},
 	}
 
@@ -530,6 +543,22 @@ func TestCapabilitiesRestartOutcomeIsSanitizedAndOperatorActionable(t *testing.T
 				t.Fatalf("before flush status=%d callbacks=%d outcomes=%d body=%s",
 					response.Code, len(response.after), len(response.outcomes), response.Body.String())
 			}
+			var body capabilityMutationResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if !body.RestartRequired || body.Restart == nil {
+				t.Fatalf("response missing restart outcome: %#v", body)
+			}
+			if body.Restart.Code != tt.wantResponseCode ||
+				body.Restart.Scheduled != tt.wantResponseSched ||
+				body.Restart.Message != tt.wantResponseMessage {
+				t.Fatalf("response restart = %#v", body.Restart)
+			}
+			if bytes.Contains(response.Body.Bytes(), []byte(capabilityCredentialCanary)) {
+				t.Fatalf("response leaked credential: %s", response.Body.String())
+			}
+
 			response.RunAfterResponse()
 			if len(response.outcomes) != 1 {
 				t.Fatalf("outcomes = %#v, want one observable result", response.outcomes)
@@ -547,6 +576,110 @@ func TestCapabilitiesRestartOutcomeIsSanitizedAndOperatorActionable(t *testing.T
 			if bytes.Contains(public, []byte(capabilityCredentialCanary)) ||
 				bytes.Contains(public, []byte("txn-private-diagnostic")) {
 				t.Fatalf("outcome leaked private diagnostics: %s", public)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesRestartOutcomeIsDeliveredToEventHub(t *testing.T) {
+	tests := []struct {
+		name          string
+		scheduler     RestartScheduler
+		wantScheduled bool
+		wantCode      string
+		wantMessage   string
+	}{
+		{
+			name:          "scheduled",
+			scheduler:     fakeRestartScheduler{},
+			wantScheduled: true,
+			wantCode:      RestartCodeScheduled,
+			wantMessage:   restartMessageScheduled,
+		},
+		{
+			name:          "manual",
+			scheduler:     StandaloneRestartScheduler{},
+			wantScheduled: false,
+			wantCode:      RestartCodeManualRestartRequired,
+			wantMessage:   restartMessageManual,
+		},
+		{
+			name:          "failed",
+			scheduler:     failingRestartScheduler{err: errors.New("systemctl leaked " + capabilityCredentialCanary)},
+			wantScheduled: false,
+			wantCode:      RestartCodeScheduleFailed,
+			wantMessage:   restartMessageFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			security := mustSecurity(t, "127.0.0.1:8422")
+			store := NewIdempotencyStore(nil, 8, time.Minute)
+			hub := NewEventHub(8)
+			providers := &fakeCapabilityProviders{
+				result: providerconfig.MutationResult{
+					RestartRequired: true,
+					TransactionID:   "txn-private-diagnostic",
+				},
+			}
+			mux := http.NewServeMux()
+			RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+				Service: &Capabilities{Providers: providers},
+				Mutation: func(limit int64, next http.Handler) http.Handler {
+					return NewMutationHandler(
+						security,
+						store,
+						limit,
+						next,
+						composeRestartOutcomeObservers(hub, nil),
+					)
+				},
+				Restart: tt.scheduler,
+			})
+
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"http://127.0.0.1:8422/api/v1/desk/models/default",
+				strings.NewReader(`{"alias":"gpt"}`),
+			)
+			request.Host = "127.0.0.1:8422"
+			request.Header.Set("X-Waffle-Desk-Token", security.Token())
+			request.Header.Set("Idempotency-Key", "restart-delivery-"+tt.name)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+			}
+
+			events, resync := hub.Subscribe(0)
+			if resync {
+				t.Fatal("hub required resync with empty history")
+			}
+			defer hub.Unsubscribe(events)
+
+			select {
+			case event := <-events:
+				if event.Type != EventTypeCapabilityRestartOutcome || event.Resource != "capability" {
+					t.Fatalf("event = %#v", event)
+				}
+				var outcome RestartScheduleOutcome
+				if err := json.Unmarshal(event.Data, &outcome); err != nil {
+					t.Fatal(err)
+				}
+				if outcome.Scheduled != tt.wantScheduled ||
+					outcome.Code != tt.wantCode ||
+					outcome.Message != tt.wantMessage {
+					t.Fatalf("delivered outcome = %#v", outcome)
+				}
+				if bytes.Contains(event.Data, []byte(capabilityCredentialCanary)) ||
+					bytes.Contains(event.Data, []byte("txn-private-diagnostic")) ||
+					bytes.Contains(event.Data, []byte("systemctl")) {
+					t.Fatalf("event leaked host or private detail: %s", event.Data)
+				}
+			default:
+				t.Fatal("expected capability.restart_outcome on the event hub")
 			}
 		})
 	}

@@ -378,7 +378,7 @@ func globalAliasHandler(routeConfig CapabilitiesRouteConfig, utility bool) http.
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeJSON(w, http.StatusAccepted, result)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
 	}
 }
 
@@ -428,7 +428,7 @@ func addModelHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc {
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeJSON(w, http.StatusAccepted, result)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
 	}
 }
 
@@ -474,7 +474,7 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeJSON(w, http.StatusAccepted, result)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
 	}
 }
 
@@ -555,33 +555,36 @@ func activateSkillHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc 
 			return
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
-		writeJSON(w, http.StatusAccepted, result)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
 	}
+}
+
+// capabilityMutationResponse is the public body for Waffle-wide mutations that
+// may require a process restart. Restart carries the sanitized schedule
+// outcome so the browser can leave the wait state without host detail.
+type capabilityMutationResponse struct {
+	RestartRequired bool                    `json:"restart_required"`
+	TransactionID   string                  `json:"transaction_id,omitempty"`
+	Restart         *RestartScheduleOutcome `json:"restart,omitempty"`
+}
+
+func writeCapabilityMutation(w http.ResponseWriter, result providerconfig.MutationResult, scheduler RestartScheduler) {
+	response := capabilityMutationResponse{
+		RestartRequired: result.RestartRequired,
+		TransactionID:   result.TransactionID,
+	}
+	if result.RestartRequired && scheduler != nil {
+		outcome := plannedRestartOutcome(scheduler)
+		response.Restart = &outcome
+	}
+	writeJSON(w, http.StatusAccepted, response)
 }
 
 func deferRestart(after AfterResponseWriter, scheduler RestartScheduler, transactionID string) {
 	after.AfterResponse(func() RestartScheduleOutcome {
 		ctx, cancel := context.WithTimeout(context.Background(), restartScheduleTimeout)
 		defer cancel()
-		err := scheduler.Schedule(ctx, transactionID)
-		switch {
-		case err == nil:
-			return RestartScheduleOutcome{
-				Scheduled: true,
-				Code:      "restart_scheduled",
-				Message:   "Waffle restart was scheduled.",
-			}
-		case errors.Is(err, ErrManualRestartRequired):
-			return RestartScheduleOutcome{
-				Code:    "manual_restart_required",
-				Message: ErrManualRestartRequired.Error(),
-			}
-		default:
-			return RestartScheduleOutcome{
-				Code:    "restart_schedule_failed",
-				Message: "restart could not be scheduled; restart waffle serve to apply the change",
-			}
-		}
+		return restartOutcomeFromError(scheduler.Schedule(ctx, transactionID))
 	})
 }
 

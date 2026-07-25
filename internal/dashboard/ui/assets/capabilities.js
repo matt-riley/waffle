@@ -36,6 +36,9 @@ if (root) {
     install: document.querySelector("#capability-skill-install"),
   };
 
+  const RESTART_POLL_INTERVAL_MS = 1000;
+  const RESTART_POLL_TIMEOUT_MS = 60_000;
+
   const state = {
     requestToken: document.body.dataset.requestToken || "",
     processGeneration: "",
@@ -48,6 +51,66 @@ if (root) {
 
   function setStatus(message) {
     elements.status.textContent = message;
+  }
+
+  function restartPendingForms() {
+    return [
+      elements.providerForm,
+      elements.defaultForm,
+      elements.utilityForm,
+      elements.modelForm,
+    ].filter(Boolean);
+  }
+
+  function setRestartFormsDisabled(disabled) {
+    for (const form of restartPendingForms()) {
+      form.dataset.restartLocked = disabled ? "true" : "false";
+      if (typeof form.querySelectorAll === "function") {
+        for (const control of form.querySelectorAll("input, button, select, textarea")) {
+          control.disabled = disabled;
+        }
+      }
+      // Fake/test harnesses may expose controls without a full DOM tree.
+      if (Array.isArray(form.controls)) {
+        for (const control of form.controls) {
+          control.disabled = disabled;
+        }
+      }
+    }
+  }
+
+  function setRestartBanner({ title, detail, hidden }) {
+    if (!elements.restart) return;
+    elements.restart.hidden = Boolean(hidden);
+    if (hidden) {
+      return;
+    }
+    clearNode(elements.restart);
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    const span = document.createElement("span");
+    span.textContent = detail;
+    elements.restart.appendChild(strong);
+    elements.restart.appendChild(span);
+  }
+
+  function readRestartOutcome(result) {
+    const restart = result && typeof result.restart === "object" && result.restart
+      ? result.restart
+      : null;
+    if (restart && typeof restart.code === "string" && restart.code) {
+      return {
+        code: restart.code,
+        message: typeof restart.message === "string" ? restart.message : "",
+        scheduled: Boolean(restart.scheduled),
+      };
+    }
+    // Legacy responses only carried restart_required; treat as scheduled.
+    return {
+      code: "restart_scheduled",
+      message: "Waffle restart was scheduled.",
+      scheduled: true,
+    };
   }
 
   async function readJSON(response) {
@@ -171,6 +234,7 @@ if (root) {
         const activate = document.createElement("button");
         activate.type = "button";
         activate.textContent = "Activate";
+        activate.disabled = state.restarting;
         activate.addEventListener("click", async () => {
           await runMutation(
             () => postMutation(`/api/v1/desk/skills/${encodeURIComponent(item.name)}/activate`, {}),
@@ -302,25 +366,84 @@ if (root) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
-  async function pollRestart() {
-    state.restarting = true;
-    elements.restart.hidden = false;
-    for (;;) {
+  function endRestartWait(statusMessage) {
+    state.restarting = false;
+    setRestartFormsDisabled(false);
+    if (statusMessage) {
+      setStatus(statusMessage);
+    }
+  }
+
+  function finishManualOrFailedRestart(outcome) {
+    const message =
+      outcome.message ||
+      (outcome.code === "restart_schedule_failed"
+        ? "restart could not be scheduled; restart waffle serve to apply the change"
+        : "Change committed; restart waffle serve to apply.");
+    setRestartBanner({
+      title: outcome.code === "restart_schedule_failed" ? "Restart could not be scheduled." : "Restart required.",
+      detail: message,
+      hidden: false,
+    });
+    endRestartWait(message);
+  }
+
+  async function pollRestart(outcome) {
+    const startedAt = Date.now();
+    const baseMessage = outcome.message || "Waffle restart was scheduled.";
+    setRestartBanner({
+      title: "Restart scheduled.",
+      detail: `${baseMessage} Waiting for a new Waffle process (0s).`,
+      hidden: false,
+    });
+
+    while (Date.now() - startedAt < RESTART_POLL_TIMEOUT_MS) {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      setRestartBanner({
+        title: "Restart scheduled.",
+        detail: `${baseMessage} Waiting for a new Waffle process (${elapsedSeconds}s).`,
+        hidden: false,
+      });
       try {
         const bootstrap = validateBootstrap(await getBootstrap());
-        if (bootstrap.process_generation === state.processGeneration) {
-          throw new Error("old_process");
+        if (bootstrap.process_generation !== state.processGeneration) {
+          state.requestToken = bootstrap.request_token;
+          state.processGeneration = bootstrap.process_generation;
+          setRestartBanner({ title: "", detail: "", hidden: true });
+          endRestartWait("Capabilities are current.");
+          await loadCapabilities();
+          return;
         }
-        state.requestToken = bootstrap.request_token;
-        state.processGeneration = bootstrap.process_generation;
-        state.restarting = false;
-        elements.restart.hidden = true;
-        await loadCapabilities();
-        return;
       } catch {
-        await delay(1000);
+        // Keep polling until the bound expires; generation may still change.
       }
+      await delay(RESTART_POLL_INTERVAL_MS);
     }
+
+    const timeoutMessage =
+      "Restart did not complete in time. Restart waffle serve to apply the change.";
+    setRestartBanner({
+      title: "Restart timed out.",
+      detail: timeoutMessage,
+      hidden: false,
+    });
+    endRestartWait(timeoutMessage);
+  }
+
+  async function handleRestartRequired(result) {
+    const outcome = readRestartOutcome(result);
+    state.restarting = true;
+    setRestartFormsDisabled(true);
+
+    if (
+      outcome.code === "manual_restart_required" ||
+      outcome.code === "restart_schedule_failed"
+    ) {
+      finishManualOrFailedRestart(outcome);
+      return;
+    }
+
+    await pollRestart(outcome);
   }
 
   async function runMutation(action, successMessage) {
@@ -328,7 +451,7 @@ if (root) {
       const result = await action();
       setStatus(successMessage);
       if (result.restart_required) {
-        await pollRestart();
+        await handleRestartRequired(result);
       } else {
         await loadCapabilities();
       }
@@ -361,7 +484,7 @@ if (root) {
     }
     setStatus("Provider enrolled.");
     if (result.restart_required) {
-      await pollRestart();
+      await handleRestartRequired(result);
     } else {
       await loadCapabilities();
     }
