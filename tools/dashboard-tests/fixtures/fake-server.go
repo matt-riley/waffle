@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -175,6 +176,7 @@ func main() {
 		WorkspaceEgress:   "allowlist",
 		Capabilities:      capabilities,
 		Restart:           fixtureRestart{},
+		Posture:           dashboard.NewPostureService(postureFixtureConfig(), nil, fixturePostureAudit{}),
 		Version:           "dashboard-fixture",
 		ProcessGeneration: "dashboard-fixture-generation",
 		Now:               func() time.Time { return fixtureNow },
@@ -891,3 +893,41 @@ var (
 	_ dashboard.RestartScheduler        = fixtureRestart{}
 	_ chat.Backend                      = (*fixtureChatBackend)(nil)
 )
+
+// postureFixtureConfig carries canary-bearing policy so the browser suite can
+// prove the posture surface redacts as well as renders (#193).
+func postureFixtureConfig() config.Config {
+	return config.Config{
+		Sandbox: config.Sandbox{Mode: "host"},
+		Agent: config.Agent{
+			Groups: map[string]config.AgentGroup{
+				config.GroupMain: {Tools: config.ToolPolicy{
+					Allow:        []string{"bash", "read"},
+					DenyPrefixes: []string{"rm -rf", "/var/lib/waffle/private/run.sh"},
+					Guidance:     "Group guidance.",
+				}},
+			},
+			Profiles: map[string]config.AgentProfile{
+				"reviewer": {
+					System:        "You review changes. Never echo desk-secret-canary.",
+					Model:         "primary",
+					Sandbox:       "docker",
+					Tools:         config.ToolPolicy{Allow: []string{"read"}, Deny: []string{"bash"}},
+					DenyPrefixes:  []string{"git push"},
+					MaxTokens:     4096,
+					MaxIterations: 12,
+				},
+			},
+		},
+	}
+}
+
+type fixturePostureAudit struct{}
+
+func (fixturePostureAudit) RecentDenials(context.Context, string, int) ([]policy.AuditEntry, error) {
+	return []policy.AuditEntry{{
+		At: "2026-07-24T12:00:00Z", Session: "session-primary", Tool: "bash",
+		Command: "git push --force", Rule: "no-force-push", Verdict: "deny",
+		Detail: "Force pushes are refused on shared branches.",
+	}}, nil
+}

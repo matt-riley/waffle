@@ -83,6 +83,7 @@ const elements = {
   skillToggle: document.querySelector("#desk-skill-toggle"),
   skillStatus: document.querySelector("#desk-skill-status"),
   profile: document.querySelector("#desk-profile"),
+  postureOpen: document.querySelector("#desk-posture-open"),
   workspace: document.querySelector("#desk-workspace"),
   provider: document.querySelector("#desk-provider"),
   sandbox: document.querySelector("#desk-sandbox"),
@@ -578,6 +579,12 @@ function renderCanonicalState(chatState, includeHistory) {
     elements.connectionDetail.textContent = state.connectionLabel;
   }
   elements.profile.textContent = chatState.profile || "Default";
+  // posture.js reads these off the trigger, so the read-only posture view
+  // always describes the profile this session is actually running (#193).
+  if (elements.postureOpen) {
+    elements.postureOpen.dataset.postureProfile = chatState.profile || "";
+    elements.postureOpen.dataset.postureSession = state.sessionID || "";
+  }
   elements.workspace.textContent = chatState.workspace || "No workspace";
   elements.provider.textContent = chatState.provider_label || "Not reported";
   if (elements.sandbox) {

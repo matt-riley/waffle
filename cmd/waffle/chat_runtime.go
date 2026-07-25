@@ -710,21 +710,12 @@ func (r *chatRuntime) commandPermissions() chatpkg.Result {
 	}
 }
 
+// resolvedPolicy is the runtime's effective permission view. It delegates to
+// config.ApplyProfilePolicy so Desk's posture projection and the profile
+// editor validate against the very policy the runtime enforces (#193).
 func (r *chatRuntime) resolvedPolicy() config.ResolvedAgentPolicy {
-	policy := r.cfg.AgentPolicy(config.GroupMain)
 	profile, _ := r.cfg.Profile(r.profileName)
-	if profile.Sandbox != "" {
-		policy.Mode = profile.Sandbox
-	}
-	if len(profile.Tools.Allow) > 0 {
-		policy.Allow = profile.Tools.Allow
-	}
-	if len(profile.Tools.Deny) > 0 {
-		policy.Deny = appendUniqueStrings(policy.Deny, profile.Tools.Deny...)
-	}
-	policy.DenyPrefixes = appendUniqueStrings(policy.DenyPrefixes, profile.DenyPrefixes...)
-	policy.DenyPrefixes = appendUniqueStrings(policy.DenyPrefixes, profile.Tools.DenyPrefixes...)
-	return policy
+	return config.ApplyProfilePolicy(r.cfg.AgentPolicy(config.GroupMain), profile)
 }
 
 func (r *chatRuntime) commandSkill(ctx context.Context, args string, emit func(chatpkg.Event)) (chatpkg.Result, error) {

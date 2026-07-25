@@ -1,0 +1,128 @@
+#desk-posture-dialog {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  color: var(--ink);
+  max-height: calc(100vh - 2rem);
+  max-width: min(46rem, calc(100vw - 2rem));
+  overflow: auto;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  width: 100%;
+}
+
+#desk-posture-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.posture-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.posture-block {
+  border-top: 1px solid var(--rule);
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+}
+
+.posture-block h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+.posture-facts {
+  display: grid;
+  gap: 0.4rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.posture-facts div {
+  min-width: 0;
+}
+
+.posture-facts dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.posture-facts dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* The prompt is the one place long operator-authored text is shown in full,
+   so it scrolls inside its own box rather than stretching the dialog. */
+.posture-prompt {
+  background: var(--rule);
+  margin: 0.5rem 0 0;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 0.6rem 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.posture-layer {
+  border: 1px solid var(--rule);
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.7rem;
+}
+
+.posture-layer-effective {
+  border-color: var(--ink);
+}
+
+.posture-layer header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.posture-layer h4 {
+  font-size: 0.85rem;
+  margin: 0 0 0.35rem;
+}
+
+.posture-layer-state,
+.posture-note,
+.posture-empty {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.posture-guidance {
+  font-size: 0.82rem;
+  margin: 0.4rem 0 0;
+}
+
+.posture-error {
+  margin: 0.4rem 0 0;
+}
+
+.posture-denial {
+  border-top: 1px solid var(--rule);
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+}
+
+.posture-denial-head {
+  font-weight: 600;
+  margin: 0 0 0.3rem;
+}
+
+.posture-trigger {
+  font-size: 0.78rem;
+}
+
+@media (max-width: 40rem) {
+  .posture-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

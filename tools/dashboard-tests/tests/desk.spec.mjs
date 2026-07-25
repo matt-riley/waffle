@@ -152,6 +152,43 @@ test("connections expose only allowlisted fields from canary-bearing config", as
   }
 });
 
+test("posture shows the prompt, each policy tier, and the rule behind a refusal", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the posture surface once.");
+  await page.goto(deskURL("today"));
+
+  const dialog = page.locator("#desk-posture-dialog");
+  await expect(dialog).toBeHidden();
+  await page.locator("#desk-posture-open").click();
+  await expect(dialog).toBeVisible();
+
+  // AC1: the effective prompt, with its source labelled.
+  await expect(dialog).toContainText("Inline in config.toml");
+  await expect(dialog).toContainText("You review changes.");
+
+  // AC2: the tiers are shown as layers, not one flattened list.
+  for (const tier of [
+    "Agent group",
+    "Profile narrowing",
+    "Repo policy (WAFFLE.md)",
+    "Effective",
+  ]) {
+    await expect(dialog).toContainText(tier);
+  }
+  await expect(dialog.locator("[data-layer='profile']")).toContainText("git push");
+
+  // AC3: a refusal names the rule that produced it.
+  await expect(dialog).toContainText("no-force-push");
+  await expect(dialog).toContainText("git push --force");
+
+  // AC4: read-only, and the host path in the group's deny prefixes is withheld
+  // rather than rendered.
+  await expect(dialog.locator("form")).toHaveCount(0);
+  await expectNoCanaries(page);
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
 test("all five destinations render their production section", async ({ page }) => {
   const destinations = [
     ["today", ".today", "Release review"],

@@ -809,43 +809,15 @@ func childProfilesFromConfig(cfg config.Config, parentDeny []string) map[string]
 // loadProfileSystem returns inline system text or file contents. File paths
 // (with or without "@" prefix, or ending in .md) must resolve under
 // WAFFLE_HOME; missing files and path escapes are errors (#71).
+// loadProfileSystem resolves a profile's system text through the shared
+// resolver so the runtime and Desk's posture view agree on both the body and
+// its source (#193).
 func loadProfileSystem(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", nil
+	prompt, err := config.ResolveProfileSystem(s)
+	if err != nil {
+		return "", err
 	}
-	path := s
-	if strings.HasPrefix(s, "@") {
-		path = strings.TrimPrefix(s, "@")
-	}
-	if strings.HasSuffix(path, ".md") || strings.HasPrefix(s, "@") {
-		home, err := config.Home()
-		if err != nil {
-			return "", fmt.Errorf("profile system file: %w", err)
-		}
-		homeAbs, err := filepath.Abs(home)
-		if err != nil {
-			return "", fmt.Errorf("profile system file: %w", err)
-		}
-		// Relative paths resolve under WAFFLE_HOME; absolute paths must still sit under it.
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(homeAbs, path)
-		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return "", fmt.Errorf("profile system file: %w", err)
-		}
-		rel, err := filepath.Rel(homeAbs, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("profile system file %q is outside WAFFLE_HOME", path)
-		}
-		b, err := os.ReadFile(abs)
-		if err != nil {
-			return "", fmt.Errorf("profile system file: %w", err)
-		}
-		return strings.TrimSpace(string(b)), nil
-	}
-	return s, nil
+	return prompt.Text, nil
 }
 
 func appendUniqueStrings(base []string, more ...string) []string {

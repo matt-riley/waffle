@@ -1,0 +1,28 @@
+package ui
+
+// PostureAssets loads the shared read-only posture view. Both Today and
+// Capabilities include it, each through AssetURL, because a relative ES import
+// between assets would resolve without the ?v= cache key.
+templ PostureAssets(view ShellView) {
+	<link rel="stylesheet" href={ AssetURL("posture.css", view.AssetVersion) }/>
+	<script type="module" src={ AssetURL("posture.js", view.AssetVersion) }></script>
+}
+
+// PostureDialog is the read-only posture surface. It has no form and no
+// submit: changing a profile is #194 and lives behind the mutation guard.
+templ PostureDialog() {
+	<dialog id="desk-posture-dialog" aria-labelledby="desk-posture-title">
+		<div class="posture-content">
+			<header class="posture-header">
+				<div>
+					<p class="panel-index">read-only / posture</p>
+					<h2 id="desk-posture-title">Posture</h2>
+					<p class="posture-note">What this agent was told, and what it is allowed to do. Nothing here can be edited.</p>
+				</div>
+				<button id="desk-posture-close" type="button">Close</button>
+			</header>
+			<p id="desk-posture-status" class="posture-note" role="status" aria-live="polite"></p>
+			<div id="desk-posture-body"></div>
+		</div>
+	</dialog>
+}

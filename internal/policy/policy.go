@@ -343,6 +343,62 @@ func LogAudit(ctx context.Context, db *sql.DB, session, tool, command string, d 
 	return err
 }
 
+// AuditEntry is one recorded policy decision, read back so a denied tool call
+// can be traced to the rule that denied it (#193).
+type AuditEntry struct {
+	At      string
+	Session string
+	Tool    string
+	Command string
+	Rule    string
+	Verdict string
+	Detail  string
+}
+
+// RecentDenials returns the most recent non-allow decisions, newest first.
+// session narrows to one conversation; empty returns denials across all
+// sessions. limit is clamped to a sane page so a caller cannot ask for the
+// whole table.
+func RecentDenials(ctx context.Context, db *sql.DB, session string, limit int) ([]AuditEntry, error) {
+	if db == nil {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	query := `
+		SELECT at, session, tool, command, rule, verdict, detail
+		FROM policy_audit
+		WHERE verdict <> ?`
+	args := []any{ActionAllow}
+	if session != "" {
+		query += ` AND session = ?`
+		args = append(args, session)
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("read policy audit: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []AuditEntry
+	for rows.Next() {
+		var entry AuditEntry
+		if err := rows.Scan(&entry.At, &entry.Session, &entry.Tool,
+			&entry.Command, &entry.Rule, &entry.Verdict, &entry.Detail); err != nil {
+			return nil, fmt.Errorf("read policy audit: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read policy audit: %w", err)
+	}
+	return entries, nil
+}
+
 // LogMutation always records a non-tool mutation into policy_audit.
 // Desk and skillinstall call this so their surfaces share the same audit trail
 // as tool decisions, even when no [[policy.rule]] matched.

@@ -764,6 +764,18 @@ if (root) {
         guidance.textContent = item.guidance;
         card.appendChild(guidance);
       }
+      // A profile is a trust boundary, so its full posture is worth reading.
+      // posture.js picks this trigger up by delegation, which is why no import
+      // between assets is needed (#193).
+      if (item?.kind === "profile" && typeof item?.profile === "string" && item.profile) {
+        const posture = document.createElement("button");
+        posture.type = "button";
+        posture.className = "posture-trigger";
+        posture.dataset.postureOpen = "";
+        posture.dataset.postureProfile = item.profile;
+        posture.textContent = "View posture";
+        card.appendChild(posture);
+      }
       if (item?.kind === "provider" && typeof item?.name === "string" && item.name) {
         const test = document.createElement("button");
         test.type = "button";
