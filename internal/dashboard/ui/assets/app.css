@@ -41,11 +41,12 @@ a {
   color: inherit;
 }
 
-/* Text-like controls share chrome; leave checkbox/radio/range/file/hidden native. */
+/* Text-like controls share chrome; leave checkbox/radio/range/file/hidden native.
+   :where() keeps baseline specificity at (0,0,1) so section class overrides win. */
 button,
 select,
 textarea,
-input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]) {
+input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])) {
   border: 1px solid var(--ink);
   border-radius: 0;
 }
@@ -84,7 +85,7 @@ input:disabled {
 
 select,
 textarea,
-input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]) {
+input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])) {
   background: var(--paper);
   color: var(--ink);
   max-width: 100%;

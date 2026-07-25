@@ -85,7 +85,7 @@ func TestAppCSSIncludesInputInSharedControlBaseline(t *testing.T) {
 	for _, required := range []string{
 		"font: inherit",
 		"input:disabled",
-		`input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])`,
+		`input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]))`,
 	} {
 		if !strings.Contains(css, required) {
 			t.Errorf("app.css control baseline missing %q", required)
