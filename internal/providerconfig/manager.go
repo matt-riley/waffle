@@ -1778,9 +1778,6 @@ func (m *Manager) rollbackJournal(ctx context.Context, j *transactionJournal) er
 	return m.finalizeTransaction()
 }
 
-// FinalizeDeferred confirms that a newly started process is healthy before
-// removing the transaction journal and backups. A failed confirmation restores
-// the exact previous files and service state.
 // VerifyReadiness re-proves readiness for the config on disk when a default
 // model is configured but the ready generation is missing or stale, and reports
 // whether it refreshed the marker.
@@ -1834,6 +1831,9 @@ func (m *Manager) VerifyReadiness(ctx context.Context) (refreshed bool, err erro
 	return true, nil
 }
 
+// FinalizeDeferred confirms that a newly started process is healthy before
+// removing the transaction journal and backups. A failed confirmation restores
+// the exact previous files and service state.
 func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
