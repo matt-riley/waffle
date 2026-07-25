@@ -1529,6 +1529,20 @@ func (d *tomlDocument) setValue(table, key, rendered string) {
 	d.lines = append(d.lines[:end], append([]string{key + " = " + rendered}, d.lines[end:]...)...)
 }
 
+// SetTableBool returns raw with table.key set to value, creating the table or
+// the key when either is absent and preserving every other line, comment, and
+// inline comment exactly.
+//
+// It is the one syntax-aware config.toml editor in Waffle. `waffle setup` uses
+// it to flip [dashboard] enabled (#192 AC3) rather than growing a second
+// rewriter that would drift from this one. Callers own validation: stage the
+// result, re-read it with config.Load, and only then replace config.toml.
+func SetTableBool(raw []byte, table, key string, value bool) []byte {
+	doc := newTOMLDocument(raw)
+	doc.setValue(table, key, strconv.FormatBool(value))
+	return doc.bytes()
+}
+
 func (d *tomlDocument) deleteValue(table, key string) {
 	start, end, ok := d.tableSpan(table)
 	if !ok {

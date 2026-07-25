@@ -12,6 +12,7 @@ templ Today(view ShellView) {
 				<span id="desk-connection-text">{ view.Connection }</span>
 			</p>
 		</header>
+		@SetupBanner()
 		<div class="stale-banner" id="desk-stale-status" role="status" aria-live="polite" hidden>
 			<div>
 				<strong>This desk is out of date.</strong>

@@ -1,0 +1,47 @@
+package ui
+
+import "github.com/matt-riley/waffle/internal/config"
+
+// SetupAssets loads the bootstrap checklist (#192). Capabilities renders the
+// full checklist; Today loads the same module only for its banner, so a new
+// owner who lands on a Desk that cannot open a conversation is told why.
+templ SetupAssets(view ShellView) {
+	<link rel="stylesheet" href={ AssetURL("setup.css", view.AssetVersion) }/>
+	<script type="module" src={ AssetURL("setup.js", view.AssetVersion) }></script>
+}
+
+// SetupBanner is Today's pointer at the checklist. It stays hidden until the
+// projection reports an unmet prerequisite, so a configured Desk never shows it.
+templ SetupBanner() {
+	<div class="setup-banner" id="desk-setup-banner" role="status" aria-live="polite" hidden>
+		<div>
+			<strong>Waffle is not set up yet.</strong>
+			<span id="desk-setup-banner-message">Some prerequisites are still missing.</span>
+		</div>
+		<a href="/desk/?section=capabilities#setup-checklist">Finish setup</a>
+	</div>
+}
+
+// SetupChecklist mirrors the steps `waffle setup` walks, each with its current
+// state and either an in-Desk action or the exact command that satisfies it.
+templ SetupChecklist() {
+	<section
+		class="capability-panel setup-panel"
+		id="setup-checklist"
+		aria-labelledby="setup-checklist-title"
+		data-starter-system={ config.DefaultMainSystemPrompt }
+	>
+		<header class="panel-heading">
+			<div>
+				<p class="panel-index">00 / setup</p>
+				<h2 id="setup-checklist-title">Setup</h2>
+				<p class="posture-note">
+					The prerequisites <code>waffle setup</code> walks, as this running Waffle sees them.
+					Changes made here take effect after a restart.
+				</p>
+			</div>
+		</header>
+		<p class="capability-form-status" id="setup-status" role="status" aria-live="polite">Checking setup…</p>
+		<ol class="setup-steps" id="setup-steps"></ol>
+	</section>
+}

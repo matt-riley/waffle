@@ -149,29 +149,10 @@ func resolveRuntimeModelTarget(cfg config.Config, alias string) (config.Resolved
 	}, nil
 }
 
+// resolveRuntimeProfileModel defers to the shared resolver so the runtime and
+// Desk's setup projection cannot drift apart about which profiles can start.
 func resolveRuntimeProfileModel(cfg config.Config, profile config.AgentProfile) (string, error) {
-	// An explicit registry has no singular provider. Its profile values are
-	// aliases, with "default" and "utility" selecting the agent aliases.
-	if cfg.ProviderRegistrySource() == config.ProviderRegistryExplicit {
-		alias := strings.TrimSpace(profile.Model)
-		switch alias {
-		case "", "default":
-			alias = cfg.Agent.DefaultModel
-		case "utility":
-			alias = cfg.Agent.UtilityModel
-			if alias == "" {
-				return "", fmt.Errorf("profile model %q requires [agent] utility_model to be set", profile.Model)
-			}
-		}
-		if alias == "" {
-			return "", fmt.Errorf("agent.default_model is not configured")
-		}
-		if _, err := cfg.ResolveModel(alias); err != nil {
-			return "", err
-		}
-		return alias, nil
-	}
-	return cfg.ResolveProfileModel(profile)
+	return cfg.ResolveProfileModelAlias(profile)
 }
 
 // redactFor returns the redactor associated with alias's connection. The

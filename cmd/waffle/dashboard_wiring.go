@@ -119,6 +119,30 @@ func newDashboardCapabilities(
 	}, nil
 }
 
+// deskSecretIdentity is Desk's window onto the secret-store identity (#192).
+// It probes on every call rather than caching, so the checklist reflects an
+// identity created out-of-band by `waffle secret init` without a restart, and
+// it never returns the identity itself to any caller.
+type deskSecretIdentity struct{}
+
+func (deskSecretIdentity) IdentityConfigured() (bool, error) {
+	if _, err := secret.LoadIdentity(); err != nil {
+		if errors.Is(err, secret.ErrNoIdentity) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// CreateIdentity generates the identity into the OS keyring and discards the
+// value. `waffle secret export-identity` is the sanctioned way to read it back
+// for backup; it is never returned here, and so never reaches the browser.
+func (deskSecretIdentity) CreateIdentity() error {
+	_, err := secret.InitIdentity(false)
+	return err
+}
+
 func defaultDashboardProviderManager() (*providerconfig.Manager, error) {
 	identity, err := secret.LoadIdentity()
 	if err != nil && !errors.Is(err, secret.ErrNoIdentity) {

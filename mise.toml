@@ -39,7 +39,8 @@ node --test \
   internal/dashboard/ui/memory_client_test.mjs \
   internal/dashboard/ui/capabilities_client_test.mjs \
   internal/dashboard/ui/posture_client_test.mjs \
-  internal/dashboard/ui/profiles_client_test.mjs
+  internal/dashboard/ui/profiles_client_test.mjs \
+  internal/dashboard/ui/setup_client_test.mjs
 """
 
 [tasks.dashboard-install]

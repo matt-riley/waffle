@@ -396,7 +396,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			// second secret boundary (#193).
 			Posture:  deskPosture,
 			Profiles: deskProfiles,
-			Restart:  restart,
+			// The setup checklist reads the same config snapshot as posture
+			// and the profile editor, so a Desk that says a prerequisite is
+			// met cannot disagree with the surfaces rendered beside it (#192).
+			Setup:   dashboard.NewSetupService(cfg, deskSecretIdentity{}, deskSecretIdentity{}),
+			Restart: restart,
 			RestartOutcome: func(outcome dashboard.RestartScheduleOutcome) {
 				log.Info("dashboard restart outcome",
 					"scheduled", outcome.Scheduled,

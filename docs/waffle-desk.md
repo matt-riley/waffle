@@ -11,7 +11,12 @@ For the surrounding operator workflows, see the [deployment guide](deploy.md#waf
 
 ## Enable and open Desk
 
-Desk is disabled by default. Enable it deliberately:
+Desk is disabled by default, and a disabled Desk cannot enable itself. The loop
+is closed from the CLI: `waffle setup` offers to enable it as its last step and
+prints the loopback URL on completion. Re-running setup on a configured install
+is safe — every completed step is skipped.
+
+To enable it by hand instead:
 
 ```toml
 [dashboard]
@@ -24,6 +29,27 @@ Start the normal service, then open the local address:
 waffle serve
 # http://127.0.0.1:8422/desk/
 ```
+
+### Setup checklist
+
+Capabilities opens with a **Setup** panel listing the same prerequisites
+`waffle setup` walks — secret-store identity, provider connection, default and
+utility model, `[agent.profile.main]`, and Desk itself — each reported as
+configured, missing, or misconfigured. A prerequisite Desk can satisfy offers
+the control inline; one it cannot states the exact command to run instead.
+Today shows a banner pointing at the checklist while anything is outstanding,
+so an install that cannot open a conversation says why.
+
+The checklist projects the configuration the running process loaded, matching
+the posture view and profile editor beside it. Desk mutations are
+restart-deferred, so a step satisfied from the browser flips once Waffle
+restarts.
+
+Creating the secret-store identity is the one action the checklist performs
+itself. The key is written to the OS keyring and never returned to the browser;
+back it up afterwards with `waffle secret export-identity`. On a headless host
+with no usable keyring, use `waffle secret init --print` and supply the value as
+`WAFFLE_AGE_IDENTITY` instead.
 
 Keep the listener on loopback. Do not expose Desk with a public bind, public
 reverse proxy, public hostname, or Tailscale Funnel. A tailnet-only

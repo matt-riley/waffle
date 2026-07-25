@@ -71,7 +71,7 @@ func TestSetupFreshInstallEndToEnd(t *testing.T) {
 	if !ok {
 		t.Fatal("agent.profile.main missing")
 	}
-	if main.System != defaultMainSystemPrompt || main.Model != "default" || main.Sandbox != "host" {
+	if main.System != config.DefaultMainSystemPrompt || main.Model != "default" || main.Sandbox != "host" {
 		t.Fatalf("profile.main = %#v", main)
 	}
 }
@@ -163,6 +163,192 @@ func TestSetupPartialIdentityOnlyAddsProviderAndProfile(t *testing.T) {
 	}
 	if main.System != "You are a careful assistant." {
 		t.Fatalf("system = %q", main.System)
+	}
+}
+
+// A disabled dashboard cannot enable itself, so `waffle setup` is the only
+// place the loop can be closed (#192 AC3).
+func TestSetupEnablesDeskAndPrintsItsLoopbackURL(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+	// The example config ships an explicit [dashboard] enabled = false, which
+	// is the state an owner who copied it is actually in.
+	appendSetupConfig(t, home, "\n[dashboard]\nenabled = false\n# skill_import_roots = []\n")
+
+	var stdout, stderr bytes.Buffer
+	err := run(context.Background(), []string{"setup"}, strings.NewReader("y\n"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"set [dashboard] enabled = true",
+		"Waffle Desk: http://127.0.0.1:8422/desk/",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatalf("Load config: %v", err)
+	}
+	if !cfg.Dashboard.Enabled {
+		t.Fatal("dashboard.enabled = false after setup enabled it")
+	}
+	// The edit must be surgical: unrelated tables and comments survive.
+	raw, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"# setup re-run fixture",
+		`model = "gpt-exact"`,
+		"[agent.profile.main]",
+		"# skill_import_roots = []",
+		"enabled = true",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("config lost %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "enabled = false") {
+		t.Fatalf("dashboard still disabled in config:\n%s", raw)
+	}
+}
+
+func TestSetupHonoursADeclinedDesk(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader("n\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Waffle Desk left disabled") {
+		t.Fatalf("want the declined notice:\n%s", out)
+	}
+	if strings.Contains(out, "Waffle Desk: http") {
+		t.Fatalf("a disabled Desk must not advertise a URL:\n%s", out)
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Enabled {
+		t.Fatal("dashboard.enabled = true after the owner declined")
+	}
+}
+
+// Exhausted stdin means nobody answered, and enabling a browser interface is
+// not something to do on a default.
+func TestSetupLeavesDeskDisabledWhenNobodyAnswers(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Enabled {
+		t.Fatal("an unanswered prompt enabled the dashboard")
+	}
+}
+
+func TestSetupSkipsAnAlreadyEnabledDesk(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+	appendSetupConfig(t, home, "\n[dashboard]\nenabled = true\n")
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Waffle Desk already enabled") {
+		t.Fatalf("want the already-enabled skip:\n%s", out)
+	}
+	if !strings.Contains(out, "Waffle Desk: http://127.0.0.1:8422/desk/") {
+		t.Fatalf("want the Desk URL:\n%s", out)
+	}
+}
+
+// Only an explicit yes enables Desk. "nope" is a refusal to any reader, and a
+// prompt that read it as consent would be the one place setup changes posture
+// against the owner's intent.
+func TestSetupAffirmativeRequiresAnExplicitYes(t *testing.T) {
+	for _, answer := range []string{"y", "Y", "yes", "YES", " yes "} {
+		if !setupAffirmative(answer) {
+			t.Errorf("setupAffirmative(%q) = false, want true", answer)
+		}
+	}
+	for _, answer := range []string{"n", "no", "NO", "nope", "nah", "sure?", "", "yy", "1"} {
+		if setupAffirmative(answer) {
+			t.Errorf("setupAffirmative(%q) = true, want false", answer)
+		}
+	}
+}
+
+// Bare Enter still enables Desk: the prompt's default carries the intent, so
+// the affirmative allowlist must not turn the offered default into a refusal.
+func TestSetupEnterAcceptsTheOfferedDefault(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader("\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Dashboard.Enabled {
+		t.Fatalf("bare Enter did not accept the offered default:\n%s", stdout.String())
+	}
+}
+
+func TestSetupTreatsAnUnrecognisedAnswerAsRefusal(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader("nope\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Waffle Desk left disabled") {
+		t.Fatalf("want the declined notice:\n%s", stdout.String())
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Enabled {
+		t.Fatal("an unrecognised answer enabled the dashboard")
+	}
+}
+
+func appendSetupConfig(t *testing.T, home, extra string) {
+	t.Helper()
+	path := filepath.Join(home, "config.toml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, []byte(extra)...), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

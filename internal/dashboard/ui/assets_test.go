@@ -26,6 +26,8 @@ func TestStaticAssetsCachedAtInit(t *testing.T) {
 		"posture.js",
 		"profiles.css",
 		"profiles.js",
+		"setup.css",
+		"setup.js",
 	}
 	for _, name := range required {
 		asset, ok := staticAssets[name]

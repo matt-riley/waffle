@@ -1,0 +1,115 @@
+/* The bootstrap checklist (#192). It reads as a list of facts, not a wizard:
+   each prerequisite states what it is, whether it holds, and the one thing
+   that satisfies it. */
+
+.setup-panel {
+  grid-column: 1 / -1;
+}
+
+.setup-steps {
+  display: grid;
+  gap: 0.75rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.setup-step {
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--rule-dark);
+  padding: 0.7rem 0.85rem;
+}
+
+.setup-step[data-state="configured"] {
+  border-left-color: var(--healthy);
+}
+
+.setup-step[data-state="missing"] {
+  border-left-color: var(--ginger);
+}
+
+.setup-step[data-state="misconfigured"] {
+  border-left-color: var(--danger);
+}
+
+.setup-step-heading {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.setup-step-heading h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.setup-state {
+  border: 1px solid currentcolor;
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.setup-step[data-state="configured"] .setup-state {
+  color: var(--healthy);
+}
+
+.setup-step[data-state="missing"] .setup-state {
+  color: var(--ginger-dark);
+}
+
+.setup-step[data-state="misconfigured"] .setup-state {
+  color: var(--danger);
+}
+
+.setup-detail {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+/* A step Desk cannot satisfy states the exact command instead of a button, so
+   the command must stay selectable and must not wrap into something that no
+   longer pastes correctly. */
+.setup-command {
+  font-size: 0.85rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.setup-command-label {
+  color: var(--muted);
+  margin-right: 0.35rem;
+}
+
+.setup-command code {
+  background: var(--rule);
+  padding: 0.1rem 0.3rem;
+}
+
+.setup-banner {
+  align-items: center;
+  background: var(--cream);
+  border: 1px solid var(--ginger);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding: 0.8rem 0.9rem;
+}
+
+.setup-banner div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.setup-banner span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
