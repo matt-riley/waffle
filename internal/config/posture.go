@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,6 +159,78 @@ func ApplyProfilePolicy(base ResolvedAgentPolicy, profile AgentProfile) Resolved
 	return out
 }
 
+// ProfileWideningError reports a profile edit that would widen its group's
+// trust boundary, naming the field responsible (#194 AC2).
+type ProfileWideningError struct {
+	// Field is the config key, e.g. "sandbox" or "tools.allow".
+	Field string
+	// Detail names the specific value that widened.
+	Detail string
+}
+
+func (e *ProfileWideningError) Error() string {
+	return "profile widens its group at " + e.Field + ": " + e.Detail
+}
+
+// ErrProfileWidens matches any widening refusal via errors.Is.
+var ErrProfileWidens = errors.New("profile widens its group policy")
+
+func (e *ProfileWideningError) Is(target error) bool { return target == ErrProfileWidens }
+
+// ValidateProfileNarrows refuses a profile that would widen its group.
+//
+// It deliberately validates the *resolved outcome* of ApplyProfilePolicy —
+// the same function the chat runtime resolves permissions through — rather
+// than re-deriving the rules. A parallel reimplementation here would be a
+// second trust boundary that can drift from the one actually enforced.
+func ValidateProfileNarrows(group ResolvedAgentPolicy, profile AgentProfile) error {
+	result := ApplyProfilePolicy(group, profile)
+
+	// docker is strictly narrower than host: it is the sandbox. A profile may
+	// enter the sandbox but never leave one its group requires.
+	if group.Mode == "docker" && result.Mode != "docker" {
+		return &ProfileWideningError{
+			Field:  "sandbox",
+			Detail: "the group runs in docker, so this profile cannot select " + result.Mode,
+		}
+	}
+
+	// An empty group allowlist means "whatever the toolbox holds", so any
+	// profile list narrows it. A non-empty one is a ceiling.
+	if len(group.Allow) > 0 {
+		for _, name := range result.Allow {
+			if !containsString(group.Allow, name) {
+				return &ProfileWideningError{
+					Field:  "tools.allow",
+					Detail: "the group does not allow " + name,
+				}
+			}
+		}
+	}
+
+	// Denials only ever accumulate, so these cannot trip through
+	// ApplyProfilePolicy today. They are checked anyway: this is the function
+	// that defines the boundary, and it should not depend on the narrowing
+	// implementation staying append-only to remain correct.
+	for _, denied := range group.Deny {
+		if !containsString(result.Deny, denied) {
+			return &ProfileWideningError{
+				Field:  "tools.deny",
+				Detail: "the group denies " + denied + " and a profile cannot lift it",
+			}
+		}
+	}
+	for _, prefix := range group.DenyPrefixes {
+		if !containsString(result.DenyPrefixes, prefix) {
+			return &ProfileWideningError{
+				Field:  "deny_prefixes",
+				Detail: "the group denies the prefix " + prefix + " and a profile cannot lift it",
+			}
+		}
+	}
+	return nil
+}
+
 // ApplyToolLayer tightens base by a repo-supplied layer. Unlike a profile, a
 // repo may never replace the allowlist: WAFFLE.md can only intersect it, so a
 // repository cannot grant its checkout a tool the host withheld.
@@ -199,6 +272,14 @@ func ApplyToolLayer(base ResolvedAgentPolicy, layer ToolLayer) ResolvedAgentPoli
 // repository policy is in scope (for example a profile viewed outside a
 // workspace).
 func (c Config) LayeredAgentPolicy(group, profileName string, repo *ToolLayer) LayeredPolicy {
+	profile, _ := c.Profile(profileName)
+	return c.LayeredAgentPolicyFor(group, profile, repo)
+}
+
+// LayeredAgentPolicyFor is LayeredAgentPolicy for a profile value that need
+// not be the one in config. The profile editor uses it to derive the posture a
+// candidate edit would produce, without writing it first (#194).
+func (c Config) LayeredAgentPolicyFor(group string, profile AgentProfile, repo *ToolLayer) LayeredPolicy {
 	groupPolicy := c.AgentPolicy(group)
 	layered := LayeredPolicy{Layers: []PolicyLayer{{
 		Name:         "group",
@@ -211,7 +292,6 @@ func (c Config) LayeredAgentPolicy(group, profileName string, repo *ToolLayer) L
 		Result:       groupPolicy,
 	}}}
 
-	profile, _ := c.Profile(profileName)
 	profileResult := ApplyProfilePolicy(groupPolicy, profile)
 	layered.Layers = append(layered.Layers, PolicyLayer{
 		Name:         "profile",

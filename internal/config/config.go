@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -447,6 +448,24 @@ var knownProfileTools = map[string]bool{
 	// codeintel
 	"code_find_symbol": true, "code_references": true, "code_callers": true,
 	"code_structure": true, "code_blast_radius": true, "code_suggest_tests": true,
+}
+
+// ValidProfileTool reports whether name may appear in a profile's tool
+// allow/deny list. The structured profile editor uses it to refuse an unknown
+// tool by name, instead of surfacing a raw config-load failure (#194).
+func ValidProfileTool(name string) bool {
+	return knownProfileTools[name]
+}
+
+// ProfileToolNames lists every tool a profile may name, so an editor can offer
+// them rather than asking an operator to guess.
+func ProfileToolNames() []string {
+	names := make([]string, 0, len(knownProfileTools))
+	for name := range knownProfileTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func validateProfiles(path string, agent Agent) error {

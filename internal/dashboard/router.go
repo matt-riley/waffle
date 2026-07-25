@@ -63,6 +63,20 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 	if config.Posture != nil {
 		RegisterPostureRoutes(mux, PostureRouteConfig{Service: config.Posture})
 	}
+	if config.Profiles != nil {
+		RegisterProfileRoutes(mux, ProfileRouteConfig{
+			Editor: config.Profiles,
+			Mutation: func(limit int64, next http.Handler) http.Handler {
+				return NewMutationHandler(
+					config.Security,
+					config.Idempotency,
+					limit,
+					next,
+					composeRestartOutcomeObservers(config.Hub, config.RestartOutcome),
+				)
+			},
+		})
+	}
 	if config.Capabilities != nil && config.Idempotency != nil {
 		RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
 			Service: config.Capabilities,

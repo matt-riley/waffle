@@ -30,7 +30,10 @@ type APIConfig struct {
 	Capabilities    *Capabilities
 	// Posture is the read-only agent-posture projection (#193). Optional: when
 	// nil the endpoints are simply not mounted.
-	Posture        *PostureService
+	Posture *PostureService
+	// Profiles is the structured agent-profile editor (#194). Optional: when
+	// nil the editor is not mounted at all.
+	Profiles       *ProfileEditor
 	Restart        RestartScheduler
 	RestartOutcome MutationOutcomeObserver
 	Version        string

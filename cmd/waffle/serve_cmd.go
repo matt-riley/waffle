@@ -364,6 +364,22 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			Events:     dashboardHub,
 			Now:        time.Now,
 		}
+		// Posture and the profile editor share one config snapshot, so the
+		// editor's before/after preview cannot disagree with the read-only view
+		// it is rendered next to (#193, #194).
+		deskPosture := dashboard.NewPostureService(
+			cfg, dashboardClients, dashboard.NewPostureAuditSource(st.DB),
+		)
+		var deskProfiles *dashboard.ProfileEditor
+		if dashboardProviders != nil {
+			deskProfiles = dashboard.NewProfileEditor(
+				dashboardProviders,
+				deskPosture,
+				operations.Previews,
+				dashboard.NewOperationsProfileReferences(operations),
+				dashboardHub,
+			)
+		}
 		restart := dashboardRestartScheduler()
 		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
 			Observability:   obs,
@@ -378,10 +394,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			Capabilities:    capabilities,
 			// Posture shares Today's exact-value redactor rather than adding a
 			// second secret boundary (#193).
-			Posture: dashboard.NewPostureService(
-				cfg, dashboardClients, dashboard.NewPostureAuditSource(st.DB),
-			),
-			Restart: restart,
+			Posture:  deskPosture,
+			Profiles: deskProfiles,
+			Restart:  restart,
 			RestartOutcome: func(outcome dashboard.RestartScheduleOutcome) {
 				log.Info("dashboard restart outcome",
 					"scheduled", outcome.Scheduled,

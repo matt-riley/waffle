@@ -1,0 +1,121 @@
+#profile-editor {
+  display: block;
+}
+
+.profile-errors {
+  border: 1px solid var(--ink);
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.7rem;
+}
+
+.profile-list {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  margin: 1rem 0;
+}
+
+.profile-card {
+  border: 1px solid var(--rule);
+  padding: 0.7rem 0.8rem;
+}
+
+.profile-card h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.3rem;
+}
+
+.profile-summary {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 0.6rem;
+}
+
+.profile-actions,
+.profile-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.profile-form {
+  border-top: 1px solid var(--rule);
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 1rem;
+  max-width: 40rem;
+  padding-top: 1rem;
+}
+
+.profile-form h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+.profile-form label {
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+}
+
+.profile-form label span {
+  color: var(--muted);
+}
+
+.profile-form input,
+.profile-form select,
+.profile-form textarea {
+  border: 1px solid var(--ink);
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  width: 100%;
+}
+
+.profile-form [aria-invalid="true"] {
+  border-width: 2px;
+  outline: 2px solid var(--ginger);
+}
+
+.profile-form-status {
+  color: var(--muted);
+  margin: 0.6rem 0 0;
+}
+
+#profile-review-dialog {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  color: var(--ink);
+  max-height: calc(100vh - 2rem);
+  max-width: min(46rem, calc(100vw - 2rem));
+  overflow: auto;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  width: 100%;
+}
+
+#profile-review-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+/* Before and after sit side by side on a wide desk and stack on a narrow one,
+   so the comparison never forces the page to scroll sideways. */
+.profile-diff {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  margin-top: 0.75rem;
+}
+
+.profile-diff-side {
+  border: 1px solid var(--rule);
+  min-width: 0;
+  padding: 0.6rem 0.7rem;
+}
+
+.profile-diff-side h4 {
+  font-size: 0.8rem;
+  margin: 0 0 0.4rem;
+}
+
+.profile-blocked {
+  margin: 0 0 0.4rem;
+}

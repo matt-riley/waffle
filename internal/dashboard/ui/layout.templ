@@ -17,6 +17,7 @@ templ Shell(view ShellView) {
 			}
 			if view.ActiveSection == "capabilities" {
 				@CapabilitiesAssets()
+				@ProfileAssets(view)
 			}
 			// Posture is read from Today (the live session) and from
 			// Capabilities (per profile), so both sections load it (#193).
