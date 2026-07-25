@@ -116,7 +116,7 @@ func TestConnectionsJSONIsAllowlistedAndRedacted(t *testing.T) {
 		Adapters: map[string]observability.AdapterHealth{
 			"telegram": {Stale: false},
 		},
-	}})
+	}}, nil)
 	mux := http.NewServeMux()
 	RegisterConnectionsRoutes(mux, source)
 	response := httptest.NewRecorder()
@@ -142,6 +142,7 @@ func TestConnectionsJSONIsAllowlistedAndRedacted(t *testing.T) {
 	allowedKeys := map[string]bool{
 		"name": true, "kind": true, "status": true, "profile": true,
 		"sandbox_mode": true, "egress": true, "guidance": true,
+		"label": true, "concurrency": true,
 	}
 	for index, record := range raw {
 		for key := range record {
@@ -161,15 +162,24 @@ func TestConnectionsJSONIsAllowlistedAndRedacted(t *testing.T) {
 		{Name: "filesystem", Kind: "mcp", Status: "configured"},
 		{Name: "cron", Kind: "profile", Status: "configured", Profile: "cron", SandboxMode: "docker", Egress: "restricted", Guidance: "Runs in a sandbox."},
 		{Name: "review", Kind: "profile", Status: "configured", Profile: "review", SandboxMode: "docker", Egress: "restricted", Guidance: "Runs in a sandbox."},
+		{Name: "github", Kind: "github", Status: "unconfigured", Guidance: "Configure [github.app] to give workspaces git access."},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("connections = %#v, want %#v", got, want)
 	}
 }
 
+type stubConnectionSource struct {
+	records []ConnectionView
+}
+
+func (s stubConnectionSource) Connections(context.Context) ([]ConnectionView, error) {
+	return s.records, nil
+}
+
 func TestConnectionsReturnsStableEmptyArray(t *testing.T) {
 	mux := http.NewServeMux()
-	RegisterConnectionsRoutes(mux, NewConnectionSource(config.Config{}, nil))
+	RegisterConnectionsRoutes(mux, stubConnectionSource{})
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/desk/connections", nil))
 
@@ -178,6 +188,198 @@ func TestConnectionsReturnsStableEmptyArray(t *testing.T) {
 	}
 	if got := strings.TrimSpace(response.Body.String()); got != "[]" {
 		t.Fatalf("body = %q, want []", got)
+	}
+}
+
+// An empty config still reports GitHub so an operator can tell "not
+// configured" from "not surfaced at all" (#182 AC1).
+func TestConnectionsAlwaysReportsGitHubRecord(t *testing.T) {
+	got, err := NewConnectionSource(config.Config{}, nil, nil).Connections(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ConnectionView{{
+		Name:     "github",
+		Kind:     "github",
+		Status:   "unconfigured",
+		Guidance: "Configure [github.app] to give workspaces git access.",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("connections = %#v, want %#v", got, want)
+	}
+}
+
+type githubProbeStub struct {
+	err   error
+	calls int
+}
+
+func (p *githubProbeStub) Verify(context.Context) error {
+	p.calls++
+	return p.err
+}
+
+// githubAppConfig is a fully populated [github.app] whose every field is a
+// distinctive canary, so AC2 can assert none of it reaches the payload.
+func githubAppConfig() config.Config {
+	return config.Config{GitHub: config.GitHub{App: config.GitHubApp{
+		AppID:          987654321,
+		InstallationID: 123456789,
+		PrivateKey:     "secret://github/app-private-key-canary",
+		BaseURL:        "https://github.private.example/api/v3",
+	}}}
+}
+
+func TestConnectionsReportsGitHubStates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cfg        config.Config
+		probe      *githubProbeStub
+		wantStatus string
+	}{
+		{name: "not configured", cfg: config.Config{}, wantStatus: "unconfigured"},
+		{
+			name: "configured without probe",
+			cfg:  githubAppConfig(),
+			// A missing probe is not evidence of failure: report configured.
+			wantStatus: "configured",
+		},
+		{
+			name:       "configured but failing",
+			cfg:        githubAppConfig(),
+			probe:      &githubProbeStub{err: errors.New("secret://github/app-private-key-canary is invalid")},
+			wantStatus: "stale",
+		},
+		{name: "healthy", cfg: githubAppConfig(), probe: &githubProbeStub{}, wantStatus: "healthy"},
+		{
+			name: "incomplete app is not configured",
+			cfg: config.Config{GitHub: config.GitHub{App: config.GitHubApp{
+				PrivateKey: "secret://github/app-private-key-canary",
+			}}},
+			probe:      &githubProbeStub{},
+			wantStatus: "unconfigured",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var probe GitHubProbe
+			if tc.probe != nil {
+				probe = tc.probe
+			}
+			mux := http.NewServeMux()
+			RegisterConnectionsRoutes(mux, NewConnectionSource(tc.cfg, nil, probe))
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/desk/connections", nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+			}
+
+			var got []ConnectionView
+			if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].Kind != "github" {
+				t.Fatalf("connections = %#v, want a single github record", got)
+			}
+			if got[0].Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got[0].Status, tc.wantStatus)
+			}
+
+			// AC2: no app ID, installation ID, private key, token, or base URL.
+			body := response.Body.String()
+			for _, canary := range []string{
+				"987654321", "123456789",
+				"app-private-key-canary", "secret://",
+				"github.private.example", "api/v3",
+			} {
+				if strings.Contains(body, canary) {
+					t.Errorf("payload leaked %q: %s", canary, body)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectionsCachesGitHubProbe(t *testing.T) {
+	probe := &githubProbeStub{}
+	source := NewConnectionSource(githubAppConfig(), nil, probe)
+	for range 3 {
+		if _, err := source.Connections(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if probe.calls != 1 {
+		t.Fatalf("probe calls = %d, want 1 within the TTL", probe.calls)
+	}
+
+	// Past the TTL the probe runs again, so a recovered installation stops
+	// reporting stale without a restart.
+	concrete, ok := source.(*configuredConnectionSource)
+	if !ok {
+		t.Fatalf("source type = %T", source)
+	}
+	concrete.now = func() time.Time { return time.Now().Add(2 * githubProbeTTL) }
+	if _, err := source.Connections(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if probe.calls != 2 {
+		t.Fatalf("probe calls = %d, want 2 after the TTL", probe.calls)
+	}
+}
+
+func TestConnectionsProjectsIntakeWatchersWithoutSecrets(t *testing.T) {
+	cfg := config.Config{Intake: config.Intake{GitHub: []config.GitHubWatch{
+		{
+			Repo:           "owner/zulu",
+			Label:          "waffle",
+			MaxConcurrency: 3,
+			Deliver:        "telegram:private-canary",
+			PollInterval:   "37s",
+			Token:          "secret://intake/token-canary",
+		},
+		{
+			Repo:           "owner/alpha",
+			Label:          "agent",
+			MaxConcurrency: 1,
+			Deliver:        "telegram:private-canary",
+			Token:          "secret://intake/token-canary",
+		},
+		// An unnamed watcher is not a connection: it is skipped.
+		{Label: "orphan"},
+	}}}
+	mux := http.NewServeMux()
+	RegisterConnectionsRoutes(mux, NewConnectionSource(cfg, nil, nil))
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/desk/connections", nil))
+
+	var got []ConnectionView
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	intake := make([]ConnectionView, 0, len(got))
+	for _, record := range got {
+		if record.Kind == "intake" {
+			intake = append(intake, record)
+		}
+	}
+	want := []ConnectionView{
+		{
+			Name: "owner/alpha", Kind: "intake", Status: "configured",
+			Label: "agent", Concurrency: 1,
+			Guidance: "Issues matching this label are picked up by the issue profile.",
+		},
+		{
+			Name: "owner/zulu", Kind: "intake", Status: "configured",
+			Label: "waffle", Concurrency: 3,
+			Guidance: "Issues matching this label are picked up by the issue profile.",
+		},
+	}
+	if !reflect.DeepEqual(intake, want) {
+		t.Fatalf("intake = %#v, want %#v", intake, want)
+	}
+	for _, canary := range []string{"private-canary", "token-canary", "37s", "orphan"} {
+		if strings.Contains(response.Body.String(), canary) {
+			t.Errorf("payload leaked %q: %s", canary, response.Body.String())
+		}
 	}
 }
 
@@ -201,7 +403,7 @@ func TestConnectionsUsesAdapterHealthOnly(t *testing.T) {
 				Healthy:  tc.name != "stale",
 				Database: tc.name == "healthy",
 				Adapters: tc.health,
-			}})
+			}}, nil)
 			got, err := source.Connections(t.Context())
 			if err != nil {
 				t.Fatal(err)
@@ -234,7 +436,7 @@ func TestConnectionsSortsRecordsAndUsesClosedSummaries(t *testing.T) {
 			},
 		},
 	}
-	source := NewConnectionSource(cfg, nil)
+	source := NewConnectionSource(cfg, nil, nil)
 
 	first, err := source.Connections(t.Context())
 	if err != nil {
@@ -256,7 +458,7 @@ func TestConnectionsSortsRecordsAndUsesClosedSummaries(t *testing.T) {
 			}
 		}
 	}
-	wantNames := []string{"alpha", "zulu", "beta", "zeta", "alpha", "review", "zeta"}
+	wantNames := []string{"alpha", "zulu", "beta", "zeta", "alpha", "review", "zeta", "github"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("names = %#v, want %#v", names, wantNames)
 	}
@@ -281,7 +483,7 @@ func TestConnectionsProfileSandboxUsesOwnGroupNotMain(t *testing.T) {
 			},
 		},
 	}
-	source := NewConnectionSource(cfg, nil)
+	source := NewConnectionSource(cfg, nil, nil)
 	got, err := source.Connections(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -311,6 +513,7 @@ func TestConnectionsFailureIsClosedAndRoutesAreGETOnly(t *testing.T) {
 	RegisterConnectionsRoutes(mux, NewConnectionSource(
 		config.Config{Channel: config.Channels{Telegram: config.Telegram{Enabled: true}}},
 		connectionHealthStub{err: errors.New("secret://health/private")},
+		nil,
 	))
 
 	failed := httptest.NewRecorder()

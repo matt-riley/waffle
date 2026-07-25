@@ -14,6 +14,10 @@ const canaries = [
   "WAFFLE_PRIVATE_ENV",
   "/var/lib/waffle/private",
   "mcp --raw-command-canary",
+  "desk-github-key-canary",
+  "github.example.invalid",
+  "desk-intake-token-canary",
+  "telegram:canary",
 ];
 
 let server;
@@ -123,8 +127,29 @@ test("connections expose only allowlisted fields from canary-bearing config", as
       sandbox_mode: "docker",
       status: "configured",
     },
+    {
+      guidance:
+        "Workspace git auth is brokered; containers never hold a credential.",
+      kind: "github",
+      name: "github",
+      status: "configured",
+    },
+    {
+      concurrency: 2,
+      guidance:
+        "Issues matching this label are picked up by the issue profile.",
+      kind: "intake",
+      label: "waffle",
+      name: "fixture/board",
+      status: "configured",
+    },
   ]);
   expectNoCanariesIn(raw);
+  // The app and installation IDs are credentials-adjacent identifiers and
+  // must not appear even though they are not strings in config (#182 AC2).
+  for (const identifier of ["4242", "8484"]) {
+    expect(raw).not.toContain(identifier);
+  }
 });
 
 test("all five destinations render their production section", async ({ page }) => {
@@ -326,6 +351,15 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
     .toEqual(["workspace-clean", "workspace-dirty"]);
 
   const dirty = page.locator("[data-workspace-id='workspace-dirty']");
+  // Git state is readable on the card itself, without opening the close flow.
+  await expect(dirty.locator(".workspace-git")).toContainText("feature/dirty");
+  await expect(dirty.locator(".workspace-git")).toContainText("1 uncommitted file");
+  await expect(dirty.locator(".workspace-git")).toContainText("1 ahead · 0 behind");
+  await expect(dirty.locator(".workspace-git")).toContainText("abc1234 local commit");
+  await expect(
+    page.locator("[data-workspace-id='workspace-clean'] .workspace-git"),
+  ).toContainText("Clean");
+
   const dirtyReview = dirty.getByRole("button", { name: "Review close", exact: true });
   await dirtyReview.click();
   const closeDialog = page.locator("#workspace-close-dialog");

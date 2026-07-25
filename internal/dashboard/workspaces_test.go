@@ -769,6 +769,155 @@ func (h *workspaceRouteHarness) request(method, path, body, key string, token bo
 	return rec
 }
 
+func TestWorkspaceGitStatusProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		git    *workspace.GitStatus
+		gitErr error
+		want   WorkspaceGitView
+	}{
+		{
+			name:   "clean tracked branch",
+			status: workspace.StatusOpen,
+			git: &workspace.GitStatus{
+				Branch: "main", Tracking: true,
+				CommitSHA: "1a2b3c4", Subject: "feat: add workspace git status",
+			},
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1", Available: true, Branch: "main", Tracking: true,
+				CommitSHA: "1a2b3c4", Subject: "feat: add workspace git status",
+			},
+		},
+		{
+			name:   "dirty tree",
+			status: workspace.StatusOpen,
+			git: &workspace.GitStatus{
+				Branch: "topic", DirtyFiles: 3, Tracking: true,
+				CommitSHA: "9f8e7d6", Subject: "wip",
+			},
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1", Available: true, Branch: "topic",
+				Dirty: true, DirtyFiles: 3, Tracking: true,
+				CommitSHA: "9f8e7d6", Subject: "wip",
+			},
+		},
+		{
+			name:   "ahead and behind",
+			status: workspace.StatusOpen,
+			git: &workspace.GitStatus{
+				Branch: "topic", Tracking: true, Ahead: 2, Behind: 5,
+				CommitSHA: "abc1234", Subject: "fix: handle cancelled runs",
+			},
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1", Available: true, Branch: "topic", Tracking: true,
+				Ahead: 2, Behind: 5, CommitSHA: "abc1234", Subject: "fix: handle cancelled runs",
+			},
+		},
+		{
+			name:   "detached head without upstream",
+			status: workspace.StatusOpen,
+			git:    &workspace.GitStatus{Detached: true, CommitSHA: "deadbee"},
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1", Available: true, Detached: true, CommitSHA: "deadbee",
+			},
+		},
+		{
+			name:   "idle workspace is unavailable",
+			status: workspace.StatusIdle,
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1",
+				Reason:      "The workspace is idle. Resume it to read git status.",
+			},
+		},
+		{
+			name:   "closed workspace is unavailable",
+			status: workspace.StatusClosed,
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1",
+				Reason:      "The workspace is closed.",
+			},
+		},
+		{
+			name:   "failed workspace is unavailable",
+			status: workspace.StatusFailed,
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1",
+				Reason:      "The workspace is not running.",
+			},
+		},
+		{
+			name:   "inspection failure stays redacted",
+			status: workspace.StatusOpen,
+			gitErr: errors.New("exec: /var/lib/waffle/queues/ws-1: https://x-access-token:ghs_secret@github.com"),
+			want: WorkspaceGitView{
+				WorkspaceID: "ws-1",
+				Reason:      "Git status could not be read from this workspace.",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newWorkspaceRouteHarness(t)
+			harness.manager.addWorkspace(workspace.Workspace{
+				ID: "ws-1", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+				Status: tc.status, Image: "bookworm", Container: "container-secret",
+			})
+			harness.manager.gitStatus = tc.git
+			harness.manager.gitErr = tc.gitErr
+
+			rec := harness.request(http.MethodGet, "/api/v1/desk/workspaces/ws-1/git", "", "", true)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+			}
+			var got WorkspaceGitView
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("git view = %+v, want %+v", got, tc.want)
+			}
+			for _, canary := range []string{"container-secret", "ghs_secret", "x-access-token", "/var/lib/waffle"} {
+				if strings.Contains(rec.Body.String(), canary) {
+					t.Errorf("git payload leaked %q: %s", canary, rec.Body.String())
+				}
+			}
+
+			// AC2: the read is non-destructive. It never invokes the close
+			// lifecycle and never changes the workspace's durable status.
+			if harness.manager.guardedInspectCalls != 0 ||
+				harness.manager.closeCalls != 0 ||
+				harness.manager.closeTransitionCalls != 0 {
+				t.Fatalf("git status invoked the close lifecycle: %+v", harness.manager)
+			}
+			if after := harness.manager.workspaces["ws-1"]; after.Status != tc.status {
+				t.Fatalf("status changed from %q to %q", tc.status, after.Status)
+			}
+		})
+	}
+}
+
+func TestWorkspaceGitStatusIsGETOnlyAndTracksMissingWorkspaces(t *testing.T) {
+	harness := newWorkspaceRouteHarness(t)
+
+	missing := harness.request(http.MethodGet, "/api/v1/desk/workspaces/ws-missing/git", "", "", true)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d: %s", missing.Code, missing.Body.String())
+	}
+	assertWorkspaceError(t, missing.Body.Bytes(), "workspace_not_found")
+	if harness.manager.gitCalls != 0 {
+		t.Fatalf("unknown workspace reached the inspection %d times", harness.manager.gitCalls)
+	}
+
+	harness.manager.addWorkspace(workspace.Workspace{
+		ID: "ws-1", Repo: "matt-riley/waffle", SessionID: "session-workspace",
+		Status: workspace.StatusOpen,
+	})
+	post := harness.request(http.MethodPost, "/api/v1/desk/workspaces/ws-1/git", `{}`, "git-post", true)
+	if post.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405: %s", post.Code, post.Body.String())
+	}
+}
+
 type recordingWorkspaceManager struct {
 	t                     *testing.T
 	workspaces            map[string]workspace.Workspace
@@ -789,6 +938,9 @@ type recordingWorkspaceManager struct {
 	closeTransitionCalls  int
 	beforeInspect         func(string)
 	beforeCloseTransition func(string)
+	gitStatus             *workspace.GitStatus
+	gitErr                error
+	gitCalls              int
 }
 
 func (m *recordingWorkspaceManager) addWorkspace(ws workspace.Workspace) {
@@ -872,6 +1024,27 @@ func (m *recordingWorkspaceManager) InspectClose(_ context.Context, id string) (
 	}
 	copy := *m.inspectReport
 	return &copy, m.inspectErr
+}
+
+// InspectGit mirrors the manager contract: it reports state for a running
+// workspace and refuses anything else without touching the container.
+func (m *recordingWorkspaceManager) InspectGit(_ context.Context, id string) (*workspace.GitStatus, error) {
+	m.gitCalls++
+	ws, ok := m.workspaces[id]
+	if !ok {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	if m.gitErr != nil {
+		return nil, m.gitErr
+	}
+	if ws.Status != workspace.StatusOpen {
+		return nil, workspace.ErrWorkspaceNotRunning
+	}
+	if m.gitStatus == nil {
+		return &workspace.GitStatus{}, nil
+	}
+	copy := *m.gitStatus
+	return &copy, nil
 }
 
 func (m *recordingWorkspaceManager) InspectCloseGuarded(

@@ -100,7 +100,21 @@ function findAction(node, action) {
   return null;
 }
 
-function createHarness(fetchResponses) {
+// createHarness drives workspaces.js against a stub fetch. Routed paths are
+// matched first so the read-only git and connections polls do not have to be
+// interleaved into every test's ordered response queue; anything unrouted
+// falls back to fetchResponses in call order.
+function createHarness(fetchResponses, routes = {}) {
+  const routed = {
+    "/git": () =>
+      response({
+        workspace: "ws-1",
+        available: false,
+        reason: "The workspace is idle. Resume it to read git status.",
+      }),
+    "/api/v1/desk/connections": () => response([]),
+    ...routes,
+  };
   const selectors = [
     ".workspaces",
     "#workspaces-list",
@@ -113,6 +127,7 @@ function createHarness(fetchResponses) {
     "#workspace-profile",
     "#workspace-open-cancel",
     "#workspace-open-status",
+    "#workspace-open-prerequisite",
     "#workspace-close-dialog",
     "#workspace-close-title",
     "#workspace-close-dirty",
@@ -126,6 +141,7 @@ function createHarness(fetchResponses) {
   );
   elements[".workspaces"].dataset = {};
   const requests = [];
+  const mutations = [];
   const navigations = [];
   let uuid = 0;
   const context = {
@@ -138,6 +154,15 @@ function createHarness(fetchResponses) {
     },
     fetch: async (path, options = {}) => {
       requests.push({ path, options });
+      if ((options.method || "GET") === "POST") {
+        mutations.push({ path, options });
+      }
+      for (const [pattern, handler] of Object.entries(routed)) {
+        if (!path.includes(pattern)) continue;
+        const next = Array.isArray(handler) ? handler.shift() : handler(path);
+        if (!next) throw new Error(`unexpected fetch ${path}`);
+        return next;
+      }
       const next = fetchResponses.shift();
       if (!next) throw new Error(`unexpected fetch ${path}`);
       return next;
@@ -153,7 +178,7 @@ function createHarness(fetchResponses) {
     clearTimeout,
   };
   vm.runInNewContext(source, context, { filename: "workspaces.js" });
-  return { elements, requests, navigations };
+  return { elements, requests, mutations, navigations };
 }
 
 async function settle() {
@@ -215,9 +240,9 @@ test("workspace client renders state actions and selects the exact Today session
   await select.dispatch("click");
   await settle();
 
-  assert.equal(harness.requests[1].path, "/api/v1/desk/workspaces/ws-1/select");
-  assert.equal(harness.requests[1].options.method, "POST");
-  assert.equal(harness.requests[1].options.body, "{}");
+  assert.equal(harness.mutations[0].path, "/api/v1/desk/workspaces/ws-1/select");
+  assert.equal(harness.mutations[0].options.method, "POST");
+  assert.equal(harness.mutations[0].options.body, "{}");
   assert.deepEqual(harness.navigations, [
     "/desk/?section=today&session_id=session-workspace",
   ]);
@@ -259,8 +284,8 @@ test("dirty close preview shows evidence and cannot confirm", async () => {
   await close.dispatch("click");
   await settle();
 
-  assert.equal(harness.requests[1].path, "/api/v1/desk/workspaces/ws-1/close-preview");
-  assert.equal(harness.requests[1].options.body, "{}");
+  assert.equal(harness.mutations[0].path, "/api/v1/desk/workspaces/ws-1/close-preview");
+  assert.equal(harness.mutations[0].options.body, "{}");
   assert.equal(harness.elements["#workspace-close-dialog"].open, true);
   assert.equal(harness.elements["#workspace-close-dirty"].textContent, "M main.go");
   assert.equal(harness.elements["#workspace-close-unpushed"].textContent, "abc123 local commit");
@@ -293,7 +318,7 @@ test("open forwards owner/repo and profile with one fresh idempotency key", asyn
   await harness.elements["#workspace-open-form"].dispatch("submit");
   await settle();
 
-  const request = harness.requests[1];
+  const request = harness.mutations[0];
   assert.equal(request.path, "/api/v1/desk/workspaces/open");
   assert.deepEqual(JSON.parse(request.options.body), {
     repository: "matt-riley/waffle",
@@ -302,4 +327,152 @@ test("open forwards owner/repo and profile with one fresh idempotency key", asyn
   assert.equal(request.options.headers["X-Waffle-Desk-Token"], "desk-token");
   assert.equal(request.options.headers["Idempotency-Key"], "uuid-1");
   assert.equal(harness.elements["#workspace-open-dialog"].open, false);
+});
+
+function textOf(node) {
+  if (!node) return "";
+  if (node.childNodes.length === 0) return node.textContent;
+  return node.childNodes.map(textOf).join(" ");
+}
+
+function openWorkspace(status = "open") {
+  return {
+    id: "ws-1",
+    repository: "matt-riley/waffle",
+    session: "session-workspace",
+    status,
+    image: "bookworm",
+    egress: "No network egress",
+  };
+}
+
+test("workspace card reads git status with a GET that carries no token or key", async () => {
+  const harness = createHarness(
+    [response({ workspaces: [openWorkspace()] })],
+    {
+      "/git": () =>
+        response({
+          workspace: "ws-1",
+          available: true,
+          branch: "topic",
+          dirty: true,
+          dirty_files: 3,
+          tracking: true,
+          ahead: 2,
+          behind: 5,
+          commit: "1a2b3c4",
+          subject: "feat: land it",
+        }),
+    },
+  );
+  await settle();
+
+  const card = harness.elements["#workspaces-list"].childNodes[0];
+  const rendered = textOf(card);
+  for (const expected of [
+    "topic",
+    "3 uncommitted files",
+    "2 ahead · 5 behind",
+    "1a2b3c4 feat: land it",
+  ]) {
+    assert.ok(rendered.includes(expected), `card missing ${expected}: ${rendered}`);
+  }
+
+  const git = harness.requests.find((entry) => entry.path.endsWith("/git"));
+  assert.ok(git, "git status was never requested");
+  assert.equal(git.options.method, "GET");
+  assert.equal(git.options.headers["X-Waffle-Desk-Token"], undefined);
+  assert.equal(git.options.headers["Idempotency-Key"], undefined);
+  assert.equal(harness.mutations.length, 0, "reading git status mutated something");
+});
+
+test("unavailable git status shows the reason instead of inventing state", async () => {
+  const harness = createHarness(
+    [response({ workspaces: [openWorkspace("idle")] })],
+    {
+      "/git": () =>
+        response({
+          workspace: "ws-1",
+          available: false,
+          reason: "The workspace is idle. Resume it to read git status.",
+        }),
+    },
+  );
+  await settle();
+
+  const rendered = textOf(harness.elements["#workspaces-list"].childNodes[0]);
+  assert.ok(
+    rendered.includes("The workspace is idle. Resume it to read git status."),
+    `card missing the unavailable reason: ${rendered}`,
+  );
+  assert.equal(rendered.includes("ahead"), false, "unavailable card invented tracking state");
+});
+
+test("a clean untracked branch reads as clean with no upstream", async () => {
+  const harness = createHarness(
+    [response({ workspaces: [openWorkspace()] })],
+    {
+      "/git": () =>
+        response({
+          workspace: "ws-1",
+          available: true,
+          branch: "solo",
+          dirty: false,
+          dirty_files: 0,
+          tracking: false,
+          commit: "deadbee",
+          subject: "initial commit",
+        }),
+    },
+  );
+  await settle();
+
+  const rendered = textOf(harness.elements["#workspaces-list"].childNodes[0]);
+  assert.ok(rendered.includes("Clean"), `card missing Clean: ${rendered}`);
+  assert.ok(
+    rendered.includes("No upstream branch"),
+    `card missing the untracked label: ${rendered}`,
+  );
+});
+
+test("open dialog names the GitHub prerequisite before submit", async () => {
+  const harness = createHarness(
+    [response({ workspaces: [] })],
+    {
+      "/api/v1/desk/connections": () =>
+        response([{
+          name: "github",
+          kind: "github",
+          status: "unconfigured",
+          guidance: "Configure [github.app] to give workspaces git access.",
+        }]),
+    },
+  );
+  await settle();
+
+  const prerequisite = harness.elements["#workspace-open-prerequisite"];
+  assert.equal(prerequisite.hidden, false, "prerequisite stayed hidden");
+  assert.ok(
+    prerequisite.textContent.includes("GitHub App credentials are not configured"),
+    `prerequisite text = ${prerequisite.textContent}`,
+  );
+  assert.ok(
+    prerequisite.textContent.includes("Configure [github.app]"),
+    `prerequisite dropped its guidance: ${prerequisite.textContent}`,
+  );
+});
+
+test("a healthy GitHub connection leaves the open dialog unqualified", async () => {
+  const harness = createHarness(
+    [response({ workspaces: [] })],
+    {
+      "/api/v1/desk/connections": () =>
+        response([{ name: "github", kind: "github", status: "healthy" }]),
+    },
+  );
+  await settle();
+
+  const prerequisite = harness.elements["#workspace-open-prerequisite"];
+  assert.equal(prerequisite.hidden, true);
+  assert.equal(prerequisite.textContent, "");
 });

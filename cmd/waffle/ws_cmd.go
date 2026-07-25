@@ -358,14 +358,7 @@ func configureWorkspaceBroker(cfg config.Config, st *store.Store, b *broker.Brok
 	mgr := newWorkspaceManager(cfg, st, nil)
 	scope := repoScopeResolver(b, mgr)
 	if cfg.GitHub.App.PrivateKey != "" {
-		if !strings.HasPrefix(cfg.GitHub.App.PrivateKey, "secret://") {
-			return fmt.Errorf("github app private_key must be a secret:// reference")
-		}
-		key, err := resolveSecretValue(cfg.GitHub.App.PrivateKey, "")
-		if err != nil {
-			return fmt.Errorf("github app private key: %w", err)
-		}
-		app, err := gitcred.NewApp(cfg.GitHub.App.AppID, cfg.GitHub.App.InstallationID, []byte(key), cfg.GitHub.App.BaseURL, nil, nil)
+		app, err := newGitHubApp(cfg)
 		if err != nil {
 			return err
 		}
@@ -376,6 +369,27 @@ func configureWorkspaceBroker(cfg config.Config, st *store.Store, b *broker.Brok
 		b.GitCredential = gitCredentialFromSecrets(scope)
 	}
 	return nil
+}
+
+// newGitHubApp resolves the configured GitHub App private key and builds the
+// installation-token minter. It returns (nil, nil) when no app is configured
+// so callers that only need an optional probe can skip GitHub entirely.
+func newGitHubApp(cfg config.Config) (*gitcred.App, error) {
+	if cfg.GitHub.App.PrivateKey == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(cfg.GitHub.App.PrivateKey, "secret://") {
+		return nil, fmt.Errorf("github app private_key must be a secret:// reference")
+	}
+	key, err := resolveSecretValue(cfg.GitHub.App.PrivateKey, "")
+	if err != nil {
+		return nil, fmt.Errorf("github app private key: %w", err)
+	}
+	app, err := gitcred.NewApp(cfg.GitHub.App.AppID, cfg.GitHub.App.InstallationID, []byte(key), cfg.GitHub.App.BaseURL, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return app, nil
 }
 
 func gitCredentialFromApp(repoForSession func(context.Context, string) (string, error), app *gitcred.App) broker.GitCredentialFunc {

@@ -25,6 +25,7 @@ templ Workspaces(view ShellView) {
 					<h2 id="workspace-open-title">Open a guarded workspace</h2>
 					<p>Use an exact owner/repo. The configured profile and network posture stay visible on the workspace.</p>
 				</header>
+				<p id="workspace-open-prerequisite" class="workspace-dialog-prerequisite" role="status" aria-live="polite" hidden></p>
 				<label for="workspace-repository">Repository</label>
 				<input id="workspace-repository" name="repository" placeholder="owner/repo" autocomplete="off" required/>
 				<label for="workspace-profile">Profile <span>(optional)</span></label>

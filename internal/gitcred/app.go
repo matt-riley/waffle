@@ -103,12 +103,28 @@ func (a *App) Credential(ctx context.Context, repo string) (string, string, erro
 	return "x-access-token", token, nil
 }
 
+// Verify reports whether the configured app credentials can still mint an
+// installation token. It mints a minimally scoped token and discards it: the
+// token, its value, and the app identifiers never leave this call. Callers use
+// it as a health probe only.
+func (a *App) Verify(ctx context.Context) error {
+	_, _, err := a.mint(ctx, "", a.now().UTC())
+	return err
+}
+
+// mint exchanges the app JWT for an installation token. An empty repository
+// requests the installation's default scope, which Verify uses as a health
+// probe without naming a repository.
 func (a *App) mint(ctx context.Context, repository string, now time.Time) (token string, expires time.Time, err error) {
 	jwt, err := a.jwt(now)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("sign github app JWT: %w", err)
 	}
-	body, _ := json.Marshal(map[string]any{"repositories": []string{repository}, "permissions": map[string]string{"contents": "write"}})
+	request := map[string]any{"permissions": map[string]string{"contents": "write"}}
+	if repository != "" {
+		request["repositories"] = []string{repository}
+	}
+	body, _ := json.Marshal(request)
 	url := fmt.Sprintf("%s/app/installations/%d/access_tokens", a.baseURL, a.installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
 	if err != nil {

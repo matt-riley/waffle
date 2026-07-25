@@ -14,6 +14,7 @@ import (
 	neturl "net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -915,6 +916,106 @@ func waitForInspectionHeartbeat(ctx context.Context, startedAt time.Time, timeou
 type CloseReport struct {
 	Dirty    string // non-empty git status --porcelain output
 	Unpushed string // non-empty log of commits ahead of upstream
+}
+
+// ErrWorkspaceNotRunning is returned by read-only inspections that refuse to
+// start a container implicitly. Idle, failed, and closed workspaces report it
+// so a status read can never change lifecycle state.
+var ErrWorkspaceNotRunning = errors.New("workspace is not running")
+
+// GitStatus is the read-only git projection for a running workspace. It
+// deliberately excludes remotes and paths: only branch, counts, and the last
+// commit subject cross this boundary.
+type GitStatus struct {
+	Branch     string // current branch, or "" when detached
+	Detached   bool
+	DirtyFiles int
+	Tracking   bool // an upstream branch is configured
+	Ahead      int
+	Behind     int
+	CommitSHA  string // abbreviated SHA of HEAD, "" for an empty repository
+	Subject    string // subject line of HEAD
+}
+
+// gitStatusScript is one read-only shell pass over the repository. Every
+// command is a query: nothing fetches, writes refs, or mutates the tree.
+const gitStatusScript = `cd /work/repo && ` +
+	`printf 'branch\t%s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)" && ` +
+	`printf 'dirty\t%s\n' "$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')" && ` +
+	`if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then ` +
+	`printf 'tracking\t1\n'; printf 'counts\t%s\n' "$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)"; ` +
+	`else printf 'tracking\t0\n'; fi && ` +
+	`printf 'sha\t%s\n' "$(git rev-parse --short HEAD 2>/dev/null || true)" && ` +
+	`printf 'subject\t%s\n' "$(git log -1 --format=%s 2>/dev/null || true)"`
+
+// InspectGit reads git state from an already-running workspace. It never
+// starts, stops, or transitions a workspace: an idle or closed workspace
+// returns ErrWorkspaceNotRunning instead (#181). The per-workspace lifecycle
+// lock is held so a status read cannot interleave with a close.
+func (m *Manager) InspectGit(ctx context.Context, id string) (*GitStatus, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if ws.Status != StatusOpen {
+		return nil, ErrWorkspaceNotRunning
+	}
+
+	client, err := m.newInspectionClient(ws)
+	if err != nil {
+		return nil, fmt.Errorf("connect workspace for git status: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	out, err := m.bashOutput(ctx, client, gitStatusScript)
+	if err != nil {
+		return nil, fmt.Errorf("read workspace git status: %w", err)
+	}
+	return parseGitStatus(out), nil
+}
+
+func parseGitStatus(out string) *GitStatus {
+	status := &GitStatus{}
+	for _, line := range strings.Split(out, "\n") {
+		key, value, found := strings.Cut(strings.TrimRight(line, "\r"), "\t")
+		if !found {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch key {
+		case "branch":
+			if value == "HEAD" || value == "" {
+				status.Detached = true
+				continue
+			}
+			status.Branch = value
+		case "dirty":
+			status.DirtyFiles, _ = strconv.Atoi(value)
+		case "tracking":
+			status.Tracking = value == "1"
+		case "counts":
+			// git rev-list --left-right --count upstream...HEAD prints
+			// "<behind>\t<ahead>": left is upstream-only, right is HEAD-only.
+			behind, ahead, ok := strings.Cut(value, "\t")
+			if !ok {
+				behind, ahead, ok = strings.Cut(value, " ")
+			}
+			if !ok {
+				continue
+			}
+			status.Behind, _ = strconv.Atoi(strings.TrimSpace(behind))
+			status.Ahead, _ = strconv.Atoi(strings.TrimSpace(ahead))
+		case "sha":
+			status.CommitSHA = value
+		case "subject":
+			status.Subject = value
+		}
+	}
+	return status
 }
 
 // InspectClose gathers the evidence Close needs without changing workspace

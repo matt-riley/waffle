@@ -388,7 +388,16 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			ProcessGeneration: dashboardGeneration,
 			Now:               time.Now,
 		})
-		dashboard.RegisterConnectionsRoutes(statusMux, dashboard.NewConnectionSource(cfg, obs))
+		// A typed-nil *gitcred.App would satisfy dashboard.GitHubProbe, so the
+		// probe seam only receives a real app. A resolution failure is a
+		// misconfiguration, not a Desk outage: log it and report unconfigured.
+		var githubProbe dashboard.GitHubProbe
+		if app, err := newGitHubApp(cfg); err != nil {
+			log.Warn("github app credentials unavailable for desk connections", "err", err)
+		} else if app != nil {
+			githubProbe = app
+		}
+		dashboard.RegisterConnectionsRoutes(statusMux, dashboard.NewConnectionSource(cfg, obs, githubProbe))
 		statusHandler = dashboardSecurity.Wrap(statusHandler)
 	}
 	statusDone := make(chan error, 1)

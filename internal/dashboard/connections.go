@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -11,7 +13,13 @@ import (
 	"github.com/matt-riley/waffle/internal/providerconfig"
 )
 
-const connectionHealthStaleAfter = 2 * time.Minute
+const (
+	connectionHealthStaleAfter = 2 * time.Minute
+	// githubProbeTTL bounds how often a Desk read mints a GitHub installation
+	// token. Connections is polled by the browser; the probe is a real
+	// outbound API call and must not run once per page render (#182).
+	githubProbeTTL = 5 * time.Minute
+)
 
 // ConnectionView is the complete, allowlisted public representation of one
 // configured connection or policy posture.
@@ -23,11 +31,23 @@ type ConnectionView struct {
 	SandboxMode string `json:"sandbox_mode,omitempty"`
 	Egress      string `json:"egress,omitempty"`
 	Guidance    string `json:"guidance,omitempty"`
+	// Label and Concurrency describe a configured intake watcher. Nothing
+	// else about a watcher — token, deliver target, poll interval — is
+	// projected (#182).
+	Label       string `json:"label,omitempty"`
+	Concurrency int    `json:"concurrency,omitempty"`
 }
 
 // ConnectionSource supplies already-sanitized connection records.
 type ConnectionSource interface {
 	Connections(context.Context) ([]ConnectionView, error)
+}
+
+// GitHubProbe reports whether configured GitHub App credentials can still
+// mint an installation token. Implementations must return only an error:
+// tokens, identifiers, and endpoints never cross this seam.
+type GitHubProbe interface {
+	Verify(context.Context) error
 }
 
 // ConnectionHealthSource is the narrow observability seam used to project
@@ -40,14 +60,24 @@ type ConnectionHealthSource interface {
 type configuredConnectionSource struct {
 	records       []ConnectionView
 	telegramIndex int
+	githubIndex   int
 	health        ConnectionHealthSource
+	github        GitHubProbe
+
+	githubMu        sync.Mutex
+	githubCheckedAt time.Time
+	githubErr       error
+	githubProbed    bool
+	now             func() time.Time
 }
 
 // NewConnectionSource snapshots only allowlisted labels and closed policy
 // summaries from cfg. Credentials, endpoints, commands, environment names,
 // tool policies, guidance, paths, allowlists, and hooks are never retained.
-func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) ConnectionSource {
-	records := make([]ConnectionView, 0, len(cfg.Providers)+len(cfg.MCP)+len(cfg.Agent.Groups)+len(cfg.Agent.Profiles)+1)
+// github is optional: when nil, a configured GitHub App reports "configured"
+// without an outbound probe.
+func NewConnectionSource(cfg config.Config, health ConnectionHealthSource, github GitHubProbe) ConnectionSource {
+	records := make([]ConnectionView, 0, len(cfg.Providers)+len(cfg.MCP)+len(cfg.Agent.Groups)+len(cfg.Agent.Profiles)+len(cfg.Intake.GitHub)+2)
 
 	providerNames := providerconfig.SortedKeys(cfg.Providers)
 	for _, name := range providerNames {
@@ -106,11 +136,55 @@ func NewConnectionSource(cfg config.Config, health ConnectionHealthSource) Conne
 		})
 	}
 
+	githubIndex := len(records)
+	records = append(records, githubConnectionRecord(cfg.GitHub))
+	records = append(records, intakeConnectionRecords(cfg.Intake)...)
+
 	return &configuredConnectionSource{
 		records:       records,
 		telegramIndex: telegramIndex,
+		githubIndex:   githubIndex,
 		health:        health,
+		github:        github,
+		now:           time.Now,
 	}
+}
+
+// githubConnectionRecord reports whether GitHub App git auth is configured.
+// It reads only whether the three required fields are present — the app ID,
+// installation ID, private key reference, and base URL are never projected.
+func githubConnectionRecord(cfg config.GitHub) ConnectionView {
+	record := ConnectionView{Name: "github", Kind: "github", Status: "unconfigured"}
+	if cfg.App.PrivateKey == "" || cfg.App.AppID <= 0 || cfg.App.InstallationID <= 0 {
+		record.Guidance = "Configure [github.app] to give workspaces git access."
+		return record
+	}
+	record.Status = "configured"
+	record.Guidance = "Workspace git auth is brokered; containers never hold a credential."
+	return record
+}
+
+// intakeConnectionRecords projects configured board intake watchers. Only the
+// repo, label, and concurrency are exposed; tokens, delivery targets, and
+// poll intervals stay in config.
+func intakeConnectionRecords(cfg config.Intake) []ConnectionView {
+	records := make([]ConnectionView, 0, len(cfg.GitHub))
+	for _, watch := range cfg.GitHub {
+		repo := strings.TrimSpace(watch.Repo)
+		if repo == "" {
+			continue
+		}
+		records = append(records, ConnectionView{
+			Name:        sanitizeDashboardString(repo),
+			Kind:        "intake",
+			Status:      "configured",
+			Label:       sanitizeDashboardString(strings.TrimSpace(watch.Label)),
+			Concurrency: max(watch.MaxConcurrency, 0),
+			Guidance:    "Issues matching this label are picked up by the issue profile.",
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
+	return records
 }
 
 func connectionSandboxSummary(mode string) string {
@@ -136,6 +210,7 @@ func (s *configuredConnectionSource) Connections(ctx context.Context) ([]Connect
 	if records == nil {
 		records = []ConnectionView{}
 	}
+	s.applyGitHubHealth(ctx, records)
 	if s.telegramIndex < 0 || s.health == nil {
 		return records, nil
 	}
@@ -151,6 +226,42 @@ func (s *configuredConnectionSource) Connections(ctx context.Context) ([]Connect
 		}
 	}
 	return records, nil
+}
+
+// applyGitHubHealth upgrades a configured GitHub record to healthy or stale.
+// A probe failure downgrades the record rather than failing the whole read:
+// GitHub being unreachable must not blank out providers, MCP, and profiles.
+func (s *configuredConnectionSource) applyGitHubHealth(ctx context.Context, records []ConnectionView) {
+	if s.github == nil || s.githubIndex < 0 || s.githubIndex >= len(records) {
+		return
+	}
+	if records[s.githubIndex].Status != "configured" {
+		return
+	}
+	if err := s.probeGitHub(ctx); err != nil {
+		records[s.githubIndex].Status = "stale"
+		records[s.githubIndex].Guidance = "GitHub App credentials did not mint an installation token."
+		return
+	}
+	records[s.githubIndex].Status = "healthy"
+}
+
+// probeGitHub mints an installation token at most once per githubProbeTTL and
+// caches only the resulting error, never the token.
+func (s *configuredConnectionSource) probeGitHub(ctx context.Context) error {
+	s.githubMu.Lock()
+	defer s.githubMu.Unlock()
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if s.githubProbed && now().Sub(s.githubCheckedAt) < githubProbeTTL {
+		return s.githubErr
+	}
+	s.githubErr = s.github.Verify(ctx)
+	s.githubCheckedAt = now()
+	s.githubProbed = true
+	return s.githubErr
 }
 
 // RegisterConnectionsRoutes mounts the additive, read-only Task 5 endpoint.
