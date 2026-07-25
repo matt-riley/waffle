@@ -61,10 +61,25 @@ func TestShellHandlerProvidesDefaultShellView(t *testing.T) {
 	ShellHandler(security).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
 
 	body := rec.Body.String()
-	for _, required := range []string{"<title>Waffle Desk</title>", ">Connected<", ">default<"} {
+	// Server-rendered rail must use neutral placeholders — never a false "Connected".
+	for _, required := range []string{
+		"<title>Waffle Desk</title>",
+		`id="rail-status"`,
+		`id="rail-connection"`,
+		`id="rail-model"`,
+		`id="rail-status-dot"`,
+		">Connecting…<",
+		">—<",
+	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("default shell missing %q", required)
 		}
+	}
+	if strings.Contains(body, ">Connected<") {
+		t.Fatal("default shell must not claim Connected before client hydration")
+	}
+	if strings.Contains(body, `>default<`) {
+		t.Fatal("default shell must not hardcode model alias default")
 	}
 }
 
