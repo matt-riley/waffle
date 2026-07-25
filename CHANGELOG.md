@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/matt-riley/waffle/compare/v0.8.5...v0.9.0) (2026-07-25)
+
+
+### Features
+
+* **dashboard:** admit tailnet Desk requests via Tailscale identity ([#205](https://github.com/matt-riley/waffle/issues/205)) ([124e74d](https://github.com/matt-riley/waffle/commit/124e74d08038420e0f3170084c2bfe6dff697d2e))
+
+
+### Bug Fixes
+
+* **broker:** expire session tokens after TTL ([#198](https://github.com/matt-riley/waffle/issues/198)) ([#202](https://github.com/matt-riley/waffle/issues/202)) ([5132df3](https://github.com/matt-riley/waffle/commit/5132df3e99a24ddde13946802d35ba7b57d1119e))
+* **desk:** surface restart outcome instead of infinite poll ([#203](https://github.com/matt-riley/waffle/issues/203)) ([7747ce8](https://github.com/matt-riley/waffle/commit/7747ce87c1de6b143a1dcb3535360f87f63e647a))
+* **skill:** fail closed when skill_status cannot be read ([#201](https://github.com/matt-riley/waffle/issues/201)) ([87e39af](https://github.com/matt-riley/waffle/commit/87e39afcdf4c4057fd68af9e2815161738533f6a))
+
 ## [0.8.5](https://github.com/matt-riley/waffle/compare/v0.8.4...v0.8.5) (2026-07-25)
 
 
