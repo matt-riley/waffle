@@ -126,20 +126,34 @@ function clearNode(node) {
   node.textContent = "";
 }
 
-function setStatusMessage(node, message, isError) {
+// Status regions declare how they behave when cleared so callers do not rely
+// on element identity inside setStatusMessage.
+const statusRegionDefaults = Object.freeze({
+  model: Object.freeze({
+    defaultText: () => "Changes this conversation only.",
+    hiddenWhenEmpty: false,
+  }),
+  skill: Object.freeze({
+    defaultText: () =>
+      selectedSkill()?.attached
+        ? "Attached to this conversation."
+        : "Changes this conversation only.",
+    hiddenWhenEmpty: false,
+  }),
+  composer: Object.freeze({
+    defaultText: () => "",
+    hiddenWhenEmpty: true,
+  }),
+});
+
+function setStatusMessage(node, message, isError, region = null) {
   if (!node) {
     return;
   }
+  const defaults = region ? statusRegionDefaults[region] : null;
   if (!message) {
-    node.hidden = node === elements.composerStatus;
-    node.textContent =
-      node === elements.modelStatus
-        ? "Changes this conversation only."
-        : node === elements.skillStatus
-          ? selectedSkill()?.attached
-            ? "Attached to this conversation."
-            : "Changes this conversation only."
-          : "";
+    node.hidden = Boolean(defaults?.hiddenWhenEmpty);
+    node.textContent = defaults?.defaultText ? defaults.defaultText() : "";
     node.classList.toggle("is-error", false);
     return;
   }
@@ -149,9 +163,9 @@ function setStatusMessage(node, message, isError) {
 }
 
 function clearControlErrors() {
-  setStatusMessage(elements.modelStatus, "");
-  setStatusMessage(elements.skillStatus, "");
-  setStatusMessage(elements.composerStatus, "");
+  setStatusMessage(elements.modelStatus, "", false, "model");
+  setStatusMessage(elements.skillStatus, "", false, "skill");
+  setStatusMessage(elements.composerStatus, "", false, "composer");
 }
 
 function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
@@ -259,7 +273,7 @@ function selectedSkill() {
 function updateSkillControl() {
   const skill = selectedSkill();
   elements.skillToggle.textContent = skill?.attached ? "Detach skill" : "Attach skill";
-  if (!elements.skillStatus?.classList.contains("is-error")) {
+  if (elements.skillStatus && !elements.skillStatus.classList.contains("is-error")) {
     elements.skillStatus.textContent = skill?.attached
       ? "Attached to this conversation."
       : "Changes this conversation only.";
@@ -707,7 +721,7 @@ async function submitTurn(event) {
   };
   state.activeTurn = turn;
   setPhase(phase.sending);
-  setStatusMessage(elements.composerStatus, "");
+  setStatusMessage(elements.composerStatus, "", false, "composer");
   try {
     await postMutation("/api/v1/desk/chat/turn", {
       client_id: state.clientID,
@@ -757,7 +771,7 @@ async function cancelTurn() {
   const turn = state.activeTurn;
   turn.cancelSettled = false;
   setPhase(phase.cancelling);
-  setStatusMessage(elements.composerStatus, "");
+  setStatusMessage(elements.composerStatus, "", false, "composer");
   try {
     await postMutation("/api/v1/desk/chat/cancel", {
       client_id: state.clientID,
@@ -806,7 +820,7 @@ async function selectModel() {
   const generation = state.generation;
   setPhase(phase.sending);
   elements.phase.textContent = "Changing model";
-  setStatusMessage(elements.modelStatus, "");
+  setStatusMessage(elements.modelStatus, "", false, "model");
   try {
     const result = await postMutation("/api/v1/desk/chat/command", {
       client_id: state.clientID,
@@ -851,7 +865,7 @@ async function toggleSkill() {
   state.activeOperation = "skill";
   setPhase(phase.sending);
   elements.phase.textContent = action === "attach" ? "Attaching skill" : "Detaching skill";
-  setStatusMessage(elements.skillStatus, "");
+  setStatusMessage(elements.skillStatus, "", false, "skill");
   try {
     const result = await postMutation("/api/v1/desk/chat/command", {
       client_id: state.clientID,
