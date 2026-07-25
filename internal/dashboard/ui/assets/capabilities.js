@@ -72,10 +72,7 @@ if (root) {
     if (form === elements.modelForm) return elements.modelStatus;
     if (form === elements.catalogueForm) return elements.catalogueStatus;
     if (form === elements.stageForm) return elements.stageStatus;
-    const describedBy =
-      (typeof form.getAttribute === "function" && form.getAttribute("aria-describedby")) ||
-      form.getAttribute?.("aria-describedby") ||
-      "";
+    const describedBy = form.getAttribute?.("aria-describedby") || "";
     if (describedBy && typeof document.querySelector === "function") {
       return document.querySelector(`#${describedBy.split(/\s+/)[0]}`);
     }
@@ -148,7 +145,7 @@ if (root) {
     }
     if (Array.isArray(form.controls)) {
       for (const control of form.controls) {
-        if (control && (control.type === "submit" || control.tagName === "BUTTON")) {
+        if (control && control.type === "submit") {
           return control;
         }
       }
