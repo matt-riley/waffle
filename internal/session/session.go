@@ -138,6 +138,26 @@ func (s *Store) SetModelAlias(ctx context.Context, id, alias string) error {
 	return nil
 }
 
+// SetModelAliasIfVersion records a model choice only if the session has not
+// changed since the caller loaded it. Long-lived Today runtimes use this CAS
+// so a provider removal cannot be followed by a stale runtime write.
+func (s *Store) SetModelAliasIfVersion(ctx context.Context, id, alias string, expectedVersion int64) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE sessions SET model_alias = ?, model_alias_version = model_alias_version + 1, updated_at = ? WHERE id = ? AND model_alias_version = ?",
+		strings.TrimSpace(alias), s.nowStr(), id, expectedVersion)
+	if err != nil {
+		return fmt.Errorf("set session model alias: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-model result: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrModelAliasChanged, id)
+	}
+	return nil
+}
+
 // ModelAliasReferences returns persisted session IDs that explicitly select
 // alias, in deterministic order. It does not rewrite any session choice.
 func (s *Store) ModelAliasReferences(ctx context.Context, alias string) ([]string, error) {

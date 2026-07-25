@@ -1243,10 +1243,11 @@ func (r *chatRuntime) commandModel(ctx context.Context, alias string) (chatpkg.R
 	if _, err := r.cfg.ResolveModel(alias); err != nil {
 		return chatpkg.Result{}, err
 	}
-	if err := r.sessions.SetModelAlias(ctx, r.current.ID, alias); err != nil {
+	if err := r.sessions.SetModelAliasIfVersion(ctx, r.current.ID, alias, r.current.ModelAliasVersion); err != nil {
 		return chatpkg.Result{}, err
 	}
 	r.current.ModelAlias = alias
+	r.current.ModelAliasVersion++
 	r.agent.Model = alias
 	r.modelError = ""
 	state := r.stateLocked(r.capabilities)

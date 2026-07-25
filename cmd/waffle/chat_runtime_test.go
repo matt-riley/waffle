@@ -59,6 +59,49 @@ func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeStaleModelSelectionCannotReintroduceRemovedAlias(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the provider manager's durable SessionApply after this runtime
+	// was opened. The runtime's config and cached session version are stale,
+	// but the exact session transition still fences its next model write.
+	beforeRemoval, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removal := session.ModelAliasChange{
+		SessionID:            beforeRemoval.ID,
+		OriginalAlias:        "gpt",
+		ReplacementAlias:     "",
+		OriginalVersion:      beforeRemoval.ModelAliasVersion,
+		ReplacementVersion:   beforeRemoval.ModelAliasVersion + 1,
+		OriginalUpdatedAt:    beforeRemoval.UpdatedAt.Format(time.RFC3339Nano),
+		ReplacementUpdatedAt: "2026-07-25T22:00:00Z",
+	}
+	if err := sessions.ReplaceModelAliases(ctx, []session.ModelAliasChange{removal}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); !errors.Is(err, session.ErrModelAliasChanged) {
+		t.Fatalf("stale model selection error = %v, want ErrModelAliasChanged", err)
+	}
+	afterAttempt, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterAttempt.ModelAlias != "" || afterAttempt.ModelAliasVersion != removal.ReplacementVersion {
+		t.Fatalf("stale model selection restored alias = %q at version %d, want empty alias at version %d", afterAttempt.ModelAlias, afterAttempt.ModelAliasVersion, removal.ReplacementVersion)
+	}
+}
+
 func TestSkillsCommandAttachesIdempotentlyAndDetachesWithoutDeactivation(t *testing.T) {
 	ctx := context.Background()
 	runtime, _ := newRuntimeFixture(t, configuredChatModels())
