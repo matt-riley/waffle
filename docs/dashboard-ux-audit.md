@@ -300,6 +300,28 @@ arbitrary config editing and should stay that way. Group editing should stay out
 of Desk entirely: groups are the fixed point the narrowing check is measured
 against.
 
+## Implementation direction (#195)
+
+Most findings above share one shape: the client re-implements what the server
+already knows. The agreed direction is to stop doing that in the four
+form-and-list sections — Capabilities, Tasks, Workspaces, Memory — by serving
+templ fragments from the existing handlers via content negotiation
+(`Accept: text/html` → fragment, else today's JSON) and swapping them with htmx.
+
+That reshapes findings 2, 4, 6, 12, and 13 rather than fixing them one at a
+time, and deletes the corresponding hand-written fetch/render JS. Finding 2 is
+the prerequisite: server-rendered error partials are only worth having once the
+server has a real error taxonomy to render.
+
+Today stays on its bespoke client. Its streaming deltas, phase machine,
+generation guards, and SSE resumption have no htmx equivalent, and porting them
+would put finding 9's reconnect work on worse footing.
+
+Three constraints hold regardless: the CSP does not change (no `hx-on:`, no
+`js:` prefixes, no eval-based extensions — all require `unsafe-eval`), htmx is
+vendored and embedded rather than fetched from a CDN, and the mutation boundary
+keeps its token, per-request idempotency key, and audit row.
+
 ## Out of scope
 
 Design-spec non-goals were respected and not filed: multi-user auth or remote
