@@ -21,6 +21,7 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`Waffle-wide default`,
 		`Utility model`,
 		`id="capability-catalogue-form"`,
+		`hx-target="#capability-catalogue-results"`,
 		`id="capability-catalogue-search"`,
 		`id="capability-catalogue-results"`,
 		`Refresh catalogue`,
@@ -54,6 +55,8 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`id="capability-skill-install-status"`,
 		`aria-describedby="capability-provider-status"`,
 		`id="capability-provider-status"`,
+		`hx-post="/api/v1/desk/providers/test"`,
+		`hx-include="#capability-provider-form"`,
 		`class="capability-form-status"`,
 	} {
 		if !strings.Contains(body, want) {

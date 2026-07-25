@@ -21,6 +21,8 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 		`id="tasks-errors"`,
 		`id="tasks-empty"`,
 		`id="task-schedule-form"`,
+		`data-waffle-json-kind="task-schedule"`,
+		`id="task-schedule-id" name="id" type="hidden" disabled`,
 		`id="task-schedule-name"`,
 		`id="task-schedule-cron"`,
 		`id="task-schedule-prompt"`,
@@ -37,6 +39,7 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 		`data-task-filter="scheduled"`,
 		`data-task-filter="completed"`,
 		`data-task-filter="attention"`,
+		`id="task-filter-attention"`,
 		`aria-live="polite"`,
 	} {
 		if !strings.Contains(body, required) {

@@ -128,3 +128,79 @@ func TestFragmentMutationPreservesHTMLErrorAndJSONContentTypes(t *testing.T) {
 		t.Fatalf("JSON error Content-Type = %q", got)
 	}
 }
+
+func TestTaskFragmentCarriesEditStateAndFilterButtonsAsOOBSwaps(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/tasks?filter=scheduled", nil)
+	component := fragmentComponent(request, http.StatusOK, TasksSnapshot{
+		Filter: TaskFilterScheduled,
+		Tasks: []TaskView{{
+			ID: "job-1", Kind: TaskKindSchedule, Name: "Morning", Cron: "0 9 * * *", Prompt: "Brief", Profile: "reviewer", Enabled: true,
+			RedactedFields: []string{"prompt"}, EvidenceLabel: "Scheduled",
+		}},
+	})
+	var rendered bytes.Buffer
+	if err := component.Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, want := range []string{
+		`id="tasks-list"`,
+		`data-task-id="job-1"`,
+		`data-task-redacted-fields="prompt"`,
+		`data-waffle-task-edit="true"`,
+		`Edit schedule`,
+		`id="task-filter-scheduled"`,
+		`aria-pressed="true"`,
+		`id="task-filter-all"`,
+		`aria-pressed="false"`,
+		`hx-swap-oob="outerHTML"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("task fragment missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestCapabilityFragmentsKeepCatalogueActionsAndSkillSourceState(t *testing.T) {
+	catalogue := fragmentComponent(nil, http.StatusOK, CapabilityCatalogueView{
+		Connection: "primary",
+		Models:     []CapabilityCatalogueModel{{ID: "vendor/model", DisplayName: "Vendor Model", AliasSuggestion: "vendor-model"}},
+	})
+	var catalogueBody bytes.Buffer
+	if err := catalogue.Render(t.Context(), &catalogueBody); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`id="capability-catalogue-results"`,
+		`Add as alias`,
+		`name="connection_name" value="primary"`,
+		`name="upstream_model" value="vendor/model"`,
+		`name="alias"`,
+		`value="vendor-model"`,
+	} {
+		if !strings.Contains(catalogueBody.String(), want) {
+			t.Errorf("catalogue fragment missing %q: %s", want, catalogueBody.String())
+		}
+	}
+
+	skillRequest := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/capabilities?part=skills", nil)
+	skills := fragmentComponent(skillRequest, http.StatusOK, CapabilitiesSnapshot{SkillSources: CapabilitySkillSources{LocalRoots: []string{"/allowed"}}})
+	var skillsBody bytes.Buffer
+	if err := skills.Render(t.Context(), &skillsBody); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(skillsBody.String(), `data-waffle-skill-source="local" data-waffle-source-available="true"`) {
+		t.Fatalf("skill fragment did not carry source availability: %s", skillsBody.String())
+	}
+}
+
+func TestCapabilityProviderTestFailureRendersAnErrorFragment(t *testing.T) {
+	component := fragmentComponent(nil, http.StatusOK, CapabilityProviderTestResult{Outcome: "authentication_failed"})
+	var rendered bytes.Buffer
+	if err := component.Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered.String(), `data-waffle-error="true"`) || !strings.Contains(rendered.String(), "authentication failed") {
+		t.Fatalf("provider test failure = %s", rendered.String())
+	}
+}

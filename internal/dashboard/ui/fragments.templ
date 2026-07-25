@@ -1,7 +1,7 @@
 package ui
 
 templ FragmentList(view FragmentView) {
-	<div id={ view.ID } class={ view.Class } data-waffle-fragment="true" hx-get={ view.GetURL } hx-trigger={ view.Trigger } hx-target="this" hx-swap="outerHTML">
+	<div id={ view.ID } class={ view.Class } data-waffle-fragment="true" if view.GetURL != "" { hx-get={ view.GetURL } hx-trigger={ view.Trigger } hx-target="this" hx-swap="outerHTML" }>
 		if view.Status != "" {
 			<p class="waffle-fragment-status" role="status">{ view.Status }</p>
 		}
@@ -9,7 +9,7 @@ templ FragmentList(view FragmentView) {
 			<p class="waffle-fragment-empty">{ view.Empty }</p>
 		}
 		for _, item := range view.Items {
-			<article class={ item.Class } data-waffle-id={ item.ID } data-task-id={ item.DataTaskID } data-workspace-id={ item.DataWorkspaceID } data-status={ item.Kind }>
+			<article class={ item.Class } data-waffle-id={ item.ID } data-task-id={ item.DataTaskID } data-workspace-id={ item.DataWorkspaceID } data-status={ item.Kind } data-task-name={ item.DataTaskName } data-task-cron={ item.DataTaskCron } data-task-prompt={ item.DataTaskPrompt } data-task-deliver={ item.DataTaskDeliver } data-task-profile={ item.DataTaskProfile } data-task-enabled={ fragmentBool(item.DataTaskEnabled) } data-task-redacted-fields={ item.DataTaskRedactedFields }>
 				if item.Kind != "" {
 					<p class="waffle-fragment-kind">{ item.Kind }</p>
 				}
@@ -33,10 +33,16 @@ templ FragmentList(view FragmentView) {
 						for _, action := range item.Actions {
 							if action.Method == "get" {
 								<a class={ action.Class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
-							} else if len(action.Fields) > 0 {
+							} else if action.Method == "edit" {
+								<button class={ action.Class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button">{ action.Label }</button>
+							} else if len(action.Fields) > 0 || len(action.Inputs) > 0 {
 								<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
 									for _, field := range action.Fields {
 										<input type="hidden" name={ field.Label } value={ field.Value }/>
+									}
+									for _, input := range action.Inputs {
+										<label for={ input.ID }>{ input.Label }</label>
+										<input id={ input.ID } name={ input.Name } type={ input.Type } placeholder={ input.Placeholder } value={ input.Value } required?={ input.Required }/>
 									}
 									<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit">{ action.Label }</button>
 								</form>
@@ -62,7 +68,10 @@ templ FragmentList(view FragmentView) {
 		</select>
 	}
 	for _, swap := range view.TextSwaps {
-		<p id={ swap.ID } hx-swap-oob="outerHTML">{ swap.Text }</p>
+		<p id={ swap.ID } hx-swap-oob="outerHTML" data-waffle-skill-source={ swap.Source } data-waffle-source-available={ fragmentBool(swap.Available) }>{ swap.Text }</p>
+	}
+	for _, filter := range view.Filters {
+		<button id={ filter.ID } class="task-filter" type="button" data-task-filter={ filter.Name } aria-pressed={ fragmentBool(filter.Pressed) } hx-get={ filter.URL } hx-target="#tasks-list" hx-swap="outerHTML" hx-swap-oob="outerHTML">{ filter.Label }</button>
 	}
 }
 

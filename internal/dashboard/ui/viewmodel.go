@@ -23,19 +23,27 @@ type FragmentView struct {
 	Items       []FragmentItem
 	OptionLists []FragmentOptionList
 	TextSwaps   []FragmentTextSwap
+	Filters     []FragmentFilter
 }
 
 type FragmentItem struct {
-	ID              string
-	Class           string
-	Kind            string
-	Title           string
-	Detail          string
-	DetailClass     string
-	DataTaskID      string
-	DataWorkspaceID string
-	Fields          []FragmentField
-	Actions         []FragmentAction
+	ID                     string
+	Class                  string
+	Kind                   string
+	Title                  string
+	Detail                 string
+	DetailClass            string
+	DataTaskID             string
+	DataWorkspaceID        string
+	DataTaskName           string
+	DataTaskCron           string
+	DataTaskPrompt         string
+	DataTaskDeliver        string
+	DataTaskProfile        string
+	DataTaskEnabled        bool
+	DataTaskRedactedFields string
+	Fields                 []FragmentField
+	Actions                []FragmentAction
 }
 
 type FragmentField struct {
@@ -56,8 +64,18 @@ type FragmentOption struct {
 }
 
 type FragmentTextSwap struct {
-	ID   string
-	Text string
+	ID        string
+	Text      string
+	Source    string
+	Available bool
+}
+
+type FragmentFilter struct {
+	ID      string
+	Name    string
+	URL     string
+	Label   string
+	Pressed bool
 }
 
 type FragmentAction struct {
@@ -70,6 +88,17 @@ type FragmentAction struct {
 	Class   string
 	Include string
 	Fields  []FragmentField
+	Inputs  []FragmentInput
+}
+
+type FragmentInput struct {
+	ID          string
+	Name        string
+	Type        string
+	Label       string
+	Placeholder string
+	Value       string
+	Required    bool
 }
 
 type FragmentStatusView struct {
@@ -116,4 +145,11 @@ type SkillReviewView struct {
 	Flags         []string
 	StageID       string
 	ExpiresAt     string
+}
+
+func fragmentBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }

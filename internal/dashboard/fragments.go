@@ -188,7 +188,8 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 		}
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: message, RestartRequired: typed.RestartRequired})
 	case CapabilityProviderTestResult:
-		return ui.FragmentStatus(ui.FragmentStatusView{Message: "Connection test: " + string(typed.Outcome)})
+		message, failed := capabilityProbeMessage(string(typed.Outcome))
+		return ui.FragmentStatus(ui.FragmentStatusView{Message: message, Error: failed})
 	case skillinstall.Manifest:
 		files := make([]ui.SkillReviewFileView, 0, len(typed.Files))
 		for _, file := range typed.Files {
@@ -286,8 +287,8 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 			view.Items = append(view.Items, item)
 		}
 		view.TextSwaps = append(view.TextSwaps,
-			ui.FragmentTextSwap{ID: "capability-skill-local-help", Text: capabilitySourceHelp("Allowed local roots", snapshot.SkillSources.LocalRoots)},
-			ui.FragmentTextSwap{ID: "capability-skill-git-help", Text: capabilitySourceHelp("Allowed Git hosts", snapshot.SkillSources.GitHosts)},
+			ui.FragmentTextSwap{ID: "capability-skill-local-help", Text: capabilitySourceHelp("Allowed local roots", snapshot.SkillSources.LocalRoots), Source: "local", Available: len(snapshot.SkillSources.LocalRoots) > 0},
+			ui.FragmentTextSwap{ID: "capability-skill-git-help", Text: capabilitySourceHelp("Allowed Git hosts", snapshot.SkillSources.GitHosts), Source: "git", Available: len(snapshot.SkillSources.GitHosts) > 0},
 		)
 	case "connections":
 		view.ID = "capability-connections"
@@ -344,20 +345,50 @@ func capabilitySourceHelp(label string, values []string) string {
 	return label + ": " + strings.Join(values, ", ")
 }
 
+func capabilityProbeMessage(outcome string) (string, bool) {
+	switch outcome {
+	case "success":
+		return "Connection test succeeded.", false
+	case "authentication_failed":
+		return "Connection test authentication failed; check the credential.", true
+	case "request_failed":
+		return "Connection test reached the endpoint, but the request was rejected; check the model ID.", true
+	case "unreachable":
+		return "Connection test could not reach the endpoint.", true
+	default:
+		return "Connection test could not be completed.", true
+	}
+}
+
 func catalogueFragment(view CapabilityCatalogueView) ui.FragmentView {
 	fragment := ui.FragmentView{ID: "capability-catalogue-results", Class: "capability-list", Empty: "No catalogue models matched this connection.", Status: view.Warning}
-	for _, model := range view.Models {
+	for index, model := range view.Models {
 		title := model.DisplayName
 		if title == "" {
 			title = model.ID
 		}
-		fragment.Items = append(fragment.Items, ui.FragmentItem{ID: model.ID, Class: "catalogue-card", Kind: model.Owner, Title: title, Fields: []ui.FragmentField{{Label: "Model ID", Value: model.ID}, {Label: "Context window", Value: formatInt64(model.ContextWindow)}}})
+		item := ui.FragmentItem{ID: model.ID, Class: "catalogue-card", Kind: model.Owner, Title: title, Detail: catalogueModelDetail(model), Fields: []ui.FragmentField{{Label: "Model ID", Value: model.ID}, {Label: "Context window", Value: formatInt64(model.ContextWindow)}}}
+		if model.EnrolledAlias == "" {
+			item.Actions = append(item.Actions, ui.FragmentAction{
+				ID: "catalogue-add-" + strconv.Itoa(index), Label: "Add as alias", URL: "/api/v1/desk/models", Target: "#capability-model-status", Swap: "innerHTML",
+				Fields: []ui.FragmentField{{Label: "connection_name", Value: view.Connection}, {Label: "upstream_model", Value: model.ID}},
+				Inputs: []ui.FragmentInput{{ID: "capability-catalogue-alias-" + strconv.Itoa(index), Name: "alias", Type: "text", Label: "Alias", Placeholder: "e.g. provider-model", Value: model.AliasSuggestion, Required: true}},
+			})
+		}
+		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
 }
 
+func catalogueModelDetail(model CapabilityCatalogueModel) string {
+	if model.EnrolledAlias != "" {
+		return "Enrolled as " + model.EnrolledAlias + "."
+	}
+	return ""
+}
+
 func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
-	fragment := ui.FragmentView{ID: "tasks-list", Class: "task-list", Empty: "No tasks match this view."}
+	fragment := ui.FragmentView{ID: "tasks-list", Class: "task-list", Empty: "No tasks match this view.", Filters: taskFilterFragments(snapshot.Filter)}
 	if len(snapshot.Errors) > 0 {
 		fragment.Status = "Some task evidence is temporarily unavailable."
 	}
@@ -368,12 +399,40 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 			title = task.EvidenceLabel
 		}
 		item := ui.FragmentItem{ID: task.ID, DataTaskID: task.ID, Class: "task-card", Kind: kind, Title: title, Fields: []ui.FragmentField{{Label: "State", Value: emptyValue(task.Phase, emptyValue(task.Outcome, "scheduled"))}, {Label: "Profile", Value: emptyValue(task.Profile, "default")}, {Label: "Evidence", Value: task.EvidenceLabel}}}
+		if task.Kind == TaskKindSchedule {
+			item.DataTaskName = task.Name
+			item.DataTaskCron = task.Cron
+			item.DataTaskPrompt = task.Prompt
+			item.DataTaskDeliver = task.Deliver
+			item.DataTaskProfile = task.Profile
+			item.DataTaskEnabled = task.Enabled
+			item.DataTaskRedactedFields = strings.Join(task.RedactedFields, ",")
+			item.Actions = append(item.Actions, ui.FragmentAction{ID: "task-edit-" + task.ID, Label: "Edit schedule", Method: "edit"})
+		}
 		if task.OpenAtDesk && task.SessionID != "" {
 			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Open at Desk", Method: "get", URL: "/desk/?section=today&session_id=" + url.QueryEscape(task.SessionID)})
 		}
 		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
+}
+
+func taskFilterFragments(active TaskFilter) []ui.FragmentFilter {
+	filters := []struct {
+		name  TaskFilter
+		label string
+	}{
+		{name: TaskFilterAll, label: "All"},
+		{name: TaskFilterActive, label: "Active"},
+		{name: TaskFilterScheduled, label: "Scheduled"},
+		{name: TaskFilterCompleted, label: "Completed"},
+		{name: TaskFilterAttention, label: "Attention"},
+	}
+	result := make([]ui.FragmentFilter, 0, len(filters))
+	for _, filter := range filters {
+		result = append(result, ui.FragmentFilter{ID: "task-filter-" + string(filter.name), Name: string(filter.name), URL: "/api/v1/desk/tasks?filter=" + url.QueryEscape(string(filter.name)), Label: filter.label, Pressed: filter.name == active})
+	}
+	return result
 }
 
 func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitView) ui.FragmentView {

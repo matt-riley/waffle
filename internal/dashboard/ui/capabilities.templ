@@ -38,7 +38,7 @@ templ Capabilities() {
 						<select id="capability-default-alias" name="alias" required></select>
 						<p id="capability-default-empty" class="scope-note" hidden></p>
 						<button type="submit">Set default</button>
-						<p class="capability-form-status" id="capability-default-status" role="status" aria-live="polite"></p>
+						<div class="capability-form-status" id="capability-default-status" role="status" aria-live="polite"></div>
 					</form>
 					<form id="capability-utility-form" aria-describedby="capability-utility-status" hx-post="/api/v1/desk/models/utility" hx-target="#capability-utility-status" hx-swap="innerHTML" data-waffle-json="true">
 						<h3>Utility model</h3>
@@ -46,17 +46,17 @@ templ Capabilities() {
 						<select id="capability-utility-alias" name="alias" required></select>
 						<p id="capability-utility-empty" class="scope-note" hidden></p>
 						<button type="submit">Set utility model</button>
-						<p class="capability-form-status" id="capability-utility-status" role="status" aria-live="polite"></p>
+					<div class="capability-form-status" id="capability-utility-status" role="status" aria-live="polite"></div>
 					</form>
 				</div>
 				<p class="scope-note"><strong>Session</strong> model choices live on Today and change one conversation only. The controls above are Waffle-wide.</p>
-				<form id="capability-catalogue-form" class="capability-catalogue-form" aria-describedby="capability-catalogue-status" hx-post="/api/v1/desk/models/catalogue/refresh" hx-target="#capability-catalogue-status" hx-swap="innerHTML" data-waffle-json="true">
+				<form id="capability-catalogue-form" class="capability-catalogue-form" aria-describedby="capability-catalogue-status" hx-post="/api/v1/desk/models/catalogue/refresh" hx-target="#capability-catalogue-results" hx-swap="outerHTML" data-waffle-json="true">
 					<h3>Browse a provider catalogue</h3>
 					<label for="capability-catalogue-connection">Enrolled connection</label>
 						<select id="capability-catalogue-connection" name="connection" required></select>
 						<p id="capability-catalogue-empty" class="scope-note" hidden></p>
 					<button type="submit">Refresh catalogue</button>
-					<p class="capability-form-status" id="capability-catalogue-status" role="status" aria-live="polite"></p>
+					<div class="capability-form-status" id="capability-catalogue-status" role="status" aria-live="polite"></div>
 				</form>
 				<div class="capability-catalogue-search">
 					<label for="capability-catalogue-search">Search refreshed models</label>
@@ -74,7 +74,7 @@ templ Capabilities() {
 					<label for="capability-model-id">Provider model ID</label>
 					<input id="capability-model-id" name="upstream_model" required/>
 					<button type="submit">Add model</button>
-					<p class="capability-form-status" id="capability-model-status" role="status" aria-live="polite"></p>
+					<div class="capability-form-status" id="capability-model-status" role="status" aria-live="polite"></div>
 				</form>
 			</section>
 			<section class="capability-panel" id="capability-skills-panel" aria-labelledby="capability-skills-title">
@@ -95,14 +95,14 @@ templ Capabilities() {
 					<label for="capability-skill-commit">Exact Git commit (40 lowercase hex)</label>
 					<input id="capability-skill-commit" name="commit" autocomplete="off"/>
 					<button type="submit">Stage review</button>
-					<p class="capability-form-status" id="capability-skill-stage-status" role="status" aria-live="polite"></p>
+				<div class="capability-form-status" id="capability-skill-stage-status" role="status" aria-live="polite"></div>
 				</form>
 				<section id="capability-skill-review" class="skill-review" aria-labelledby="capability-skill-review-title" hidden>
 					<h3 id="capability-skill-review-title">Review manifest and diff</h3>
 					<div id="capability-skill-preview" class="skill-review-content"></div>
 					<p id="capability-skill-review-expires" class="skill-review-expiry" role="status" aria-live="polite"></p>
 					<button type="button" id="capability-skill-install" aria-describedby="capability-skill-install-status">Install inactive</button>
-					<p class="capability-form-status" id="capability-skill-install-status" role="status" aria-live="polite"></p>
+			<div class="capability-form-status" id="capability-skill-install-status" role="status" aria-live="polite"></div>
 				</section>
 			</section>
 			<section class="capability-panel" id="capability-connections-panel" aria-labelledby="capability-connections-title">
@@ -137,8 +137,8 @@ templ Capabilities() {
 						<label><input id="capability-provider-default" name="make_default" type="checkbox"/> Make this first model the Waffle-wide default</label>
 						<label><input id="capability-provider-utility" name="make_utility" type="checkbox"/> Make this first model the utility model</label>
 						<button type="submit">Enroll provider</button>
-						<button type="button" id="capability-provider-test">Test connection</button>
-					<p class="capability-form-status" id="capability-provider-status" role="status" aria-live="polite"></p>
+					<button type="button" id="capability-provider-test" hx-post="/api/v1/desk/providers/test" hx-target="#capability-provider-status" hx-swap="innerHTML" hx-include="#capability-provider-form" hx-disabled-elt="this">Test connection</button>
+					<div class="capability-form-status" id="capability-provider-status" role="status" aria-live="polite"></div>
 				</form>
 			</section>
 		</div>
