@@ -206,8 +206,10 @@ if (root) {
         if (node.dataset && node.dataset.removalAction === "true") {
           node.disabled = disabled;
         }
-        if (Array.isArray(node.childNodes)) {
-          for (const child of node.childNodes) visit(child);
+        if (node.childNodes && typeof node.childNodes.length === "number") {
+          for (let index = 0; index < node.childNodes.length; index += 1) {
+            visit(node.childNodes[index]);
+          }
         }
       };
       visit(container);

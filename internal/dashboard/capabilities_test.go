@@ -253,6 +253,51 @@ func TestCapabilitiesModelRemovalConfirmationUsesExplicitReplacementForSessions(
 	}
 }
 
+func TestCapabilitiesModelRemovalRestoresSessionsWhenProviderRemovalFails(t *testing.T) {
+	sessions := &fakeCapabilitySessions{
+		modelRefs: map[string][]string{"gpt": {"session-1", "session-2"}},
+		sessions: map[string]*session.Session{
+			"session-1": {ID: "session-1", ModelAlias: "gpt"},
+			"session-2": {ID: "session-2", ModelAlias: "gpt"},
+		},
+	}
+	var providerSawReplacement bool
+	providers := &fakeCapabilityProviders{
+		modelPreview: providerconfig.ModelRemovalPreview{
+			Alias: "gpt", Provider: "openai", Revision: "revision-1", Default: true,
+		},
+		removeModelHook: func() error {
+			providerSawReplacement = true
+			for _, value := range sessions.sessions {
+				if value.ModelAlias != "small" {
+					providerSawReplacement = false
+				}
+			}
+			return errors.New("provider removal failed")
+		},
+	}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Sessions:  sessions,
+		Previews:  NewPreviewStore(nil, previewEntropy(1)),
+	}
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capabilities.ConfirmModelRemoval(t.Context(), "gpt", "small", preview.PreviewToken); err == nil {
+		t.Fatal("provider removal unexpectedly succeeded")
+	}
+	if !providerSawReplacement {
+		t.Fatal("provider removal was not attempted after session reassignment")
+	}
+	for id, value := range sessions.sessions {
+		if value.ModelAlias != "gpt" {
+			t.Fatalf("session %s alias = %q, want removed alias restored after failed removal", id, value.ModelAlias)
+		}
+	}
+}
+
 func TestCapabilitiesProviderRemovalNamesAliasesAndPreservesReferencedRefusal(t *testing.T) {
 	providers := &fakeCapabilityProviders{
 		providerPreview: providerconfig.ProviderRemovalPreview{
@@ -1410,6 +1455,7 @@ type fakeCapabilityProviders struct {
 	removeModelCalls       int
 	removeModelAlias       string
 	removeModelReplacement string
+	removeModelHook        func() error
 	removeProviderName     string
 }
 
@@ -1456,6 +1502,11 @@ func (f *fakeCapabilityProviders) PreviewProviderRemoval(context.Context, string
 func (f *fakeCapabilityProviders) RemoveModelWithMode(_ context.Context, alias, replacement string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	f.removeModelCalls++
 	f.removeModelAlias, f.removeModelReplacement = alias, replacement
+	if f.removeModelHook != nil {
+		if err := f.removeModelHook(); err != nil {
+			return providerconfig.MutationResult{}, err
+		}
+	}
 	return f.mutationResult()
 }
 
@@ -1514,6 +1565,11 @@ func (f *fakeCapabilitySessions) ModelAliasReferences(_ context.Context, alias s
 
 func (f *fakeCapabilitySessions) ReplaceModelAlias(_ context.Context, from, to string) error {
 	f.replacedFrom, f.replacedTo = from, to
+	for _, value := range f.sessions {
+		if value.ModelAlias == from {
+			value.ModelAlias = to
+		}
+	}
 	return nil
 }
 

@@ -380,16 +380,30 @@ func (c *Capabilities) ConfirmModelRemoval(ctx context.Context, alias, replaceme
 	if preview.ReplacementRequired && replacement == "" {
 		return providerconfig.MutationResult{}, ErrCapabilityReplacementRequired
 	}
-	result, err := c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
-	if err != nil {
+	if replacement == "" {
+		return c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
+	}
+
+	// Move persisted session choices before deleting the provider alias. The
+	// provider mutation has its own recovery journal, so an error leaves the
+	// alias available for this compensation path; a process death between these
+	// steps leaves sessions pointing at the still-present replacement instead of
+	// at a removed alias.
+	if err := c.Sessions.ReplaceModelAlias(ctx, current.Target, replacement); err != nil {
 		return providerconfig.MutationResult{}, err
 	}
-	if replacement != "" {
-		if err := c.Sessions.ReplaceModelAlias(ctx, current.Target, replacement); err != nil {
-			return providerconfig.MutationResult{}, err
-		}
+	result, err := c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
+	if err == nil {
+		return result, nil
 	}
-	return result, nil
+	var restoreErr error
+	for _, reference := range current.References {
+		if reference.Kind != "session" {
+			continue
+		}
+		restoreErr = errors.Join(restoreErr, c.Sessions.SetModelAlias(ctx, reference.Name, current.Target))
+	}
+	return providerconfig.MutationResult{}, errors.Join(err, restoreErr)
 }
 
 func (c *Capabilities) ConfirmProviderRemoval(ctx context.Context, name, token string) (providerconfig.MutationResult, error) {

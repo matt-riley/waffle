@@ -857,6 +857,55 @@ test("scheduled restart disables forms and skill activate while waiting and repo
   );
 });
 
+test("scheduled restart disables removal buttons through a NodeList-like childNodes tree", async () => {
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: {
+        state: "ready",
+        default_model: "gpt",
+        utility_model: "gpt",
+        providers: { openai: { type: "openai" } },
+        models: { gpt: { provider: "openai", model: "gpt-test" } },
+      },
+      provider_presets: [],
+      skills: [],
+    }),
+    providerResponse: response({
+      restart_required: true,
+      restart: {
+        scheduled: true,
+        code: "restart_scheduled",
+        message: "Waffle restart was scheduled.",
+      },
+    }, true, 202),
+    bootstrapGenerations: ["process-old"],
+    clock: true,
+    deferTimers: true,
+  });
+  await flush();
+
+  const modelCard = harness.elements["#capability-models"].childNodes[0];
+  const remove = findButton(modelCard, "Remove alias");
+  assert.ok(remove, "expected model removal button after capabilities load");
+  const children = harness.elements["#capability-models"].childNodes;
+  harness.elements["#capability-models"].childNodes = {
+    0: children[0],
+    length: children.length,
+  };
+
+  const submitPromise = harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(remove.disabled, true, "removal button must lock during restart wait");
+
+  await harness.runTimersUntilIdle(70);
+  await submitPromise;
+  await flush();
+  assert.equal(remove.disabled, false, "removal button must unlock after restart wait ends");
+});
+
 test("provider credential is cleared after failure and never appears in safe UI", async () => {
   const harness = createHarness({
     providerResponse: response({
