@@ -214,7 +214,7 @@ test("session model wins over waffle-wide default", async () => {
   assert.equal(harness.elements["#rail-model"].dataset.modelScope, "session");
   assert.match(
     harness.elements["#rail-status"].getAttribute("aria-label"),
-    /session model/,
+    /this conversation/,
   );
 
   rail.setModel("gpt-desk", rail.modelScopes.waffleWide);

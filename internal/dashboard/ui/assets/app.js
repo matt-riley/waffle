@@ -52,8 +52,10 @@ function modelDisplay(alias, scope) {
 function railAriaLabel() {
   const connection = connectionLabels[railState.connection] || railState.connection;
   const model = modelDisplay(railState.modelAlias, railState.modelScope);
+  // Avoid the substring "Session model" so Playwright getByLabel("Session model")
+  // still uniquely resolves the Today select (#desk-model), not this rail region.
   if (railState.modelScope === modelScopes.session) {
-    return `Connection and model: ${connection}, ${model} (session model)`;
+    return `Connection and model: ${connection}, ${model} (this conversation)`;
   }
   if (railState.modelScope === modelScopes.waffleWide) {
     return `Connection and model: ${connection}, ${model} (Waffle-wide default)`;
