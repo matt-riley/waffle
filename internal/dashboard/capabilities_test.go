@@ -97,6 +97,28 @@ func TestCapabilitiesSnapshotCombinesModelsAndSessionSkills(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesSnapshotIncludesCredentialFreeProviderPresets(t *testing.T) {
+	capabilities := &Capabilities{Providers: &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Providers: map[string]providerconfig.ProviderSummary{},
+		Models:    map[string]providerconfig.ModelSummary{},
+	}}}
+
+	snapshot, err := capabilities.Snapshot(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.ProviderPresets) != len(providerconfig.Presets()) {
+		t.Fatalf("provider presets = %#v, want %#v", snapshot.ProviderPresets, providerconfig.Presets())
+	}
+	public, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(public, []byte(capabilityCredentialCanary)) {
+		t.Fatalf("snapshot leaked credential material: %s", public)
+	}
+}
+
 func TestCapabilitiesSnapshotRetriesTransientProviderLock(t *testing.T) {
 	providers := &fakeCapabilityProviders{
 		snapshot: providerconfig.Listing{
@@ -226,6 +248,220 @@ func TestCapabilitiesCatalogueRedactsPrivateFetchValuesAcrossEveryPublicString(t
 		view.Models[0].Owner != "owner-[REDACTED]" ||
 		!reflect.DeepEqual(view.Models[0].Capabilities, []string{"text-[REDACTED]", "tools-[REDACTED]"}) {
 		t.Fatalf("redacted catalogue = %#v", view)
+	}
+}
+
+func TestCapabilitiesCatalogueEnrolledAliasIgnoresOtherConnectionsAndKeepsLowestAlias(t *testing.T) {
+	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Providers: map[string]providerconfig.ProviderSummary{
+			"router": {Type: "openai"},
+			"other":  {Type: "openai"},
+		},
+		Models: map[string]providerconfig.ModelSummary{
+			"zeta":    {Provider: "router", Model: "anthropic/claude-sonnet-4-6"},
+			"alpha":   {Provider: "router", Model: "anthropic/claude-sonnet-4-6"},
+			"mirrors": {Provider: "other", Model: "openai/gpt-5.4"},
+		},
+	}}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Catalogue: fakeCapabilityCatalogue{result: CapabilityCatalogueResult{Result: modelcatalog.Result{
+			Record: modelcatalog.Record{Connection: modelcatalog.Connection{Name: "router"}, Models: []modelcatalog.Model{
+				{ID: "anthropic/claude-sonnet-4-6"},
+				{ID: "openai/gpt-5.4"},
+			}},
+		}}},
+	}
+
+	view, err := capabilities.RefreshCatalogue(t.Context(), "router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Models) != 2 {
+		t.Fatalf("models = %#v", view.Models)
+	}
+	if view.Models[0].EnrolledAlias != "alpha" {
+		t.Fatalf("duplicate aliases must resolve to the lowest alias, got %#v", view.Models[0])
+	}
+	if view.Models[1].EnrolledAlias != "" {
+		t.Fatalf("another connection's alias must not mark this catalogue model, got %#v", view.Models[1])
+	}
+}
+
+func TestCapabilitiesCatalogueMarksAlreadyEnrolledModelsAndSuggestsAliases(t *testing.T) {
+	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Providers: map[string]providerconfig.ProviderSummary{"router": {Type: "openai"}},
+		Models: map[string]providerconfig.ModelSummary{
+			"claude": {Provider: "router", Model: "anthropic/claude-sonnet-4-6"},
+		},
+	}}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Catalogue: fakeCapabilityCatalogue{result: CapabilityCatalogueResult{Result: modelcatalog.Result{
+			Record: modelcatalog.Record{Connection: modelcatalog.Connection{Name: "router"}, Models: []modelcatalog.Model{
+				{ID: "anthropic/claude-sonnet-4-6"},
+				{ID: "openai/gpt-5.4"},
+			}},
+		}}},
+	}
+
+	view, err := capabilities.RefreshCatalogue(t.Context(), "router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Models) != 2 {
+		t.Fatalf("models = %#v", view.Models)
+	}
+	if view.Models[0].EnrolledAlias != "claude" || view.Models[0].AliasSuggestion != "anthropic-claude-sonnet-4-6" {
+		t.Fatalf("enrolled model = %#v", view.Models[0])
+	}
+	if view.Models[1].EnrolledAlias != "" || view.Models[1].AliasSuggestion != "openai-gpt-5-4" {
+		t.Fatalf("new model = %#v", view.Models[1])
+	}
+	public, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(public, []byte("sk-")) {
+		t.Fatalf("catalogue JSON leaked a credential: %s", public)
+	}
+}
+
+func TestCapabilitiesProviderTestClassifiesOnlySafeOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "success", want: "success"},
+		{name: "authentication", err: errors.New("upstream 401 Unauthorized for sk-super-private"), want: "authentication_failed"},
+		{name: "unreachable", err: context.DeadlineExceeded, want: "unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providers := &fakeCapabilityProviders{testErr: tc.err}
+			result, err := (&Capabilities{Providers: providers}).TestProvider(t.Context(), "primary")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != providerconfig.ProbeOutcome(tc.want) {
+				t.Fatalf("outcome = %q, want %q", result.Outcome, tc.want)
+			}
+			public, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(public, []byte(capabilityCredentialCanary)) || bytes.Contains(public, []byte("401")) {
+				t.Fatalf("test result leaked probe detail: %s", public)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesProspectiveProviderTestClassifiesOnlySafeOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want providerconfig.ProbeOutcome
+	}{
+		{name: "success", want: providerconfig.ProbeOutcomeSuccess},
+		{name: "authentication", err: errors.New("upstream 401 Unauthorized for " + capabilityCredentialCanary), want: providerconfig.ProbeOutcomeAuthentication},
+		{name: "unreachable", err: context.DeadlineExceeded, want: providerconfig.ProbeOutcomeUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providers := &fakeCapabilityProviders{prospectiveErr: tc.err}
+			result, err := (&Capabilities{Providers: providers}).TestProspectiveProvider(t.Context(), providerconfig.ProspectiveProbeRequest{
+				ConnectionName: "primary",
+				Connection:     config.ProviderConnection{Type: "openai"},
+				Model:          "gpt-test",
+				APIKey:         capabilityCredentialCanary,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != tc.want {
+				t.Fatalf("outcome = %q, want %q", result.Outcome, tc.want)
+			}
+			public, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(public, []byte(capabilityCredentialCanary)) || bytes.Contains(public, []byte("401")) {
+				t.Fatalf("prospective result leaked probe detail: %s", public)
+			}
+		})
+	}
+}
+
+func TestRegisterCapabilitiesRoutesProviderTestKeepsMutationProtectionAndRedactsFailures(t *testing.T) {
+	providers := &fakeCapabilityProviders{testErr: errors.New("provider returned 401 for " + capabilityCredentialCanary)}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Providers: providers},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+	})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/desk/providers/primary/test", strings.NewReader(`{}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), capabilityCredentialCanary) || !strings.Contains(response.Body.String(), "authentication_failed") {
+		t.Fatalf("unsafe or unclassified response: %s", response.Body.String())
+	}
+}
+
+func TestRegisterCapabilitiesRoutesProspectiveProviderTestUsesEnteredInputs(t *testing.T) {
+	providers := &fakeCapabilityProviders{}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Providers: providers},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+	})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/desk/providers/test",
+		strings.NewReader(`{"connection_name":"new-provider","type":"openai-compatible","base_url":"https://gateway.example/v1","max_tokens":321,"model":"vendor/model","api_key":"`+capabilityCredentialCanary+`"}`),
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	want := providerconfig.ProspectiveProbeRequest{
+		ConnectionName: "new-provider",
+		Connection: config.ProviderConnection{
+			Type:      "openai",
+			BaseURL:   "https://gateway.example/v1",
+			MaxTokens: 321,
+		},
+		Model:  "vendor/model",
+		APIKey: capabilityCredentialCanary,
+	}
+	if providers.lastProspective != want {
+		t.Fatalf("prospective request = %#v, want %#v", providers.lastProspective, want)
+	}
+	if strings.Contains(response.Body.String(), capabilityCredentialCanary) {
+		t.Fatalf("response leaked credential: %s", response.Body.String())
+	}
+}
+
+func TestRegisterCapabilitiesRoutesCatalogueAddPreservesExactModelIDAndConnection(t *testing.T) {
+	providers := &fakeCapabilityProviders{}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Providers: providers},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+		Restart:  fakeRestartScheduler{},
+	})
+	response := newAfterResponseRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/desk/models",
+		strings.NewReader(`{"connection_name":"router","alias":"claude-opus","upstream_model":"accounts/fireworks/models/claude-opus-4-6"}`),
+	))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	if providers.lastAdd.ConnectionName != "router" || providers.lastAdd.UpstreamModel != "accounts/fireworks/models/claude-opus-4-6" {
+		t.Fatalf("add request = %#v", providers.lastAdd)
 	}
 }
 
@@ -850,13 +1086,17 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 }
 
 type fakeCapabilityProviders struct {
-	snapshot      providerconfig.Listing
-	snapshotErrs  []error
-	snapshotCalls int
-	result        providerconfig.MutationResult
-	mutationErr   error
-	mutations     int
-	lastAPIKey    string
+	snapshot        providerconfig.Listing
+	snapshotErrs    []error
+	snapshotCalls   int
+	result          providerconfig.MutationResult
+	mutationErr     error
+	mutations       int
+	lastAPIKey      string
+	testErr         error
+	lastProspective providerconfig.ProspectiveProbeRequest
+	prospectiveErr  error
+	lastAdd         providerconfig.AddModelRequest
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -875,8 +1115,9 @@ func (f *fakeCapabilityProviders) AddWithMode(_ context.Context, request provide
 	return f.mutationResult()
 }
 
-func (f *fakeCapabilityProviders) AddModelWithMode(context.Context, providerconfig.AddModelRequest, providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+func (f *fakeCapabilityProviders) AddModelWithMode(_ context.Context, request providerconfig.AddModelRequest, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	f.mutations++
+	f.lastAdd = request
 	return f.mutationResult()
 }
 
@@ -888,6 +1129,13 @@ func (f *fakeCapabilityProviders) ActivateModelWithMode(context.Context, string,
 func (f *fakeCapabilityProviders) ActivateUtilityModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	f.mutations++
 	return f.mutationResult()
+}
+
+func (f *fakeCapabilityProviders) Test(context.Context, string) error { return f.testErr }
+
+func (f *fakeCapabilityProviders) TestProspective(_ context.Context, request providerconfig.ProspectiveProbeRequest) error {
+	f.lastProspective = request
+	return f.prospectiveErr
 }
 
 func (f *fakeCapabilityProviders) mutationResult() (providerconfig.MutationResult, error) {

@@ -32,6 +32,9 @@ import (
 var (
 	// ErrLocked means another provider mutation owns the host lock.
 	ErrLocked = errors.New("provider configuration is locked")
+	// ErrAliasConflict is wrapped by the stable legacy error text for a
+	// requested model alias that already exists.
+	ErrAliasConflict = errors.New("model alias")
 	// ErrReferenced means a connection cannot be removed while model aliases
 	// still point at it.
 	ErrReferenced = errors.New("provider connection is referenced")
@@ -266,7 +269,7 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 	}
 	for alias := range req.Models {
 		if _, exists := before.cfg.Models[alias]; exists {
-			return fmt.Errorf("model alias %q already exists", alias)
+			return fmt.Errorf("%w %q already exists", ErrAliasConflict, alias)
 		}
 	}
 	scopeID, err := m.newCatalogScope()
@@ -415,6 +418,36 @@ func (m *Manager) Test(ctx context.Context, name string) error {
 	return nil
 }
 
+// TestProspective probes unsaved provider inputs directly. It deliberately
+// does not acquire the provider lock or read/write config and secrets.
+func (m *Manager) TestProspective(ctx context.Context, req ProspectiveProbeRequest) error {
+	if err := ValidateProspectiveProbe(req); err != nil {
+		return redactError(err, req.APIKey)
+	}
+	if err := validateNoActiveKeyInDurableStrings(req.APIKey,
+		req.ConnectionName,
+		req.Connection.Type,
+		req.Connection.BaseURL,
+		req.Model,
+	); err != nil {
+		return redactError(err, req.APIKey)
+	}
+	if m.Probe == nil {
+		return errors.New("provider probe is not configured")
+	}
+	target := config.ResolvedModel{
+		Alias:          req.Model,
+		ConnectionName: req.ConnectionName,
+		Connection:     req.Connection,
+		UpstreamModel:  req.Model,
+		MaxTokens:      req.Connection.MaxTokens,
+	}
+	if err := m.Probe(ctx, target, req.APIKey); err != nil {
+		return redactError(fmt.Errorf("probe prospective provider %q model %q: %w", req.ConnectionName, req.Model, err), req.APIKey)
+	}
+	return nil
+}
+
 // CatalogSnapshot returns the private inputs needed to discover one
 // connection's catalogue. Legacy enrollments receive a scope on first access.
 func (m *Manager) CatalogSnapshot(ctx context.Context, name string) (snapshot CatalogSnapshot, err error) {
@@ -507,7 +540,7 @@ func (m *Manager) addModel(ctx context.Context, req AddModelRequest) (err error)
 		return err
 	}
 	if _, ok := before.cfg.Models[req.Alias]; ok {
-		return fmt.Errorf("model alias %q already exists", req.Alias)
+		return fmt.Errorf("%w %q already exists", ErrAliasConflict, req.Alias)
 	}
 
 	target := config.ModelTarget{Provider: req.ConnectionName, Model: req.UpstreamModel}

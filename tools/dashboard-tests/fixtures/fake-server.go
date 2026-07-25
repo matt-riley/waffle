@@ -601,6 +601,12 @@ func (p *fixtureProviders) ActivateUtilityModelWithMode(_ context.Context, alias
 	return providerconfig.MutationResult{}, nil
 }
 
+func (*fixtureProviders) Test(context.Context, string) error { return nil }
+
+func (*fixtureProviders) TestProspective(context.Context, providerconfig.ProspectiveProbeRequest) error {
+	return nil
+}
+
 type fixtureSkills struct {
 	mu    sync.Mutex
 	items []dashboard.CapabilitySkill

@@ -12,23 +12,32 @@ if (root) {
     providerName: document.querySelector("#capability-provider-name"),
     providerType: document.querySelector("#capability-provider-type"),
     providerBaseURL: document.querySelector("#capability-provider-base-url"),
+    providerBaseURLGuidance: document.querySelector("#capability-provider-base-url-guidance"),
     providerAlias: document.querySelector("#capability-provider-model-alias"),
     providerModelID: document.querySelector("#capability-provider-model-id"),
+    providerMaxTokens: document.querySelector("#capability-provider-max-tokens"),
     providerCredential: document.querySelector("#capability-provider-credential"),
+    providerDefault: document.querySelector("#capability-provider-default"),
+    providerUtility: document.querySelector("#capability-provider-utility"),
+    providerTest: document.querySelector("#capability-provider-test"),
     defaultForm: document.querySelector("#capability-default-form"),
     defaultStatus: document.querySelector("#capability-default-status"),
     defaultAlias: document.querySelector("#capability-default-alias"),
+    defaultEmpty: document.querySelector("#capability-default-empty"),
     utilityForm: document.querySelector("#capability-utility-form"),
     utilityStatus: document.querySelector("#capability-utility-status"),
     utilityAlias: document.querySelector("#capability-utility-alias"),
+    utilityEmpty: document.querySelector("#capability-utility-empty"),
     modelForm: document.querySelector("#capability-model-form"),
     modelStatus: document.querySelector("#capability-model-status"),
     modelConnection: document.querySelector("#capability-model-connection"),
+    modelConnectionEmpty: document.querySelector("#capability-model-connection-empty"),
     modelAlias: document.querySelector("#capability-model-alias"),
     modelID: document.querySelector("#capability-model-id"),
     catalogueForm: document.querySelector("#capability-catalogue-form"),
     catalogueStatus: document.querySelector("#capability-catalogue-status"),
     catalogueConnection: document.querySelector("#capability-catalogue-connection"),
+    catalogueEmpty: document.querySelector("#capability-catalogue-empty"),
     catalogueSearch: document.querySelector("#capability-catalogue-search"),
     catalogueSummary: document.querySelector("#capability-catalogue-summary"),
     catalogueResults: document.querySelector("#capability-catalogue-results"),
@@ -56,6 +65,9 @@ if (root) {
     restarting: false,
     loadGeneration: 0,
     formIntents: Object.create(null),
+    providerState: null,
+    providerPresetName: "",
+    providerPresetBaseURL: "",
   };
 
   function setPageStatus(message) {
@@ -366,6 +378,79 @@ if (root) {
     node.replaceChildren();
   }
 
+  function setPickerOptions(select, values, selectedValue, emptyMessage, form, emptyNode) {
+    if (!select) return;
+    clearNode(select);
+    const choices = Array.isArray(values) ? values : [];
+    for (const value of choices) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+    const hasChoices = choices.length > 0;
+    select.hidden = !hasChoices;
+    select.disabled = !hasChoices || state.restarting;
+    select.required = hasChoices;
+    const submit = findSubmitControl(form);
+    if (submit) submit.disabled = !hasChoices || state.restarting;
+    if (emptyNode) {
+      emptyNode.hidden = hasChoices;
+      emptyNode.textContent = hasChoices ? "" : emptyMessage;
+    }
+    if (!hasChoices) {
+      select.value = "";
+      return;
+    }
+    select.value = choices.includes(selectedValue) ? selectedValue : choices[0];
+  }
+
+  function renderProviderPresets(presets) {
+    if (!elements.providerType) return;
+    clearNode(elements.providerType);
+    const choices = Array.isArray(presets) ? presets : [];
+    for (const preset of choices) {
+      if (!preset || typeof preset.name !== "string" || !preset.name) continue;
+      const option = document.createElement("option");
+      option.value = preset.name;
+      option.textContent = preset.name;
+      option.dataset.requiresBaseURL = preset.requires_base_url ? "true" : "false";
+      option.dataset.baseURL = typeof preset.base_url === "string" ? preset.base_url : "";
+      elements.providerType.appendChild(option);
+    }
+    if (choices.length && !elements.providerType.value) {
+      elements.providerType.value = choices[0].name;
+    }
+    updateProviderPresetGuidance();
+  }
+
+  function selectedProviderPreset() {
+    const name = elements.providerType?.value || "";
+    for (const option of elements.providerType?.childNodes || []) {
+      if (option.value === name) return option;
+    }
+    return null;
+  }
+
+  function updateProviderPresetGuidance() {
+    const preset = selectedProviderPreset();
+    const presetName = elements.providerType?.value || "";
+    const presetBaseURL = preset?.dataset?.baseURL || "";
+    if (elements.providerBaseURL &&
+      (elements.providerBaseURL.value.trim() === "" || elements.providerBaseURL.value === state.providerPresetBaseURL)) {
+      elements.providerBaseURL.value = presetBaseURL;
+    }
+    state.providerPresetName = presetName;
+    state.providerPresetBaseURL = presetBaseURL;
+    const requiresBaseURL = preset?.dataset?.requiresBaseURL === "true";
+    if (elements.providerBaseURL) elements.providerBaseURL.required = requiresBaseURL;
+    if (elements.providerBaseURLGuidance) {
+      elements.providerBaseURLGuidance.textContent = requiresBaseURL
+        ? "Base URL is required for this provider type."
+        : "Base URL is optional; leave blank to use the provider default.";
+    }
+  }
+
   function findFieldByName(form, name) {
     if (!form || !name) return null;
     if (typeof form.querySelector === "function") {
@@ -457,6 +542,42 @@ if (root) {
     clearNode(elements.models);
     const models = providerState?.models || {};
     const aliases = Object.keys(models).sort();
+    const connections = Object.keys(providerState?.providers || {}).sort();
+    setPickerOptions(
+      elements.defaultAlias,
+      aliases,
+      providerState?.default_model || "",
+      "Add a model before choosing a Waffle-wide default.",
+      elements.defaultForm,
+      elements.defaultEmpty,
+    );
+    setPickerOptions(
+      elements.utilityAlias,
+      aliases,
+      providerState?.utility_model || "",
+      "Add a model before choosing a utility model.",
+      elements.utilityForm,
+      elements.utilityEmpty,
+    );
+    setPickerOptions(
+      elements.catalogueConnection,
+      connections,
+      state.catalogueConnection,
+      "Enroll a provider first to browse its catalogue.",
+      elements.catalogueForm,
+      elements.catalogueEmpty,
+    );
+    setPickerOptions(
+      elements.modelConnection,
+      connections,
+      "",
+      "Enroll a provider first to add a model.",
+      elements.modelForm,
+      elements.modelConnectionEmpty,
+    );
+    if (elements.providerDefault) {
+      elements.providerDefault.checked = !providerState?.default_model;
+    }
     for (const alias of aliases) {
       const model = models[alias] || {};
       const card = document.createElement("article");
@@ -470,6 +591,52 @@ if (root) {
       detail.textContent = `${model.provider || "Unknown provider"} · ${model.model || "Unknown model"}${roles.length ? ` · ${roles.join(", ")}` : ""}`;
       card.appendChild(title);
       card.appendChild(detail);
+      const makeDefault = document.createElement("button");
+      makeDefault.type = "button";
+      makeDefault.textContent = "Make default";
+      makeDefault.disabled = state.restarting || providerState.default_model === alias;
+      makeDefault.addEventListener("click", async () => {
+        if (makeDefault.disabled) return;
+        makeDefault.disabled = true;
+        try {
+          const result = await postMutation(
+            "/api/v1/desk/models/default",
+            { alias },
+            `model-default:${alias}`,
+          );
+          clearFormIntent(`model-default:${alias}`);
+          if (result.restart_required) await handleRestartRequired(result);
+          else await loadCapabilities();
+        } catch (error) {
+          setFormStatus(elements.defaultForm, error.safeMessage || "Capability request could not be completed.", "error");
+        } finally {
+          if (!state.restarting) makeDefault.disabled = false;
+        }
+      });
+      card.appendChild(makeDefault);
+      const makeUtility = document.createElement("button");
+      makeUtility.type = "button";
+      makeUtility.textContent = "Make utility";
+      makeUtility.disabled = state.restarting || providerState.utility_model === alias;
+      makeUtility.addEventListener("click", async () => {
+        if (makeUtility.disabled) return;
+        makeUtility.disabled = true;
+        try {
+          const result = await postMutation(
+            "/api/v1/desk/models/utility",
+            { alias },
+            `model-utility:${alias}`,
+          );
+          clearFormIntent(`model-utility:${alias}`);
+          if (result.restart_required) await handleRestartRequired(result);
+          else await loadCapabilities();
+        } catch (error) {
+          setFormStatus(elements.utilityForm, error.safeMessage || "Capability request could not be completed.", "error");
+        } finally {
+          if (!state.restarting) makeUtility.disabled = false;
+        }
+      });
+      card.appendChild(makeUtility);
       elements.models.appendChild(card);
     }
     if (aliases.length === 0) {
@@ -588,6 +755,43 @@ if (root) {
         guidance.textContent = item.guidance;
         card.appendChild(guidance);
       }
+      if (item?.kind === "provider" && typeof item?.name === "string" && item.name) {
+        const test = document.createElement("button");
+        test.type = "button";
+        test.textContent = "Test connection";
+        const testStatus = document.createElement("p");
+        testStatus.className = "connection-test-status";
+        testStatus.setAttribute("role", "status");
+        testStatus.setAttribute("aria-live", "polite");
+        test.addEventListener("click", async () => {
+          if (test.disabled || state.restarting) return;
+          test.disabled = true;
+          const original = test.textContent;
+          test.textContent = PENDING_LABEL;
+          try {
+            const result = await postMutation(
+              `/api/v1/desk/providers/${encodeURIComponent(item.name)}/test`,
+              {},
+              `provider-test:${item.name}`,
+            );
+            clearFormIntent(`provider-test:${item.name}`);
+            const messages = {
+              success: "Connection test succeeded.",
+              authentication_failed: "Connection test authentication failed.",
+              request_failed: "Connection test reached the endpoint, but the request was rejected.",
+              unreachable: "Connection test could not reach the endpoint.",
+            };
+            setControlStatus(testStatus, messages[result.outcome] || "Connection test could not be completed.", result.outcome === "success" ? "" : "error");
+          } catch (error) {
+            setControlStatus(testStatus, error.safeMessage || "Connection test could not be completed.", "error");
+          } finally {
+            test.textContent = original;
+            test.disabled = false;
+          }
+        });
+        card.appendChild(test);
+        card.appendChild(testStatus);
+      }
       elements.connections.appendChild(card);
     }
     if (!records.length) {
@@ -614,6 +818,58 @@ if (root) {
       detail.textContent = `${model.id || "Unknown model ID"}${owner}`;
       card.appendChild(title);
       card.appendChild(detail);
+      if (model.enrolled_alias) {
+        const enrolled = document.createElement("p");
+        enrolled.textContent = `Enrolled as ${model.enrolled_alias}.`;
+        card.appendChild(enrolled);
+      } else if (model.id) {
+        const alias = document.createElement("input");
+        alias.type = "text";
+        alias.value = model.alias_suggestion || "";
+        alias.setAttribute("aria-label", `Alias for ${model.id}`);
+        card.appendChild(alias);
+        const add = document.createElement("button");
+        add.type = "button";
+        add.textContent = "Add as alias";
+        add.disabled = state.restarting;
+        add.addEventListener("click", async () => {
+          if (add.disabled) return;
+          const selectedAlias = alias.value.trim();
+          if (!selectedAlias) {
+            setFieldInvalid(alias);
+            setFormStatus(elements.catalogueForm, "Enter an alias before adding the catalogue model.", "error");
+            return;
+          }
+          add.disabled = true;
+          const original = add.textContent;
+          add.textContent = PENDING_LABEL;
+          try {
+            const result = await postMutation(
+              "/api/v1/desk/models",
+              {
+                connection_name: state.catalogueConnection,
+                alias: selectedAlias,
+                upstream_model: model.id,
+                default: false,
+                utility: false,
+              },
+              `catalogue-add:${state.catalogueConnection}:${model.id}`,
+            );
+            clearFormIntent(`catalogue-add:${state.catalogueConnection}:${model.id}`);
+            model.enrolled_alias = selectedAlias;
+            renderCatalogue();
+            setFormStatus(elements.catalogueForm, "Model added.", "");
+            if (result.restart_required) await handleRestartRequired(result);
+            else await loadCapabilities();
+          } catch (error) {
+            setFormStatus(elements.catalogueForm, error.safeMessage || "Capability request could not be completed.", "error");
+          } finally {
+            add.textContent = original;
+            if (!model.enrolled_alias && !state.restarting) add.disabled = false;
+          }
+        });
+        card.appendChild(add);
+      }
       elements.catalogueResults.appendChild(card);
     }
     if (matches.length === 0) {
@@ -640,7 +896,9 @@ if (root) {
       throw error;
     }
     if (generation !== state.loadGeneration) return false;
+    state.providerState = snapshot.providers;
     renderModels(snapshot.providers);
+    renderProviderPresets(snapshot.provider_presets);
     renderSkills(snapshot.skills);
     renderConnections(connections);
     setPageStatus("Capabilities are current.");
@@ -784,13 +1042,16 @@ if (root) {
 
     const alias = elements.providerAlias.value.trim();
     const modelID = elements.providerModelID.value.trim();
+    const maxTokens = Number.parseInt(elements.providerMaxTokens.value, 10) || 0;
     const body = {
       connection_name: elements.providerName.value.trim(),
       type: elements.providerType.value.trim(),
       base_url: elements.providerBaseURL.value.trim(),
+      max_tokens: maxTokens,
       api_key: elements.providerCredential.value,
       models: { [alias]: { model: modelID } },
-      default_model: alias,
+      default_model: elements.providerDefault.checked ? alias : "",
+      utility_model: elements.providerUtility.checked ? alias : "",
     };
 
     await withSubmitPending(form, async () => {
@@ -802,6 +1063,7 @@ if (root) {
           setFormStatus(form, "Provider enrolled.", "");
         } finally {
           // Always clear the credential field after an enroll attempt.
+          clearFormIntent("provider");
           elements.providerCredential.value = "";
         }
         if (result.restart_required) {
@@ -818,6 +1080,51 @@ if (root) {
         );
       }
     });
+  });
+
+  elements.providerType?.addEventListener("change", updateProviderPresetGuidance);
+
+  elements.providerTest?.addEventListener("click", async () => {
+    const name = elements.providerName.value.trim();
+    if (!name) {
+      setFieldInvalid(elements.providerName);
+      setFormStatus(elements.providerForm, "Enter the connection name before testing it.", "error");
+      return;
+    }
+    if (elements.providerTest.disabled) return;
+    const original = elements.providerTest.textContent;
+    elements.providerTest.disabled = true;
+    elements.providerTest.textContent = PENDING_LABEL;
+    const formKey = "provider-prospective-test";
+    const body = {
+      connection_name: name,
+      type: elements.providerType.value.trim(),
+      base_url: elements.providerBaseURL.value.trim(),
+      max_tokens: Number.parseInt(elements.providerMaxTokens.value, 10) || 0,
+      model: elements.providerModelID.value.trim(),
+      api_key: elements.providerCredential.value,
+    };
+    try {
+      const result = await postMutation(
+        "/api/v1/desk/providers/test",
+        body,
+        formKey,
+      );
+      const messages = {
+        success: "Connection test succeeded.",
+        authentication_failed: "Connection test authentication failed; check the credential.",
+        request_failed: "Connection test reached the endpoint, but the request was rejected; check the model ID.",
+        unreachable: "Connection test could not reach the endpoint.",
+      };
+      setFormStatus(elements.providerForm, messages[result.outcome] || "Connection test could not be completed.", result.outcome === "success" ? "" : "error");
+    } catch (error) {
+      setFormStatus(elements.providerForm, error.safeMessage || "Connection test could not be completed.", "error");
+    } finally {
+      clearFormIntent(formKey);
+      elements.providerCredential.value = "";
+      elements.providerTest.textContent = original;
+      elements.providerTest.disabled = false;
+    }
   });
 
   elements.defaultForm?.addEventListener("submit", async (event) => {
@@ -854,6 +1161,8 @@ if (root) {
         connection_name: elements.modelConnection.value.trim(),
         alias: elements.modelAlias.value.trim(),
         upstream_model: elements.modelID.value.trim(),
+        default: false,
+        utility: false,
       },
       successMessage: "Model added.",
       requiredFields: [

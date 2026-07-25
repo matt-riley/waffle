@@ -127,8 +127,13 @@ function deferredResponse() {
 
 function createHarness({
   providerResponse = response({}, true, 202),
+  providerTestResponse = response({ outcome: "success" }),
+  providerProspectiveTestResponse = response({ outcome: "success" }),
   defaultResponse = response({ restart_required: false }),
+  utilityResponse = response({ restart_required: false }),
+  modelResponse = response({ restart_required: false }),
   catalogueResponse = response({ connection: "primary", models: [] }),
+  capabilitiesResponse = null,
   connectionResponse = response([]),
   connectionResponses = null,
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
@@ -149,23 +154,32 @@ function createHarness({
     "#capability-provider-name",
     "#capability-provider-type",
     "#capability-provider-base-url",
+    "#capability-provider-base-url-guidance",
     "#capability-provider-model-alias",
     "#capability-provider-model-id",
+    "#capability-provider-max-tokens",
+    "#capability-provider-default",
+    "#capability-provider-utility",
     "#capability-provider-credential",
+    "#capability-provider-test",
     "#capability-default-form",
     "#capability-default-status",
     "#capability-default-alias",
+    "#capability-default-empty",
     "#capability-utility-form",
     "#capability-utility-status",
     "#capability-utility-alias",
+    "#capability-utility-empty",
     "#capability-model-form",
     "#capability-model-status",
     "#capability-model-connection",
+    "#capability-model-connection-empty",
     "#capability-model-alias",
     "#capability-model-id",
     "#capability-catalogue-form",
     "#capability-catalogue-status",
     "#capability-catalogue-connection",
+    "#capability-catalogue-empty",
     "#capability-catalogue-search",
     "#capability-catalogue-summary",
     "#capability-catalogue-results",
@@ -198,11 +212,18 @@ function createHarness({
   wireField("#capability-provider-name", "connection_name");
   elements["#capability-provider-type"].value = "openai";
   wireField("#capability-provider-type", "type");
+  elements["#capability-provider-type"].tagName = "SELECT";
   wireField("#capability-provider-base-url", "base_url");
   elements["#capability-provider-model-alias"].value = "gpt";
   wireField("#capability-provider-model-alias", "model_alias");
   elements["#capability-provider-model-id"].value = "gpt-test";
   wireField("#capability-provider-model-id", "model_id");
+  wireField("#capability-provider-max-tokens", "max_tokens");
+  elements["#capability-provider-max-tokens"].type = "number";
+  wireField("#capability-provider-default", "make_default");
+  elements["#capability-provider-default"].type = "checkbox";
+  wireField("#capability-provider-utility", "make_utility");
+  elements["#capability-provider-utility"].type = "checkbox";
   elements["#capability-provider-credential"].value = "sk-super-private";
   wireField("#capability-provider-credential", "api_key");
 
@@ -225,14 +246,21 @@ function createHarness({
 
   const providerSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
   providerSubmit.textContent = "Enroll provider";
+  const providerTest = elements["#capability-provider-test"];
+  providerTest.type = "button";
+  providerTest.textContent = "Test connection";
   elements["#capability-provider-form"].controls = [
     elements["#capability-provider-name"],
     elements["#capability-provider-type"],
     elements["#capability-provider-base-url"],
     elements["#capability-provider-model-alias"],
     elements["#capability-provider-model-id"],
+    elements["#capability-provider-max-tokens"],
+    elements["#capability-provider-default"],
+    elements["#capability-provider-utility"],
     elements["#capability-provider-credential"],
     providerSubmit,
+    providerTest,
   ];
 
   const defaultSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
@@ -290,7 +318,7 @@ function createHarness({
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
     if (path === "/api/v1/desk/capabilities") {
-      return response({
+      return capabilitiesResponse || response({
         providers: {
           state: "ready",
           default_model: "gpt",
@@ -298,6 +326,11 @@ function createHarness({
           providers: {},
           models: {},
         },
+        provider_presets: [
+          { name: "openai", runtime_type: "openai", requires_base_url: false },
+          { name: "anthropic", runtime_type: "anthropic", requires_base_url: false },
+          { name: "openai-compatible", runtime_type: "openai", requires_base_url: true },
+        ],
         skills,
       });
     }
@@ -312,8 +345,20 @@ function createHarness({
     if (path === "/api/v1/desk/providers") {
       return providerResponse;
     }
+    if (path === "/api/v1/desk/providers/test") {
+      return providerProspectiveTestResponse;
+    }
+    if (path.startsWith("/api/v1/desk/providers/") && path.endsWith("/test")) {
+      return providerTestResponse;
+    }
     if (path === "/api/v1/desk/models/default") {
       return defaultResponse;
+    }
+    if (path === "/api/v1/desk/models/utility") {
+      return utilityResponse;
+    }
+    if (path === "/api/v1/desk/models") {
+      return modelResponse;
     }
     if (path === "/api/v1/desk/models/catalogue/refresh") {
       return catalogueResponse;
@@ -331,7 +376,14 @@ function createHarness({
   };
   const document = {
     body: { dataset: { requestToken: "token" } },
-    createElement: () => new FakeElement(),
+    createElement: (tag) => {
+      const element = new FakeElement({ tagName: String(tag).toUpperCase() });
+      // Real elements expose tagName as a getter-only property, so assigning to
+      // it from a strict-mode module throws. Match that here to keep the client
+      // from relying on a writable tagName that only exists in this harness.
+      Object.defineProperty(element, "tagName", { value: element.tagName, writable: false });
+      return element;
+    },
     querySelector: (selector) => elements[selector] || null,
   };
   const context = vm.createContext({
@@ -547,6 +599,7 @@ test("provider credential is cleared after failure and never appears in safe UI"
       code: "capability_failed",
       message: "capability request could not be completed",
     }, false, 400),
+    uuidSequence: ["enrollment-a", "enrollment-b"],
   });
   await flush();
 
@@ -565,14 +618,76 @@ test("provider credential is cleared after failure and never appears in safe UI"
     false,
   );
   assert.equal(
-    harness.elements["#capability-default-status"].textContent,
-    "",
+    harness.elements["#capability-default-status"].textContent.includes("capability request could not be completed"),
+    false,
     "failure must not leak into another form status",
+  );
+
+  await harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+  const enrollments = harness.calls.filter((call) => call.path === "/api/v1/desk/providers");
+  assert.equal(enrollments.length, 2);
+  assert.equal(enrollments[0].options.headers["Idempotency-Key"], "enrollment-a");
+  assert.equal(
+    enrollments[1].options.headers["Idempotency-Key"],
+    "enrollment-b",
+    "failed sensitive enrollment intents must not retain their idempotency key",
+  );
+});
+
+test("prospective provider test sends entered inputs and clears its sensitive intent after failure", async () => {
+  const prospectiveFailure = {
+    then(onFulfilled) {
+      return Promise.resolve(
+        response({ code: "capability_failed", message: "connection test failed" }, false, 400),
+      ).then(onFulfilled);
+    },
+  };
+  const harness = createHarness({
+    providerProspectiveTestResponse: prospectiveFailure,
+    uuidSequence: ["prospective-a", "prospective-b"],
+  });
+  await flush();
+
+  const testButton = harness.elements["#capability-provider-form"].controls.find(
+    (control) => control.textContent === "Test connection",
+  );
+  await testButton.listener("click")();
+  await flush();
+
+  const tests = harness.calls.filter((call) => call.path === "/api/v1/desk/providers/test");
+  assert.equal(tests.length, 1);
+  assert.deepEqual(JSON.parse(tests[0].options.body), {
+    connection_name: "openai",
+    type: "openai",
+    base_url: "",
+    max_tokens: 0,
+    model: "gpt-test",
+    api_key: "sk-super-private",
+  });
+  assert.equal(tests[0].options.headers["Idempotency-Key"], "prospective-a");
+  assert.equal(harness.elements["#capability-provider-credential"].value, "");
+
+  await testButton.listener("click")();
+  await flush();
+  const repeatedTests = harness.calls.filter((call) => call.path === "/api/v1/desk/providers/test");
+  assert.equal(repeatedTests.length, 2);
+  assert.equal(
+    repeatedTests[1].options.headers["Idempotency-Key"],
+    "prospective-b",
+    "failed sensitive test intents must not retain their idempotency key",
   );
 });
 
 test("catalogue refresh renders results and search filters without another request", async () => {
   const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: { primary: { type: "openai" } }, models: {} },
+      provider_presets: [{ name: "openai", runtime_type: "openai", requires_base_url: false }],
+      skills: [],
+    }),
     catalogueResponse: response({
       connection: "primary",
       models: [
@@ -700,6 +815,11 @@ test("an older overlapping load cannot overwrite newer post-mutation connections
 
 test("form failures stay on the form that caused them (AC1)", async () => {
   const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: { primary: { type: "openai" } }, models: { gpt: { provider: "primary", model: "gpt-test" } } },
+      provider_presets: [{ name: "openai", runtime_type: "openai", requires_base_url: false }],
+      skills: [],
+    }),
     providerResponse: response({
       code: "capability_failed",
       message: "provider enrollment failed",
@@ -716,8 +836,8 @@ test("form failures stay on the form that caused them (AC1)", async () => {
     harness.elements["#capability-provider-status"].textContent,
     "provider enrollment failed",
   );
-  assert.equal(harness.elements["#capability-default-status"].textContent, "");
-  assert.equal(harness.elements["#capability-catalogue-status"].textContent, "");
+  assert.equal(harness.elements["#capability-default-status"].textContent.includes("provider enrollment failed"), false);
+  assert.equal(harness.elements["#capability-catalogue-status"].textContent.includes("provider enrollment failed"), false);
 
   harness.elements["#capability-default-alias"].value = "gpt";
   await harness.elements["#capability-default-form"].listener("submit")({
@@ -739,6 +859,11 @@ test("form failures stay on the form that caused them (AC1)", async () => {
 test("double submit produces exactly one in-flight request (AC5)", async () => {
   const deferred = deferredResponse();
   const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: { primary: { type: "openai" } }, models: { gpt: { provider: "primary", model: "gpt-test" } } },
+      provider_presets: [{ name: "openai", runtime_type: "openai", requires_base_url: false }],
+      skills: [],
+    }),
     providerResponse: deferred.promise,
   });
   await flush();
@@ -780,6 +905,11 @@ test("unchanged resubmit reuses Idempotency-Key until success (AC3)", async () =
     },
   };
   const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: { router: { type: "openai" } }, models: { gpt: { provider: "router", model: "gpt-test" } } },
+      provider_presets: [{ name: "openai", runtime_type: "openai", requires_base_url: false }],
+      skills: [],
+    }),
     defaultResponse,
     uuidSequence: ["key-a", "key-b", "key-c"],
   });
@@ -843,4 +973,130 @@ test("empty required field sets aria-invalid and focuses it (AC4)", async () => 
     harness.calls.filter((call) => call.path === "/api/v1/desk/models/default").length,
     0,
   );
+});
+
+test("catalogue card add keeps the exact upstream ID and marks enrolled aliases", async () => {
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", providers: { router: { type: "openai" } }, models: {} },
+      provider_presets: [{ name: "openai", runtime_type: "openai", requires_base_url: false }],
+      skills: [],
+    }),
+    catalogueResponse: response({
+      connection: "router",
+      models: [
+        { id: "anthropic/claude-sonnet-4-6", alias_suggestion: "claude", enrolled_alias: "claude" },
+        { id: "accounts/fireworks/models/deepseek-v3", alias_suggestion: "deepseek-v3" },
+      ],
+    }),
+  });
+  harness.elements["#capability-catalogue-connection"].value = "router";
+  await flush();
+
+  await harness.elements["#capability-catalogue-form"].listener("submit")({ preventDefault() {} });
+  await flush();
+
+  const cards = harness.elements["#capability-catalogue-results"].childNodes;
+  assert.match(cards[0].childNodes.map((node) => node.textContent).join(" "), /Enrolled as claude/);
+  const alias = cards[1].childNodes.find((node) => node.tagName === "INPUT");
+  assert.equal(alias.value, "deepseek-v3");
+  const add = cards[1].childNodes.find((node) => node.textContent === "Add as alias");
+  assert.ok(add, "new catalogue model needs an add action");
+  await add.listener("click")();
+  await flush();
+
+  const addCall = harness.calls.find((call) => call.path === "/api/v1/desk/models");
+  assert.deepEqual(JSON.parse(addCall.options.body), {
+    connection_name: "router",
+    alias: "deepseek-v3",
+    upstream_model: "accounts/fireworks/models/deepseek-v3",
+    default: false,
+    utility: false,
+  });
+});
+
+test("model role and connection pickers use the latest capability snapshot", async () => {
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: {
+        state: "ready",
+        default_model: "main",
+        utility_model: "fast",
+        providers: { primary: { type: "openai" }, backup: { type: "anthropic" } },
+        models: {
+          main: { provider: "primary", model: "gpt-main" },
+          fast: { provider: "backup", model: "claude-fast" },
+        },
+      },
+      skills: [],
+    }),
+  });
+  await flush();
+
+  for (const selector of [
+    "#capability-default-alias",
+    "#capability-utility-alias",
+  ]) {
+    assert.deepEqual(
+      harness.elements[selector].childNodes.map((option) => option.value),
+      ["fast", "main"],
+      `${selector} options must come from snapshot models`,
+    );
+  }
+  for (const selector of [
+    "#capability-catalogue-connection",
+    "#capability-model-connection",
+  ]) {
+    assert.deepEqual(
+      harness.elements[selector].childNodes.map((option) => option.value),
+      ["backup", "primary"],
+      `${selector} options must come from snapshot providers`,
+    );
+  }
+
+  const cards = harness.elements["#capability-models"].childNodes;
+  const fastCard = cards.find((card) => card.childNodes[0].textContent === "fast");
+  const makeDefault = fastCard.childNodes.find((node) => node.textContent === "Make default");
+  await makeDefault.listener("click")();
+  await flush();
+  const defaultCall = harness.calls.find((call) => call.path === "/api/v1/desk/models/default");
+  assert.deepEqual(JSON.parse(defaultCall.options.body), { alias: "fast" });
+});
+
+test("provider enrollment sends explicit roles and reports a redacted connection test", async () => {
+  const harness = createHarness({
+    providerResponse: response({ restart_required: false }),
+    providerProspectiveTestResponse: response({ outcome: "authentication_failed" }),
+  });
+  harness.elements["#capability-provider-default"].checked = false;
+  harness.elements["#capability-provider-utility"].checked = true;
+  await flush();
+
+  await harness.elements["#capability-provider-form"].listener("submit")({ preventDefault() {} });
+  await flush();
+  const enrollment = harness.calls.find((call) => call.path === "/api/v1/desk/providers");
+  assert.deepEqual(JSON.parse(enrollment.options.body), {
+    connection_name: "openai",
+    type: "openai",
+    base_url: "",
+    max_tokens: 0,
+    api_key: "sk-super-private",
+    models: { gpt: { model: "gpt-test" } },
+    default_model: "",
+    utility_model: "gpt",
+  });
+  assert.equal(harness.elements["#capability-provider-credential"].value, "");
+
+  const testButton = harness.elements["#capability-provider-form"].controls.find(
+    (control) => control.textContent === "Test connection",
+  );
+  assert.ok(testButton, "enrollment exposes a protected connection test");
+  await testButton.listener("click")();
+  await flush();
+  assert.equal(
+    harness.calls.some((call) => call.path === "/api/v1/desk/providers/test"),
+    true,
+  );
+  assert.match(harness.elements["#capability-provider-status"].textContent, /authentication/i);
+  assert.equal(harness.elements["#capability-provider-status"].textContent.includes("sk-super-private"), false);
 });

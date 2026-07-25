@@ -37,6 +37,8 @@ type CapabilityProviders interface {
 	AddModelWithMode(context.Context, providerconfig.AddModelRequest, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	ActivateModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	ActivateUtilityModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+	Test(context.Context, string) error
+	TestProspective(context.Context, providerconfig.ProspectiveProbeRequest) error
 }
 
 type CapabilitySessions interface {
@@ -79,17 +81,36 @@ type CapabilitySession struct {
 }
 
 type CapabilitiesSnapshot struct {
-	Providers providerconfig.Listing `json:"providers"`
-	Session   *CapabilitySession     `json:"session,omitempty"`
-	Skills    []CapabilitySkill      `json:"skills"`
+	Providers       providerconfig.Listing  `json:"providers"`
+	ProviderPresets []providerconfig.Preset `json:"provider_presets"`
+	Session         *CapabilitySession      `json:"session,omitempty"`
+	Skills          []CapabilitySkill       `json:"skills"`
 }
 
 type CapabilityCatalogueView struct {
-	Connection string               `json:"connection"`
-	FetchedAt  time.Time            `json:"fetched_at"`
-	Stale      bool                 `json:"stale"`
-	Warning    string               `json:"warning,omitempty"`
-	Models     []modelcatalog.Model `json:"models"`
+	Connection string                     `json:"connection"`
+	FetchedAt  time.Time                  `json:"fetched_at"`
+	Stale      bool                       `json:"stale"`
+	Warning    string                     `json:"warning,omitempty"`
+	Models     []CapabilityCatalogueModel `json:"models"`
+}
+
+// CapabilityCatalogueModel is the catalogue-card representation. It carries
+// the exact upstream ID and only credential-free local enrolment state.
+type CapabilityCatalogueModel struct {
+	ID              string   `json:"id"`
+	DisplayName     string   `json:"display_name,omitempty"`
+	Owner           string   `json:"owner,omitempty"`
+	ContextWindow   int64    `json:"context_window,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	AliasSuggestion string   `json:"alias_suggestion,omitempty"`
+	EnrolledAlias   string   `json:"enrolled_alias,omitempty"`
+}
+
+// CapabilityProviderTestResult is a fixed, safe probe outcome with no
+// upstream error details.
+type CapabilityProviderTestResult struct {
+	Outcome providerconfig.ProbeOutcome `json:"outcome"`
 }
 
 // Capabilities owns the narrow application operations used by the additive
@@ -110,8 +131,9 @@ func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (Capabili
 		return CapabilitiesSnapshot{}, err
 	}
 	snapshot := CapabilitiesSnapshot{
-		Providers: providers,
-		Skills:    make([]CapabilitySkill, 0),
+		Providers:       providers,
+		ProviderPresets: providerconfig.Presets(),
+		Skills:          make([]CapabilitySkill, 0),
 	}
 	if sessionID != "" {
 		if c.Sessions == nil {
@@ -180,6 +202,23 @@ func (c *Capabilities) EnrollProvider(ctx context.Context, request providerconfi
 	return c.Providers.AddWithMode(ctx, request, providerconfig.CommitForRestart)
 }
 
+func (c *Capabilities) TestProvider(ctx context.Context, name string) (CapabilityProviderTestResult, error) {
+	if c == nil || c.Providers == nil {
+		return CapabilityProviderTestResult{}, ErrCapabilitiesUnavailable
+	}
+	return CapabilityProviderTestResult{Outcome: providerconfig.ClassifyProbeError(c.Providers.Test(ctx, strings.TrimSpace(name)))}, nil
+}
+
+func (c *Capabilities) TestProspectiveProvider(ctx context.Context, request providerconfig.ProspectiveProbeRequest) (CapabilityProviderTestResult, error) {
+	if c == nil || c.Providers == nil {
+		return CapabilityProviderTestResult{}, ErrCapabilitiesUnavailable
+	}
+	if err := providerconfig.ValidateProspectiveProbe(request); err != nil {
+		return CapabilityProviderTestResult{}, err
+	}
+	return CapabilityProviderTestResult{Outcome: providerconfig.ClassifyProbeError(c.Providers.TestProspective(ctx, request))}, nil
+}
+
 func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) (CapabilityCatalogueView, error) {
 	if c == nil || c.Catalogue == nil {
 		return CapabilityCatalogueView{}, ErrCapabilitiesUnavailable
@@ -192,13 +231,52 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 	if models == nil {
 		models = make([]modelcatalog.Model, 0)
 	}
+	listing := providerconfig.Listing{}
+	if c.Providers != nil {
+		var err error
+		listing, err = c.Providers.Snapshot(ctx)
+		if err != nil {
+			return CapabilityCatalogueView{}, err
+		}
+	}
+	enrolledAliases := enrolledAliasesByUpstreamModel(listing, result.Result.Connection.Name)
+	viewModels := make([]CapabilityCatalogueModel, 0, len(models))
+	for _, model := range models {
+		viewModel := CapabilityCatalogueModel{
+			ID: model.ID, DisplayName: model.DisplayName, Owner: model.Owner,
+			ContextWindow: model.ContextWindow, Capabilities: model.Capabilities,
+		}
+		if suggestion, suggestionErr := modelcatalog.AliasFor(model.ID); suggestionErr == nil {
+			viewModel.AliasSuggestion = suggestion
+		}
+		viewModel.EnrolledAlias = enrolledAliases[model.ID]
+		viewModels = append(viewModels, viewModel)
+	}
 	return CapabilityCatalogueView{
 		Connection: redactCapabilityCatalogueText(result.Result.Connection.Name, result.PrivateValues...),
 		FetchedAt:  result.Result.FetchedAt,
 		Stale:      result.Result.Stale,
 		Warning:    redactCapabilityCatalogueText(result.Result.Warning, result.PrivateValues...),
-		Models:     models,
+		Models:     viewModels,
 	}, nil
+}
+
+// enrolledAliasesByUpstreamModel indexes one connection's enrolled aliases by
+// the upstream model they target, so catalogue rendering stays a single pass
+// over the listing instead of one sorted scan per catalogue model. Ties keep
+// the lowest alias, matching the previous sorted first-match behaviour.
+func enrolledAliasesByUpstreamModel(listing providerconfig.Listing, connection string) map[string]string {
+	aliases := make(map[string]string, len(listing.Models))
+	for alias, enrolled := range listing.Models {
+		if enrolled.Provider != connection {
+			continue
+		}
+		if existing, ok := aliases[enrolled.Model]; ok && existing <= alias {
+			continue
+		}
+		aliases[enrolled.Model] = alias
+	}
+	return aliases
 }
 
 func redactCapabilityCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {
@@ -301,6 +379,8 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	mux.Handle("POST /api/v1/desk/models/catalogue/refresh", mutation(capabilityMutationMaxBodyBytes, catalogueRefreshHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/models", mutation(capabilityMutationMaxBodyBytes, addModelHandler(routeConfig)))
 	mux.Handle("POST /api/v1/desk/providers", mutation(CapabilityProviderMaxBodyBytes, providerEnrollmentHandler(routeConfig)))
+	mux.Handle("POST /api/v1/desk/providers/test", mutation(CapabilityProviderMaxBodyBytes, providerProspectiveTestHandler(routeConfig.Service)))
+	mux.Handle("POST /api/v1/desk/providers/{name}/test", mutation(capabilityMutationMaxBodyBytes, providerTestHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/skills/session/attach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, true)))
 	mux.Handle("POST /api/v1/desk/skills/session/detach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, false)))
 	mux.Handle("POST /api/v1/desk/skills/stage", mutation(capabilityMutationMaxBodyBytes, stageSkillHandler(routeConfig.Service)))
@@ -452,6 +532,11 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 		if !decodeCapabilityRequest(w, r, &request) {
 			return
 		}
+		preset, err := providerconfig.ResolvePreset(request.Type, request.BaseURL)
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
 		credential := []byte(request.APIKey)
 		defer func() {
 			clear(credential)
@@ -460,8 +545,8 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 		result, err := routeConfig.Service.EnrollProvider(r.Context(), providerconfig.AddRequest{
 			ConnectionName: request.ConnectionName,
 			Connection: config.ProviderConnection{
-				Type:      request.Type,
-				BaseURL:   request.BaseURL,
+				Type:      preset.RuntimeType,
+				BaseURL:   preset.BaseURL,
 				MaxTokens: request.MaxTokens,
 			},
 			Models:       request.Models,
@@ -475,6 +560,58 @@ func providerEnrollmentHandler(routeConfig CapabilitiesRouteConfig) http.Handler
 		}
 		deferRestart(after, routeConfig.Restart, result.TransactionID)
 		writeCapabilityMutation(w, result, routeConfig.Restart)
+	}
+}
+
+func providerTestHandler(service *Capabilities) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		result, err := service.TestProvider(r.Context(), r.PathValue("name"))
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func providerProspectiveTestHandler(service *Capabilities) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ConnectionName string `json:"connection_name"`
+			Type           string `json:"type"`
+			BaseURL        string `json:"base_url"`
+			MaxTokens      int    `json:"max_tokens"`
+			Model          string `json:"model"`
+			APIKey         string `json:"api_key"`
+		}
+		if !decodeCapabilityRequest(w, r, &request) {
+			return
+		}
+		preset, err := providerconfig.ResolvePreset(request.Type, request.BaseURL)
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		credential := []byte(request.APIKey)
+		defer func() {
+			clear(credential)
+			request.APIKey = ""
+		}()
+		result, err := service.TestProspectiveProvider(r.Context(), providerconfig.ProspectiveProbeRequest{
+			ConnectionName: strings.TrimSpace(request.ConnectionName),
+			Connection: config.ProviderConnection{
+				Type:      preset.RuntimeType,
+				BaseURL:   preset.BaseURL,
+				MaxTokens: request.MaxTokens,
+			},
+			Model:  strings.TrimSpace(request.Model),
+			APIKey: string(credential),
+		})
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -635,6 +772,7 @@ var capabilityErrorMappings = []capabilityErrorMapping{
 
 	// providerconfig enrollment/mutation path
 	{providerconfig.ErrLocked, http.StatusConflict, "provider_locked", "provider configuration is locked by another operation — retry"},
+	{providerconfig.ErrAliasConflict, http.StatusConflict, "model_alias_exists", "that model alias is already enrolled; choose another alias"},
 	{providerconfig.ErrReferenced, http.StatusConflict, "provider_referenced", "provider connection is still referenced by model aliases"},
 	{providerconfig.ErrDeferredRestartPending, http.StatusConflict, "provider_restart_pending", "provider configuration restart is pending — wait for the restart to finish"},
 	{providerconfig.ErrDeferredHealth, http.StatusBadGateway, "provider_restart_health_failed", "provider restart health check failed; previous configuration was restored"},

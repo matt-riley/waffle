@@ -501,18 +501,17 @@ test("provider enrollment clears and never renders its credential", async ({ pag
   await page.goto(deskURL("capabilities"));
   const providerForm = page.locator("#capability-provider-form");
   await providerForm.getByLabel("Connection name").fill("secondary");
-  await providerForm.getByLabel("Provider type").fill("openai");
+  await providerForm.getByLabel("Provider type").selectOption("openai");
   await providerForm.getByLabel("First model alias").fill("secondary");
   await providerForm.getByLabel("Provider model ID").fill("fixture-secondary");
   await providerForm.getByLabel("Credential").fill(credential);
   const enrollment = page.waitForResponse(
     (response) =>
-      response.url().endsWith("/api/v1/desk/providers") &&
-      response.status() === 202,
+      response.url().endsWith("/api/v1/desk/providers"),
   );
   await providerForm.getByRole("button", { name: "Enroll provider", exact: true }).click();
 
-  await enrollment;
+  expect((await enrollment).status()).toBe(202);
   await expect(page.getByText("Capabilities are current.", { exact: true })).toBeVisible();
   await expect(providerForm.getByLabel("Credential")).toHaveValue("");
   await expect(
