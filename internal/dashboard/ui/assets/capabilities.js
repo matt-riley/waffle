@@ -1240,7 +1240,7 @@ if (root) {
             const preview = await getRemovalPreview(
               `/api/v1/desk/providers/${encodeURIComponent(item.name)}/removal-preview`,
             );
-            renderProviderRemovalPreview(card, item.name, preview);
+            renderProviderRemovalPreview(card, item.name, preview, remove);
           } catch (error) {
             setPageStatus(error.safeMessage || "Removal preview could not be loaded.");
             remove.disabled = false;
@@ -1255,7 +1255,7 @@ if (root) {
     }
   }
 
-  function renderProviderRemovalPreview(card, name, preview) {
+  function renderProviderRemovalPreview(card, name, preview, originalRemove) {
     const panel = removalPreviewPanel(`Removal preview for provider connection ${name}`, preview);
     const references = Array.isArray(preview?.references) ? preview.references : [];
     const message = document.createElement("p");
@@ -1289,6 +1289,7 @@ if (root) {
         } catch (error) {
           setPageStatus(error.safeMessage || "Provider connection removal could not be completed.");
           confirm.disabled = false;
+          if (originalRemove) originalRemove.disabled = false;
         }
       });
       panel.appendChild(confirm);

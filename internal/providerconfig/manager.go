@@ -95,18 +95,26 @@ type MutationResult struct {
 }
 
 // SessionAliasChange binds one persisted session to the exact alias transition
-// made before a model-removal transaction. It is deliberately credential-free
-// and scoped to one session ID.
+// in a model-removal transaction. It is deliberately credential-free and
+// scoped to one session ID.
 type SessionAliasChange struct {
-	SessionID string `json:"session_id"`
-	From      string `json:"from"`
-	To        string `json:"to"`
+	SessionID     string `json:"session_id"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	FromVersion   int64  `json:"from_version,omitempty"`
+	ToVersion     int64  `json:"to_version,omitempty"`
+	FromUpdatedAt string `json:"from_updated_at,omitempty"`
+	ToUpdatedAt   string `json:"to_updated_at,omitempty"`
 }
 
 // SessionRecovery restores session choices after provider files are rolled
-// back. Implementations must use a conditional update on SessionID/To so a
-// newer Today choice is never overwritten.
+// back. Implementations must use the recorded alias, version, and updated-at
+// values so a newer Today choice is never overwritten.
 type SessionRecovery func(context.Context, []SessionAliasChange) error
+
+// SessionApply applies the exact session transitions recorded in a provider
+// journal while the provider manager lock is held.
+type SessionApply func(context.Context, []SessionAliasChange) error
 
 type sessionAliasChangesContextKey struct{}
 
@@ -215,6 +223,7 @@ type Manager struct {
 	// the named resource ("secret" then "config") is durably committed.
 	AfterCommit     func(resource string) error
 	CrashAfterPhase func(phase string) error
+	SessionApply    SessionApply
 	SessionRecovery SessionRecovery
 	// afterReadStatus is a deterministic concurrency-test seam.
 	afterReadStatus func()
@@ -225,6 +234,14 @@ type Manager struct {
 func (m *Manager) SetSessionRecovery(handler SessionRecovery) {
 	if m != nil {
 		m.SessionRecovery = handler
+	}
+}
+
+// SetSessionApply wires the process-local session participant for model
+// removal transactions.
+func (m *Manager) SetSessionApply(handler SessionApply) {
+	if m != nil {
+		m.SessionApply = handler
 	}
 }
 
@@ -1219,8 +1236,13 @@ func (m *Manager) commitWithExpectedRevision(ctx context.Context, before snapsho
 		return err
 	}
 	sessionAliasChanges, _ := ctx.Value(sessionAliasChangesContextKey{}).([]SessionAliasChange)
-	if len(sessionAliasChanges) > 0 && m.SessionRecovery == nil {
-		return errors.New("session recovery handler is not configured")
+	if len(sessionAliasChanges) > 0 && (m.SessionApply == nil || m.SessionRecovery == nil) {
+		return errors.New("session transaction handlers are not configured")
+	}
+	for _, change := range sessionAliasChanges {
+		if change.FromVersion == 0 || change.ToVersion != change.FromVersion+1 || change.FromUpdatedAt == "" || change.ToUpdatedAt == "" {
+			return errors.New("exact session alias transition version is required")
+		}
 	}
 	journal := transactionJournal{
 		Phase: "prepared", ConfigExisted: before.configExist, SecretExisted: before.secretExist,
@@ -1241,6 +1263,14 @@ func (m *Manager) commitWithExpectedRevision(ctx context.Context, before snapsho
 		}
 		err = errors.Join(redactError(err, key), redactError(m.recoverLocked(ctx), key))
 	}()
+	if len(sessionAliasChanges) > 0 {
+		if err = m.SessionApply(ctx, sessionAliasChanges); err != nil {
+			return fmt.Errorf("apply session aliases: %w", err)
+		}
+		if err = m.crashPoint("session_applied"); err != nil {
+			return err
+		}
+	}
 
 	if secretStage != "" {
 		if err = commitStage(secretStage, m.SecretsPath, 0o600); err != nil {

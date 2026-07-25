@@ -218,11 +218,19 @@ func TestManagerDeferredRecoveryUsesJournalPayloadAfterStartup(t *testing.T) {
 	if err := m.Add(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	changes := []SessionAliasChange{{SessionID: "session-1", From: "gpt", To: "small"}}
+	changes := []SessionAliasChange{{SessionID: "session-1", From: "gpt", To: "small", FromVersion: 1, ToVersion: 2, FromUpdatedAt: "before", ToUpdatedAt: "after"}}
+	var applied bool
+	m.SetSessionApply(func(context.Context, []SessionAliasChange) error {
+		applied = true
+		return nil
+	})
 	m.SetSessionRecovery(func(context.Context, []SessionAliasChange) error { return nil })
 	result, err := m.RemoveModelWithModeAtRevision(context.Background(), "gpt", "small", "", changes, CommitForRestart)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("session apply callback was not invoked")
 	}
 	if result.TransactionID == "" {
 		t.Fatal("deferred transaction did not return an ID")
@@ -245,6 +253,44 @@ func TestManagerDeferredRecoveryUsesJournalPayloadAfterStartup(t *testing.T) {
 	}
 	if !reflect.DeepEqual(recovered, changes) {
 		t.Fatalf("recovered session changes = %#v, want %#v", recovered, changes)
+	}
+}
+
+func TestManagerCrashAfterJournaledSessionApplyRecoversOnNextStartup(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	changes := []SessionAliasChange{{SessionID: "session-1", From: "gpt", To: "small", FromVersion: 1, ToVersion: 2, FromUpdatedAt: "before", ToUpdatedAt: "after"}}
+	var applied, recovered bool
+	m.SetSessionApply(func(context.Context, []SessionAliasChange) error {
+		applied = true
+		return nil
+	})
+	m.SetSessionRecovery(func(_ context.Context, got []SessionAliasChange) error {
+		recovered = reflect.DeepEqual(got, changes)
+		return nil
+	})
+	m.CrashAfterPhase = func(phase string) error {
+		if phase == "session_applied" {
+			return ErrSimulatedCrash
+		}
+		return nil
+	}
+	if _, err := m.RemoveModelWithModeAtRevision(context.Background(), "gpt", "small", "", changes, CommitForRestart); !errors.Is(err, ErrSimulatedCrash) {
+		t.Fatalf("crashed removal error = %v, want ErrSimulatedCrash", err)
+	}
+	if !applied {
+		t.Fatal("session apply callback was not invoked before crash")
+	}
+	m.CrashAfterPhase = nil
+	if err := m.Preflight(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !recovered {
+		t.Fatal("startup recovery did not receive exact journaled session changes")
 	}
 }
 

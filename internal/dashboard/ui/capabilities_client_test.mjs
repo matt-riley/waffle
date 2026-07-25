@@ -1246,6 +1246,34 @@ test("provider removal preview gives safe alias guidance and no destructive acti
   );
 });
 
+test("failed provider removal re-enables both removal triggers", async () => {
+  const harness = createHarness({
+    connectionResponse: response([{ name: "openai", kind: "provider", status: "configured" }]),
+    providerRemovalPreviewResponse: response({
+      kind: "provider",
+      target: "openai",
+      references: [],
+      replacement_required: false,
+      preview_token: "opaque-provider-preview",
+      expires_at: "2026-07-25T00:01:00Z",
+    }),
+    providerRemovalResponse: response({ code: "preview_invalid" }, false, 409),
+  });
+  await flush();
+
+  const card = harness.elements["#capability-connections"].childNodes[0];
+  const remove = findButton(card, "Remove connection");
+  await remove.listener("click")();
+  await flush();
+  const confirm = findButton(card, "Remove provider connection");
+  assert.ok(confirm, "expected provider confirmation button");
+  await confirm.listener("click")();
+  await flush();
+
+  assert.equal(confirm.disabled, false);
+  assert.equal(remove.disabled, false);
+});
+
 test("connections use a stable accessible empty state", async () => {
   const harness = createHarness({ connectionResponse: response(null) });
   await flush();

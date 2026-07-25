@@ -523,7 +523,7 @@ func TestManagerRemoveModelReassignsDefaultAndUtility(t *testing.T) {
 	}
 }
 
-func TestManagerRemoveModelRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
+func TestManagerRemoveModelWithoutReplacementRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
 	m := newTestManager(t)
 	req := validAddRequest()
 	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
@@ -538,7 +538,7 @@ func TestManagerRemoveModelRejectsStaleExpectedRevisionUnderCommitLock(t *testin
 	if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# changed after preview\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.RemoveModelWithExpectedRevision(context.Background(), "gpt", "small", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
+	if _, err := m.RemoveModelWithExpectedRevision(context.Background(), "gpt", "", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
 		t.Fatalf("stale removal error = %v, want ErrRevisionMismatch", err)
 	}
 	current, err := os.ReadFile(m.ConfigPath)

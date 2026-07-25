@@ -196,9 +196,17 @@ func TestModelAliasRecoveryIsExactAndDoesNotOverwriteNewerChoices(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	first, err = sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	changes := []ModelAliasChange{
-		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
-		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: first.ModelAliasVersion, ReplacementVersion: first.ModelAliasVersion + 1, OriginalUpdatedAt: first.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: second.ModelAliasVersion, ReplacementVersion: second.ModelAliasVersion + 1, OriginalUpdatedAt: second.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
 	}
 	if err := sessions.ReplaceModelAliases(ctx, changes); err != nil {
 		t.Fatal(err)
@@ -222,6 +230,43 @@ func TestModelAliasRecoveryIsExactAndDoesNotOverwriteNewerChoices(t *testing.T) 
 	}
 }
 
+func TestModelAliasRecoveryPreservesConcurrentSameValueChoice(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	item, err := sessions.Create(ctx, "same value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sessions.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := ModelAliasChange{
+		SessionID: item.ID, OriginalAlias: "removed", ReplacementAlias: "replacement",
+		OriginalVersion: before.ModelAliasVersion, ReplacementVersion: before.ModelAliasVersion + 1,
+		OriginalUpdatedAt: before.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z",
+	}
+	if err := sessions.ReplaceModelAliases(ctx, []ModelAliasChange{change}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, item.ID, "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.RestoreModelAliases(ctx, []ModelAliasChange{change}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sessions.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ModelAlias != "replacement" || got.ModelAliasVersion != change.ReplacementVersion+1 {
+		t.Fatalf("same-value concurrent choice = alias %q version %d, want replacement version %d", got.ModelAlias, got.ModelAliasVersion, change.ReplacementVersion+1)
+	}
+}
+
 func TestReplaceModelAliasesIsAllOrNothingWhenOneReferenceChanged(t *testing.T) {
 	ctx := context.Background()
 	sessions := newTestStore(t)
@@ -238,12 +283,20 @@ func TestReplaceModelAliasesIsAllOrNothingWhenOneReferenceChanged(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	first, err = sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := sessions.SetModelAlias(ctx, second.ID, "today-newer"); err != nil {
 		t.Fatal(err)
 	}
 	changes := []ModelAliasChange{
-		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
-		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: first.ModelAliasVersion, ReplacementVersion: first.ModelAliasVersion + 1, OriginalUpdatedAt: first.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: second.ModelAliasVersion, ReplacementVersion: second.ModelAliasVersion + 1, OriginalUpdatedAt: second.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
 	}
 	if err := sessions.ReplaceModelAliases(ctx, changes); err == nil {
 		t.Fatal("replacement unexpectedly succeeded after a concurrent session choice")

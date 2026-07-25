@@ -89,12 +89,22 @@ func newDashboardCapabilities(
 	if st == nil || sessions == nil || providers == nil || catalogue == nil || strings.TrimSpace(ws.Dir) == "" {
 		return nil, dashboard.ErrCapabilitiesUnavailable
 	}
-	providers.SetSessionRecovery(func(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
-		var recoveryErr error
+	toModelChanges := func(changes []providerconfig.SessionAliasChange) []session.ModelAliasChange {
+		modelChanges := make([]session.ModelAliasChange, 0, len(changes))
 		for _, change := range changes {
-			recoveryErr = errors.Join(recoveryErr, sessions.RestoreModelAliasIfCurrent(ctx, change.SessionID, change.To, change.From))
+			modelChanges = append(modelChanges, session.ModelAliasChange{
+				SessionID: change.SessionID, OriginalAlias: change.From, ReplacementAlias: change.To,
+				OriginalVersion: change.FromVersion, ReplacementVersion: change.ToVersion,
+				OriginalUpdatedAt: change.FromUpdatedAt, ReplacementUpdatedAt: change.ToUpdatedAt,
+			})
 		}
-		return recoveryErr
+		return modelChanges
+	}
+	providers.SetSessionApply(func(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
+		return sessions.ReplaceModelAliases(ctx, toModelChanges(changes))
+	})
+	providers.SetSessionRecovery(func(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
+		return sessions.RestoreModelAliases(ctx, toModelChanges(changes))
 	})
 	home, err := config.Home()
 	if err != nil {

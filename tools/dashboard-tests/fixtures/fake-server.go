@@ -720,6 +720,10 @@ func (p *fixtureProviders) RemoveModelWithMode(_ context.Context, alias, replace
 	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-model-remove"}, nil
 }
 
+func (p *fixtureProviders) RemoveModelWithModeAtRevision(ctx context.Context, alias, replacement, _ string, _ []providerconfig.SessionAliasChange, mode providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	return p.RemoveModelWithMode(ctx, alias, replacement, mode)
+}
+
 func (p *fixtureProviders) RemoveWithMode(_ context.Context, name string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
