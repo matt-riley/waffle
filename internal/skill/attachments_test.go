@@ -106,6 +106,70 @@ func TestAttachmentsNormalizeSkillNamesBeforePersisting(t *testing.T) {
 	}
 }
 
+func TestAttachmentsNormalizeLegacyWhitespaceRowsAtSQLBoundary(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	sess, err := sessions.Create(ctx, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+
+	for _, name := range []string{" reviewer ", "reviewer"} {
+		if _, err := st.DB.ExecContext(ctx, `
+			INSERT INTO session_skills (session_id, skill_name, attached_at)
+			VALUES (?, ?, ?)`, sess.ID, name, "2026-07-25T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"reviewer"}; !slices.Equal(got, want) {
+		t.Fatalf("legacy attachments = %v, want %v", got, want)
+	}
+	references, err := attachments.References(ctx, " reviewer ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []AttachmentReference{{SessionID: sess.ID, Title: "legacy"}}; !slices.Equal(references, want) {
+		t.Fatalf("legacy references = %#v, want %#v", references, want)
+	}
+
+	if err := attachments.Attach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM session_skills
+		WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("attachment rows after idempotent legacy attach = %d, want 2", count)
+	}
+
+	if err := attachments.Detach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	got, err = attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("legacy attachments after detach = %v, want empty", got)
+	}
+	references, err = attachments.References(ctx, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references) != 0 {
+		t.Fatalf("legacy references after detach = %#v, want empty", references)
+	}
+}
+
 func TestAttachmentsReferencesReturnStableSessionLabels(t *testing.T) {
 	ctx := context.Background()
 	st, sessions := openAttachmentTestStore(t)

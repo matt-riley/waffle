@@ -47,10 +47,13 @@ func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error 
 		}
 	}
 	_, err := a.DB.ExecContext(ctx, `
-		INSERT INTO session_skills (session_id, skill_name, attached_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(session_id, skill_name) DO NOTHING`,
-		sessionID, name, time.Now().UTC().Format(time.RFC3339Nano))
+		INSERT OR IGNORE INTO session_skills (session_id, skill_name, attached_at)
+		SELECT ?, TRIM(?), ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM session_skills
+			WHERE session_id = ? AND TRIM(skill_name) = TRIM(?)
+		)`,
+		sessionID, name, time.Now().UTC().Format(time.RFC3339Nano), sessionID, name)
 	if err != nil {
 		return fmt.Errorf("attach skill to session: %w", err)
 	}
@@ -65,7 +68,7 @@ func (a *Attachments) Detach(ctx context.Context, sessionID, name string) error 
 	}
 	if _, err := a.DB.ExecContext(ctx, `
 		DELETE FROM session_skills
-		WHERE session_id = ? AND skill_name = ?`, sessionID, name); err != nil {
+		WHERE session_id = ? AND TRIM(skill_name) = TRIM(?)`, sessionID, name); err != nil {
 		return fmt.Errorf("detach skill from session: %w", err)
 	}
 	return nil
@@ -81,10 +84,10 @@ func (a *Attachments) List(ctx context.Context, sessionID string) (out []string,
 	}
 	out = make([]string, 0)
 	rows, err := a.DB.QueryContext(ctx, `
-		SELECT skill_name
+		SELECT DISTINCT TRIM(skill_name)
 		FROM session_skills
-		WHERE session_id = ?
-		ORDER BY skill_name ASC`, sessionID)
+		WHERE session_id = ? AND TRIM(skill_name) <> ''
+		ORDER BY TRIM(skill_name) ASC`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list session skills: %w", err)
 	}
@@ -117,10 +120,10 @@ func (a *Attachments) References(ctx context.Context, name string) (out []Attach
 		return nil, errors.New("skill name required")
 	}
 	rows, err := a.DB.QueryContext(ctx, `
-		SELECT ss.session_id, COALESCE(s.title, '')
+		SELECT DISTINCT ss.session_id, COALESCE(s.title, '')
 		FROM session_skills ss
 		LEFT JOIN sessions s ON s.id = ss.session_id
-		WHERE ss.skill_name = ?
+		WHERE TRIM(ss.skill_name) = TRIM(?)
 		ORDER BY COALESCE(s.title, ''), ss.session_id`, name)
 	if err != nil {
 		return nil, fmt.Errorf("list skill references: %w", err)

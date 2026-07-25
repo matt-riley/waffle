@@ -48,6 +48,7 @@ func skillsActivateCmd(ctx context.Context, args []string, stdout io.Writer) err
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	defer st.SkillLifecycleGuard().Unlock()
 	if err := skill.ActivateSkill(ctx, st.DB, ws, name); err != nil {
 		return err
 	}
@@ -65,6 +66,7 @@ func skillsDeactivateCmd(ctx context.Context, args []string, stdout io.Writer) e
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	defer st.SkillLifecycleGuard().Unlock()
 	if err := skill.DeactivateSkill(ctx, st.DB, ws, name); err != nil {
 		return err
 	}
@@ -82,6 +84,7 @@ func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	defer st.SkillLifecycleGuard().Unlock()
 	all, err := skill.Discover(ws.SkillsDir())
 	if err != nil {
 		return err
@@ -129,7 +132,13 @@ func openSkillsWorkspace(ctx context.Context) (*store.Store, memory.Workspace, e
 		_ = st.Close()
 		return nil, memory.Workspace{}, err
 	}
-	if err := skill.RecoverPendingSkillUninstalls(ctx, st.DB, ws, st.SkillLifecycleGuard()); err != nil {
+	guard := st.SkillLifecycleGuard()
+	if err := guard.Lock(ctx); err != nil {
+		_ = st.Close()
+		return nil, memory.Workspace{}, fmt.Errorf("lock skill lifecycle for skills command: %w", err)
+	}
+	if err := skill.RecoverPendingSkillUninstallsLocked(ctx, st.DB, ws); err != nil {
+		guard.Unlock()
 		_ = st.Close()
 		return nil, memory.Workspace{}, fmt.Errorf("recover pending skill uninstall: %w", err)
 	}

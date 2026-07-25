@@ -191,6 +191,13 @@ func RecoverPendingSkillUninstalls(ctx context.Context, db *sql.DB, ws memory.Wo
 	return recoverPendingSkillUninstallsLocked(ctx, db, ws)
 }
 
+// RecoverPendingSkillUninstallsLocked repairs or finalizes uninstall journals
+// while the caller already holds the lifecycle guard. It avoids deadlocking
+// when recovery must remain atomic with a follow-up skill operation.
+func RecoverPendingSkillUninstallsLocked(ctx context.Context, db *sql.DB, ws memory.Workspace) error {
+	return recoverPendingSkillUninstallsLocked(ctx, db, ws)
+}
+
 func recoverPendingSkillUninstallsLocked(ctx context.Context, db *sql.DB, ws memory.Workspace) error {
 	parent := ws.SkillsDir()
 	entries, err := os.ReadDir(parent)
@@ -267,10 +274,19 @@ func validateUninstallJournal(parent, journalPath string, journal uninstallJourn
 
 func recoverUninstallJournal(ctx context.Context, db *sql.DB, journal uninstallJournal, journalPath string) error {
 	if journal.Phase == "committed" {
-		if _, err := os.Stat(journal.SkillDir); err == nil {
+		visibleInfo, err := requireRecoveryDirectory(journal.SkillDir, "visible skill")
+		if err != nil {
+			return err
+		}
+		if visibleInfo != nil {
 			return fmt.Errorf("%w: committed uninstall still has visible skill %q", ErrUninstallRecovery, journal.Name)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect committed skill uninstall %q: %w", journal.Name, err)
+		}
+		backupInfo, err := requireRecoveryDirectory(journal.Backup, "staged skill")
+		if err != nil {
+			return err
+		}
+		if backupInfo == nil {
+			return removeUninstallJournal(journalPath, journal.Parent)
 		}
 		if err := os.RemoveAll(journal.Backup); err != nil {
 			return fmt.Errorf("recover committed skill uninstall %q: %w", journal.Name, err)
@@ -281,22 +297,22 @@ func recoverUninstallJournal(ctx context.Context, db *sql.DB, journal uninstallJ
 		return removeUninstallJournal(journalPath, journal.Parent)
 	}
 
-	backupInfo, backupErr := os.Lstat(journal.Backup)
-	if backupErr == nil {
-		if _, err := os.Lstat(journal.SkillDir); err == nil {
+	backupInfo, err := requireRecoveryDirectory(journal.Backup, "staged skill")
+	if err != nil {
+		return err
+	}
+	visibleInfo, err := requireRecoveryDirectory(journal.SkillDir, "visible skill")
+	if err != nil {
+		return err
+	}
+	if backupInfo != nil {
+		if visibleInfo != nil {
 			return fmt.Errorf("%w: both visible and staged skill %q exist", ErrUninstallRecovery, journal.Name)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect visible skill during recovery %q: %w", journal.Name, err)
-		}
-		if backupInfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: staged skill %q is a symlink", ErrUninstallRecovery, journal.Name)
 		}
 		if err := os.Rename(journal.Backup, journal.SkillDir); err != nil {
 			return fmt.Errorf("restore interrupted skill uninstall %q: %w", journal.Name, err)
 		}
-	} else if !errors.Is(backupErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect staged skill during recovery %q: %w", journal.Name, backupErr)
-	} else if _, err := os.Lstat(journal.SkillDir); errors.Is(err, os.ErrNotExist) {
+	} else if visibleInfo == nil {
 		return fmt.Errorf("%w: interrupted uninstall lost both copies of skill %q", ErrUninstallRecovery, journal.Name)
 	}
 	if journal.PreviousStatus != nil {
@@ -308,6 +324,20 @@ func recoverUninstallJournal(ctx context.Context, db *sql.DB, journal uninstallJ
 		return fmt.Errorf("sync rolled back skill uninstall %q: %w", journal.Name, err)
 	}
 	return removeUninstallJournal(journalPath, journal.Parent)
+}
+
+func requireRecoveryDirectory(path, label string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: inspect %s %q: %v", ErrUninstallRecovery, label, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("%w: %s %q is not a real directory", ErrUninstallRecovery, label, path)
+	}
+	return info, nil
 }
 
 func rollbackUninstall(ctx context.Context, db *sql.DB, journal uninstallJournal, journalPath string) error {

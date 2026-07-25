@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
@@ -156,5 +157,66 @@ func TestSkillsListRecoversPendingUninstallBeforeDiscoveringSkills(t *testing.T)
 	}
 	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovery backup = %v, want absent", err)
+	}
+}
+
+func TestOpenSkillsWorkspaceKeepsLifecycleGuardForFollowupOperation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	skillDir := filepath.Join(home, "workspace", "main", "skills", "reviewer")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: reviewer\nstatus: inactive\n---\n\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, ws, err := openSkillsWorkspace(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	guard := st.SkillLifecycleGuard()
+	guardReleased := false
+	t.Cleanup(func() {
+		if !guardReleased {
+			guard.Unlock()
+		}
+	})
+
+	contender, err := store.Open(ctx, filepath.Join(home, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = contender.Close() })
+	acquired := make(chan error, 1)
+	go func() {
+		if err := contender.SkillLifecycleGuard().Lock(ctx); err != nil {
+			acquired <- err
+			return
+		}
+		contender.SkillLifecycleGuard().Unlock()
+		acquired <- nil
+	}()
+	select {
+	case err := <-acquired:
+		guardReleased = true
+		t.Fatalf("follow-up operation released lifecycle guard before returning: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := skill.ActivateSkill(ctx, st.DB, ws, "reviewer"); err != nil {
+		t.Fatalf("follow-up activation: %v", err)
+	}
+	guard.Unlock()
+	guardReleased = true
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("contender after follow-up operation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("contender did not acquire lifecycle guard after follow-up operation")
 	}
 }

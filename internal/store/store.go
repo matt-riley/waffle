@@ -70,12 +70,23 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	lockPath := filepath.Clean(path) + ".skill-lifecycle.lock"
+	lockPath := canonicalDatabasePath(path) + ".skill-lifecycle.lock"
 	return &Store{
 		DB:                 db,
 		SkillLifecycle:     lifecycle.NewGuard(lockPath),
 		skillLifecyclePath: lockPath,
 	}, nil
+}
+
+func canonicalDatabasePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(real)
+	}
+	return filepath.Clean(abs)
 }
 
 // Close closes the underlying database.

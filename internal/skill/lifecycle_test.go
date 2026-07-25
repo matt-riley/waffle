@@ -368,6 +368,91 @@ func TestRecoverPendingUninstallUsesCanonicalDirectoryWhenFrontmatterNameDiffers
 	}
 }
 
+func TestRecoverPendingUninstallRejectsAmbiguousFilesystemEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase string
+		setup func(t *testing.T, skillDir, backup string)
+	}{
+		{
+			name:  "prepared backup file",
+			phase: "prepared",
+			setup: func(t *testing.T, _, backup string) {
+				if err := os.WriteFile(backup, []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:  "prepared backup dangling symlink",
+			phase: "prepared",
+			setup: func(t *testing.T, _, backup string) {
+				if err := os.Symlink("missing-backup", backup); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name:  "prepared visible file",
+			phase: "prepared",
+			setup: func(t *testing.T, skillDir, _ string) {
+				if err := os.WriteFile(skillDir, []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:  "prepared visible dangling symlink",
+			phase: "prepared",
+			setup: func(t *testing.T, skillDir, _ string) {
+				if err := os.Symlink("missing-visible", skillDir); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name:  "committed visible dangling symlink",
+			phase: "committed",
+			setup: func(t *testing.T, skillDir, _ string) {
+				if err := os.Symlink("missing-visible", skillDir); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
+			parent := ws.SkillsDir()
+			skillDir := filepath.Join(parent, "reviewer-files")
+			backup := filepath.Join(parent, ".waffle-uninstall-reviewer")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, skillDir, backup)
+			journal := uninstallJournal{
+				Version: 1, Name: "reviewer", SkillDir: skillDir, Backup: backup,
+				Parent: parent, Phase: tc.phase,
+			}
+			journalPath := uninstallJournalPath(parent, journal.Name)
+			if err := writeUninstallJournal(journalPath, journal); err != nil {
+				t.Fatal(err)
+			}
+
+			err := RecoverPendingSkillUninstalls(ctx, nil, ws, lifecycle.NewGuard())
+			if !errors.Is(err, ErrUninstallRecovery) {
+				t.Fatalf("recovery error = %v, want ErrUninstallRecovery", err)
+			}
+			if _, err := os.Lstat(journalPath); err != nil {
+				t.Fatalf("recovery removed ambiguous journal: %v", err)
+			}
+		})
+	}
+}
+
 func newInactiveSkillFixture(t *testing.T) (context.Context, memory.Workspace, *store.Store, string, *lifecycle.Guard) {
 	t.Helper()
 	ctx := context.Background()
