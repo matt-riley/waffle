@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,85 @@ func TestSessionModelAliasPersistsAcrossGetLatestAndList(t *testing.T) {
 	list, err := sessions.List(ctx, 10)
 	if err != nil || len(list) != 1 || list[0].ModelAlias != "claude" {
 		t.Fatalf("List = %+v, %v", list, err)
+	}
+}
+
+func TestModelAliasReferencesAreDeterministic(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := sessions.Create(ctx, "third")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		id    string
+		alias string
+	}{
+		{first.ID, "removed"},
+		{second.ID, "kept"},
+		{third.ID, "removed"},
+	} {
+		if err := sessions.SetModelAlias(ctx, item.id, item.alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := sessions.ModelAliasReferences(ctx, "removed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{first.ID, third.ID}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("references = %v, want %v", got, want)
+	}
+	empty, err := sessions.ModelAliasReferences(ctx, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("missing references = %v, want empty", empty)
+	}
+}
+
+func TestReplaceModelAliasOnlyMovesExplicitlySelectedSessions(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	removed, err := sessions.Create(ctx, "removed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := sessions.Create(ctx, "kept")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, removed.ID, "removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, kept.ID, "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ReplaceModelAlias(ctx, "removed", "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	gotRemoved, err := sessions.Get(ctx, removed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotKept, err := sessions.Get(ctx, kept.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRemoved.ModelAlias != "replacement" || gotKept.ModelAlias != "kept" {
+		t.Fatalf("session aliases = %q/%q", gotRemoved.ModelAlias, gotKept.ModelAlias)
 	}
 }
 

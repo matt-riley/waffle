@@ -380,6 +380,8 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 				dashboardHub,
 			)
 		}
+		capabilities.Previews = operations.Previews
+		capabilities.Now = time.Now
 		restart := dashboardRestartScheduler()
 		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
 			Observability:   obs,

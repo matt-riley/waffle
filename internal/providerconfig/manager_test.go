@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -233,6 +234,71 @@ func TestManagerRemoveRejectsReferencedConnectionPrecisely(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), providerTestKey) {
 		t.Fatalf("error leaked key: %v", err)
+	}
+}
+
+func TestManagerPreviewRemovalBindsCurrentProviderState(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := m.PreviewModelRemoval(context.Background(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Alias != "gpt" || model.Provider != "openai" || !model.Default || !model.Utility || model.Revision == "" {
+		t.Fatalf("model preview = %#v", model)
+	}
+	if len(model.Profiles) != 0 {
+		t.Fatalf("model profiles = %v, want empty", model.Profiles)
+	}
+	connection, err := m.PreviewProviderRemoval(context.Background(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.Name != "openai" || connection.Revision == "" || !slices.Equal(connection.ModelAliases, []string{"gpt", "small"}) {
+		t.Fatalf("connection preview = %#v", connection)
+	}
+}
+
+func TestManagerModeAwareRemovalReturnsDeferredMutation(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, false)
+	result, err := m.RemoveModelWithMode(context.Background(), "gpt", "", CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || result.TransactionID == "" {
+		t.Fatalf("model removal result = %#v", result)
+	}
+	provider := newTestManager(t)
+	enrollConnectionWithoutRoles(t, provider, false)
+	if err := provider.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	providerResult, err := provider.RemoveWithMode(context.Background(), "openai", CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !providerResult.RestartRequired || providerResult.TransactionID == "" {
+		t.Fatalf("provider removal result = %#v", providerResult)
+	}
+	if _, err := os.Stat(provider.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := config.Load(provider.ConfigPath); err != nil {
+		t.Fatal(err)
+	} else if len(cfg.Models) != 0 || len(cfg.Providers) != 0 {
+		t.Fatalf("removed config = %#v", cfg)
+	}
+	store := secret.OpenFile(provider.SecretsPath, provider.Identity)
+	for _, name := range []string{"provider/openai/api-key", "provider/openai/catalog-scope"} {
+		if _, err := store.Get(name); !errors.Is(err, secret.ErrNotFound) {
+			t.Fatalf("secret %q error = %v, want ErrNotFound", name, err)
+		}
 	}
 }
 

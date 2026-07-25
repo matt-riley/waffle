@@ -132,12 +132,16 @@ function createHarness({
   defaultResponse = response({ restart_required: false }),
   utilityResponse = response({ restart_required: false }),
   modelResponse = response({ restart_required: false }),
+  modelRemovalPreviewResponse = response({ kind: "model", target: "gpt", references: [], replacement_required: false, preview_token: "model-preview", expires_at: "2026-07-25T00:01:00Z" }),
+  modelRemovalResponse = response({ restart_required: false }),
   catalogueResponse = response({ connection: "primary", models: [] }),
   stageResponse = response({}, true, 200),
   installResponse = response({ restart_required: false }),
   skillLifecycleResponse = response({ restart_required: false }),
   capabilitiesResponse = null,
   connectionResponse = response([]),
+  providerRemovalPreviewResponse = response({ kind: "provider", target: "openai", references: [], replacement_required: false, preview_token: "provider-preview", expires_at: "2026-07-25T00:01:00Z" }),
+  providerRemovalResponse = response({ restart_required: false }),
   connectionResponses = null,
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
   skills = [],
@@ -367,6 +371,12 @@ function createHarness({
     if (path === "/api/v1/desk/models") {
       return modelResponse;
     }
+    if (path.startsWith("/api/v1/desk/models/") && path.endsWith("/removal-preview")) {
+      return modelRemovalPreviewResponse;
+    }
+    if (path.startsWith("/api/v1/desk/models/") && path.endsWith("/remove")) {
+      return modelRemovalResponse;
+    }
     if (path === "/api/v1/desk/models/catalogue/refresh") {
       return catalogueResponse;
     }
@@ -379,6 +389,12 @@ function createHarness({
     if (path.startsWith("/api/v1/desk/skills/") &&
       (path.endsWith("/activate") || path.endsWith("/deactivate") || path.endsWith("/uninstall"))) {
       return skillLifecycleResponse;
+    }
+    if (path.startsWith("/api/v1/desk/providers/") && path.endsWith("/removal-preview")) {
+      return providerRemovalPreviewResponse;
+    }
+    if (path.startsWith("/api/v1/desk/providers/") && path.endsWith("/remove")) {
+      return providerRemovalResponse;
     }
     if (path === "/api/v1/desk/bootstrap") {
       const generation =
@@ -676,6 +692,36 @@ test("attached missing skills remain visibly actionable without an activate acti
   assert.match(nodeText(card), /Missing from the library/);
   assert.equal(findSkillActivateButton(harness.elements["#capability-skills"]), null);
 });
+
+function findButton(root, label) {
+  const visit = (node) => {
+    if (!node) return null;
+    if (node.tagName === "BUTTON" && node.textContent === label) return node;
+    for (const child of node.childNodes || []) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(root);
+}
+
+function findElementByTag(root, tagName) {
+  const visit = (node) => {
+    if (!node) return null;
+    if (node.tagName === tagName) return node;
+    for (const child of node.childNodes || []) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(root);
+}
+
+function allText(root) {
+  return [root.textContent || "", ...(root.childNodes || []).map(allText)].join(" ");
+}
 
 test("provider credential clears and polling waits for a changed process without replay", async () => {
   const harness = createHarness({
@@ -1027,6 +1073,91 @@ test("github and intake connections render their allowlisted labels only", async
   assert.equal(
     cards[3].childNodes[1].textContent,
     "Issue intake · Configured · Label waffle · Concurrency 2",
+  );
+});
+
+test("model removal previews references, requires a replacement, and posts the opaque token safely", async () => {
+  const hostileReference = `<script>steal()</script>`;
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", default_model: "gpt", utility_model: "small", providers: { openai: { type: "openai" } }, models: {
+        gpt: { provider: "openai", model: "gpt" },
+        small: { provider: "openai", model: "small" },
+      } },
+      provider_presets: [],
+      skills: [],
+    }),
+    modelRemovalPreviewResponse: response({
+      kind: "model",
+      target: "gpt",
+      references: [{ kind: "default", name: "default" }, { kind: "session", name: hostileReference }],
+      replacement_required: true,
+      preview_token: "opaque-model-preview",
+      expires_at: "2026-07-25T00:01:00Z",
+    }),
+    modelRemovalResponse: response({ restart_required: false }),
+  });
+  await flush();
+
+  const modelCard = harness.elements["#capability-models"].childNodes.find(
+    (card) => card.childNodes[0]?.textContent === "gpt",
+  );
+  assert.ok(modelCard, "expected gpt card");
+  const remove = findButton(modelCard, "Remove alias");
+  assert.ok(remove, "expected remove button");
+  await remove.listener("click")();
+  await flush();
+
+  assert.equal(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/models/gpt/removal-preview").length,
+    1,
+  );
+  assert.match(allText(modelCard), /default/);
+  assert.match(allText(modelCard), /steal/);
+  assert.equal(allText(modelCard).includes("opaque-model-preview"), false);
+
+  const replacement = findElementByTag(modelCard, "SELECT");
+  assert.ok(replacement, "expected explicit replacement picker");
+  replacement.value = "small";
+  const confirm = findButton(modelCard, "Remove model alias");
+  assert.ok(confirm, "expected confirmation button");
+  await confirm.listener("click")();
+  await flush();
+
+  const removal = harness.calls.find((call) => call.path === "/api/v1/desk/models/gpt/remove");
+  assert.ok(removal, "expected removal request");
+  assert.deepEqual(JSON.parse(removal.options.body), {
+    preview_token: "opaque-model-preview",
+    replacement: "small",
+  });
+});
+
+test("provider removal preview gives safe alias guidance and no destructive action", async () => {
+  const harness = createHarness({
+    connectionResponse: response([{ name: "openai", kind: "provider", status: "configured" }]),
+    providerRemovalPreviewResponse: response({
+      kind: "provider",
+      target: "openai",
+      references: [{ kind: "model_alias", name: "gpt" }],
+      replacement_required: false,
+      preview_token: "opaque-provider-preview",
+      expires_at: "2026-07-25T00:01:00Z",
+    }),
+  });
+  await flush();
+
+  const card = harness.elements["#capability-connections"].childNodes[0];
+  const remove = findButton(card, "Remove connection");
+  assert.ok(remove, "expected provider removal button");
+  await remove.listener("click")();
+  await flush();
+
+  assert.match(allText(card), /gpt/);
+  assert.match(allText(card), /still referenced/i);
+  assert.equal(findButton(card, "Remove provider connection"), null);
+  assert.equal(
+    harness.calls.some((call) => call.path.endsWith("/remove") && call.options.method === "POST"),
+    false,
   );
 });
 

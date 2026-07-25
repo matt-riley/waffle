@@ -144,6 +144,25 @@ type Listing struct {
 	Models       map[string]ModelSummary    `json:"models"`
 }
 
+// ModelRemovalPreview is the credential-free provider state needed to confirm
+// an alias removal. Revision binds the preview to the exact config bytes.
+type ModelRemovalPreview struct {
+	Alias    string
+	Provider string
+	Default  bool
+	Utility  bool
+	Profiles []string
+	Revision string
+}
+
+// ProviderRemovalPreview is the credential-free provider state needed to
+// confirm a connection removal.
+type ProviderRemovalPreview struct {
+	Name         string
+	ModelAliases []string
+	Revision     string
+}
+
 // ProviderSummary is the public, credential-free part of a connection.
 type ProviderSummary struct {
 	Type      string `json:"type"`
@@ -347,7 +366,20 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 }
 
 // Remove deletes an unreferenced connection and its scoped credential.
-func (m *Manager) Remove(ctx context.Context, name string) (err error) {
+func (m *Manager) Remove(ctx context.Context, name string) error {
+	_, err := m.RemoveWithMode(ctx, name, CommitAndReconcile)
+	return err
+}
+
+// RemoveWithMode deletes an unreferenced connection using the requested
+// commit lifecycle.
+func (m *Manager) RemoveWithMode(ctx context.Context, name string, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.remove(modeCtx, name)
+	})
+}
+
+func (m *Manager) remove(ctx context.Context, name string) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err
@@ -401,6 +433,75 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 	}
 	defer func() { _ = os.Remove(secretStage) }()
 	return m.commit(ctx, before, configStage, secretStage, candidate, "")
+}
+
+// PreviewModelRemoval returns the current credential-free references for alias.
+func (m *Manager) PreviewModelRemoval(ctx context.Context, alias string) (ModelRemovalPreview, error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	defer func() { _ = lease.Release() }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	if !config.ValidModelAlias(alias) {
+		return ModelRemovalPreview{}, fmt.Errorf("invalid model alias %q", alias)
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	target, ok := before.cfg.Models[alias]
+	if !ok {
+		return ModelRemovalPreview{}, fmt.Errorf("model alias %q does not exist", alias)
+	}
+	profiles := make([]string, 0)
+	for name, profile := range before.cfg.Agent.Profiles {
+		if profile.Model == alias {
+			profiles = append(profiles, name)
+		}
+	}
+	sort.Strings(profiles)
+	return ModelRemovalPreview{
+		Alias: alias, Provider: target.Provider,
+		Default:  before.cfg.Agent.DefaultModel == alias,
+		Utility:  before.cfg.Agent.UtilityModel == alias,
+		Profiles: profiles,
+		Revision: transactionIDForBytes(before.configBytes),
+	}, nil
+}
+
+// PreviewProviderRemoval returns the current aliases that reference name.
+func (m *Manager) PreviewProviderRemoval(ctx context.Context, name string) (ProviderRemovalPreview, error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	defer func() { _ = lease.Release() }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if !config.ValidProviderConnectionName(name) {
+		return ProviderRemovalPreview{}, fmt.Errorf("invalid connection name %q", name)
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if _, ok := before.cfg.Providers[name]; !ok {
+		return ProviderRemovalPreview{}, fmt.Errorf("provider connection %q does not exist", name)
+	}
+	return ProviderRemovalPreview{
+		Name: name, ModelAliases: referencedAliases(before.cfg, name),
+		Revision: transactionIDForBytes(before.configBytes),
+	}, nil
 }
 
 // Test probes the first alias for a named connection using its encrypted key.
@@ -687,7 +788,19 @@ func (m *Manager) activateModel(ctx context.Context, alias string, utility bool)
 // RemoveModel deletes an alias. replacement reassigns default, utility, and
 // profile references; without it, default/utility references are cleared and
 // profile references fail closed.
-func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (err error) {
+func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) error {
+	_, err := m.RemoveModelWithMode(ctx, alias, replacement, CommitAndReconcile)
+	return err
+}
+
+// RemoveModelWithMode deletes an alias using the requested commit lifecycle.
+func (m *Manager) RemoveModelWithMode(ctx context.Context, alias, replacement string, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.removeModel(modeCtx, alias, replacement)
+	})
+}
+
+func (m *Manager) removeModel(ctx context.Context, alias, replacement string) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err

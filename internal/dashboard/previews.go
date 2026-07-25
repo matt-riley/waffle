@@ -112,6 +112,20 @@ func (s *PreviewStore) Issue(operation, resourceID string, ttl time.Duration) st
 // Consume atomically spends a token. Both successful and mismatched attempts
 // permanently burn the token.
 func (s *PreviewStore) Consume(token, operation, resourceID string) error {
+	bound, err := s.ConsumeBound(token, operation)
+	if err != nil {
+		return err
+	}
+	if bound != resourceID {
+		return ErrPreviewMismatch
+	}
+	return nil
+}
+
+// ConsumeBound atomically spends a token and returns the exact resource binding
+// recorded when it was issued. Both successful and mismatched attempts
+// permanently burn the token.
+func (s *PreviewStore) ConsumeBound(token, operation string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -122,20 +136,20 @@ func (s *PreviewStore) Consume(token, operation, resourceID string) error {
 	entry, ok := s.live.get(token)
 	if !ok {
 		if outcome, known := s.outcomes.get(token); known {
-			return outcome
+			return "", outcome
 		}
-		return ErrPreviewUnknown
+		return "", ErrPreviewUnknown
 	}
 
 	s.live.delete(token)
 	if !entry.ExpiresAt.After(now) {
 		s.outcomes.put(token, ErrPreviewExpired)
-		return ErrPreviewExpired
+		return "", ErrPreviewExpired
 	}
 
 	s.outcomes.put(token, ErrPreviewUsed)
-	if entry.Value.operation != operation || entry.Value.resourceID != resourceID {
-		return ErrPreviewMismatch
+	if entry.Value.operation != operation {
+		return "", ErrPreviewMismatch
 	}
-	return nil
+	return entry.Value.resourceID, nil
 }

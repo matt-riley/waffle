@@ -385,6 +385,30 @@ func (s *fixtureSessions) SetModelAlias(_ context.Context, id, alias string) err
 	return nil
 }
 
+func (s *fixtureSessions) ModelAliasReferences(_ context.Context, alias string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var references []string
+	for id, value := range s.sessions {
+		if value.ModelAlias == strings.TrimSpace(alias) {
+			references = append(references, id)
+		}
+	}
+	sort.Strings(references)
+	return references, nil
+}
+
+func (s *fixtureSessions) ReplaceModelAlias(_ context.Context, from, to string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, value := range s.sessions {
+		if value.ModelAlias == strings.TrimSpace(from) {
+			value.ModelAlias = strings.TrimSpace(to)
+		}
+	}
+	return nil
+}
+
 type fixtureNotes struct {
 	memoryPath string
 }
@@ -640,6 +664,79 @@ func (p *fixtureProviders) ActivateUtilityModelWithMode(_ context.Context, alias
 	defer p.mu.Unlock()
 	p.listing.UtilityModel = alias
 	return providerconfig.MutationResult{}, nil
+}
+
+func (p *fixtureProviders) PreviewModelRemoval(_ context.Context, alias string) (providerconfig.ModelRemovalPreview, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	model, ok := p.listing.Models[alias]
+	if !ok {
+		return providerconfig.ModelRemovalPreview{}, fmt.Errorf("model alias %q does not exist", alias)
+	}
+	return providerconfig.ModelRemovalPreview{
+		Alias: alias, Provider: model.Provider,
+		Default: p.listing.DefaultModel == alias, Utility: p.listing.UtilityModel == alias,
+		Revision: fmt.Sprintf("fixture-models-%d-%s-%s", len(p.listing.Models), p.listing.DefaultModel, p.listing.UtilityModel),
+	}, nil
+}
+
+func (p *fixtureProviders) PreviewProviderRemoval(_ context.Context, name string) (providerconfig.ProviderRemovalPreview, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.listing.Providers[name]; !ok {
+		return providerconfig.ProviderRemovalPreview{}, fmt.Errorf("provider connection %q does not exist", name)
+	}
+	var aliases []string
+	for alias, model := range p.listing.Models {
+		if model.Provider == name {
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return providerconfig.ProviderRemovalPreview{
+		Name: name, ModelAliases: aliases,
+		Revision: fmt.Sprintf("fixture-providers-%d", len(p.listing.Providers)),
+	}, nil
+}
+
+func (p *fixtureProviders) RemoveModelWithMode(_ context.Context, alias, replacement string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.listing.Models[alias]; !ok {
+		return providerconfig.MutationResult{}, fmt.Errorf("model alias %q does not exist", alias)
+	}
+	if replacement != "" {
+		if _, ok := p.listing.Models[replacement]; !ok {
+			return providerconfig.MutationResult{}, fmt.Errorf("replacement model alias %q does not exist", replacement)
+		}
+	}
+	delete(p.listing.Models, alias)
+	if p.listing.DefaultModel == alias {
+		p.listing.DefaultModel = replacement
+	}
+	if p.listing.UtilityModel == alias {
+		p.listing.UtilityModel = replacement
+	}
+	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-model-remove"}, nil
+}
+
+func (p *fixtureProviders) RemoveWithMode(_ context.Context, name string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.listing.Providers[name]; !ok {
+		return providerconfig.MutationResult{}, fmt.Errorf("provider connection %q does not exist", name)
+	}
+	var aliases []string
+	for alias, model := range p.listing.Models {
+		if model.Provider == name {
+			aliases = append(aliases, alias)
+		}
+	}
+	if len(aliases) > 0 {
+		return providerconfig.MutationResult{}, fmt.Errorf("%w: %s", providerconfig.ErrReferenced, strings.Join(aliases, ", "))
+	}
+	delete(p.listing.Providers, name)
+	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-provider-remove"}, nil
 }
 
 func (*fixtureProviders) Test(context.Context, string) error { return nil }

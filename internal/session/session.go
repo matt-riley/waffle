@@ -121,6 +121,49 @@ func (s *Store) SetModelAlias(ctx context.Context, id, alias string) error {
 	return nil
 }
 
+// ModelAliasReferences returns persisted session IDs that explicitly select
+// alias, in deterministic order. It does not rewrite any session choice.
+func (s *Store) ModelAliasReferences(ctx context.Context, alias string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM sessions WHERE model_alias = ? ORDER BY id`, strings.TrimSpace(alias))
+	if err != nil {
+		return nil, fmt.Errorf("list model alias references: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var references []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list model alias references: %w", err)
+		}
+		references = append(references, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list model alias references: %w", err)
+	}
+	return references, nil
+}
+
+// ReplaceModelAlias moves only sessions that explicitly selected from to to.
+// Other sessions retain their local model choices.
+func (s *Store) ReplaceModelAlias(ctx context.Context, from, to string) error {
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET model_alias = ?, updated_at = ? WHERE model_alias = ?`,
+		to, s.nowStr(), from); err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	return nil
+}
+
 // Get loads one session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
