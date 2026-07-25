@@ -60,6 +60,22 @@ const state = {
   skills: [],
 };
 
+function pushRailConnection(railState) {
+  const rail = globalThis.waffleDeskRail;
+  if (!rail || typeof rail.setConnection !== "function") {
+    return;
+  }
+  rail.setConnection(railState);
+}
+
+function pushRailModel(alias, scope) {
+  const rail = globalThis.waffleDeskRail;
+  if (!rail || typeof rail.setModel !== "function") {
+    return;
+  }
+  rail.setModel(alias, scope);
+}
+
 function setPhase(next) {
   state.currentPhase = next;
   if (elements.shell) {
@@ -80,6 +96,11 @@ function setPhase(next) {
   if (disconnected) {
     elements.connectionText.textContent = "Disconnected";
     elements.connectionDetail.textContent = "Stale";
+    pushRailConnection(globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected");
+  } else if (next === phase.opening) {
+    pushRailConnection(globalThis.waffleDeskRail?.connectionStates?.connecting || "connecting");
+  } else {
+    pushRailConnection(globalThis.waffleDeskRail?.connectionStates?.connected || "connected");
   }
   updateControls();
 }
@@ -245,6 +266,12 @@ function renderCanonicalState(chatState, includeHistory) {
   elements.provider.textContent = chatState.provider_label || "Not reported";
   renderModels(chatState.models, chatState.model_alias);
   renderSkills(chatState.skills);
+  if (chatState.model_alias) {
+    pushRailModel(
+      chatState.model_alias,
+      globalThis.waffleDeskRail?.modelScopes?.session || "session",
+    );
+  }
   if (includeHistory && Array.isArray(chatState.history)) {
     renderHistory(chatState.history);
   }

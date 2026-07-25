@@ -32,6 +32,7 @@ run = "go tool templ generate -path internal/dashboard/ui"
 description = "Test the dependency-free Waffle Desk browser client"
 run = """
 node --test \
+  internal/dashboard/ui/app_client_test.mjs \
   internal/dashboard/ui/today_client_test.mjs \
   internal/dashboard/ui/tasks_client_test.mjs \
   internal/dashboard/ui/workspaces_client_test.mjs \

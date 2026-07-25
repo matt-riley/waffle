@@ -169,7 +169,27 @@ textarea {
 }
 
 .status-dot {
-  color: var(--healthy);
+  background: var(--muted);
+  border-radius: 50%;
+  display: inline-block;
+  height: 0.55rem;
+  width: 0.55rem;
+}
+
+.status-dot.is-connecting {
+  background: var(--muted);
+}
+
+.status-dot.is-connected {
+  background: var(--healthy);
+}
+
+.status-dot.is-degraded {
+  background: var(--ginger);
+}
+
+.status-dot.is-disconnected {
+  background: var(--danger);
 }
 
 code,
@@ -183,6 +203,11 @@ code,
 .rail-status code {
   color: var(--cream);
   overflow-wrap: anywhere;
+}
+
+.rail-status[data-connection-state="disconnected"] #rail-connection,
+.rail-status[data-connection-state="degraded"] #rail-connection {
+  color: #f3d8cf;
 }
 
 main {

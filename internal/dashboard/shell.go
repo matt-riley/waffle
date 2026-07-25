@@ -13,8 +13,10 @@ func ShellHandler(security *Security) http.Handler {
 	return shellHandler(security, ui.ShellView{
 		Title:         "Waffle Desk",
 		ActiveSection: "today",
-		Connection:    "Connected",
-		ModelAlias:    "default",
+		// Neutral placeholders until shared shell JS hydrates live state.
+		// Never ship a false "Connected" before the client confirms health.
+		Connection: "Connecting…",
+		ModelAlias: "—",
 	})
 }
 
@@ -59,10 +61,10 @@ func withShellDefaults(view ui.ShellView, requestToken string) ui.ShellView {
 		view.ActiveSection = "today"
 	}
 	if view.Connection == "" {
-		view.Connection = "Connected"
+		view.Connection = "Connecting…"
 	}
 	if view.ModelAlias == "" {
-		view.ModelAlias = "default"
+		view.ModelAlias = "—"
 	}
 	view.RequestToken = requestToken
 	view.AssetVersion = ui.AssetVersion()
