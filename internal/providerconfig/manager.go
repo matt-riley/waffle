@@ -1781,6 +1781,59 @@ func (m *Manager) rollbackJournal(ctx context.Context, j *transactionJournal) er
 // FinalizeDeferred confirms that a newly started process is healthy before
 // removing the transaction journal and backups. A failed confirmation restores
 // the exact previous files and service state.
+// VerifyReadiness re-proves readiness for the config on disk when a default
+// model is configured but the ready generation is missing or stale, and reports
+// whether it refreshed the marker.
+//
+// The marker records that the health probe passed for one exact config. Only
+// provider transactions wrote it, so any out-of-band edit to config.toml left a
+// healthy host reporting Installed with no route back except an unrelated
+// provider mutation — and consumers of that state read Installed as "shut the
+// service down". Proving readiness here is the same assertion the transaction
+// path makes, at the one other moment the service is known to be running the
+// config in question.
+//
+// An unproven outcome is not an error: a failing probe, an unresolvable default
+// model, or a missing probe callback all leave the marker untouched so the state
+// stays Installed.
+func (m *Manager) VerifyReadiness(ctx context.Context) (refreshed bool, err error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+
+	configBytes, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		return false, err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return false, err
+	}
+	if cfg.Agent.DefaultModel == "" {
+		return false, nil
+	}
+	if _, err := cfg.ResolveModel(cfg.Agent.DefaultModel); err != nil {
+		return false, nil
+	}
+	generation := generationBytes(configBytes)
+	existing, err := os.ReadFile(m.readyPath())
+	if err == nil && string(existing) == string(generation) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if m.Health == nil || m.Health(ctx) != nil {
+		return false, nil
+	}
+	if err := writeDurable(m.readyPath(), generation, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (m *Manager) FinalizeDeferred(ctx context.Context) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
