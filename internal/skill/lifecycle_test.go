@@ -322,7 +322,51 @@ func TestRecoverPendingUninstallRestoresVisibleSkillAndStatusAfterRestart(t *tes
 	assertNoUninstallArtifacts(t, ws, "reviewer")
 }
 
-func TestRecoverPendingUninstallUsesCanonicalDirectoryWhenFrontmatterNameDiffers(t *testing.T) {
+func TestValidateUninstallJournalRejectsMismatchedSkillDirName(t *testing.T) {
+	ws := memory.Workspace{Dir: filepath.Join(t.TempDir(), "workspace")}
+	parent := ws.SkillsDir()
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	otherSkill := filepath.Join(parent, "other-skill")
+	if err := os.MkdirAll(otherSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherSkill, "SKILL.md"), []byte("---\nname: other-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(parent, ".waffle-uninstall-my-skill")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := uninstallJournal{
+		Version:  1,
+		Name:     "my-skill",
+		SkillDir: otherSkill,
+		Backup:   backup,
+		Parent:   parent,
+		Phase:    "prepared",
+	}
+	journalPath := uninstallJournalPath(parent, journal.Name)
+	if err := validateUninstallJournal(parent, journalPath, journal); !errors.Is(err, ErrUninstallRecovery) {
+		t.Fatalf("validateUninstallJournal = %v, want ErrUninstallRecovery", err)
+	}
+	if err := writeUninstallJournal(journalPath, journal); err != nil {
+		t.Fatal(err)
+	}
+	// Recovery must fail closed before any rename that could clobber other-skill.
+	if err := RecoverPendingSkillUninstalls(context.Background(), nil, ws, lifecycle.NewGuard()); !errors.Is(err, ErrUninstallRecovery) {
+		t.Fatalf("recovery error = %v, want ErrUninstallRecovery", err)
+	}
+	if _, err := os.Stat(otherSkill); err != nil {
+		t.Fatalf("mismatched recovery clobbered other skill: %v", err)
+	}
+	if _, err := os.Lstat(journalPath); err != nil {
+		t.Fatalf("recovery removed rejected journal: %v", err)
+	}
+}
+
+func TestUninstallSkillRejectsDirectoryNameMismatch(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
@@ -343,28 +387,55 @@ func TestRecoverPendingUninstallUsesCanonicalDirectoryWhenFrontmatterNameDiffers
 	}); err != nil {
 		t.Fatal(err)
 	}
-	previous := uninstallAfterPhase
-	uninstallAfterPhase = func(phase string) error {
-		if phase == "status_removed" {
-			return errors.New("simulated interruption")
-		}
-		return nil
-	}
-	t.Cleanup(func() { uninstallAfterPhase = previous })
 	guard := st.SkillLifecycleGuard()
 	attachments := &Attachments{DB: st.DB, Workspace: ws, Lifecycle: guard}
-	if err := UninstallSkill(ctx, st.DB, ws, "reviewer", attachments, guard); err == nil {
-		t.Fatal("uninstall succeeded, want simulated interruption")
-	}
-	if err := RecoverPendingSkillUninstalls(ctx, st.DB, ws, guard); err != nil {
-		t.Fatalf("recover mismatched skill directory: %v", err)
+	err = UninstallSkill(ctx, st.DB, ws, "reviewer", attachments, guard)
+	if err == nil || !strings.Contains(err.Error(), "does not match skill name") {
+		t.Fatalf("uninstall error = %v, want directory/name mismatch", err)
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("canonical skill directory was not restored: %v", err)
+		t.Fatalf("mismatched skill was removed: %v", err)
 	}
-	assertStatusRecord(t, st.DB, "reviewer", StatusInactive, "local:reviewer")
-	if _, err := os.Stat(filepath.Join(ws.SkillsDir(), ".waffle-uninstall-reviewer-files")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unexpected directory-name staging artifact: %v", err)
+}
+
+func TestLoadStatusRecordRejectsCorruptTimestamps(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(root, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.DB.ExecContext(ctx, `
+		INSERT INTO skill_status (name, status, source, source_ref, content_digest, created_at, activated_at)
+		VALUES ('reviewer', 'inactive', 'dashboard', 'local:reviewer', 'sha256:x', 'not-a-timestamp', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadStatusRecord(ctx, st.DB, "reviewer"); err == nil {
+		t.Fatal("loadStatusRecord accepted corrupt created_at")
+	}
+
+	if _, err := st.DB.ExecContext(ctx, `
+		UPDATE skill_status SET created_at = ?, activated_at = ? WHERE name = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano), "also-not-valid", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadStatusRecord(ctx, st.DB, "reviewer"); err == nil {
+		t.Fatal("loadStatusRecord accepted corrupt activated_at")
+	}
+
+	// Empty activated_at remains valid (inactive skills).
+	created := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := st.DB.ExecContext(ctx, `
+		UPDATE skill_status SET created_at = ?, activated_at = '' WHERE name = ?`, created, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	record, err := loadStatusRecord(ctx, st.DB, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.CreatedAt.IsZero() || !record.ActivatedAt.IsZero() {
+		t.Fatalf("record = %#v, want parsed created_at and zero activated_at", record)
 	}
 }
 
@@ -427,7 +498,7 @@ func TestRecoverPendingUninstallRejectsAmbiguousFilesystemEntries(t *testing.T) 
 			root := t.TempDir()
 			ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
 			parent := ws.SkillsDir()
-			skillDir := filepath.Join(parent, "reviewer-files")
+			skillDir := filepath.Join(parent, "reviewer")
 			backup := filepath.Join(parent, ".waffle-uninstall-reviewer")
 			if err := os.MkdirAll(parent, 0o700); err != nil {
 				t.Fatal(err)

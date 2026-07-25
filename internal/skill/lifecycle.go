@@ -124,6 +124,11 @@ func UninstallSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name s
 	}
 
 	skillDir := filepath.Dir(target.Path)
+	if filepath.Base(skillDir) != target.Name {
+		// Journals key recovery on skill name; a mismatched directory would let
+		// prepared-phase rollback rename into the wrong sibling skill path.
+		return fmt.Errorf("skill directory name %q does not match skill name %q", filepath.Base(skillDir), target.Name)
+	}
 	parent := filepath.Dir(skillDir)
 	backup := filepath.Join(parent, ".waffle-uninstall-"+target.Name)
 	journalPath := uninstallJournalPath(parent, target.Name)
@@ -263,7 +268,7 @@ func validateUninstallJournal(parent, journalPath string, journal uninstallJourn
 	skillDir := filepath.Clean(journal.SkillDir)
 	wantBackup := filepath.Join(parent, ".waffle-uninstall-"+journal.Name)
 	skillDirName := filepath.Base(skillDir)
-	if filepath.Clean(journalPath) != uninstallJournalPath(parent, journal.Name) || filepath.Clean(journal.Parent) != parent || filepath.Dir(skillDir) != parent || skillDirName == "" || skillDirName == "." || skillDirName == ".." || strings.HasPrefix(skillDirName, ".waffle-uninstall-") || filepath.Clean(journal.Backup) != wantBackup {
+	if filepath.Clean(journalPath) != uninstallJournalPath(parent, journal.Name) || filepath.Clean(journal.Parent) != parent || filepath.Dir(skillDir) != parent || skillDirName == "" || skillDirName == "." || skillDirName == ".." || skillDirName != journal.Name || strings.HasPrefix(skillDirName, ".waffle-uninstall-") || filepath.Clean(journal.Backup) != wantBackup {
 		return fmt.Errorf("%w: journal paths do not match skill root", ErrUninstallRecovery)
 	}
 	if journal.Phase != "prepared" && journal.Phase != "committed" {
@@ -402,20 +407,37 @@ func loadStatusRecord(ctx context.Context, db *sql.DB, name string) (*StatusReco
 	if err != nil {
 		return nil, fmt.Errorf("load skill status: %w", err)
 	}
+	createdAt, err := parseStatusTime(created)
+	if err != nil {
+		return nil, fmt.Errorf("load skill status %q created_at: %w", name, err)
+	}
+	activatedAt, err := parseStatusTime(activated)
+	if err != nil {
+		return nil, fmt.Errorf("load skill status %q activated_at: %w", name, err)
+	}
 	return &StatusRecord{
 		Name:          name,
 		Status:        status,
 		Source:        source,
 		SourceRef:     sourceRef,
 		ContentDigest: digest,
-		CreatedAt:     parseStatusTime(created),
-		ActivatedAt:   parseStatusTime(activated),
+		CreatedAt:     createdAt,
+		ActivatedAt:   activatedAt,
 	}, nil
 }
 
-func parseStatusTime(value string) time.Time {
-	parsed, _ := time.Parse(time.RFC3339Nano, value)
-	return parsed
+// parseStatusTime distinguishes missing timestamps (empty → zero time) from
+// corrupt values that must fail closed before they are journaled as PreviousStatus.
+func parseStatusTime(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid skill status timestamp %q: %w", value, err)
+	}
+	return parsed, nil
 }
 
 func syncDirectory(path string) error {
