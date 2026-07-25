@@ -2,8 +2,24 @@ package dashboard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
+)
+
+// Restart outcome codes delivered to Desk clients. Values are stable contracts.
+const (
+	RestartCodeScheduled             = "restart_scheduled"
+	RestartCodeManualRestartRequired = "manual_restart_required"
+	RestartCodeScheduleFailed        = "restart_schedule_failed"
+
+	// EventTypeCapabilityRestartOutcome is published after a deferred restart
+	// schedule completes so connected Desk clients can leave the wait state.
+	EventTypeCapabilityRestartOutcome = "capability.restart_outcome"
+
+	restartMessageScheduled = "Waffle restart was scheduled."
+	restartMessageManual    = "Change committed; restart waffle serve to apply."
+	restartMessageFailed    = "restart could not be scheduled; restart waffle serve to apply the change"
 )
 
 // RestartScheduler requests a process restart after a successful deferred
@@ -49,6 +65,89 @@ type RestartScheduleOutcome struct {
 	Scheduled bool   `json:"scheduled"`
 	Code      string `json:"code"`
 	Message   string `json:"message"`
+}
+
+// PlannedRestartReporter optionally announces the client-facing outcome known
+// before Schedule runs. Schedulers that omit it are treated as scheduled until
+// the after-response callback reports the real result via the event hub.
+// Implement this for any mode that will always return ErrManualRestartRequired
+// (standalone, test doubles, wrappers) so the HTTP response does not claim a
+// managed restart will occur.
+type PlannedRestartReporter interface {
+	PlannedRestart() RestartScheduleOutcome
+}
+
+// PlannedRestart reports the standalone client outcome before Schedule runs.
+func (StandaloneRestartScheduler) PlannedRestart() RestartScheduleOutcome {
+	return RestartScheduleOutcome{
+		Code:    RestartCodeManualRestartRequired,
+		Message: restartMessageManual,
+	}
+}
+
+// plannedRestartOutcome is the client-facing outcome known before Schedule runs.
+func plannedRestartOutcome(scheduler RestartScheduler) RestartScheduleOutcome {
+	if reporter, ok := scheduler.(PlannedRestartReporter); ok {
+		return reporter.PlannedRestart()
+	}
+	return RestartScheduleOutcome{
+		Scheduled: true,
+		Code:      RestartCodeScheduled,
+		Message:   restartMessageScheduled,
+	}
+}
+
+// restartOutcomeFromError maps a Schedule result onto a sanitized public
+// outcome. The raw error string never leaves the process.
+func restartOutcomeFromError(err error) RestartScheduleOutcome {
+	switch {
+	case err == nil:
+		return RestartScheduleOutcome{
+			Scheduled: true,
+			Code:      RestartCodeScheduled,
+			Message:   restartMessageScheduled,
+		}
+	case errors.Is(err, ErrManualRestartRequired):
+		return RestartScheduleOutcome{
+			Code:    RestartCodeManualRestartRequired,
+			Message: restartMessageManual,
+		}
+	default:
+		return RestartScheduleOutcome{
+			Code:    RestartCodeScheduleFailed,
+			Message: restartMessageFailed,
+		}
+	}
+}
+
+// PublishRestartOutcome fans a sanitized restart outcome out through the Desk
+// event hub. It never includes transaction IDs, commands, or host detail.
+func PublishRestartOutcome(hub *EventHub, outcome RestartScheduleOutcome) {
+	if hub == nil {
+		return
+	}
+	// Re-seal fields so a misbehaving observer cannot inject host detail.
+	sealed := RestartScheduleOutcome{
+		Scheduled: outcome.Scheduled,
+		Code:      outcome.Code,
+		Message:   outcome.Message,
+	}
+	switch sealed.Code {
+	case RestartCodeScheduled, RestartCodeManualRestartRequired, RestartCodeScheduleFailed:
+	default:
+		sealed.Code = RestartCodeScheduleFailed
+		sealed.Scheduled = false
+		sealed.Message = restartMessageFailed
+	}
+	data, err := json.Marshal(sealed)
+	if err != nil {
+		return
+	}
+	hub.Publish(Event{
+		Type:     EventTypeCapabilityRestartOutcome,
+		Resource: "capability",
+		Data:     data,
+	})
 }
 
 // AfterResponseWriter is supplied by the coordinator-owned mutation wrapper.

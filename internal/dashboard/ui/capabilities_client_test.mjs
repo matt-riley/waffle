@@ -67,6 +67,9 @@ function createHarness({
   connectionResponse = response([]),
   connectionResponses = null,
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
+  skills = [],
+  deferTimers = false,
+  clock = false,
 } = {}) {
   const selectors = [
     "#desk-capabilities",
@@ -82,6 +85,14 @@ function createHarness({
     "#capability-provider-model-alias",
     "#capability-provider-model-id",
     "#capability-provider-credential",
+    "#capability-default-form",
+    "#capability-default-alias",
+    "#capability-utility-form",
+    "#capability-utility-alias",
+    "#capability-model-form",
+    "#capability-model-connection",
+    "#capability-model-alias",
+    "#capability-model-id",
     "#capability-catalogue-form",
     "#capability-catalogue-connection",
     "#capability-catalogue-search",
@@ -94,9 +105,29 @@ function createHarness({
   elements["#capability-provider-model-alias"].value = "gpt";
   elements["#capability-provider-model-id"].value = "gpt-test";
   elements["#capability-provider-credential"].value = "sk-super-private";
+  const providerSubmit = new FakeElement();
+  providerSubmit.type = "submit";
+  elements["#capability-provider-form"].controls = [
+    elements["#capability-provider-name"],
+    elements["#capability-provider-type"],
+    elements["#capability-provider-base-url"],
+    elements["#capability-provider-model-alias"],
+    elements["#capability-provider-model-id"],
+    elements["#capability-provider-credential"],
+    providerSubmit,
+  ];
+  elements["#capability-default-form"].controls = [elements["#capability-default-alias"]];
+  elements["#capability-utility-form"].controls = [elements["#capability-utility-alias"]];
+  elements["#capability-model-form"].controls = [
+    elements["#capability-model-connection"],
+    elements["#capability-model-alias"],
+    elements["#capability-model-id"],
+  ];
   const calls = [];
+  const timers = [];
   let bootstrapPolls = 0;
   let connectionFetches = 0;
+  let nowMs = 0;
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
     if (path === "/api/v1/desk/capabilities") {
@@ -108,7 +139,7 @@ function createHarness({
           providers: {},
           models: {},
         },
-        skills: [],
+        skills,
       });
     }
     if (path === "/api/v1/desk/connections") {
@@ -146,13 +177,44 @@ function createHarness({
     crypto: { randomUUID: () => "idempotency-key" },
     document,
     fetch,
-    setTimeout: (callback) => {
+    Date: clock
+      ? class extends Date {
+          static now() {
+            return nowMs;
+          }
+        }
+      : Date,
+    setTimeout: (callback, ms = 0) => {
+      if (deferTimers) {
+        timers.push({ callback, ms: Number(ms) || 0 });
+        return timers.length;
+      }
+      if (clock) {
+        nowMs += Number(ms) || 0;
+      }
       void callback();
       return 1;
     },
   });
   new vm.Script(source, { filename: "capabilities.js" }).runInContext(context);
-  return { calls, elements };
+  return {
+    calls,
+    elements,
+    providerSubmit,
+    timers,
+    async runTimersUntilIdle(maxSteps = 100) {
+      let steps = 0;
+      while (timers.length > 0 && steps < maxSteps) {
+        const timer = timers.shift();
+        if (clock) {
+          nowMs += timer.ms;
+        }
+        timer.callback();
+        await flush();
+        steps += 1;
+      }
+    },
+  };
 }
 
 async function flush() {
@@ -161,11 +223,26 @@ async function flush() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+function findSkillActivateButton(skillsRoot) {
+  for (const card of skillsRoot.childNodes) {
+    for (const child of card.childNodes || []) {
+      if (child.dataset && child.dataset.skillActivate === "true") {
+        return child;
+      }
+    }
+  }
+  return null;
+}
+
 test("provider credential clears and polling waits for a changed process without replay", async () => {
   const harness = createHarness({
     providerResponse: response({
       restart_required: true,
-      transaction_id: "txn-1",
+      restart: {
+        scheduled: true,
+        code: "restart_scheduled",
+        message: "Waffle restart was scheduled.",
+      },
     }, true, 202),
   });
   await flush();
@@ -184,6 +261,107 @@ test("provider credential clears and polling waits for a changed process without
     harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length >= 3,
   );
   assert.equal(harness.elements["#capability-restart-status"].hidden, true);
+});
+
+test("manual restart outcome stops polling and shows a terminal message", async () => {
+  const harness = createHarness({
+    providerResponse: response({
+      restart_required: true,
+      restart: {
+        scheduled: false,
+        code: "manual_restart_required",
+        message: "Change committed; restart waffle serve to apply.",
+      },
+    }, true, 202),
+    bootstrapGenerations: ["process-old"],
+  });
+  await flush();
+
+  const bootstrapBefore = harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length;
+
+  await harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const bootstrapAfter = harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length;
+  assert.equal(bootstrapAfter, bootstrapBefore, "manual restart must not poll bootstrap");
+  assert.equal(
+    harness.elements["#capability-status"].textContent,
+    "Change committed; restart waffle serve to apply.",
+  );
+  assert.equal(harness.elements["#capability-restart-status"].hidden, false);
+  assert.match(
+    harness.elements["#capability-restart-status"].childNodes.map((n) => n.textContent).join(" "),
+    /restart waffle serve/i,
+  );
+  assert.equal(
+    harness.elements["#capability-provider-form"].dataset.restartLocked,
+    "false",
+  );
+  assert.equal(harness.providerSubmit.disabled, false);
+  assert.equal(
+    harness.calls.some((call) => JSON.stringify(call).includes("transaction_id")),
+    false,
+  );
+});
+
+test("scheduled restart disables forms and skill activate while waiting and reports timeout", async () => {
+  const harness = createHarness({
+    providerResponse: response({
+      restart_required: true,
+      restart: {
+        scheduled: true,
+        code: "restart_scheduled",
+        message: "Waffle restart was scheduled.",
+      },
+    }, true, 202),
+    bootstrapGenerations: ["process-old"],
+    skills: [{ name: "review-me", active: false }],
+    clock: true,
+    deferTimers: true,
+  });
+  await flush();
+
+  const activate = findSkillActivateButton(harness.elements["#capability-skills"]);
+  assert.ok(activate, "expected skill activate button after load");
+  assert.equal(activate.disabled, false);
+
+  const submitPromise = harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(
+    harness.elements["#capability-provider-form"].dataset.restartLocked,
+    "true",
+  );
+  assert.equal(harness.providerSubmit.disabled, true);
+  assert.equal(activate.disabled, true, "skill activate must lock during restart wait");
+  assert.equal(harness.elements["#capability-restart-status"].hidden, false);
+  assert.match(
+    harness.elements["#capability-restart-status"].childNodes.map((n) => n.textContent).join(" "),
+    /Waiting for a new Waffle process/i,
+  );
+
+  await harness.runTimersUntilIdle(70);
+  await submitPromise;
+  await flush();
+
+  assert.match(
+    harness.elements["#capability-status"].textContent,
+    /did not complete in time/i,
+  );
+  assert.equal(harness.elements["#capability-restart-status"].hidden, false);
+  assert.equal(
+    harness.elements["#capability-provider-form"].dataset.restartLocked,
+    "false",
+  );
+  assert.equal(harness.providerSubmit.disabled, false);
+  assert.equal(activate.disabled, false, "skill activate re-enables after wait ends");
+  assert.ok(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length > 1,
+  );
 });
 
 test("provider credential is cleared after failure and never appears in safe UI", async () => {

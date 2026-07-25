@@ -64,10 +64,30 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 		RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
 			Service: config.Capabilities,
 			Mutation: func(limit int64, next http.Handler) http.Handler {
-				return NewMutationHandler(config.Security, config.Idempotency, limit, next, config.RestartOutcome)
+				return NewMutationHandler(
+					config.Security,
+					config.Idempotency,
+					limit,
+					next,
+					composeRestartOutcomeObservers(config.Hub, config.RestartOutcome),
+				)
 			},
 			Restart: config.Restart,
 		})
+	}
+}
+
+// composeRestartOutcomeObservers publishes the sanitized restart outcome on
+// the Desk event hub and invokes any coordinator-supplied observer (logging).
+func composeRestartOutcomeObservers(hub *EventHub, observe MutationOutcomeObserver) MutationOutcomeObserver {
+	if hub == nil && observe == nil {
+		return nil
+	}
+	return func(outcome RestartScheduleOutcome) {
+		PublishRestartOutcome(hub, outcome)
+		if observe != nil {
+			observe(outcome)
+		}
 	}
 }
 
