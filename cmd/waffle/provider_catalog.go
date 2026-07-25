@@ -14,9 +14,10 @@ import (
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/modelcatalog"
+	"github.com/matt-riley/waffle/internal/providerconfig"
 )
 
-const openRouterBaseURL = "https://openrouter.ai/api/v1"
+const openRouterBaseURL = providerconfig.OpenRouterBaseURL
 
 const (
 	maxProviderPromptBytes = 64 * 1024
@@ -350,33 +351,11 @@ func safeCatalogueText(value string, private ...string) string {
 }
 
 func resolveProviderPreset(kind, override string) (providerPreset, error) {
-	kind = strings.ToLower(strings.TrimSpace(kind))
-	preset := providerPreset{Name: kind}
-	switch kind {
-	case "openai":
-		preset.RuntimeType = "openai"
-	case "anthropic":
-		preset.RuntimeType = "anthropic"
-	case "openrouter":
-		preset.RuntimeType = "openai"
-		preset.StoredBaseURL = openRouterBaseURL
-	case "openai-compatible":
-		preset.RuntimeType = "openai"
-		if strings.TrimSpace(override) == "" {
-			return providerPreset{}, errors.New("provider preset openai-compatible requires a base URL")
-		}
-	default:
-		return providerPreset{}, fmt.Errorf("unsupported provider preset %q", kind)
+	preset, err := providerconfig.ResolvePreset(kind, override)
+	if err != nil {
+		return providerPreset{}, err
 	}
-
-	if strings.TrimSpace(override) != "" {
-		baseURL, err := normalizeProviderBaseURL(override)
-		if err != nil {
-			return providerPreset{}, fmt.Errorf("provider preset %q base URL: %w", kind, err)
-		}
-		preset.StoredBaseURL = baseURL
-	}
-	return preset, nil
+	return providerPreset{Name: preset.Name, RuntimeType: preset.RuntimeType, StoredBaseURL: preset.BaseURL}, nil
 }
 
 func effectiveCatalogConnection(name string, connection config.ProviderConnection, scopeID string) (modelcatalog.Connection, bool, error) {

@@ -32,6 +32,9 @@ import (
 var (
 	// ErrLocked means another provider mutation owns the host lock.
 	ErrLocked = errors.New("provider configuration is locked")
+	// ErrAliasConflict is wrapped by the stable legacy error text for a
+	// requested model alias that already exists.
+	ErrAliasConflict = errors.New("model alias")
 	// ErrReferenced means a connection cannot be removed while model aliases
 	// still point at it.
 	ErrReferenced = errors.New("provider connection is referenced")
@@ -266,7 +269,7 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 	}
 	for alias := range req.Models {
 		if _, exists := before.cfg.Models[alias]; exists {
-			return fmt.Errorf("model alias %q already exists", alias)
+			return fmt.Errorf("%w %q already exists", ErrAliasConflict, alias)
 		}
 	}
 	scopeID, err := m.newCatalogScope()
@@ -507,7 +510,7 @@ func (m *Manager) addModel(ctx context.Context, req AddModelRequest) (err error)
 		return err
 	}
 	if _, ok := before.cfg.Models[req.Alias]; ok {
-		return fmt.Errorf("model alias %q already exists", req.Alias)
+		return fmt.Errorf("%w %q already exists", ErrAliasConflict, req.Alias)
 	}
 
 	target := config.ModelTarget{Provider: req.ConnectionName, Model: req.UpstreamModel}
