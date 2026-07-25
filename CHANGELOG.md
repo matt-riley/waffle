@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/matt-riley/waffle/compare/v0.9.1...v0.9.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* **provider:** stop holding the provider lock across the readiness probe ([#214](https://github.com/matt-riley/waffle/issues/214)) ([5789d69](https://github.com/matt-riley/waffle/commit/5789d695c8a76bfe5ab78894f1ad64c82462cbfd))
+
 ## [0.9.1](https://github.com/matt-riley/waffle/compare/v0.9.0...v0.9.1) (2026-07-25)
 
 
