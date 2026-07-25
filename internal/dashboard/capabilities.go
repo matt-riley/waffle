@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -168,8 +169,8 @@ type Capabilities struct {
 	SkillSources CapabilitySkillSources
 	Skills       CapabilitySkills
 	Catalogue    CapabilityCatalogue
-	Previews  *PreviewStore
-	Now       func() time.Time
+	Previews     *PreviewStore
+	Now          func() time.Time
 }
 
 func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (CapabilitiesSnapshot, error) {
