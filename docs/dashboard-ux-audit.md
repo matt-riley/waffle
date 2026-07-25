@@ -16,8 +16,8 @@ The server side is sound. Routes, sanitization, idempotency, restart deferral,
 the loopback/CSRF boundary, and the `policy_audit` trail all hold up, and the
 audit found no security defects.
 
-Almost every problem is a presentation gap: **the API already returns the data
-the UI needs, and the UI does not use it.**
+Most problems are a presentation gap: **the API already returns the data the UI
+needs, and the UI does not use it.**
 
 | Endpoint returns | UI does |
 | --- | --- |
@@ -26,6 +26,10 @@ the UI needs, and the UI does not use it.**
 | `skillinstall.Manifest.Files` + `.Audit.Flags` | `JSON.stringify` into a `<pre>` |
 | every provider, profile, and connection name | asks the user to type them |
 | a restart outcome explaining why nothing is happening | writes it to the server log |
+
+The exceptions are findings 15-17, which are genuinely absent capability rather
+than unrendered data: Desk cannot bootstrap an installation, cannot show the
+system prompt, and cannot author an agent profile.
 
 ## What works
 
@@ -238,9 +242,72 @@ stylesheets from inside `<body>` (unstyled flash), and `aria-live` is applied to
 whole list containers rather than status regions, so a re-render announces the
 entire list.
 
+### 15. Desk cannot bootstrap an installation — P1 (#192)
+
+Desk presupposes a configured Waffle. Four things must already be true before it
+is reachable: a secret identity exists, a provider connection is configured
+(without one the chat runtime refuses outright — `"no provider configured; run
+waffle setup to get started"`, `cmd/waffle/chat_cmd.go:171-175`), a model alias
+resolves (`internal/config/config.go:1082-1100`), and `[dashboard] enabled =
+true` has been hand-edited into `config.toml` with the service restarted.
+
+`waffle setup` (`cmd/waffle/setup_cmd.go:23-102`) walks the first three
+interactively — identity, guided provider add with credentials on stdin or a
+0600 key file, a minimal `[agent.profile.main]` with a prompted system prompt,
+then the active alias and next command. Desk mirrors none of it and has no
+notion of "not set up yet": with no provider, Today just fails to open with a
+generic error.
+
+The fourth step cannot be a Desk action — a disabled dashboard cannot enable
+itself — so that half belongs in `setup`, which should offer to enable Desk and
+print the loopback URL.
+
+### 16. The system prompt and profile posture are invisible — P1 (#193)
+
+Desk never shows what the agent was told or what it is allowed to do. An
+`AgentProfile` carries `System`, `Model`, `Sandbox`, `Tools{Allow, Deny,
+DenyPrefixes, Guidance}`, `MaxTokens`, `MaxIterations`, and `AllowedChildren`
+(`internal/config/config.go:258-279`). Desk shows the profile *name* in Today's
+context list (`internal/dashboard/ui/today.templ:78-81`) and, in Tools &
+connections, a sandbox label plus one of two canned strings — "Tool policy is
+enforced." or "Runs in a sandbox." (`internal/dashboard/connections.go:94-107`).
+
+The system prompt is exposed nowhere, so the single largest determinant of the
+agent's behaviour is invisible on the surface built to observe it. The tool
+policy is nearly as bad: `chat.PermissionView{SandboxMode, Allow, Deny,
+DenyPrefixes}` (`internal/chat/types.go:51-56`) is already computed and
+sanitized on the command endpoint and simply never requested (finding 8), so a
+denied tool call cannot be traced to the rule that denied it, and `WAFFLE.md`
+tightening is invisible.
+
+### 17. Agent profiles cannot be authored — P2 (#194)
+
+Profiles shape what Waffle is, and creating one means hand-editing `config.toml`
+and restarting. Desk can select a profile for a workspace
+(`internal/dashboard/ui/workspaces.templ:30-31`) and list profile names as
+connections (`internal/dashboard/connections.go:72-107`), but cannot create,
+edit, copy, or delete one. `waffle setup` writing `[agent.profile.main]` is the
+only guided profile authoring in the product.
+
+This is the most security-sensitive change the audit proposes and should not be
+built without design signoff. Profiles and groups are trust boundaries —
+"Profile selection must never widen a group's tool or sandbox policy; repo
+policy (`WAFFLE.md`) can only tighten it further" (`CLAUDE.md`,
+`internal/config/config.go:255-257`) — and the spec's non-goals rule out editing
+raw TOML in the browser. A structured editor that can only narrow, validated by
+the same code that enforces policy at runtime, is a different thing from
+arbitrary config editing and should stay that way. Group editing should stay out
+of Desk entirely: groups are the fixed point the narrowing check is measured
+against.
+
 ## Out of scope
 
 Design-spec non-goals were respected and not filed: multi-user auth or remote
-access, raw TOML/secret editing in the browser, a file browser or terminal, and
-public hosting. The loopback-only boundary, process token, and idempotency model
-were reviewed and are sound.
+access, arbitrary TOML/secret editing in the browser, a file browser or
+terminal, and public hosting. The loopback-only boundary, process token, and
+idempotency model were reviewed and are sound.
+
+Finding 17 sits closest to that line and is deliberately scoped to stay on the
+right side of it: a structured, narrowing-only editor over a known schema, not a
+config text box. If it cannot be built with server-side enforcement by the same
+code that enforces policy at runtime, it should not be built.
