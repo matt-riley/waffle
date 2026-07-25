@@ -17,6 +17,7 @@ class FakeElement {
     this.disabled = false;
     this.value = "";
     this.selected = false;
+    this.attributes = new Map();
     this._textContent = "";
     this.classList = {
       toggle: (name, force) => {
@@ -95,10 +96,60 @@ class FakeElement {
   }
 
   querySelector(selector) {
-    if (selector === ".message-body") {
-      return this.childNodes.find((child) => child.className === "message-body") || null;
+    const matches = (node) => {
+      if (selector.startsWith(".")) {
+        return node.className.split(/\s+/).includes(selector.slice(1));
+      }
+      if (selector.startsWith("#")) {
+        return node.getAttribute("id") === selector.slice(1);
+      }
+      return node.tagName === selector.toUpperCase();
+    };
+    for (const child of this.childNodes) {
+      if (matches(child)) {
+        return child;
+      }
+      const nested = child.querySelector?.(selector);
+      if (nested) {
+        return nested;
+      }
     }
     return null;
+  }
+
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (node) => {
+      for (const child of node.childNodes) {
+        if (
+          (selector.startsWith(".") &&
+            child.className.split(/\s+/).includes(selector.slice(1))) ||
+          (!selector.startsWith(".") && child.tagName === selector.toUpperCase())
+        ) {
+          matches.push(child);
+        }
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
+  replaceChildren(...children) {
+    this.textContent = "";
+    this.append(...children);
   }
 
   addEventListener(type, listener) {
@@ -113,6 +164,10 @@ class FakeElement {
 
   focus() {
     this.focused = true;
+  }
+
+  select() {
+    this.selectedText = true;
   }
 
   scrollIntoView() {}
@@ -170,8 +225,12 @@ function createHarness({
     status: {},
   },
   commandHandler,
+  openHandler,
+  closeHandler,
   turnHandler,
   cancelHandler,
+  confirmResult = true,
+  storedLease = null,
 } = {}) {
   const selectors = [
     ".desk-shell",
@@ -200,6 +259,20 @@ function createHarness({
     "#desk-profile",
     "#desk-workspace",
     "#desk-provider",
+    "#desk-sandbox",
+    "#desk-model-error-row",
+    "#desk-model-error",
+    "#desk-new",
+    "#desk-session-refresh",
+    "#desk-sessions",
+    "#desk-usage-refresh",
+    "#desk-usage",
+    "#desk-permissions-refresh",
+    "#desk-permissions",
+    "#desk-workset-refresh",
+    "#desk-workset",
+    "#desk-help-refresh",
+    "#desk-help",
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
@@ -208,10 +281,32 @@ function createHarness({
   elements["#desk-model-status"].textContent = "Changes this conversation only.";
   elements["#desk-skill-status"].textContent = "Changes this conversation only.";
 
+  const body = new FakeElement("body");
+  body.dataset.requestToken = "stale-token";
+  const forbiddenMarkupAssignments = [];
+  Object.defineProperty(FakeElement.prototype, "innerHTML", {
+    configurable: true,
+    get() {
+      return "";
+    },
+    set(value) {
+      forbiddenMarkupAssignments.push(String(value));
+    },
+  });
+  Object.defineProperty(FakeElement.prototype, "outerHTML", {
+    configurable: true,
+    get() {
+      return "";
+    },
+    set(value) {
+      forbiddenMarkupAssignments.push(String(value));
+    },
+  });
   const document = {
-    body: { dataset: { requestToken: "stale-token" } },
+    body,
     createElement: (tagName) => new FakeElement(tagName),
     createTextNode: (text) => new FakeTextNode(text),
+    execCommand: () => true,
     querySelector: (selector) => elements[selector] || null,
   };
   const railCalls = [];
@@ -243,8 +338,12 @@ function createHarness({
       return jsonResponse(bootstrap);
     }
     if (path === "/api/v1/desk/chat/open") {
+      if (openHandler) {
+        return openHandler({ path, options });
+      }
       return jsonResponse({
         client_id: "client-1",
+        reattach_token: "lease-1",
         state: defaultChatState(),
       });
     }
@@ -269,6 +368,12 @@ function createHarness({
         return cancelHandler({ path, options });
       }
       return cancelResponse.promise;
+    }
+    if (path === "/api/v1/desk/chat/close") {
+      if (closeHandler) {
+        return closeHandler({ path, options });
+      }
+      return jsonResponse({});
     }
     return jsonResponse({});
   };
@@ -311,6 +416,17 @@ function createHarness({
   }
   FakeEventSource.instances = [];
 
+  const storage = new Map();
+  if (storedLease) {
+    storage.set("waffle.desk.today.owner.v1", JSON.stringify(storedLease));
+  }
+  const sessionStorage = {
+    getItem: (key) => storage.get(key) ?? null,
+    removeItem: (key) => storage.delete(key),
+    setItem: (key, value) => storage.set(key, String(value)),
+  };
+  const lifecycleListeners = new Map();
+  const clipboardWrites = [];
   const context = vm.createContext({
     console,
     crypto: { randomUUID: () => `key-${calls.length}` },
@@ -318,6 +434,20 @@ function createHarness({
     EventSource: FakeEventSource,
     fetch,
     location: { href },
+    navigator: {
+      clipboard: {
+        async writeText(value) {
+          clipboardWrites.push(String(value));
+        },
+      },
+    },
+    sessionStorage,
+    confirm: () => confirmResult,
+    addEventListener: (type, listener) => {
+      const listeners = lifecycleListeners.get(type) || [];
+      listeners.push(listener);
+      lifecycleListeners.set(type, listeners);
+    },
     URL,
     waffleDeskRail,
     setTimeout: (fn, delay) => {
@@ -335,9 +465,14 @@ function createHarness({
 
   return {
     calls,
+    clipboardWrites,
     cancelResponse,
     elements,
     EventSource: FakeEventSource,
+    forbiddenMarkupAssignments,
+    lifecycleListeners,
+    sessionStorage,
+    storage,
     timers,
     railCalls,
     turnResponse,
@@ -465,6 +600,432 @@ test("session skill control attaches through the live chat command", async () =>
   );
   assert.equal(harness.elements["#desk-skill-toggle"].textContent, "Detach skill");
   assert.equal(harness.elements["#desk-skill-status"].textContent, "Attached to this conversation.");
+});
+
+test("assistant markdown renders structured inert DOM and copies a fenced block", async () => {
+  const markdown = [
+    "## Build notes",
+    "",
+    "Use `mise run test`.",
+    "",
+    "- first",
+    "- second <script>globalThis.pwned = true</script>",
+    "",
+    "```go",
+    "fmt.Println(\"safe\")",
+    "```",
+  ].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+
+  const transcript = harness.elements["#desk-transcript"];
+  assert.equal(transcript.querySelectorAll("h2").length, 1);
+  assert.equal(transcript.querySelectorAll("ul").length, 1);
+  assert.equal(transcript.querySelectorAll("pre").length, 1);
+  assert.equal(transcript.querySelectorAll("code").length, 2);
+  assert.match(transcript.textContent, /<script>globalThis\.pwned = true<\/script>/);
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+
+  const copy = transcript.querySelector(".code-copy");
+  assert.ok(copy);
+  await copy.listener("click")();
+  assert.deepEqual(harness.clipboardWrites, ['fmt.Println("safe")']);
+  assert.equal(copy.textContent, "Copied");
+});
+
+test("Ctrl or Cmd Enter sends while plain Enter remains a newline", async () => {
+  const harness = createHarness({
+    turnHandler: async () => jsonResponse({}),
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const keydown = message.listener("keydown");
+  message.value = "line one";
+  let prevented = 0;
+  await keydown({
+    key: "Enter",
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {
+      prevented += 1;
+    },
+  });
+  assert.equal(prevented, 0);
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 0);
+
+  await keydown({
+    key: "Enter",
+    ctrlKey: true,
+    metaKey: false,
+    preventDefault() {
+      prevented += 1;
+    },
+  });
+  await flush();
+  assert.equal(prevented, 1);
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  await flush();
+  message.value = "line two";
+  await keydown({
+    key: "Enter",
+    ctrlKey: false,
+    metaKey: true,
+    preventDefault() {
+      prevented += 1;
+    },
+  });
+  await flush();
+  assert.equal(prevented, 2);
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 2);
+});
+
+test("keyboard send ignores empty and non-idle composers", async () => {
+  const pending = deferred();
+  const harness = createHarness({
+    turnHandler: async () => pending.promise,
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const keydown = message.listener("keydown");
+  const shortcut = () =>
+    keydown({
+      key: "Enter",
+      ctrlKey: true,
+      metaKey: false,
+      preventDefault() {},
+    });
+
+  message.value = "   ";
+  await shortcut();
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 0);
+  message.value = "one";
+  void shortcut();
+  await flush();
+  message.value = "two";
+  await shortcut();
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+  pending.resolve(jsonResponse({}));
+});
+
+test("tool ledger pairs concurrent calls by opaque ID with duration and outcome", async () => {
+  const harness = createHarness();
+  await flush();
+  const stream = harness.EventSource.instances[0];
+  const emit = (type, data) =>
+    stream.emit(type, {
+      resource: "chat",
+      resource_id: "client-1",
+      type,
+      data,
+    });
+  emit("tool_started", { tool_name: "read", tool_call_id: "tool-1" });
+  emit("tool_started", { tool_name: "read", tool_call_id: "tool-2" });
+  emit("tool_finished", {
+    tool_name: "read",
+    tool_call_id: "tool-2",
+    duration_ms: 12,
+    byte_count: 0,
+    is_error: true,
+  });
+  emit("tool_finished", {
+    tool_name: "read",
+    tool_call_id: "tool-1",
+    duration_ms: 25,
+    byte_count: 128,
+    is_error: false,
+  });
+  emit("tool_finished", {
+    tool_name: "read",
+    tool_call_id: "tool-2",
+    duration_ms: 12,
+    byte_count: 0,
+    is_error: true,
+  });
+
+  const ledger = harness.elements["#desk-tool-activity"];
+  assert.equal(ledger.childNodes.length, 2);
+  assert.match(ledger.childNodes[0].textContent, /read.*25 ms.*succeeded.*128 bytes/i);
+  assert.equal(ledger.childNodes[0].classList.contains("is-success"), true);
+  assert.match(ledger.childNodes[1].textContent, /read.*12 ms.*failed/i);
+  assert.equal(ledger.childNodes[1].classList.contains("is-error"), true);
+});
+
+test("new conversation requires explicit confirmation then replaces canonical state", async () => {
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "new" && command.args === "") {
+        return jsonResponse({ confirm: true, text: "Start over?" });
+      }
+      if (command.name === "new" && command.args === "confirm") {
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "session-new",
+            title: "Fresh desk",
+            history: [{ role: "assistant", blocks: [{ type: "text", text: "Fresh start" }] }],
+          }),
+        });
+      }
+      return jsonResponse({}, false);
+    },
+  });
+  await flush();
+  await harness.elements["#desk-new"].listener("click")();
+  await flush();
+
+  const commands = mutationCalls(harness, "/api/v1/desk/chat/command").map(
+    (call) => JSON.parse(call.options.body).command,
+  );
+  assert.deepEqual(commands, [
+    { name: "new", args: "" },
+    { name: "new", args: "confirm" },
+  ]);
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh desk");
+  assert.match(harness.elements["#desk-transcript"].textContent, /Fresh start/);
+  assert.equal(
+    JSON.parse(harness.storage.get("waffle.desk.today.owner.v1")).session_id,
+    "session-new",
+  );
+});
+
+test("declining new conversation confirmation preserves the current session", async () => {
+  const harness = createHarness({
+    confirmResult: false,
+    commandHandler: async () => jsonResponse({ confirm: true, text: "Start over?" }),
+  });
+  await flush();
+  const before = harness.elements["#desk-session-title"].textContent;
+  await harness.elements["#desk-new"].listener("click")();
+  await flush();
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/command").length, 1);
+  assert.equal(harness.elements["#desk-session-title"].textContent, before);
+});
+
+test("sessions list resumes selected history in place and failed resume leaves it intact", async () => {
+  let failResume = false;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-2",
+              title: "Second session",
+              summary: "Summary",
+              updated_at: "2026-07-25T12:00:00Z",
+            },
+          ],
+        });
+      }
+      if (command.name === "resume" && failResume) {
+        return jsonResponse({ code: "resume_failed", message: "Could not resume." }, false);
+      }
+      return jsonResponse({
+        state: defaultChatState({
+          session_id: "session-2",
+          title: "Second session",
+          history: [{ role: "assistant", blocks: [{ type: "text", text: "Restored" }] }],
+        }),
+      });
+    },
+  });
+  await flush();
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const sessionButton = harness.elements["#desk-sessions"].querySelector("button");
+  assert.match(sessionButton.textContent, /Second session.*25 Jul 2026/i);
+  await sessionButton.listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Second session");
+  assert.match(harness.elements["#desk-transcript"].textContent, /Restored/);
+
+  failResume = true;
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  await harness.elements["#desk-sessions"].querySelector("button").listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Second session");
+  assert.match(harness.elements["#desk-transcript"].textContent, /Restored/);
+});
+
+test("usage permissions workset and help commands render existing sanitized results", async () => {
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      const results = {
+        usage: {
+          usage: [
+            {
+              period: "today",
+              requests: 2,
+              input_tokens: 30,
+              output_tokens: 12,
+              reserved_tokens: 4,
+            },
+          ],
+        },
+        permissions: {
+          permissions: {
+            sandbox_mode: "workspace-write",
+            allow: ["read"],
+            deny: ["bash"],
+            deny_prefixes: ["secret."],
+          },
+        },
+        workset: {
+          workset: [{ id: "goal-1", text: "Ship the safe Desk" }],
+        },
+        help: {
+          commands: [
+            { name: "new", usage: "/new", description: "Start a conversation" },
+          ],
+        },
+      };
+      return jsonResponse(results[command.name]);
+    },
+  });
+  await flush();
+  for (const id of [
+    "#desk-usage-refresh",
+    "#desk-permissions-refresh",
+    "#desk-workset-refresh",
+    "#desk-help-refresh",
+  ]) {
+    await harness.elements[id].listener("click")();
+    await flush();
+  }
+  assert.match(harness.elements["#desk-usage"].textContent, /2 requests.*30 in.*12 out.*4 reserved/i);
+  assert.match(
+    harness.elements["#desk-permissions"].textContent,
+    /workspace-write.*Allow.*read.*Deny.*bash.*secret\./i,
+  );
+  assert.match(harness.elements["#desk-workset"].textContent, /goal-1.*Ship the safe Desk/i);
+  assert.match(harness.elements["#desk-help"].textContent, /\/new.*Start a conversation/i);
+});
+
+test("sandbox mode and model error render from canonical state", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          sandbox_mode: "workspace-write",
+          model_error: "Pinned model is unavailable",
+        }),
+      }),
+  });
+  await flush();
+  assert.equal(harness.elements["#desk-sandbox"].textContent, "workspace-write");
+  assert.equal(harness.elements["#desk-model-error-row"].hidden, false);
+  assert.equal(
+    harness.elements["#desk-model-error"].textContent,
+    "Pinned model is unavailable",
+  );
+  assert.equal(harness.elements["#desk-model-error"].classList.contains("is-error"), true);
+});
+
+test("reload reattaches with the stored proof and rotates persisted ownership", async () => {
+  const storedLease = {
+    client_id: "client-owned",
+    reattach_token: "lease-old",
+    session_id: "session-1",
+  };
+  const harness = createHarness({
+    storedLease,
+    openHandler: async ({ options }) => {
+      const body = JSON.parse(options.body);
+      assert.equal(body.reattach_client_id, "client-owned");
+      assert.equal(body.reattach_token, "lease-old");
+      return jsonResponse({
+        client_id: "client-owned",
+        reattach_token: "lease-new",
+        state: defaultChatState(),
+      });
+    },
+  });
+  await flush();
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-message"].disabled, false);
+  assert.deepEqual(JSON.parse(harness.storage.get("waffle.desk.today.owner.v1")), {
+    client_id: "client-owned",
+    reattach_token: "lease-new",
+    session_id: "session-1",
+  });
+
+  for (const listener of harness.lifecycleListeners.get("pagehide") || []) {
+    listener();
+  }
+  await flush();
+  const close = mutationCalls(harness, "/api/v1/desk/chat/close").at(-1);
+  assert.deepEqual(JSON.parse(close.options.body), {
+    client_id: "client-owned",
+    reattach_token: "lease-new",
+  });
+  assert.equal(close.options.keepalive, true);
+});
+
+test("expired stored proof clears and falls back to one fresh owner", async () => {
+  let opens = 0;
+  const harness = createHarness({
+    storedLease: {
+      client_id: "client-stale",
+      reattach_token: "lease-stale",
+      session_id: "session-1",
+    },
+    openHandler: async () => {
+      opens += 1;
+      if (opens === 1) {
+        return jsonResponse(
+          { code: "chat_client_not_found", message: "chat client was not found" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-fresh",
+        reattach_token: "lease-fresh",
+        state: defaultChatState(),
+      });
+    },
+  });
+  await flush();
+  const openBodies = mutationCalls(harness, "/api/v1/desk/chat/open").map((call) =>
+    JSON.parse(call.options.body)
+  );
+  assert.equal(openBodies.length, 2);
+  assert.equal(openBodies[0].reattach_client_id, "client-stale");
+  assert.equal("reattach_client_id" in openBodies[1], false);
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(
+    JSON.parse(harness.storage.get("waffle.desk.today.owner.v1")).client_id,
+    "client-fresh",
+  );
+});
+
+test("an independent tab without a lease never claims an existing client", async () => {
+  const harness = createHarness();
+  await flush();
+  const [open] = mutationCalls(harness, "/api/v1/desk/chat/open");
+  const body = JSON.parse(open.options.body);
+  assert.equal("reattach_client_id" in body, false);
+  assert.equal("reattach_token" in body, false);
 });
 
 test("turn remains locked until its POST and turn_done settle, then applies canonical metadata", async () => {

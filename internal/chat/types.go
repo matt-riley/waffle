@@ -107,23 +107,27 @@ const (
 
 // Event is one presentation-neutral streamed backend update.
 type Event struct {
-	Kind      EventKind `json:"kind"`
-	Text      string    `json:"text"`
-	ToolName  string    `json:"tool_name"`
-	IsError   bool      `json:"is_error"`
-	ByteCount int       `json:"byte_count"`
-	Usage     llm.Usage `json:"usage"`
-	State     *State    `json:"state"`
+	Kind       EventKind `json:"kind"`
+	Text       string    `json:"text"`
+	ToolName   string    `json:"tool_name"`
+	ToolCallID string    `json:"tool_call_id"`
+	IsError    bool      `json:"is_error"`
+	ByteCount  int       `json:"byte_count"`
+	DurationMS int64     `json:"duration_ms"`
+	Usage      llm.Usage `json:"usage"`
+	State      *State    `json:"state"`
 }
 
 type eventJSON struct {
-	Kind      EventKind `json:"kind"`
-	Text      string    `json:"text"`
-	ToolName  string    `json:"tool_name"`
-	IsError   bool      `json:"is_error"`
-	ByteCount int       `json:"byte_count"`
-	Usage     usageJSON `json:"usage"`
-	State     *State    `json:"state"`
+	Kind       EventKind `json:"kind"`
+	Text       string    `json:"text"`
+	ToolName   string    `json:"tool_name"`
+	ToolCallID string    `json:"tool_call_id"`
+	IsError    bool      `json:"is_error"`
+	ByteCount  int       `json:"byte_count"`
+	DurationMS int64     `json:"duration_ms"`
+	Usage      usageJSON `json:"usage"`
+	State      *State    `json:"state"`
 }
 
 type usageJSON struct {
@@ -135,11 +139,13 @@ type usageJSON struct {
 // token counts stable snake-case wire names.
 func (e Event) MarshalJSON() ([]byte, error) {
 	return json.Marshal(eventJSON{
-		Kind:      e.Kind,
-		Text:      e.Text,
-		ToolName:  e.ToolName,
-		IsError:   e.IsError,
-		ByteCount: e.ByteCount,
+		Kind:       e.Kind,
+		Text:       e.Text,
+		ToolName:   e.ToolName,
+		ToolCallID: e.ToolCallID,
+		IsError:    e.IsError,
+		ByteCount:  e.ByteCount,
+		DurationMS: e.DurationMS,
 		Usage: usageJSON{
 			InputTokens:  e.Usage.InputTokens,
 			OutputTokens: e.Usage.OutputTokens,
@@ -155,11 +161,13 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*e = Event{
-		Kind:      wire.Kind,
-		Text:      wire.Text,
-		ToolName:  wire.ToolName,
-		IsError:   wire.IsError,
-		ByteCount: wire.ByteCount,
+		Kind:       wire.Kind,
+		Text:       wire.Text,
+		ToolName:   wire.ToolName,
+		ToolCallID: wire.ToolCallID,
+		IsError:    wire.IsError,
+		ByteCount:  wire.ByteCount,
+		DurationMS: wire.DurationMS,
 		Usage: llm.Usage{
 			InputTokens:  wire.Usage.InputTokens,
 			OutputTokens: wire.Usage.OutputTokens,

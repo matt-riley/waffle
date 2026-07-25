@@ -672,6 +672,7 @@ type fixtureChatBackend struct {
 	sessions *fixtureSessions
 	skills   *fixtureSkills
 	session  string
+	history  []llm.Message
 }
 
 func (b *fixtureChatBackend) Open(_ context.Context, options chat.OpenOptions) (chat.State, error) {
@@ -688,6 +689,26 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		emit(chat.Event{Kind: chat.EventTurnDone})
 		return nil
 	}
+	if strings.Contains(strings.ToLower(input), "markdown") {
+		emit(chat.Event{
+			Kind:       chat.EventToolStarted,
+			ToolName:   "fixture_read",
+			ToolCallID: "tool-1",
+		})
+		emit(chat.Event{
+			Kind:       chat.EventToolFinished,
+			ToolName:   "fixture_read",
+			ToolCallID: "tool-1",
+			ByteCount:  24,
+			DurationMS: 18,
+		})
+		emit(chat.Event{
+			Kind: chat.EventTextDelta,
+			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n```go\nfmt.Println(\"fixture\")\n```",
+		})
+		emit(chat.Event{Kind: chat.EventTurnDone})
+		return nil
+	}
 	emit(chat.Event{Kind: chat.EventTextDelta, Text: "Fixture reply"})
 	emit(chat.Event{Kind: chat.EventTurnDone})
 	return nil
@@ -695,6 +716,75 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 
 func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedCommand, _ func(chat.Event)) (chat.Result, error) {
 	switch command.Name {
+	case "new":
+		if strings.TrimSpace(command.Args) != "confirm" {
+			return chat.Result{Confirm: true, Text: "Start a new fixture conversation?"}, nil
+		}
+		b.sessions.mu.Lock()
+		b.sessions.sessions["session-fresh"] = &session.Session{
+			ID:         "session-fresh",
+			Title:      "Fresh conversation",
+			Summary:    "A fresh fixture session.",
+			ModelAlias: "primary",
+			CreatedAt:  fixtureNow,
+			UpdatedAt:  fixtureNow,
+		}
+		b.sessions.mu.Unlock()
+		b.session = "session-fresh"
+		b.history = []llm.Message{{
+			Role: llm.RoleAssistant,
+			Blocks: []llm.Block{{
+				Type: llm.BlockText,
+				Text: "Fresh start",
+			}},
+		}}
+	case "sessions":
+		return chat.Result{Sessions: []chat.Session{
+			{
+				ID:         "session-primary",
+				Title:      "Release review",
+				Summary:    "Reviewing the release queue.",
+				ModelAlias: "primary",
+				UpdatedAt:  fixtureNow,
+			},
+			{
+				ID:         "session-fresh",
+				Title:      "Fresh conversation",
+				Summary:    "A fresh fixture session.",
+				ModelAlias: "primary",
+				UpdatedAt:  fixtureNow,
+			},
+		}}, nil
+	case "resume":
+		b.session = strings.TrimSpace(command.Args)
+		b.history = nil
+	case "usage":
+		return chat.Result{Usage: []chat.UsageRow{{
+			SessionID:      b.session,
+			Period:         "today",
+			Requests:       3,
+			InputTokens:    120,
+			OutputTokens:   45,
+			ReservedTokens: 10,
+		}}}, nil
+	case "permissions":
+		return chat.Result{Permissions: &chat.PermissionView{
+			SandboxMode:  "workspace-write",
+			Allow:        []string{"read"},
+			Deny:         []string{"bash"},
+			DenyPrefixes: []string{"secret."},
+		}}, nil
+	case "workset":
+		return chat.Result{Workset: []chat.WorkItem{{
+			ID:   "goal-fixture",
+			Text: "Verify the Today experience",
+		}}}, nil
+	case "help":
+		return chat.Result{Commands: []chat.Command{{
+			Name:        chat.CommandNew,
+			Usage:       "/new",
+			Description: "Start a conversation",
+		}}}, nil
 	case "model":
 		if err := b.sessions.SetModelAlias(context.Background(), b.session, command.Args); err != nil {
 			return chat.Result{}, err
@@ -733,7 +823,7 @@ func (b *fixtureChatBackend) state() (chat.State, error) {
 		ConnectionMode: "Connected",
 		SandboxMode:    "workspace-write",
 		Workspace:      "matt-riley/waffle",
-		History:        []llm.Message{},
+		History:        append([]llm.Message(nil), b.history...),
 		Models: []chat.Model{
 			{Alias: "primary", Provider: "fixture", Upstream: "primary-model", Current: current.ModelAlias == "primary"},
 			{Alias: "local", Provider: "fixture", Upstream: "local-model", Current: current.ModelAlias == "local"},

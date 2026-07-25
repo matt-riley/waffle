@@ -237,6 +237,92 @@ func TestChatOpenRouteReturnsResumedHistory(t *testing.T) {
 	}
 }
 
+func TestChatRoutesReattachAndCloseWithRotatingOwnerProof(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	backend := &fakeChatBackend{openState: chat.State{SessionID: "session-owned", Title: "Owned"}}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{13}, 128)),
+	)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{
+		Security:    security,
+		Hub:         NewEventHub(8),
+		ChatClients: clients,
+		Idempotency: NewIdempotencyStore(nil, 16, time.Minute),
+	})
+
+	request := func(path, key, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422"+path, strings.NewReader(body))
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", key)
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	var opened struct {
+		ClientID      string     `json:"client_id"`
+		ReattachToken string     `json:"reattach_token"`
+		State         chat.State `json:"state"`
+	}
+	first := request("/api/v1/desk/chat/open", "open", `{}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("open status = %d body = %s", first.Code, first.Body.String())
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &opened); err != nil {
+		t.Fatal(err)
+	}
+	if opened.ClientID == "" || opened.ReattachToken == "" || opened.State.SessionID != "session-owned" {
+		t.Fatalf("open response = %+v", opened)
+	}
+
+	reattachBody := `{"reattach_client_id":"` + opened.ClientID + `","reattach_token":"` + opened.ReattachToken + `"}`
+	second := request("/api/v1/desk/chat/open", "reattach", reattachBody)
+	if second.Code != http.StatusOK {
+		t.Fatalf("reattach status = %d body = %s", second.Code, second.Body.String())
+	}
+	var reattached struct {
+		ClientID      string `json:"client_id"`
+		ReattachToken string `json:"reattach_token"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &reattached); err != nil {
+		t.Fatal(err)
+	}
+	if reattached.ClientID != opened.ClientID || reattached.ReattachToken == "" || reattached.ReattachToken == opened.ReattachToken {
+		t.Fatalf("reattach response = %+v, opened = %+v", reattached, opened)
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("backend opens = %d, want one", backend.openCount())
+	}
+
+	unprovenClose := request(
+		"/api/v1/desk/chat/close",
+		"unproven-close",
+		`{"client_id":"`+reattached.ClientID+`"}`,
+	)
+	if unprovenClose.Code != http.StatusNotFound || backend.closeCount() != 0 {
+		t.Fatalf("unproven close = %d %s, close calls = %d", unprovenClose.Code, unprovenClose.Body.String(), backend.closeCount())
+	}
+
+	staleClose := request(
+		"/api/v1/desk/chat/close",
+		"stale-close",
+		`{"client_id":"`+opened.ClientID+`","reattach_token":"`+opened.ReattachToken+`"}`,
+	)
+	if staleClose.Code != http.StatusNotFound || backend.closeCount() != 0 {
+		t.Fatalf("stale close = %d %s, close calls = %d", staleClose.Code, staleClose.Body.String(), backend.closeCount())
+	}
+	currentClose := request(
+		"/api/v1/desk/chat/close",
+		"current-close",
+		`{"client_id":"`+reattached.ClientID+`","reattach_token":"`+reattached.ReattachToken+`"}`,
+	)
+	if currentClose.Code != http.StatusOK || backend.closeCount() != 1 {
+		t.Fatalf("current close = %d %s, close calls = %d", currentClose.Code, currentClose.Body.String(), backend.closeCount())
+	}
+}
+
 func TestChatRoutesAllowlistStableErrors(t *testing.T) {
 	const canary = "hostile backend-controlled message"
 	for _, test := range []struct {
@@ -369,10 +455,10 @@ func TestChatRoutesReplayWithoutReinvocationAndRejectConflicts(t *testing.T) {
 			security := mustSecurity(t, "127.0.0.1:8422")
 			backend := &fakeChatBackend{}
 			clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
-			id := ""
+			lease := ChatClientLease{}
 			if route != "open" {
 				var err error
-				id, _, err = clients.Open(context.Background(), chat.OpenOptions{})
+				lease, _, err = clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -382,11 +468,14 @@ func TestChatRoutesReplayWithoutReinvocationAndRejectConflicts(t *testing.T) {
 			body := `{}`
 			switch route {
 			case "turn":
-				body = `{"client_id":"` + id + `","text":"hi"}`
+				body = `{"client_id":"` + lease.ClientID + `","text":"hi"}`
 			case "command":
-				body = `{"client_id":"` + id + `","command":{"name":"status"}}`
+				body = `{"client_id":"` + lease.ClientID + `","command":{"name":"status"}}`
 			case "cancel", "close":
-				body = `{"client_id":"` + id + `"}`
+				body = `{"client_id":"` + lease.ClientID + `"}`
+				if route == "close" {
+					body = `{"client_id":"` + lease.ClientID + `","reattach_token":"` + lease.ReattachToken + `"}`
+				}
 			}
 			do := func(path, payload string) *httptest.ResponseRecorder {
 				rec := httptest.NewRecorder()

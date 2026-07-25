@@ -96,19 +96,43 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatMaxBodyBytes, next)
 	}
 	mux.Handle("POST /api/v1/desk/chat/open", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var options chat.OpenOptions
-		if !decodeChatRequest(w, r, &options) {
+		var request struct {
+			Continue         bool     `json:"continue"`
+			SessionID        string   `json:"session_id"`
+			Profile          string   `json:"profile"`
+			Capabilities     []string `json:"capabilities"`
+			ReattachClientID string   `json:"reattach_client_id"`
+			ReattachToken    string   `json:"reattach_token"`
+		}
+		if !decodeChatRequest(w, r, &request) {
 			return
 		}
-		clientID, state, err := config.ChatClients.Open(r.Context(), options)
+		lease, state, err := config.ChatClients.OpenWithLease(
+			r.Context(),
+			chat.OpenOptions{
+				Continue:     request.Continue,
+				SessionID:    request.SessionID,
+				Profile:      request.Profile,
+				Capabilities: request.Capabilities,
+			},
+			ChatClientLease{
+				ClientID:      request.ReattachClientID,
+				ReattachToken: request.ReattachToken,
+			},
+		)
 		if err != nil {
 			writeChatError(w, err, "open_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, struct {
-			ClientID string     `json:"client_id"`
-			State    chat.State `json:"state"`
-		}{ClientID: clientID, State: config.ChatClients.safeChatState(state)})
+			ClientID      string     `json:"client_id"`
+			ReattachToken string     `json:"reattach_token"`
+			State         chat.State `json:"state"`
+		}{
+			ClientID:      lease.ClientID,
+			ReattachToken: lease.ReattachToken,
+			State:         config.ChatClients.safeChatState(state),
+		})
 	})))
 	mux.Handle("POST /api/v1/desk/chat/turn", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -144,7 +168,6 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 		run  func(context.Context, string) error
 	}{
 		{path: "POST /api/v1/desk/chat/cancel", run: func(_ context.Context, clientID string) error { return config.ChatClients.Cancel(clientID) }},
-		{path: "POST /api/v1/desk/chat/close", run: config.ChatClients.Close},
 	} {
 		route := route
 		mux.Handle(route.path, mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +184,24 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeJSON(w, http.StatusOK, struct{}{})
 		})))
 	}
+	mux.Handle("POST /api/v1/desk/chat/close", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ClientID      string `json:"client_id"`
+			ReattachToken string `json:"reattach_token"`
+		}
+		if !decodeChatRequest(w, r, &request) {
+			return
+		}
+		err := config.ChatClients.CloseWithLease(r.Context(), ChatClientLease{
+			ClientID:      request.ClientID,
+			ReattachToken: request.ReattachToken,
+		})
+		if err != nil {
+			writeChatError(w, err, "chat_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, struct{}{})
+	})))
 }
 
 func decodeChatRequest(w http.ResponseWriter, r *http.Request, target any) bool {

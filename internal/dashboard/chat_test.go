@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -52,7 +53,8 @@ func TestTodayClientStaticContract(t *testing.T) {
 		`bootstrap.request_token`,
 		`bootstrap.event_cursor`,
 		`/api/v1/desk/events?after=`,
-		`const staleClientID = state.clientID`,
+		`sessionStorage`,
+		`waffle.desk.today.owner.v1`,
 		`generation: 0`,
 		`generation !== state.generation`,
 		`function scheduleReconnect()`,
@@ -68,7 +70,6 @@ func TestTodayClientStaticContract(t *testing.T) {
 	for _, forbidden := range []string{
 		"innerHTML",
 		"localStorage",
-		"sessionStorage",
 		"retryTurn",
 		"retryMutation",
 		"console.",
@@ -93,11 +94,11 @@ func TestTodayClientStaticContract(t *testing.T) {
 		t.Errorf("cancel mutation call sites = %d, want exactly 1", got)
 	}
 	cancelStart := strings.Index(source, "async function cancelTurn")
-	modelStart := strings.Index(source, "async function selectModel")
-	if cancelStart == -1 || modelStart <= cancelStart {
-		t.Fatal("Today client must define bounded cancel and model handlers")
+	commandStart := strings.Index(source, "async function runCommandOperation")
+	if cancelStart == -1 || commandStart <= cancelStart {
+		t.Fatal("Today client must define bounded cancel and command handlers")
 	}
-	if strings.Contains(source[cancelStart:modelStart], "setPhase(phase.idle)") {
+	if strings.Contains(source[cancelStart:commandStart], "setPhase(phase.idle)") {
 		t.Fatal("cancel must wait for turn_done instead of restoring idle itself")
 	}
 }
@@ -117,6 +118,125 @@ func TestChatClientDoesNotRetryTurnAfterDisconnect(t *testing.T) {
 	}
 	if backend.turnCalls != 1 {
 		t.Fatalf("turn calls = %d, want 1", backend.turnCalls)
+	}
+}
+
+func TestChatClientReattachesOnlyWithServerIssuedLeaseAndRotatesProof(t *testing.T) {
+	backend := &fakeChatBackend{openState: chat.State{
+		SessionID: "session-owned",
+		Title:     "Owned conversation",
+	}}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{11}, 128)),
+	)
+
+	lease, opened, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.ClientID == "" || lease.ReattachToken == "" {
+		t.Fatalf("lease = %+v, want opaque client ID and reattach proof", lease)
+	}
+	if opened.SessionID != "session-owned" {
+		t.Fatalf("opened state = %+v", opened)
+	}
+
+	reattached, recovered, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reattached.ClientID != lease.ClientID || reattached.ReattachToken == lease.ReattachToken {
+		t.Fatalf("reattached lease = %+v, original = %+v", reattached, lease)
+	}
+	if recovered.SessionID != opened.SessionID || recovered.Title != opened.Title {
+		t.Fatalf("recovered state = %+v, want %+v", recovered, opened)
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("backend opens = %d, want one owner", backend.openCount())
+	}
+
+	// A response lost after rotation can recover once with the previous proof.
+	recoveredLease, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, lease)
+	if err != nil {
+		t.Fatalf("reattach with previous proof: %v", err)
+	}
+	if recoveredLease.ClientID != lease.ClientID || recoveredLease.ReattachToken == reattached.ReattachToken {
+		t.Fatalf("lost-response recovery lease = %+v", recoveredLease)
+	}
+
+	unknown := lease
+	unknown.ReattachToken = "not-the-server-proof"
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, unknown); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("unknown reattach proof error = %v, want client not found", err)
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("unknown proof created backend; opens = %d", backend.openCount())
+	}
+}
+
+func TestChatClientLeaseRejectsStalePageCloseAfterReattach(t *testing.T) {
+	backend := &fakeChatBackend{}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{12}, 96)),
+	)
+	original, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := clients.CloseWithLease(context.Background(), original); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("stale close error = %v, want client not found", err)
+	}
+	if backend.closeCount() != 0 {
+		t.Fatalf("stale page closed reattached backend %d times", backend.closeCount())
+	}
+	if err := clients.CloseWithLease(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if backend.closeCount() != 1 {
+		t.Fatalf("current owner close calls = %d, want one", backend.closeCount())
+	}
+}
+
+func TestChatClientReattachReturnsCanonicalStateAfterSessionCommand(t *testing.T) {
+	backend := &fakeChatBackend{
+		openState: chat.State{SessionID: "session-old", Title: "Old"},
+		commandResult: chat.Result{State: &chat.State{
+			SessionID: "session-new",
+			Title:     "New",
+			History: []llm.Message{{
+				Role: llm.RoleAssistant,
+				Blocks: []llm.Block{{
+					Type: llm.BlockText,
+					Text: "Canonical history",
+				}},
+			}},
+		}},
+	}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{14}, 64)),
+	)
+	lease, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients.Command(context.Background(), lease.ClientID, chat.ParsedCommand{Name: chat.CommandNew}); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SessionID != "session-new" || state.Title != "New" ||
+		len(state.History) != 1 || state.History[0].Blocks[0].Text != "Canonical history" {
+		t.Fatalf("reattached state = %+v, want command state", state)
 	}
 }
 
@@ -171,7 +291,13 @@ func TestChatClientTurnReapsIdleClient(t *testing.T) {
 
 func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 	canary := "sk-browser-event-secret"
-	backend := &fakeChatBackend{turnEvent: chat.Event{Kind: chat.EventNotice, Text: "safe " + canary, ToolName: "/var/lib/waffle/private"}}
+	backend := &fakeChatBackend{turnEvent: chat.Event{
+		Kind:       chat.EventToolFinished,
+		Text:       "safe " + canary,
+		ToolName:   "/var/lib/waffle/private",
+		ToolCallID: "../provider/call",
+		DurationMS: 27,
+	}}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{4}, 32)))
 	// Exact-value redaction is the chat secret boundary; format regex is not (#153).
 	clients.SetRedactor(func(s string) string { return strings.ReplaceAll(s, canary, "[redacted]") })
@@ -190,7 +316,7 @@ func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 	}
 	defer hub.Unsubscribe(events)
 	event := <-events
-	if event.Resource != "chat" || event.ResourceID != client || event.Type != string(chat.EventNotice) {
+	if event.Resource != "chat" || event.ResourceID != client || event.Type != string(chat.EventToolFinished) {
 		t.Fatalf("event = %+v, want chat event for client", event)
 	}
 	data := string(event.Data)
@@ -204,6 +330,12 @@ func TestChatClientPublishesSanitizedEvents(t *testing.T) {
 	}
 	if !strings.Contains(data, `"tool_name":"[redacted]"`) {
 		t.Fatalf("tool name was not structurally rejected: %s", data)
+	}
+	if !strings.Contains(data, `"tool_call_id":"[redacted]"`) {
+		t.Fatalf("tool call ID was not structurally rejected: %s", data)
+	}
+	if !strings.Contains(data, `"duration_ms":27`) {
+		t.Fatalf("tool duration was not projected: %s", data)
 	}
 }
 
@@ -244,6 +376,30 @@ func TestChatClientPublishesSafeErrorAndStateEvents(t *testing.T) {
 	}
 	if workspace, exists := projected.State["workspace"]; !exists || string(workspace) != `""` {
 		t.Fatalf("absolute workspace path was not dropped: %s", second.Data)
+	}
+}
+
+func TestSafeChatResultProjectsPermissionValuesBeforeBrowserRendering(t *testing.T) {
+	const canary = "sk-permission-secret"
+	clients := NewChatClients(nil, nil)
+	clients.SetRedactor(func(value string) string {
+		return strings.ReplaceAll(value, canary, "[redacted]")
+	})
+	result := clients.safeChatResult(chat.Result{Permissions: &chat.PermissionView{
+		SandboxMode:  "workspace-write",
+		Allow:        []string{"read", "/var/lib/waffle/private", canary},
+		Deny:         []string{"bash", "bad\npolicy"},
+		DenyPrefixes: []string{"secret.", `C:\private`},
+	}})
+
+	want := &chat.PermissionView{
+		SandboxMode:  "workspace-write",
+		Allow:        []string{"read", "[redacted]", "[redacted]"},
+		Deny:         []string{"bash", "[redacted]"},
+		DenyPrefixes: []string{"secret.", "[redacted]"},
+	}
+	if !reflect.DeepEqual(result.Permissions, want) {
+		t.Fatalf("permissions = %+v, want %+v", result.Permissions, want)
 	}
 }
 
@@ -1126,6 +1282,7 @@ type fakeChatBackend struct {
 	openErr          error
 	turnCalls        int
 	commandCalls     int
+	commandResult    chat.Result
 	closeCalls       int
 	turnStarted      chan struct{}
 	releaseTurn      chan struct{}
@@ -1178,7 +1335,7 @@ func (f *fakeChatBackend) Command(context.Context, chat.ParsedCommand, func(chat
 	f.mu.Lock()
 	f.commandCalls++
 	f.mu.Unlock()
-	return chat.Result{}, nil
+	return f.commandResult, nil
 }
 
 func (f *fakeChatBackend) Cancel() {
