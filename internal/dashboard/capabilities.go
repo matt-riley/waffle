@@ -597,25 +597,63 @@ func decodeCapabilityRequest(w http.ResponseWriter, r *http.Request, target any)
 	})
 }
 
+// capabilityErrorMapping is one stable, redacted HTTP mapping for a known
+// capability sentinel. Codes and messages are fixed strings chosen here —
+// never raw upstream error text, paths, URLs, or credential material.
+type capabilityErrorMapping struct {
+	err     error
+	status  int
+	code    string
+	message string
+}
+
+// capabilityErrorMappings is the ordered table of known capability failures.
+// First matching errors.Is wins. Unmapped errors keep the generic fallback.
+var capabilityErrorMappings = []capabilityErrorMapping{
+	{session.ErrNotFound, http.StatusNotFound, "session_not_found", "session was not found"},
+	{ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found", "model alias was not found"},
+	{ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
+	{ErrAfterResponseUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
+	{ErrCapabilitiesUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
+
+	// skillinstall review/install path
+	{skillinstall.ErrInvalidRequest, http.StatusUnprocessableEntity, "skill_request_invalid", "skill stage request is invalid"},
+	{skillinstall.ErrSourceNotAllowed, http.StatusForbidden, "skill_source_not_allowed", "skill source is not allowed; configure [dashboard] skill_import_roots or skill_git_hosts"},
+	{skillinstall.ErrGitHostNotAllowed, http.StatusForbidden, "skill_git_host_not_allowed", "git host is not in [dashboard] skill_git_hosts"},
+	{skillinstall.ErrCommitRequired, http.StatusUnprocessableEntity, "skill_commit_required", "exact pinned git commit is required"},
+	{skillinstall.ErrBoundedGitUnsupported, http.StatusUnprocessableEntity, "skill_git_archive_unsupported", "exact-commit git archive is not supported for this source"},
+	{skillinstall.ErrCommitMismatch, http.StatusUnprocessableEntity, "skill_commit_mismatch", "fetched git commit does not match the requested commit"},
+	{skillinstall.ErrUnsafeTree, http.StatusUnprocessableEntity, "skill_tree_unsafe", "skill source tree failed safety checks"},
+	{skillinstall.ErrTreeTooLarge, http.StatusUnprocessableEntity, "skill_tree_too_large", "skill source exceeds review size limits"},
+	{skillinstall.ErrAuditFailed, http.StatusUnprocessableEntity, "skill_audit_failed", "skill audit failed; review the flags and fix the source"},
+	{skillinstall.ErrSkillExists, http.StatusConflict, "skill_already_installed", "a skill with that name is already installed"},
+	{skillinstall.ErrStageNotFound, http.StatusNotFound, "skill_stage_not_found", "skill install stage was not found"},
+	{skillinstall.ErrStageExpired, http.StatusConflict, "skill_stage_expired", "skill install stage expired; stage the skill again"},
+	{skillinstall.ErrStageChanged, http.StatusConflict, "skill_stage_changed", "staged skill changed after review; stage the skill again"},
+	{skillinstall.ErrDigestMismatch, http.StatusConflict, "skill_digest_mismatch", "review digest does not match the staged skill"},
+	{skillinstall.ErrAtomicRenameUnsupported, http.StatusServiceUnavailable, "skill_install_unsupported", "atomic skill installation is not supported on this platform"},
+
+	// providerconfig enrollment/mutation path
+	{providerconfig.ErrLocked, http.StatusConflict, "provider_locked", "provider configuration is locked by another operation — retry"},
+	{providerconfig.ErrReferenced, http.StatusConflict, "provider_referenced", "provider connection is still referenced by model aliases"},
+	{providerconfig.ErrDeferredRestartPending, http.StatusConflict, "provider_restart_pending", "provider configuration restart is pending — wait for the restart to finish"},
+	{providerconfig.ErrDeferredHealth, http.StatusBadGateway, "provider_restart_health_failed", "provider restart health check failed; previous configuration was restored"},
+	{providerconfig.ErrDeferredIntegrity, http.StatusConflict, "provider_restart_integrity_failed", "deferred provider transaction failed integrity checks"},
+}
+
 func writeCapabilityError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	response := errorResponse{
 		Code:    "capability_failed",
 		Message: "capability request could not be completed",
 	}
-	switch {
-	case errors.Is(err, session.ErrNotFound):
-		status = http.StatusNotFound
-		response.Code, response.Message = "session_not_found", "session was not found"
-	case errors.Is(err, ErrCapabilityModelNotFound):
-		status = http.StatusNotFound
-		response.Code, response.Message = "model_not_found", "model alias was not found"
-	case errors.Is(err, ErrCapabilitySkillNotFound):
-		status = http.StatusNotFound
-		response.Code, response.Message = "skill_not_found", "skill was not found"
-	case errors.Is(err, ErrAfterResponseUnavailable), errors.Is(err, ErrCapabilitiesUnavailable):
-		status = http.StatusServiceUnavailable
-		response.Code, response.Message = "capabilities_unavailable", "capabilities are unavailable"
+	for _, mapping := range capabilityErrorMappings {
+		if errors.Is(err, mapping.err) {
+			status = mapping.status
+			response.Code = mapping.code
+			response.Message = mapping.message
+			break
+		}
 	}
 	writeJSON(w, status, response)
 }

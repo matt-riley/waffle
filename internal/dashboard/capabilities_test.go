@@ -713,6 +713,142 @@ func TestRegisterCapabilitiesRoutesHasNoRemovalEndpoints(t *testing.T) {
 	}
 }
 
+func TestWriteCapabilityErrorMapsKnownSentinels(t *testing.T) {
+	// Every table entry must map to a distinct stable code with the
+	// declared status. Messages are fixed mapper strings (never upstream
+	// text). Unmapped errors keep the generic capability_failed fallback.
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"session_not_found", session.ErrNotFound, http.StatusNotFound, "session_not_found"},
+		{"model_not_found", ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found"},
+		{"skill_not_found", ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found"},
+		{"after_response_unavailable", ErrAfterResponseUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable"},
+		{"capabilities_unavailable", ErrCapabilitiesUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable"},
+
+		{"skill_invalid_request", skillinstall.ErrInvalidRequest, http.StatusUnprocessableEntity, "skill_request_invalid"},
+		{"skill_source_not_allowed", skillinstall.ErrSourceNotAllowed, http.StatusForbidden, "skill_source_not_allowed"},
+		{"skill_git_host_not_allowed", skillinstall.ErrGitHostNotAllowed, http.StatusForbidden, "skill_git_host_not_allowed"},
+		{"skill_commit_required", skillinstall.ErrCommitRequired, http.StatusUnprocessableEntity, "skill_commit_required"},
+		{"skill_git_archive_unsupported", skillinstall.ErrBoundedGitUnsupported, http.StatusUnprocessableEntity, "skill_git_archive_unsupported"},
+		{"skill_commit_mismatch", skillinstall.ErrCommitMismatch, http.StatusUnprocessableEntity, "skill_commit_mismatch"},
+		{"skill_tree_unsafe", skillinstall.ErrUnsafeTree, http.StatusUnprocessableEntity, "skill_tree_unsafe"},
+		{"skill_tree_too_large", skillinstall.ErrTreeTooLarge, http.StatusUnprocessableEntity, "skill_tree_too_large"},
+		{"skill_audit_failed", skillinstall.ErrAuditFailed, http.StatusUnprocessableEntity, "skill_audit_failed"},
+		{"skill_already_installed", skillinstall.ErrSkillExists, http.StatusConflict, "skill_already_installed"},
+		{"skill_stage_not_found", skillinstall.ErrStageNotFound, http.StatusNotFound, "skill_stage_not_found"},
+		{"skill_stage_expired", skillinstall.ErrStageExpired, http.StatusConflict, "skill_stage_expired"},
+		{"skill_stage_changed", skillinstall.ErrStageChanged, http.StatusConflict, "skill_stage_changed"},
+		{"skill_digest_mismatch", skillinstall.ErrDigestMismatch, http.StatusConflict, "skill_digest_mismatch"},
+		{"skill_install_unsupported", skillinstall.ErrAtomicRenameUnsupported, http.StatusServiceUnavailable, "skill_install_unsupported"},
+
+		{"provider_locked", providerconfig.ErrLocked, http.StatusConflict, "provider_locked"},
+		{"provider_referenced", providerconfig.ErrReferenced, http.StatusConflict, "provider_referenced"},
+		{"provider_restart_pending", providerconfig.ErrDeferredRestartPending, http.StatusConflict, "provider_restart_pending"},
+		{"provider_restart_health_failed", providerconfig.ErrDeferredHealth, http.StatusBadGateway, "provider_restart_health_failed"},
+		{"provider_restart_integrity_failed", providerconfig.ErrDeferredIntegrity, http.StatusConflict, "provider_restart_integrity_failed"},
+
+		{"wrapped_skill_exists", fmt.Errorf("install: %w", skillinstall.ErrSkillExists), http.StatusConflict, "skill_already_installed"},
+		{"unknown_fallback", errors.New("probe failed: secret sk-super-private"), http.StatusBadRequest, "capability_failed"},
+	}
+
+	// Codes for mapped sentinels (excluding the intentional shared codes and
+	// the generic fallback) must be unique so the UI can branch on them.
+	sharedOK := map[string]bool{
+		"capabilities_unavailable": true,
+		"capability_failed":        true,
+	}
+	seenCodes := map[string]string{}
+	for _, tc := range cases {
+		if sharedOK[tc.code] {
+			continue
+		}
+		if prev, ok := seenCodes[tc.code]; ok && prev != tc.name {
+			// Allow the same code only when testing wrapped variants of the
+			// same sentinel class (name prefix match).
+			if !strings.HasPrefix(tc.name, "wrapped_") {
+				t.Fatalf("code %q used by both %q and %q", tc.code, prev, tc.name)
+			}
+		}
+		if !strings.HasPrefix(tc.name, "wrapped_") {
+			seenCodes[tc.code] = tc.name
+		}
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeCapabilityError(recorder, tc.err)
+
+			if recorder.Code != tc.status {
+				t.Fatalf("status = %d, want %d body=%s", recorder.Code, tc.status, recorder.Body.String())
+			}
+			var body errorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Code != tc.code {
+				t.Fatalf("code = %q, want %q", body.Code, tc.code)
+			}
+			if body.Message == "" {
+				t.Fatal("message is empty")
+			}
+			// Redaction: never echo upstream material (credentials, secrets).
+			if strings.Contains(body.Message, capabilityCredentialCanary) {
+				t.Fatalf("message leaked credential material: %q", body.Message)
+			}
+			if strings.Contains(body.Message, "probe failed") {
+				t.Fatalf("message leaked upstream error text: %q", body.Message)
+			}
+			// Mapped messages must match the table's fixed string, not err.Error().
+			if tc.code != "capability_failed" && body.Message == tc.err.Error() {
+				t.Fatalf("message echoed raw error: %q", body.Message)
+			}
+		})
+	}
+}
+
+func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
+	// Guard against the mapper table drifting from the issue's required
+	// skillinstall and providerconfig sentinels.
+	required := []error{
+		skillinstall.ErrSourceNotAllowed,
+		skillinstall.ErrGitHostNotAllowed,
+		skillinstall.ErrCommitRequired,
+		skillinstall.ErrCommitMismatch,
+		skillinstall.ErrUnsafeTree,
+		skillinstall.ErrTreeTooLarge,
+		skillinstall.ErrAuditFailed,
+		skillinstall.ErrSkillExists,
+		skillinstall.ErrStageExpired,
+		skillinstall.ErrStageChanged,
+		skillinstall.ErrDigestMismatch,
+		providerconfig.ErrLocked,
+		providerconfig.ErrReferenced,
+		providerconfig.ErrDeferredRestartPending,
+		providerconfig.ErrDeferredHealth,
+		providerconfig.ErrDeferredIntegrity,
+	}
+	for _, want := range required {
+		found := false
+		for _, mapping := range capabilityErrorMappings {
+			if mapping.err == want {
+				found = true
+				if mapping.code == "" || mapping.message == "" || mapping.status == 0 {
+					t.Fatalf("incomplete mapping for %v", want)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("capabilityErrorMappings missing %v", want)
+		}
+	}
+}
+
 type fakeCapabilityProviders struct {
 	snapshot      providerconfig.Listing
 	snapshotErrs  []error
