@@ -382,6 +382,22 @@ func (s *fixtureSessions) SetModelAlias(_ context.Context, id, alias string) err
 		return session.ErrNotFound
 	}
 	value.ModelAlias = strings.TrimSpace(alias)
+	value.ModelAliasVersion++
+	return nil
+}
+
+func (s *fixtureSessions) SetModelAliasIfVersion(_ context.Context, id, alias string, expectedVersion int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	if value.ModelAliasVersion != expectedVersion {
+		return fmt.Errorf("%w: %s", session.ErrModelAliasChanged, id)
+	}
+	value.ModelAlias = strings.TrimSpace(alias)
+	value.ModelAliasVersion++
 	return nil
 }
 

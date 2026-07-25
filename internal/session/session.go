@@ -373,7 +373,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, created_at, updated_at
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -386,7 +386,7 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	for rows.Next() {
 		var sess Session
 		var created, updated string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &created, &updated); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)

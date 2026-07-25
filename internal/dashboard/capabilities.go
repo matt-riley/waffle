@@ -57,7 +57,7 @@ type CapabilityProviders interface {
 
 type CapabilitySessions interface {
 	Get(context.Context, string) (*session.Session, error)
-	SetModelAlias(context.Context, string, string) error
+	SetModelAliasIfVersion(context.Context, string, string, int64) error
 	ModelAliasReferences(context.Context, string) ([]string, error)
 	ReplaceModelAlias(context.Context, string, string) error
 }
@@ -212,6 +212,10 @@ func (c *Capabilities) SetSessionModel(ctx context.Context, sessionID, alias str
 	if c == nil || c.Providers == nil || c.Sessions == nil {
 		return ErrCapabilitiesUnavailable
 	}
+	current, err := c.Sessions.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
 	snapshot, err := c.Providers.Snapshot(ctx)
 	if err != nil {
 		return err
@@ -219,10 +223,7 @@ func (c *Capabilities) SetSessionModel(ctx context.Context, sessionID, alias str
 	if _, ok := snapshot.Models[strings.TrimSpace(alias)]; !ok {
 		return ErrCapabilityModelNotFound
 	}
-	if _, err := c.Sessions.Get(ctx, sessionID); err != nil {
-		return err
-	}
-	return c.Sessions.SetModelAlias(ctx, sessionID, alias)
+	return c.Sessions.SetModelAliasIfVersion(ctx, sessionID, alias, current.ModelAliasVersion)
 }
 
 func (c *Capabilities) SetDefaultModel(ctx context.Context, alias string) (providerconfig.MutationResult, error) {

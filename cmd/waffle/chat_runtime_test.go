@@ -59,6 +59,37 @@ func TestChatRuntimeModelSelectionPersistsAndResumeRestoresIt(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeContinueLoadsModelAliasVersion(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "gpt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed := newRuntimeAgainstSameStore(t, configuredChatModels(), sessions)
+	continued, err := resumed.Open(ctx, chatpkg.OpenOptions{Continue: true})
+	if err != nil || continued.SessionID != state.SessionID || continued.ModelAlias != "gpt" {
+		t.Fatalf("continued = %+v, %v", continued, err)
+	}
+	if _, err := resumed.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandModel, Args: "claude"}, nil); err != nil {
+		t.Fatalf("valid model change after continue: %v", err)
+	}
+	saved, err := sessions.Get(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ModelAlias != "claude" || saved.ModelAliasVersion != 2 {
+		t.Fatalf("saved after continue = %+v", saved)
+	}
+}
+
 func TestChatRuntimeStaleModelSelectionCannotReintroduceRemovedAlias(t *testing.T) {
 	ctx := context.Background()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())

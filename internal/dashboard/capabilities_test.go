@@ -62,6 +62,30 @@ func TestCapabilitiesSessionModelIsolatedFromGlobalRoles(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesSessionModelRejectsRemovalAfterProviderSnapshot(t *testing.T) {
+	sessions := &fakeCapabilitySessions{sessions: map[string]*session.Session{
+		"sess-1": {ID: "sess-1", ModelAlias: "gpt"},
+	}}
+	providers := &fakeCapabilityProviders{
+		snapshot: providerconfig.Listing{Models: map[string]providerconfig.ModelSummary{
+			"gpt": {Provider: "openai", Model: "gpt"},
+		}},
+		snapshotHook: func() {
+			if err := sessions.SetModelAlias(context.Background(), "sess-1", ""); err != nil {
+				t.Fatalf("simulate SessionApply: %v", err)
+			}
+		},
+	}
+	capabilities := &Capabilities{Providers: providers, Sessions: sessions}
+
+	if err := capabilities.SetSessionModel(t.Context(), "sess-1", "gpt"); !errors.Is(err, session.ErrModelAliasChanged) {
+		t.Fatalf("stale session model error = %v, want ErrModelAliasChanged", err)
+	}
+	if got := sessions.sessions["sess-1"].ModelAlias; got != "" {
+		t.Fatalf("stale session model restored alias %q", got)
+	}
+}
+
 func TestCapabilitiesSnapshotCombinesModelsAndSessionSkills(t *testing.T) {
 	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
 		State:        "ready",
@@ -1483,6 +1507,7 @@ type fakeCapabilityProviders struct {
 	lastAdd                     providerconfig.AddModelRequest
 	modelPreview                providerconfig.ModelRemovalPreview
 	providerPreview             providerconfig.ProviderRemovalPreview
+	snapshotHook                func()
 	removeModelCalls            int
 	removeModelAlias            string
 	removeModelReplacement      string
@@ -1498,6 +1523,9 @@ func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.List
 		err := f.snapshotErrs[0]
 		f.snapshotErrs = f.snapshotErrs[1:]
 		return providerconfig.Listing{}, err
+	}
+	if f.snapshotHook != nil {
+		f.snapshotHook()
 	}
 	return f.snapshot, nil
 }
@@ -1619,6 +1647,21 @@ func (f *fakeCapabilitySessions) SetModelAlias(_ context.Context, id, alias stri
 	}
 	f.setSession, f.setAlias = id, alias
 	f.sessions[id].ModelAlias = alias
+	f.sessions[id].ModelAliasVersion++
+	return nil
+}
+
+func (f *fakeCapabilitySessions) SetModelAliasIfVersion(_ context.Context, id, alias string, expectedVersion int64) error {
+	value, ok := f.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	if value.ModelAliasVersion != expectedVersion {
+		return fmt.Errorf("%w: %s", session.ErrModelAliasChanged, id)
+	}
+	f.setSession, f.setAlias = id, alias
+	value.ModelAlias = alias
+	value.ModelAliasVersion++
 	return nil
 }
 
