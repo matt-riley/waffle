@@ -317,6 +317,11 @@ func (c *Client) CloseContext(ctx context.Context) error {
 }
 
 func runDockerCleanup(ctx context.Context, args ...string) error {
+	// Fail fast when the caller's deadline is already exhausted so sequential
+	// stop/rm cleanup cannot pay another process spawn under a spent context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err == nil || strings.Contains(string(out), "No such container:") {
 		return nil
