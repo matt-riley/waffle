@@ -7,6 +7,7 @@
   --ginger-dark: #9d421f;
   --healthy: #2f7d55;
   --danger: #b83a32;
+  --danger-text: #f3d8cf;
   --rule: #d7c9b7;
   --rule-dark: #aa9985;
   --shadow: 3px 3px 0 var(--ink);
@@ -207,7 +208,7 @@ code,
 
 .rail-status[data-connection-state="disconnected"] #rail-connection,
 .rail-status[data-connection-state="degraded"] #rail-connection {
-  color: #f3d8cf;
+  color: var(--danger-text);
 }
 
 main {

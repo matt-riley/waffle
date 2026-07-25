@@ -100,7 +100,16 @@ function setPhase(next) {
   } else if (next === phase.opening) {
     pushRailConnection(globalThis.waffleDeskRail?.connectionStates?.connecting || "connecting");
   } else {
-    pushRailConnection(globalThis.waffleDeskRail?.connectionStates?.connected || "connected");
+    // Do not mask a process-health degraded rail with "connected" just because
+    // an active session phase is live. Bootstrap owns degraded health.
+    const degraded =
+      globalThis.waffleDeskRail?.connectionStates?.degraded || "degraded";
+    const current = globalThis.waffleDeskRail?.getState?.()?.connection;
+    if (current !== degraded) {
+      pushRailConnection(
+        globalThis.waffleDeskRail?.connectionStates?.connected || "connected",
+      );
+    }
   }
   updateControls();
 }
