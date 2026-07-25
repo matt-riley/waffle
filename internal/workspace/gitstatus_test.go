@@ -37,7 +37,14 @@ func TestParseGitStatusReadsBranchDirtinessAndTracking(t *testing.T) {
 			want: GitStatus{Detached: true, CommitSHA: "feedfac", Subject: "detached work"},
 		},
 		{
-			name: "empty repository",
+			// An unborn branch still names itself via symbolic-ref, so only the
+			// commit fields are empty.
+			name: "cloned repository with no commits",
+			out:  "branch\tmain\ndirty\t0\ntracking\t0\nsha\t\nsubject\t",
+			want: GitStatus{Branch: "main"},
+		},
+		{
+			name: "detached head with no reachable commit",
 			out:  "branch\tHEAD\ndirty\t0\ntracking\t0\nsha\t\nsubject\t",
 			want: GitStatus{Detached: true},
 		},

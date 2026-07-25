@@ -940,7 +940,10 @@ type GitStatus struct {
 // gitStatusScript is one read-only shell pass over the repository. Every
 // command is a query: nothing fetches, writes refs, or mutates the tree.
 const gitStatusScript = `cd /work/repo && ` +
-	`printf 'branch\t%s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)" && ` +
+	// symbolic-ref, not rev-parse --abbrev-ref: it still names the branch on a
+	// freshly cloned repo with no commits, and fails only when HEAD really is
+	// detached.
+	`printf 'branch\t%s\n' "$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)" && ` +
 	`printf 'dirty\t%s\n' "$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')" && ` +
 	`if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then ` +
 	`printf 'tracking\t1\n'; printf 'counts\t%s\n' "$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)"; ` +
