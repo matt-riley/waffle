@@ -245,16 +245,25 @@ func (c Config) LayeredAgentPolicy(group, profileName string, repo *ToolLayer) L
 
 func samePolicy(a, b ResolvedAgentPolicy) bool {
 	return a.Mode == b.Mode && a.Guidance == b.Guidance &&
-		sameStrings(a.Allow, b.Allow) && sameStrings(a.Deny, b.Deny) &&
-		sameStrings(a.DenyPrefixes, b.DenyPrefixes)
+		sameStringSet(a.Allow, b.Allow) && sameStringSet(a.Deny, b.Deny) &&
+		sameStringSet(a.DenyPrefixes, b.DenyPrefixes)
 }
 
-func sameStrings(a, b []string) bool {
+// sameStringSet compares tool and prefix lists as sets. These lists are
+// unordered policy: a profile that restates its group's allowlist in a
+// different order has changed nothing, and must not be reported as having
+// applied a restriction.
+func sameStringSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	counts := make(map[string]int, len(a))
+	for _, value := range a {
+		counts[value]++
+	}
+	for _, value := range b {
+		counts[value]--
+		if counts[value] < 0 {
 			return false
 		}
 	}

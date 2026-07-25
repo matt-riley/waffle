@@ -270,15 +270,15 @@ if (dialog) {
     }
     try {
       const query = profile ? `?profile=${encodeURIComponent(profile)}` : "";
-      const view = await get(`/api/v1/desk/posture${query}`);
-      let denials = [];
-      if (session) {
-        const snapshot = await get(
-          `/api/v1/desk/posture/denials?session=${encodeURIComponent(session)}`,
-        );
-        denials = Array.isArray(snapshot?.denials) ? snapshot.denials : [];
-      }
-      render(view, denials);
+      // Both reads are independent, so issue them together rather than making
+      // the denial trace wait on the posture response.
+      const [view, snapshot] = await Promise.all([
+        get(`/api/v1/desk/posture${query}`),
+        session
+          ? get(`/api/v1/desk/posture/denials?session=${encodeURIComponent(session)}`)
+          : Promise.resolve(null),
+      ]);
+      render(view, Array.isArray(snapshot?.denials) ? snapshot.denials : []);
       elements.status.textContent = "";
     } catch (error) {
       elements.status.textContent =

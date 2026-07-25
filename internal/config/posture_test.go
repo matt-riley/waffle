@@ -291,6 +291,37 @@ func TestLayeredAgentPolicyRecordsEachTier(t *testing.T) {
 	}
 }
 
+// Allow/deny lists are unordered policy, so restating a group's allowlist in a
+// different order is not a restriction and must not read as "Applied".
+func TestLayeredAgentPolicyIgnoresListOrderWhenMarkingApplied(t *testing.T) {
+	cfg := Config{
+		Sandbox: Sandbox{Mode: "host"},
+		Agent: Agent{
+			Groups: map[string]AgentGroup{
+				GroupMain: {Tools: ToolPolicy{Allow: []string{"bash", "read_file"}}},
+			},
+			Profiles: map[string]AgentProfile{
+				"restater": {Tools: ToolPolicy{Allow: []string{"read_file", "bash"}}},
+				"narrower": {Tools: ToolPolicy{Allow: []string{"read_file"}}},
+			},
+		},
+	}
+
+	restated := cfg.LayeredAgentPolicy(GroupMain, "restater", nil)
+	if restated.Layers[1].Applied {
+		t.Fatalf("reordered allowlist reported as applied: %+v", restated.Layers[1])
+	}
+	if !samePolicy(restated.Layers[0].Result, restated.Effective) {
+		t.Fatal("reordering changed the effective policy")
+	}
+
+	// A genuine narrowing still reports as applied.
+	narrowed := cfg.LayeredAgentPolicy(GroupMain, "narrower", nil)
+	if !narrowed.Layers[1].Applied {
+		t.Fatal("a real narrowing was reported as no change")
+	}
+}
+
 func TestLayeredAgentPolicyMarksInertProfileLayer(t *testing.T) {
 	cfg := Config{
 		Sandbox: Sandbox{Mode: "host"},
