@@ -173,6 +173,25 @@ function createHarness({
     createTextNode: (text) => new FakeTextNode(text),
     querySelector: (selector) => elements[selector] || null,
   };
+  const railCalls = [];
+  const waffleDeskRail = {
+    connectionStates: {
+      connecting: "connecting",
+      connected: "connected",
+      degraded: "degraded",
+      disconnected: "disconnected",
+    },
+    modelScopes: {
+      session: "session",
+      waffleWide: "waffle-wide",
+    },
+    setConnection(state) {
+      railCalls.push({ kind: "connection", state });
+    },
+    setModel(alias, scope) {
+      railCalls.push({ kind: "model", alias, scope });
+    },
+  };
   const calls = [];
   const cancelResponse = deferred();
   const turnResponse = deferred();
@@ -258,6 +277,7 @@ function createHarness({
     fetch,
     location: { href },
     URL,
+    waffleDeskRail,
   });
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
@@ -266,6 +286,7 @@ function createHarness({
     cancelResponse,
     elements,
     EventSource: FakeEventSource,
+    railCalls,
     turnResponse,
   };
 }
@@ -287,6 +308,31 @@ test("bootstrap replaces stale in-memory authority and seeds the native event cu
   assert.equal(open.options.headers["X-Waffle-Desk-Token"], "fresh-token");
   assert.equal(harness.EventSource.instances.length, 1);
   assert.equal(harness.EventSource.instances[0].url, "/api/v1/desk/events?after=42");
+  assert.deepEqual(
+    harness.railCalls.filter((call) => call.kind === "model"),
+    [{ kind: "model", alias: "old-model", scope: "session" }],
+  );
+  assert.equal(
+    harness.railCalls.some(
+      (call) => call.kind === "connection" && call.state === "connected",
+    ),
+    true,
+  );
+});
+
+test("rail receives disconnected when the live stream closes", async () => {
+  const harness = createHarness();
+  await flush();
+  harness.railCalls.length = 0;
+
+  harness.EventSource.instances[0].emit("error", {});
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "disconnected");
+  assert.deepEqual(harness.railCalls.at(-1), {
+    kind: "connection",
+    state: "disconnected",
+  });
 });
 
 test("open at desk selects exactly one requested persisted session", async () => {

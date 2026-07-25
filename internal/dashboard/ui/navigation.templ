@@ -10,10 +10,16 @@ templ Navigation(view ShellView) {
 			@NavigationItem("memory", "Memory", view.ActiveSection)
 			@NavigationItem("capabilities", "Capabilities", view.ActiveSection)
 		</ul>
-		<div class="rail-status" aria-label="Connection and model">
-			<span class="status-dot" aria-hidden="true"></span>
-			<span>{ view.Connection }</span>
-			<code>{ view.ModelAlias }</code>
+		<div
+			class="rail-status"
+			id="rail-status"
+			data-connection-state="connecting"
+			aria-live="polite"
+			aria-label={ "Connection and model: " + view.Connection + ", " + view.ModelAlias }
+		>
+			<span class="status-dot is-connecting" id="rail-status-dot" aria-hidden="true"></span>
+			<span id="rail-connection">{ view.Connection }</span>
+			<code id="rail-model" data-model-scope="">{ view.ModelAlias }</code>
 		</div>
 	</nav>
 }

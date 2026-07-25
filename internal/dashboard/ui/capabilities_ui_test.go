@@ -11,9 +11,7 @@ import (
 
 func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) {
 	var rendered bytes.Buffer
-	if err := Capabilities(CapabilitiesView{
-		AssetVersion: "test-version",
-	}).Render(t.Context(), &rendered); err != nil {
+	if err := Capabilities().Render(t.Context(), &rendered); err != nil {
 		t.Fatal(err)
 	}
 	body := rendered.String()
@@ -33,6 +31,8 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`id="capability-restart-status"`,
 		`Restart required.`,
 		`id="capability-connections"`,
+		`id="capability-status"`,
+		`role="status"`,
 		`aria-live="polite"`,
 		`Connection health only`,
 		`Credentials, endpoints, commands, environment, and tool policy details stay private.`,
@@ -51,11 +51,52 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`aria-describedby="capability-provider-status"`,
 		`id="capability-provider-status"`,
 		`class="capability-form-status"`,
-		`capabilities.js`,
-		`capabilities.css`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Capabilities markup missing %q:\n%s", want, body)
+		}
+	}
+	// List containers must not announce full re-renders; status regions keep aria-live.
+	for _, listID := range []string{
+		`id="capability-models"`,
+		`id="capability-skills"`,
+		`id="capability-connections"`,
+		`id="capability-catalogue-results"`,
+	} {
+		idx := strings.Index(body, listID)
+		if idx < 0 {
+			t.Fatalf("missing list container %q", listID)
+		}
+		// Inspect the opening tag only.
+		end := strings.Index(body[idx:], ">")
+		if end < 0 {
+			t.Fatalf("unclosed tag for %q", listID)
+		}
+		openTag := body[idx : idx+end+1]
+		if strings.Contains(openTag, `aria-live`) {
+			t.Errorf("list container %q must not carry aria-live: %s", listID, openTag)
+		}
+	}
+	if strings.Contains(body, "capabilities.css") || strings.Contains(body, "capabilities.js") {
+		t.Error("Capabilities section must not link stylesheet/script from body; use CapabilitiesAssets in head")
+	}
+}
+
+func TestCapabilitiesAssetsAreVersionedInHead(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := CapabilitiesAssets().Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	version := CapabilitiesAssetVersion()
+	for _, required := range []string{
+		`/desk/assets/capabilities.css?v=` + version,
+		`/desk/assets/capabilities.js?v=` + version,
+		`type="module"`,
+		`rel="stylesheet"`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("CapabilitiesAssets missing %q:\n%s", required, body)
 		}
 	}
 }
@@ -76,6 +117,11 @@ func TestCapabilitiesConnectionsStayReadableOnNarrowScreens(t *testing.T) {
 		if !regexp.MustCompile(pattern).MatchString(body) {
 			t.Errorf("%s rule missing from capabilities.css", name)
 		}
+	}
+	// Input chrome lives in the shared app.css baseline, not section CSS.
+	// Field-level aria-invalid highlights are allowed.
+	if regexp.MustCompile(`\.capability-panel\s+input\s*\{`).MatchString(body) {
+		t.Error("capabilities.css must not redeclare input control baseline")
 	}
 }
 

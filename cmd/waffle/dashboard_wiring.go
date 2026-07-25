@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -142,6 +143,35 @@ func configureServeWorkspaceManager(cfg config.Config, manager *workspace.Manage
 	manager.BrokerURL = brokerURL
 	if cfg.Workspace.Egress != "full" {
 		manager.ProxyURL = strings.TrimRight(brokerURL, "/") + "/egress"
+	}
+}
+
+// verifyProviderReadiness re-proves provider readiness for the config this
+// process just loaded. It reuses an already-built manager when Desk supplied one
+// and otherwise builds its own, because the stale-generation problem it repairs
+// is independent of whether Desk is enabled.
+//
+// Every failure is logged rather than returned: readiness verification is a
+// repair, and a host that cannot complete it must still finish starting.
+func verifyProviderReadiness(ctx context.Context, log *slog.Logger, manager *providerconfig.Manager) {
+	if manager == nil {
+		built, err := defaultDashboardProviderManager()
+		if err != nil {
+			log.Warn("provider readiness verification unavailable", "err", err)
+			return
+		}
+		manager = built
+	}
+	refreshed, err := manager.VerifyReadiness(ctx)
+	switch {
+	case errors.Is(err, providerconfig.ErrLocked):
+		// A concurrent provider mutation owns the lock and will write the
+		// generation itself.
+		log.Debug("provider readiness verification skipped; provider config is locked")
+	case err != nil:
+		log.Warn("verify provider readiness", "err", err)
+	case refreshed:
+		log.Info("re-proved provider readiness for the current config")
 	}
 }
 

@@ -794,11 +794,21 @@ if (root) {
     };
 
     await withSubmitPending(form, async () => {
-      let result;
       try {
-        result = await postMutation("/api/v1/desk/providers", body, "provider");
-        clearFormIntent("provider");
-        setFormStatus(form, "Provider enrolled.", "");
+        let result;
+        try {
+          result = await postMutation("/api/v1/desk/providers", body, "provider");
+          clearFormIntent("provider");
+          setFormStatus(form, "Provider enrolled.", "");
+        } finally {
+          // Always clear the credential field after an enroll attempt.
+          elements.providerCredential.value = "";
+        }
+        if (result.restart_required) {
+          await handleRestartRequired(result);
+        } else {
+          await loadCapabilities();
+        }
       } catch (error) {
         applyFieldError(form, error);
         setFormStatus(
@@ -806,14 +816,6 @@ if (root) {
           error.safeMessage || "Capability request could not be completed.",
           "error",
         );
-        return;
-      } finally {
-        elements.providerCredential.value = "";
-      }
-      if (result.restart_required) {
-        await handleRestartRequired(result);
-      } else {
-        await loadCapabilities();
       }
     });
   });

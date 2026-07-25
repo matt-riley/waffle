@@ -91,14 +91,6 @@
   padding-top: 1rem;
 }
 
-.capability-panel input {
-  background: #fff;
-  border: 1px solid var(--ink);
-  min-height: 2.75rem;
-  padding: 0.65rem 0.75rem;
-  width: 100%;
-}
-
 .capability-card {
   border-bottom: 1px solid var(--rule);
   display: grid;

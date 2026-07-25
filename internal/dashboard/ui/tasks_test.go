@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,16 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 			t.Errorf("Tasks view missing %q", required)
 		}
 	}
+	// List container must not announce full re-renders; status regions keep aria-live.
+	listIdx := strings.Index(body, `id="tasks-list"`)
+	if listIdx < 0 {
+		t.Fatal("missing tasks-list")
+	}
+	end := strings.Index(body[listIdx:], ">")
+	openTag := body[listIdx : listIdx+end+1]
+	if strings.Contains(openTag, `aria-live`) {
+		t.Errorf("tasks-list must not carry aria-live: %s", openTag)
+	}
 }
 
 func TestTasksStylesProvideResponsiveCardsAndAttentionState(t *testing.T) {
@@ -62,6 +73,27 @@ func TestTasksStylesProvideResponsiveCardsAndAttentionState(t *testing.T) {
 		if !strings.Contains(css, required) {
 			t.Errorf("Tasks CSS missing %q", required)
 		}
+	}
+}
+
+func TestAppCSSIncludesInputInSharedControlBaseline(t *testing.T) {
+	contents, err := assetFiles.ReadFile("assets/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(contents)
+	for _, required := range []string{
+		"font: inherit",
+		"input:disabled",
+		`input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]))`,
+	} {
+		if !strings.Contains(css, required) {
+			t.Errorf("app.css control baseline missing %q", required)
+		}
+	}
+	// font: inherit selector list must include input.
+	if !regexp.MustCompile(`(?s)a,\s*button,\s*select,\s*textarea,\s*input\s*\{[^}]*font:\s*inherit`).MatchString(css) {
+		t.Error("input must share font: inherit with a, button, select, textarea")
 	}
 }
 
