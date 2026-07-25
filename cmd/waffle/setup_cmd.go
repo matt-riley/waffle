@@ -139,13 +139,16 @@ func setupCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 }
 
 // setupAffirmative treats anything but an explicit refusal as consent, because
-// the prompt already defaults to "y" and an empty line returns that default.
+// setupAffirmative requires an explicit yes. Enabling a browser interface is a
+// posture change, so anything unrecognised — "nope", a typo, a stray paste —
+// declines rather than consenting by accident. Bare Enter still enables it:
+// the prompt's own default is "y", so an empty line arrives here as "y".
 func setupAffirmative(answer string) bool {
 	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "n", "no":
-		return false
-	default:
+	case "y", "yes":
 		return true
+	default:
+		return false
 	}
 }
 

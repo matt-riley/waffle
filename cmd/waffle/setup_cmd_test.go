@@ -283,6 +283,63 @@ func TestSetupSkipsAnAlreadyEnabledDesk(t *testing.T) {
 	}
 }
 
+// Only an explicit yes enables Desk. "nope" is a refusal to any reader, and a
+// prompt that read it as consent would be the one place setup changes posture
+// against the owner's intent.
+func TestSetupAffirmativeRequiresAnExplicitYes(t *testing.T) {
+	for _, answer := range []string{"y", "Y", "yes", "YES", " yes "} {
+		if !setupAffirmative(answer) {
+			t.Errorf("setupAffirmative(%q) = false, want true", answer)
+		}
+	}
+	for _, answer := range []string{"n", "no", "NO", "nope", "nah", "sure?", "", "yy", "1"} {
+		if setupAffirmative(answer) {
+			t.Errorf("setupAffirmative(%q) = true, want false", answer)
+		}
+	}
+}
+
+// Bare Enter still enables Desk: the prompt's default carries the intent, so
+// the affirmative allowlist must not turn the offered default into a refusal.
+func TestSetupEnterAcceptsTheOfferedDefault(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader("\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Dashboard.Enabled {
+		t.Fatalf("bare Enter did not accept the offered default:\n%s", stdout.String())
+	}
+}
+
+func TestSetupTreatsAnUnrecognisedAnswerAsRefusal(t *testing.T) {
+	home := installSetupHome(t)
+	id := seedSetupIdentity(t)
+	writeSetupConfiguredConfig(t, home, id)
+
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"setup"}, strings.NewReader("nope\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("setup: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Waffle Desk left disabled") {
+		t.Fatalf("want the declined notice:\n%s", stdout.String())
+	}
+	cfg, err := config.Load(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Enabled {
+		t.Fatal("an unrecognised answer enabled the dashboard")
+	}
+}
+
 func appendSetupConfig(t *testing.T, home, extra string) {
 	t.Helper()
 	path := filepath.Join(home, "config.toml")
