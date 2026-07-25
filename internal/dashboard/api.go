@@ -28,9 +28,12 @@ type APIConfig struct {
 	Memory          memory.Workspace
 	WorkspaceEgress string
 	Capabilities    *Capabilities
-	Restart         RestartScheduler
-	RestartOutcome  MutationOutcomeObserver
-	Version         string
+	// Posture is the read-only agent-posture projection (#193). Optional: when
+	// nil the endpoints are simply not mounted.
+	Posture        *PostureService
+	Restart        RestartScheduler
+	RestartOutcome MutationOutcomeObserver
+	Version        string
 	// ProcessGeneration is a coordinator-created opaque identity that changes
 	// for every serving process. Restart-aware clients use it to reject the
 	// still-running process while waiting for deferred activation.

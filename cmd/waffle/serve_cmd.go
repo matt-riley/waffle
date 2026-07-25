@@ -376,7 +376,12 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			Memory:          ws,
 			WorkspaceEgress: cfg.Workspace.Egress,
 			Capabilities:    capabilities,
-			Restart:         restart,
+			// Posture shares Today's exact-value redactor rather than adding a
+			// second secret boundary (#193).
+			Posture: dashboard.NewPostureService(
+				cfg, dashboardClients, dashboard.NewPostureAuditSource(st.DB),
+			),
+			Restart: restart,
 			RestartOutcome: func(outcome dashboard.RestartScheduleOutcome) {
 				log.Info("dashboard restart outcome",
 					"scheduled", outcome.Scheduled,

@@ -732,6 +732,13 @@ func (c *ChatClients) projectChatText(event chat.Event) string {
 	return c.redactExact(event.Text)
 }
 
+// RedactExact exposes the chat exact-value redactor to sibling Desk surfaces
+// (the posture view, #193) so they share one secret boundary instead of
+// standing up a second that can drift.
+func (c *ChatClients) RedactExact(value string) string {
+	return c.redactExact(value)
+}
+
 func (c *ChatClients) redactExact(value string) string {
 	if value == "" {
 		return value

@@ -60,6 +60,9 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 			Events:      config.Hub,
 		})
 	}
+	if config.Posture != nil {
+		RegisterPostureRoutes(mux, PostureRouteConfig{Service: config.Posture})
+	}
 	if config.Capabilities != nil && config.Idempotency != nil {
 		RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
 			Service: config.Capabilities,

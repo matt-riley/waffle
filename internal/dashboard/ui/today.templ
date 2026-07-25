@@ -88,6 +88,12 @@ templ Today(view ShellView) {
 						<dd id="desk-profile">—</dd>
 					</div>
 					<div>
+						<dt>Posture</dt>
+						<dd>
+							<button id="desk-posture-open" class="posture-trigger" type="button" data-posture-open>View system prompt and policy</button>
+						</dd>
+					</div>
+					<div>
 						<dt>Workspace</dt>
 						<dd id="desk-workspace">No workspace</dd>
 					</div>
@@ -135,5 +141,6 @@ templ Today(view ShellView) {
 				</nav>
 			</aside>
 		</div>
+		@PostureDialog()
 	</section>
 }
