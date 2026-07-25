@@ -173,18 +173,21 @@ test("Today sends a streamed reply and confirms cancellation", async ({ page }) 
   await expect(cancel).toBeDisabled();
 });
 
-test("Today makes SSE disconnect explicit and recovers from canonical state", async ({ page }) => {
+test("Today reconnects after SSE drop without tearing down the desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the recovery flow once.");
   await page.route("**/api/v1/desk/events?*", (route) => route.abort("connectionrefused"));
   await page.goto(deskURL("today"));
 
-  await expect(page.locator("#desk-phase")).toHaveText("Disconnected");
-  await expect(page.locator("#desk-stale-status")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Refresh Desk" })).toBeEnabled();
+  // Dropped stream surfaces a reconnecting state rather than full teardown.
+  await expect(page.locator("#desk-phase")).toHaveText("Reconnecting");
+  await expect(page.locator("#desk-stale-status")).toBeHidden();
+  // Composer stays live while reconnecting (recoverable path).
+  await expect(page.getByLabel("Message Waffle")).toBeEnabled();
 
+  // Restore the event stream; the client should auto-reconnect from the
+  // stored cursor without requiring "Refresh Desk".
   await page.unroute("**/api/v1/desk/events?*");
-  await page.getByRole("button", { name: "Refresh Desk" }).click();
-  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await expect(page.locator("#desk-phase")).toHaveText("Ready", { timeout: 15_000 });
   await expect(page.locator("#desk-stale-status")).toBeHidden();
   await expect(page.getByLabel("Message Waffle")).toBeEnabled();
 });
