@@ -231,7 +231,10 @@ func TestCapabilitiesModelRemovalConfirmationUsesExplicitReplacementForSessions(
 	providers := &fakeCapabilityProviders{modelPreview: providerconfig.ModelRemovalPreview{
 		Alias: "gpt", Provider: "openai", Default: true, Revision: "revision-1",
 	}, result: providerconfig.MutationResult{RestartRequired: true, TransactionID: "txn-remove-model"}}
-	sessions := &fakeCapabilitySessions{modelRefs: map[string][]string{"gpt": {"session-1"}}}
+	sessions := &fakeCapabilitySessions{
+		modelRefs: map[string][]string{"gpt": {"session-1"}},
+		sessions:  map[string]*session.Session{"session-1": {ID: "session-1", ModelAlias: "gpt"}},
+	}
 	capabilities := &Capabilities{
 		Providers: providers,
 		Sessions:  sessions,
@@ -247,6 +250,9 @@ func TestCapabilitiesModelRemovalConfirmationUsesExplicitReplacementForSessions(
 	}
 	if !result.RestartRequired || providers.removeModelAlias != "gpt" || providers.removeModelReplacement != "small" {
 		t.Fatalf("result=%#v removal=%q/%q", result, providers.removeModelAlias, providers.removeModelReplacement)
+	}
+	if providers.removeModelExpectedRevision != "revision-1" {
+		t.Fatalf("expected revision = %q, want revision-1", providers.removeModelExpectedRevision)
 	}
 	if sessions.replacedFrom != "gpt" || sessions.replacedTo != "small" {
 		t.Fatalf("session replacement = %q -> %q", sessions.replacedFrom, sessions.replacedTo)
@@ -1439,24 +1445,25 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 }
 
 type fakeCapabilityProviders struct {
-	snapshot               providerconfig.Listing
-	snapshotErrs           []error
-	snapshotCalls          int
-	result                 providerconfig.MutationResult
-	mutationErr            error
-	mutations              int
-	lastAPIKey             string
-	testErr                error
-	lastProspective        providerconfig.ProspectiveProbeRequest
-	prospectiveErr         error
-	lastAdd                providerconfig.AddModelRequest
-	modelPreview           providerconfig.ModelRemovalPreview
-	providerPreview        providerconfig.ProviderRemovalPreview
-	removeModelCalls       int
-	removeModelAlias       string
-	removeModelReplacement string
-	removeModelHook        func() error
-	removeProviderName     string
+	snapshot                    providerconfig.Listing
+	snapshotErrs                []error
+	snapshotCalls               int
+	result                      providerconfig.MutationResult
+	mutationErr                 error
+	mutations                   int
+	lastAPIKey                  string
+	testErr                     error
+	lastProspective             providerconfig.ProspectiveProbeRequest
+	prospectiveErr              error
+	lastAdd                     providerconfig.AddModelRequest
+	modelPreview                providerconfig.ModelRemovalPreview
+	providerPreview             providerconfig.ProviderRemovalPreview
+	removeModelCalls            int
+	removeModelAlias            string
+	removeModelReplacement      string
+	removeModelExpectedRevision string
+	removeModelHook             func() error
+	removeProviderName          string
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -1500,6 +1507,20 @@ func (f *fakeCapabilityProviders) PreviewProviderRemoval(context.Context, string
 }
 
 func (f *fakeCapabilityProviders) RemoveModelWithMode(_ context.Context, alias, replacement string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	return f.removeModel(alias, replacement, "")
+}
+
+func (f *fakeCapabilityProviders) RemoveModelWithExpectedRevision(_ context.Context, alias, replacement, expectedRevision string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeModelExpectedRevision = expectedRevision
+	return f.removeModel(alias, replacement, expectedRevision)
+}
+
+func (f *fakeCapabilityProviders) RemoveModelWithModeAtRevision(_ context.Context, alias, replacement, expectedRevision string, _ []providerconfig.SessionAliasChange, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeModelExpectedRevision = expectedRevision
+	return f.removeModel(alias, replacement, expectedRevision)
+}
+
+func (f *fakeCapabilityProviders) removeModel(alias, replacement, _ string) (providerconfig.MutationResult, error) {
 	f.removeModelCalls++
 	f.removeModelAlias, f.removeModelReplacement = alias, replacement
 	if f.removeModelHook != nil {
@@ -1511,6 +1532,11 @@ func (f *fakeCapabilityProviders) RemoveModelWithMode(_ context.Context, alias, 
 }
 
 func (f *fakeCapabilityProviders) RemoveWithMode(_ context.Context, name string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeProviderName = name
+	return f.mutationResult()
+}
+
+func (f *fakeCapabilityProviders) RemoveWithExpectedRevision(_ context.Context, name, _ string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	f.removeProviderName = name
 	return f.mutationResult()
 }
@@ -1570,6 +1596,42 @@ func (f *fakeCapabilitySessions) ReplaceModelAlias(_ context.Context, from, to s
 			value.ModelAlias = to
 		}
 	}
+	return nil
+}
+
+func (f *fakeCapabilitySessions) ReplaceModelAliases(_ context.Context, changes []session.ModelAliasChange) error {
+	if len(changes) > 0 {
+		f.replacedFrom, f.replacedTo = changes[0].OriginalAlias, changes[0].ReplacementAlias
+	}
+	for _, change := range changes {
+		value, ok := f.sessions[change.SessionID]
+		if !ok || value.ModelAlias != change.OriginalAlias {
+			return errors.New("session alias changed")
+		}
+	}
+	for _, change := range changes {
+		f.sessions[change.SessionID].ModelAlias = change.ReplacementAlias
+	}
+	return nil
+}
+
+func (f *fakeCapabilitySessions) RestoreModelAliases(_ context.Context, changes []session.ModelAliasChange) error {
+	for _, change := range changes {
+		value, ok := f.sessions[change.SessionID]
+		if !ok || value.ModelAlias != change.ReplacementAlias {
+			continue
+		}
+		value.ModelAlias = change.OriginalAlias
+	}
+	return nil
+}
+
+func (f *fakeCapabilitySessions) RestoreModelAliasIfCurrent(_ context.Context, id, expectedCurrent, original string) error {
+	value, ok := f.sessions[id]
+	if !ok || value.ModelAlias != expectedCurrent {
+		return nil
+	}
+	value.ModelAlias = original
 	return nil
 }
 

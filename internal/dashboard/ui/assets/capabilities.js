@@ -691,7 +691,7 @@ if (root) {
           const preview = await getRemovalPreview(
             `/api/v1/desk/models/${encodeURIComponent(alias)}/removal-preview`,
           );
-          renderModelRemovalPreview(card, alias, preview);
+          renderModelRemovalPreview(card, alias, preview, remove);
         } catch (error) {
           setPageStatus(error.safeMessage || "Removal preview could not be loaded.");
           remove.disabled = false;
@@ -925,7 +925,7 @@ if (root) {
     return panel;
   }
 
-  function renderModelRemovalPreview(card, alias, preview) {
+  function renderModelRemovalPreview(card, alias, preview, removeTrigger) {
     const panel = removalPreviewPanel(`Removal preview for model alias ${alias}`, preview);
     const message = document.createElement("p");
     message.textContent = preview?.replacement_required
@@ -983,6 +983,9 @@ if (root) {
         } catch (error) {
           setPageStatus(error.safeMessage || "Model alias removal could not be completed.");
           confirm.disabled = false;
+          if (!state.restarting && removeTrigger) {
+            removeTrigger.disabled = false;
+          }
         }
       });
       panel.appendChild(confirm);

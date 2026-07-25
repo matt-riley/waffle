@@ -180,6 +180,83 @@ func TestReplaceModelAliasOnlyMovesExplicitlySelectedSessions(t *testing.T) {
 	}
 }
 
+func TestModelAliasRecoveryIsExactAndDoesNotOverwriteNewerChoices(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []*Session{first, second} {
+		if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changes := []ModelAliasChange{
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+	}
+	if err := sessions.ReplaceModelAliases(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, first.ID, "today-newer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.RestoreModelAliases(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	gotFirst, err := sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSecond, err := sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst.ModelAlias != "today-newer" || gotSecond.ModelAlias != "removed" {
+		t.Fatalf("recovered aliases = %q/%q, want newer choice/original", gotFirst.ModelAlias, gotSecond.ModelAlias)
+	}
+}
+
+func TestReplaceModelAliasesIsAllOrNothingWhenOneReferenceChanged(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []*Session{first, second} {
+		if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sessions.SetModelAlias(ctx, second.ID, "today-newer"); err != nil {
+		t.Fatal(err)
+	}
+	changes := []ModelAliasChange{
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement"},
+	}
+	if err := sessions.ReplaceModelAliases(ctx, changes); err == nil {
+		t.Fatal("replacement unexpectedly succeeded after a concurrent session choice")
+	}
+	gotFirst, err := sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst.ModelAlias != "removed" {
+		t.Fatalf("first alias = %q, want unchanged after all-or-nothing failure", gotFirst.ModelAlias)
+	}
+}
+
 func TestSettersReturnNotFoundForMissingSession(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

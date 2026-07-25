@@ -61,6 +61,22 @@ type CapabilitySessions interface {
 	ReplaceModelAlias(context.Context, string, string) error
 }
 
+type capabilityRevisionModelRemover interface {
+	RemoveModelWithModeAtRevision(context.Context, string, string, string, []providerconfig.SessionAliasChange, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+}
+
+type capabilityExactSessionReplacer interface {
+	ReplaceModelAliases(context.Context, []session.ModelAliasChange) error
+}
+
+type capabilityConditionalSessionRestorer interface {
+	RestoreModelAliasIfCurrent(context.Context, string, string, string) error
+}
+
+type capabilityRevisionProviderRemover interface {
+	RemoveWithExpectedRevision(context.Context, string, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+}
+
 type CapabilitySkills interface {
 	List(context.Context, string) ([]CapabilitySkill, error)
 	Attach(context.Context, string, string) error
@@ -384,24 +400,45 @@ func (c *Capabilities) ConfirmModelRemoval(ctx context.Context, alias, replaceme
 		return c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
 	}
 
-	// Move persisted session choices before deleting the provider alias. The
-	// provider mutation has its own recovery journal, so an error leaves the
-	// alias available for this compensation path; a process death between these
-	// steps leaves sessions pointing at the still-present replacement instead of
-	// at a removed alias.
-	if err := c.Sessions.ReplaceModelAlias(ctx, current.Target, replacement); err != nil {
-		return providerconfig.MutationResult{}, err
-	}
-	result, err := c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
-	if err == nil {
-		return result, nil
-	}
-	var restoreErr error
+	var changes []session.ModelAliasChange
+	var journalChanges []providerconfig.SessionAliasChange
 	for _, reference := range current.References {
 		if reference.Kind != "session" {
 			continue
 		}
-		restoreErr = errors.Join(restoreErr, c.Sessions.SetModelAlias(ctx, reference.Name, current.Target))
+		changes = append(changes, session.ModelAliasChange{
+			SessionID: reference.Name, OriginalAlias: current.Target, ReplacementAlias: replacement,
+		})
+		journalChanges = append(journalChanges, providerconfig.SessionAliasChange{
+			SessionID: reference.Name, From: current.Target, To: replacement,
+		})
+	}
+	if len(changes) > 0 {
+		replacer, ok := c.Sessions.(capabilityExactSessionReplacer)
+		if !ok {
+			return providerconfig.MutationResult{}, errors.New("exact session alias replacement is unavailable")
+		}
+		if err := replacer.ReplaceModelAliases(ctx, changes); err != nil {
+			return providerconfig.MutationResult{}, err
+		}
+	}
+	var result providerconfig.MutationResult
+	if remover, ok := c.Providers.(capabilityRevisionModelRemover); ok {
+		result, err = remover.RemoveModelWithModeAtRevision(ctx, current.Target, replacement, current.Revision, journalChanges, providerconfig.CommitForRestart)
+	} else {
+		result, err = c.Providers.RemoveModelWithMode(ctx, current.Target, replacement, providerconfig.CommitForRestart)
+	}
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, providerconfig.ErrRevisionMismatch) {
+		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	var restoreErr error
+	if restorer, ok := c.Sessions.(capabilityConditionalSessionRestorer); ok {
+		for _, change := range changes {
+			restoreErr = errors.Join(restoreErr, restorer.RestoreModelAliasIfCurrent(ctx, change.SessionID, change.ReplacementAlias, change.OriginalAlias))
+		}
 	}
 	return providerconfig.MutationResult{}, errors.Join(err, restoreErr)
 }
@@ -425,6 +462,13 @@ func (c *Capabilities) ConfirmProviderRemoval(ctx context.Context, name, token s
 	currentResource, err := encodeCapabilityRemovalBinding(current)
 	if err != nil || resource != currentResource {
 		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	if remover, ok := c.Providers.(capabilityRevisionProviderRemover); ok {
+		result, err := remover.RemoveWithExpectedRevision(ctx, current.Target, current.Revision, providerconfig.CommitForRestart)
+		if errors.Is(err, providerconfig.ErrRevisionMismatch) {
+			return providerconfig.MutationResult{}, ErrPreviewMismatch
+		}
+		return result, err
 	}
 	return c.Providers.RemoveWithMode(ctx, current.Target, providerconfig.CommitForRestart)
 }

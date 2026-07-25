@@ -1181,6 +1181,42 @@ test("model removal previews references, requires a replacement, and posts the o
   });
 });
 
+test("failed model removal confirmation re-enables the original trigger", async () => {
+  const harness = createHarness({
+    capabilitiesResponse: response({
+      providers: { state: "ready", default_model: "gpt", utility_model: "small", providers: { openai: { type: "openai" } }, models: {
+        gpt: { provider: "openai", model: "gpt" },
+        small: { provider: "openai", model: "small" },
+      } },
+      provider_presets: [],
+      skills: [],
+    }),
+    modelRemovalPreviewResponse: response({
+      kind: "model",
+      target: "gpt",
+      references: [],
+      replacement_required: false,
+      preview_token: "stale-model-preview",
+      expires_at: "2026-07-25T00:01:00Z",
+    }),
+    modelRemovalResponse: response({ code: "preview_invalid" }, false, 409),
+  });
+  await flush();
+
+  const modelCard = harness.elements["#capability-models"].childNodes.find(
+    (card) => card.childNodes[0]?.textContent === "gpt",
+  );
+  const remove = findButton(modelCard, "Remove alias");
+  await remove.listener("click")();
+  await flush();
+  const confirm = findButton(modelCard, "Remove model alias");
+  await confirm.listener("click")();
+  await flush();
+
+  assert.equal(confirm.disabled, false);
+  assert.equal(remove.disabled, false);
+});
+
 test("provider removal preview gives safe alias guidance and no destructive action", async () => {
   const harness = createHarness({
     connectionResponse: response([{ name: "openai", kind: "provider", status: "configured" }]),

@@ -523,6 +523,61 @@ func TestManagerRemoveModelReassignsDefaultAndUtility(t *testing.T) {
 	}
 }
 
+func TestManagerRemoveModelRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := transactionIDForBytes(raw)
+	if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# changed after preview\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RemoveModelWithExpectedRevision(context.Background(), "gpt", "small", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
+		t.Fatalf("stale removal error = %v, want ErrRevisionMismatch", err)
+	}
+	current, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(current, []byte("[models.gpt]")) {
+		t.Fatalf("stale removal deleted model alias: %s", current)
+	}
+}
+
+func TestManagerRemoveProviderRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.Add(context.Background(), validAddRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := transactionIDForBytes(raw)
+	if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# changed after preview\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RemoveWithExpectedRevision(context.Background(), "openai", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
+		t.Fatalf("stale provider removal error = %v, want ErrRevisionMismatch", err)
+	}
+	current, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(current, []byte("[providers.openai]")) {
+		t.Fatalf("stale removal deleted provider: %s", current)
+	}
+}
+
 func TestDeploymentDocsDescribeModelAndProviderRemovalSemantics(t *testing.T) {
 	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "deploy.md"))
 	if err != nil {

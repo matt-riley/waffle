@@ -211,6 +211,43 @@ func TestManagerFinalizeDeferredFinalizesHealthyOrRollsBackFailure(t *testing.T)
 	})
 }
 
+func TestManagerDeferredRecoveryUsesJournalPayloadAfterStartup(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	changes := []SessionAliasChange{{SessionID: "session-1", From: "gpt", To: "small"}}
+	m.SetSessionRecovery(func(context.Context, []SessionAliasChange) error { return nil })
+	result, err := m.RemoveModelWithModeAtRevision(context.Background(), "gpt", "small", "", changes, CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TransactionID == "" {
+		t.Fatal("deferred transaction did not return an ID")
+	}
+	j, present, err := m.readJournal()
+	if err != nil || !present {
+		t.Fatalf("read journal: present=%v err=%v", present, err)
+	}
+	if !reflect.DeepEqual(j.SessionAliasChanges, changes) {
+		t.Fatalf("journal session changes = %#v, want %#v", j.SessionAliasChanges, changes)
+	}
+	var recovered []SessionAliasChange
+	m.SetSessionRecovery(func(_ context.Context, got []SessionAliasChange) error {
+		recovered = append([]SessionAliasChange(nil), got...)
+		return nil
+	})
+	m.Health = func(context.Context) error { return errors.New("new process unhealthy") }
+	if err := m.FinalizeDeferred(context.Background()); !errors.Is(err, ErrDeferredHealth) {
+		t.Fatalf("FinalizeDeferred error = %v, want ErrDeferredHealth", err)
+	}
+	if !reflect.DeepEqual(recovered, changes) {
+		t.Fatalf("recovered session changes = %#v, want %#v", recovered, changes)
+	}
+}
+
 func TestManagerFinalizeDeferredRejectsUnboundOrTamperedTransactions(t *testing.T) {
 	tests := []struct {
 		name   string

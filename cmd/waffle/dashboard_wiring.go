@@ -89,6 +89,13 @@ func newDashboardCapabilities(
 	if st == nil || sessions == nil || providers == nil || catalogue == nil || strings.TrimSpace(ws.Dir) == "" {
 		return nil, dashboard.ErrCapabilitiesUnavailable
 	}
+	providers.SetSessionRecovery(func(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
+		var recoveryErr error
+		for _, change := range changes {
+			recoveryErr = errors.Join(recoveryErr, sessions.RestoreModelAliasIfCurrent(ctx, change.SessionID, change.To, change.From))
+		}
+		return recoveryErr
+	})
 	home, err := config.Home()
 	if err != nil {
 		return nil, fmt.Errorf("resolve Waffle home for reviewed skill staging: %w", err)
