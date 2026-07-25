@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,13 +211,33 @@ func TestConnectionsAlwaysReportsGitHubRecord(t *testing.T) {
 }
 
 type githubProbeStub struct {
-	err   error
-	calls int
+	mu          sync.Mutex
+	err         error
+	calls       int
+	sawErr      error
+	hasDeadline bool
+	block       chan struct{}
 }
 
-func (p *githubProbeStub) Verify(context.Context) error {
+func (p *githubProbeStub) Verify(ctx context.Context) error {
+	p.mu.Lock()
 	p.calls++
+	p.sawErr = ctx.Err()
+	_, p.hasDeadline = ctx.Deadline()
+	block := p.block
+	p.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.err
+}
+
+func (p *githubProbeStub) snapshot() (calls int, sawErr error, hasDeadline bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls, p.sawErr, p.hasDeadline
 }
 
 // githubAppConfig is a fully populated [github.app] whose every field is a
@@ -324,6 +345,79 @@ func TestConnectionsCachesGitHubProbe(t *testing.T) {
 	if probe.calls != 2 {
 		t.Fatalf("probe calls = %d, want 2 after the TTL", probe.calls)
 	}
+}
+
+// A browser that navigates away mid-probe cancels the request context. That
+// cancellation must not be cached as a probe failure, or healthy credentials
+// report stale for the rest of the TTL.
+func TestConnectionsGitHubProbeSurvivesCallerCancellation(t *testing.T) {
+	probe := &githubProbeStub{}
+	source := NewConnectionSource(githubAppConfig(), nil, probe)
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	got, err := source.Connections(cancelled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Status != "healthy" {
+		t.Fatalf("status = %q, want healthy despite a cancelled caller", got[0].Status)
+	}
+
+	calls, sawErr, hasDeadline := probe.snapshot()
+	if calls != 1 {
+		t.Fatalf("probe calls = %d, want 1", calls)
+	}
+	if sawErr != nil {
+		t.Fatalf("probe observed a cancelled context: %v", sawErr)
+	}
+	if !hasDeadline {
+		t.Fatal("detached probe context carried no deadline")
+	}
+
+	// The cached result is a real verdict, so a later live read agrees.
+	again, err := source.Connections(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again[0].Status != "healthy" {
+		t.Fatalf("cached status = %q, want healthy", again[0].Status)
+	}
+}
+
+// The state lock must never be held across the outbound mint (#214): a slow
+// GitHub must not stall readers that only need the already-cached verdict.
+func TestConnectionsGitHubProbeDoesNotHoldTheStateLock(t *testing.T) {
+	probe := &githubProbeStub{block: make(chan struct{})}
+	source := NewConnectionSource(githubAppConfig(), nil, probe)
+	concrete, ok := source.(*configuredConnectionSource)
+	if !ok {
+		t.Fatalf("source type = %T", source)
+	}
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		_, _ = source.Connections(t.Context())
+		close(done)
+	}()
+	<-started
+
+	// cachedGitHubProbe takes githubMu. If the probe held that lock across
+	// Verify, this read would block until the test deadline.
+	read := make(chan struct{})
+	go func() {
+		_, _ = concrete.cachedGitHubProbe()
+		close(read)
+	}()
+	select {
+	case <-read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("state lock was held across the outbound probe")
+	}
+	close(probe.block)
+	<-done
 }
 
 func TestConnectionsProjectsIntakeWatchersWithoutSecrets(t *testing.T) {

@@ -19,6 +19,9 @@ const (
 	// token. Connections is polled by the browser; the probe is a real
 	// outbound API call and must not run once per page render (#182).
 	githubProbeTTL = 5 * time.Minute
+	// githubProbeTimeout bounds the detached probe. Without a caller context
+	// to cancel it, the mint needs its own deadline.
+	githubProbeTimeout = 15 * time.Second
 )
 
 // ConnectionView is the complete, allowlisted public representation of one
@@ -64,6 +67,10 @@ type configuredConnectionSource struct {
 	health        ConnectionHealthSource
 	github        GitHubProbe
 
+	// githubProbeMu serializes the outbound mint; githubMu guards only the
+	// cached result. Keeping them separate means the state lock is never held
+	// across a network call (#214).
+	githubProbeMu   sync.Mutex
 	githubMu        sync.Mutex
 	githubCheckedAt time.Time
 	githubErr       error
@@ -210,7 +217,7 @@ func (s *configuredConnectionSource) Connections(ctx context.Context) ([]Connect
 	if records == nil {
 		records = []ConnectionView{}
 	}
-	s.applyGitHubHealth(ctx, records)
+	s.applyGitHubHealth(records)
 	if s.telegramIndex < 0 || s.health == nil {
 		return records, nil
 	}
@@ -231,14 +238,14 @@ func (s *configuredConnectionSource) Connections(ctx context.Context) ([]Connect
 // applyGitHubHealth upgrades a configured GitHub record to healthy or stale.
 // A probe failure downgrades the record rather than failing the whole read:
 // GitHub being unreachable must not blank out providers, MCP, and profiles.
-func (s *configuredConnectionSource) applyGitHubHealth(ctx context.Context, records []ConnectionView) {
+func (s *configuredConnectionSource) applyGitHubHealth(records []ConnectionView) {
 	if s.github == nil || s.githubIndex < 0 || s.githubIndex >= len(records) {
 		return
 	}
 	if records[s.githubIndex].Status != "configured" {
 		return
 	}
-	if err := s.probeGitHub(ctx); err != nil {
+	if err := s.probeGitHub(); err != nil {
 		records[s.githubIndex].Status = "stale"
 		records[s.githubIndex].Guidance = "GitHub App credentials did not mint an installation token."
 		return
@@ -248,20 +255,49 @@ func (s *configuredConnectionSource) applyGitHubHealth(ctx context.Context, reco
 
 // probeGitHub mints an installation token at most once per githubProbeTTL and
 // caches only the resulting error, never the token.
-func (s *configuredConnectionSource) probeGitHub(ctx context.Context) error {
+//
+// It deliberately takes no caller context. The probe describes the
+// installation, not one request: a browser that navigates away mid-probe would
+// otherwise cache context.Canceled and report healthy credentials as stale for
+// the rest of the TTL.
+func (s *configuredConnectionSource) probeGitHub() error {
+	if err, fresh := s.cachedGitHubProbe(); fresh {
+		return err
+	}
+	// Serialize probes so a burst of Desk polls mints one token, but never
+	// hold the state lock across the network call (#214).
+	s.githubProbeMu.Lock()
+	defer s.githubProbeMu.Unlock()
+	if err, fresh := s.cachedGitHubProbe(); fresh {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), githubProbeTimeout)
+	defer cancel()
+	err := s.github.Verify(ctx)
+
+	s.githubMu.Lock()
+	s.githubErr = err
+	s.githubCheckedAt = s.nowTime()
+	s.githubProbed = true
+	s.githubMu.Unlock()
+	return err
+}
+
+func (s *configuredConnectionSource) cachedGitHubProbe() (error, bool) {
 	s.githubMu.Lock()
 	defer s.githubMu.Unlock()
-	now := time.Now
+	if s.githubProbed && s.nowTime().Sub(s.githubCheckedAt) < githubProbeTTL {
+		return s.githubErr, true
+	}
+	return nil, false
+}
+
+func (s *configuredConnectionSource) nowTime() time.Time {
 	if s.now != nil {
-		now = s.now
+		return s.now()
 	}
-	if s.githubProbed && now().Sub(s.githubCheckedAt) < githubProbeTTL {
-		return s.githubErr
-	}
-	s.githubErr = s.github.Verify(ctx)
-	s.githubCheckedAt = now()
-	s.githubProbed = true
-	return s.githubErr
+	return time.Now()
 }
 
 // RegisterConnectionsRoutes mounts the additive, read-only Task 5 endpoint.
