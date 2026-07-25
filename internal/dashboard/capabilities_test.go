@@ -119,6 +119,37 @@ func TestCapabilitiesSnapshotIncludesCredentialFreeProviderPresets(t *testing.T)
 	}
 }
 
+func TestCapabilitiesSnapshotIncludesSanitizedSkillSourceChoices(t *testing.T) {
+	capabilities := &Capabilities{
+		Providers: &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+			Providers: map[string]providerconfig.ProviderSummary{},
+			Models:    map[string]providerconfig.ModelSummary{},
+		}},
+		SkillSources: CapabilitySkillSources{
+			LocalRoots: []string{"/srv/reviewed-skills", "/private/source"},
+			GitHosts:   []string{"github.com", "gitlab.example"},
+		},
+	}
+
+	snapshot, err := capabilities.Snapshot(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.SkillSources.LocalRoots, []string{"reviewed-skills", "source"}) {
+		t.Fatalf("local skill roots = %#v", snapshot.SkillSources.LocalRoots)
+	}
+	if !reflect.DeepEqual(snapshot.SkillSources.GitHosts, []string{"github.com", "gitlab.example"}) {
+		t.Fatalf("git skill hosts = %#v", snapshot.SkillSources.GitHosts)
+	}
+	public, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(public, []byte("/private/")) || bytes.Contains(public, []byte("sk-super-private")) {
+		t.Fatalf("snapshot leaked source or credential material: %s", public)
+	}
+}
+
 func TestCapabilitiesSnapshotRetriesTransientProviderLock(t *testing.T) {
 	providers := &fakeCapabilityProviders{
 		snapshot: providerconfig.Listing{
@@ -172,6 +203,98 @@ func TestCapabilitiesSkillsStageInstallInactiveThenExplicitActivate(t *testing.T
 	}
 	if !skills.activated || !result.RestartRequired || result.TransactionID == "" {
 		t.Fatalf("activation result=%#v activated=%v", result, skills.activated)
+	}
+}
+
+func TestCapabilitiesSkillLifecycleReturnsRestartMutations(t *testing.T) {
+	skills := &fakeCapabilitySkills{}
+	capabilities := &Capabilities{Skills: skills}
+
+	deactivated, err := capabilities.DeactivateSkill(t.Context(), "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skills.deactivated || !deactivated.RestartRequired || deactivated.TransactionID == "" {
+		t.Fatalf("deactivation result=%#v deactivated=%v", deactivated, skills.deactivated)
+	}
+
+	uninstalled, err := capabilities.UninstallSkill(t.Context(), "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skills.uninstalled || !uninstalled.RestartRequired || uninstalled.TransactionID == "" {
+		t.Fatalf("uninstall result=%#v uninstalled=%v", uninstalled, skills.uninstalled)
+	}
+}
+
+func TestRegisterCapabilitiesRoutesSkillLifecyclePreservesRestartContract(t *testing.T) {
+	skills := &fakeCapabilitySkills{}
+	restart := &recordingRestartScheduler{}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Skills: skills},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+		Restart:  restart,
+	})
+
+	for _, path := range []string{
+		"/api/v1/desk/skills/review/deactivate",
+		"/api/v1/desk/skills/review/uninstall",
+	} {
+		response := newAfterResponseRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("%s status = %d body=%s", path, response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "transaction_id") {
+			t.Fatalf("%s leaked transaction ID: %s", path, response.Body.String())
+		}
+		response.RunAfterResponse()
+	}
+	if restart.calls != 2 || restart.transactionID == "" {
+		t.Fatalf("restart scheduler = %#v", restart)
+	}
+}
+
+func TestSkillLifecycleMutationUsesSharedAuditAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "desk-skill-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	security := mustSecurity(t, "127.0.0.1:8422")
+	security.SetPolicyAuditDB(st.DB)
+	idem := NewIdempotencyStore(nil, 8, time.Minute)
+	skills := &fakeCapabilitySkills{}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service: &Capabilities{Skills: skills},
+		Mutation: func(limit int64, next http.Handler) http.Handler {
+			return NewMutationHandler(security, idem, limit, next)
+		},
+		Restart: fakeRestartScheduler{},
+	})
+	request := func() *httptest.ResponseRecorder {
+		record := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/skills/review/deactivate", strings.NewReader(`{}`))
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", "skill-deactivate-once")
+		mux.ServeHTTP(record, req)
+		return record
+	}
+	first := request()
+	second := request()
+	if first.Code != http.StatusAccepted || second.Code != http.StatusAccepted || skills.deactivateCalls != 1 {
+		t.Fatalf("responses=(%d,%d) calls=%d", first.Code, second.Code, skills.deactivateCalls)
+	}
+	var audits int
+	if err := st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM policy_audit WHERE tool = 'desk.mutation'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("desk mutation audits = %d, want one first execution", audits)
 	}
 }
 
@@ -980,6 +1103,8 @@ func TestWriteCapabilityErrorMapsKnownSentinels(t *testing.T) {
 		{"skill_stage_changed", skillinstall.ErrStageChanged, http.StatusConflict, "skill_stage_changed"},
 		{"skill_digest_mismatch", skillinstall.ErrDigestMismatch, http.StatusConflict, "skill_digest_mismatch"},
 		{"skill_install_unsupported", skillinstall.ErrAtomicRenameUnsupported, http.StatusServiceUnavailable, "skill_install_unsupported"},
+		{"skill_active", skill.ErrSkillActive, http.StatusConflict, "skill_active"},
+		{"skill_attached", skill.ErrSkillAttached, http.StatusConflict, "skill_attached"},
 
 		{"provider_locked", providerconfig.ErrLocked, http.StatusConflict, "provider_locked"},
 		{"provider_referenced", providerconfig.ErrReferenced, http.StatusConflict, "provider_referenced"},
@@ -1044,6 +1169,26 @@ func TestWriteCapabilityErrorMapsKnownSentinels(t *testing.T) {
 				t.Fatalf("message echoed raw error: %q", body.Message)
 			}
 		})
+	}
+}
+
+func TestWriteCapabilityErrorNamesAttachedSessionsWithoutPrivateDiagnostics(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeCapabilityError(response, &skill.AttachmentConflictError{References: []skill.AttachmentReference{
+		{SessionID: "sess-1", Title: "Review changes"},
+	}})
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "skill_attached" || !strings.Contains(body.Message, "Review changes") || !strings.Contains(body.Message, "sess-1") {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(body.Message, "/private/") || strings.Contains(body.Message, capabilityCredentialCanary) {
+		t.Fatalf("body leaked private diagnostics: %#v", body)
 	}
 }
 
@@ -1173,13 +1318,17 @@ func (f *fakeCapabilitySessions) SetModelAlias(_ context.Context, id, alias stri
 }
 
 type fakeCapabilitySkills struct {
-	listed      []CapabilitySkill
-	listSession string
-	manifest    skillinstall.Manifest
-	installed   CapabilitySkill
-	activated   bool
-	attachCalls int
-	detachCalls int
+	listed          []CapabilitySkill
+	listSession     string
+	manifest        skillinstall.Manifest
+	installed       CapabilitySkill
+	activated       bool
+	deactivated     bool
+	uninstalled     bool
+	deactivateCalls int
+	uninstallCalls  int
+	attachCalls     int
+	detachCalls     int
 }
 
 func (f *fakeCapabilitySkills) List(_ context.Context, sessionID string) ([]CapabilitySkill, error) {
@@ -1203,6 +1352,16 @@ func (f *fakeCapabilitySkills) Install(context.Context, string, string) (Capabil
 }
 func (f *fakeCapabilitySkills) Activate(context.Context, string) error {
 	f.activated = true
+	return nil
+}
+func (f *fakeCapabilitySkills) Deactivate(context.Context, string) error {
+	f.deactivated = true
+	f.deactivateCalls++
+	return nil
+}
+func (f *fakeCapabilitySkills) Uninstall(context.Context, string) error {
+	f.uninstalled = true
+	f.uninstallCalls++
 	return nil
 }
 

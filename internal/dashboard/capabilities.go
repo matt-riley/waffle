@@ -13,6 +13,7 @@ import (
 	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/skillinstall"
 )
 
@@ -53,6 +54,8 @@ type CapabilitySkills interface {
 	Stage(context.Context, skillinstall.StageRequest) (skillinstall.Manifest, error)
 	Install(context.Context, string, string) (CapabilitySkill, error)
 	Activate(context.Context, string) error
+	Deactivate(context.Context, string) error
+	Uninstall(context.Context, string) error
 }
 
 type CapabilityCatalogue interface {
@@ -84,6 +87,7 @@ type CapabilitiesSnapshot struct {
 	Providers       providerconfig.Listing  `json:"providers"`
 	ProviderPresets []providerconfig.Preset `json:"provider_presets"`
 	Session         *CapabilitySession      `json:"session,omitempty"`
+	SkillSources    CapabilitySkillSources  `json:"skill_sources"`
 	Skills          []CapabilitySkill       `json:"skills"`
 }
 
@@ -116,10 +120,11 @@ type CapabilityProviderTestResult struct {
 // Capabilities owns the narrow application operations used by the additive
 // Desk routes. It never receives or emits raw secret-store state.
 type Capabilities struct {
-	Providers CapabilityProviders
-	Sessions  CapabilitySessions
-	Skills    CapabilitySkills
-	Catalogue CapabilityCatalogue
+	Providers    CapabilityProviders
+	Sessions     CapabilitySessions
+	SkillSources CapabilitySkillSources
+	Skills       CapabilitySkills
+	Catalogue    CapabilityCatalogue
 }
 
 func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (CapabilitiesSnapshot, error) {
@@ -133,6 +138,7 @@ func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (Capabili
 	snapshot := CapabilitiesSnapshot{
 		Providers:       providers,
 		ProviderPresets: providerconfig.Presets(),
+		SkillSources:    NewCapabilitySkillSources(c.SkillSources.LocalRoots, c.SkillSources.GitHosts),
 		Skills:          make([]CapabilitySkill, 0),
 	}
 	if sessionID != "" {
@@ -345,11 +351,37 @@ func (c *Capabilities) ActivateSkill(ctx context.Context, name string) (provider
 	if err := c.Skills.Activate(ctx, name); err != nil {
 		return providerconfig.MutationResult{}, err
 	}
-	sum := sha256.Sum256([]byte("activate-skill\x00" + name))
+	return skillMutationResult("activate-skill", name), nil
+}
+
+func (c *Capabilities) DeactivateSkill(ctx context.Context, name string) (providerconfig.MutationResult, error) {
+	if c == nil || c.Skills == nil {
+		return providerconfig.MutationResult{}, ErrCapabilitiesUnavailable
+	}
+	name = strings.TrimSpace(name)
+	if err := c.Skills.Deactivate(ctx, name); err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	return skillMutationResult("deactivate-skill", name), nil
+}
+
+func (c *Capabilities) UninstallSkill(ctx context.Context, name string) (providerconfig.MutationResult, error) {
+	if c == nil || c.Skills == nil {
+		return providerconfig.MutationResult{}, ErrCapabilitiesUnavailable
+	}
+	name = strings.TrimSpace(name)
+	if err := c.Skills.Uninstall(ctx, name); err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	return skillMutationResult("uninstall-skill", name), nil
+}
+
+func skillMutationResult(operation, name string) providerconfig.MutationResult {
+	sum := sha256.Sum256([]byte(operation + "\x00" + name))
 	return providerconfig.MutationResult{
 		RestartRequired: true,
 		TransactionID:   hex.EncodeToString(sum[:16]),
-	}, nil
+	}
 }
 
 type CapabilityMutationFactory func(int64, http.Handler) http.Handler
@@ -385,7 +417,9 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	mux.Handle("POST /api/v1/desk/skills/session/detach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, false)))
 	mux.Handle("POST /api/v1/desk/skills/stage", mutation(capabilityMutationMaxBodyBytes, stageSkillHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/skills/install", mutation(capabilityMutationMaxBodyBytes, installSkillHandler(routeConfig.Service)))
-	mux.Handle("POST /api/v1/desk/skills/{name}/activate", mutation(capabilityMutationMaxBodyBytes, activateSkillHandler(routeConfig)))
+	mux.Handle("POST /api/v1/desk/skills/{name}/activate", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "activate")))
+	mux.Handle("POST /api/v1/desk/skills/{name}/deactivate", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "deactivate")))
+	mux.Handle("POST /api/v1/desk/skills/{name}/uninstall", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "uninstall")))
 }
 
 func capabilitiesSnapshotHandler(service *Capabilities) http.Handler {
@@ -679,14 +713,27 @@ func installSkillHandler(service *Capabilities) http.HandlerFunc {
 	}
 }
 
-func activateSkillHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc {
+func skillLifecycleHandler(routeConfig CapabilitiesRouteConfig, operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		after, ok := w.(AfterResponseWriter)
 		if !ok || routeConfig.Restart == nil {
 			writeCapabilityError(w, ErrAfterResponseUnavailable)
 			return
 		}
-		result, err := routeConfig.Service.ActivateSkill(r.Context(), r.PathValue("name"))
+		var (
+			result providerconfig.MutationResult
+			err    error
+		)
+		switch operation {
+		case "activate":
+			result, err = routeConfig.Service.ActivateSkill(r.Context(), r.PathValue("name"))
+		case "deactivate":
+			result, err = routeConfig.Service.DeactivateSkill(r.Context(), r.PathValue("name"))
+		case "uninstall":
+			result, err = routeConfig.Service.UninstallSkill(r.Context(), r.PathValue("name"))
+		default:
+			err = ErrCapabilitiesUnavailable
+		}
 		if err != nil {
 			writeCapabilityError(w, err)
 			return
@@ -750,6 +797,9 @@ var capabilityErrorMappings = []capabilityErrorMapping{
 	{session.ErrNotFound, http.StatusNotFound, "session_not_found", "session was not found"},
 	{ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found", "model alias was not found"},
 	{ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
+	{skill.ErrSkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
+	{skill.ErrSkillActive, http.StatusConflict, "skill_active", "deactivate the skill before uninstalling it"},
+	{skill.ErrSkillAttached, http.StatusConflict, "skill_attached", "skill is still attached to one or more sessions"},
 	{ErrAfterResponseUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
 	{ErrCapabilitiesUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
 
@@ -784,6 +834,22 @@ func writeCapabilityError(w http.ResponseWriter, err error) {
 	response := errorResponse{
 		Code:    "capability_failed",
 		Message: "capability request could not be completed",
+	}
+	var attachmentConflict *skill.AttachmentConflictError
+	if errors.As(err, &attachmentConflict) {
+		status = http.StatusConflict
+		response.Code = "skill_attached"
+		labels := make([]string, 0, len(attachmentConflict.References))
+		for _, reference := range attachmentConflict.References {
+			label := reference.SessionID
+			if reference.Title != "" {
+				label = reference.Title + " (" + reference.SessionID + ")"
+			}
+			labels = append(labels, label)
+		}
+		response.Message = "skill is attached to sessions: " + strings.Join(labels, ", ")
+		writeJSON(w, status, response)
+		return
 	}
 	for _, mapping := range capabilityErrorMappings {
 		if errors.Is(err, mapping.err) {

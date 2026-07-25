@@ -14,6 +14,12 @@ type Attachments struct {
 	DB *sql.DB
 }
 
+// AttachmentReference identifies a session that still uses a skill.
+type AttachmentReference struct {
+	SessionID string
+	Title     string
+}
+
 // Attach idempotently associates a skill name with a session.
 func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error {
 	if err := a.validate(sessionID, name); err != nil {
@@ -74,6 +80,42 @@ func (a *Attachments) List(ctx context.Context, sessionID string) (out []string,
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list session skills: %w", err)
+	}
+	return out, nil
+}
+
+// References returns the sessions that currently hold a skill attachment.
+// Titles are display metadata; session IDs remain available for exact action.
+func (a *Attachments) References(ctx context.Context, name string) (out []AttachmentReference, err error) {
+	if a == nil || a.DB == nil {
+		return nil, errors.New("attachments database required")
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("skill name required")
+	}
+	rows, err := a.DB.QueryContext(ctx, `
+		SELECT ss.session_id, COALESCE(s.title, '')
+		FROM session_skills ss
+		LEFT JOIN sessions s ON s.id = ss.session_id
+		WHERE ss.skill_name = ?
+		ORDER BY COALESCE(s.title, ''), ss.session_id`, name)
+	if err != nil {
+		return nil, fmt.Errorf("list skill references: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	for rows.Next() {
+		var reference AttachmentReference
+		if err := rows.Scan(&reference.SessionID, &reference.Title); err != nil {
+			return nil, fmt.Errorf("scan skill reference: %w", err)
+		}
+		out = append(out, reference)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list skill references: %w", err)
 	}
 	return out, nil
 }

@@ -688,6 +688,30 @@ func (s *fixtureSkills) Activate(_ context.Context, name string) error {
 	return dashboard.ErrCapabilitySkillNotFound
 }
 
+func (s *fixtureSkills) Deactivate(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.items {
+		if s.items[index].Name == name {
+			s.items[index].Active = false
+			return nil
+		}
+	}
+	return dashboard.ErrCapabilitySkillNotFound
+}
+
+func (s *fixtureSkills) Uninstall(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.items {
+		if s.items[index].Name == name {
+			s.items = append(s.items[:index], s.items[index+1:]...)
+			return nil
+		}
+	}
+	return dashboard.ErrCapabilitySkillNotFound
+}
+
 type fixtureCatalogue struct{}
 
 func (fixtureCatalogue) Refresh(context.Context, string) (dashboard.CapabilityCatalogueResult, error) {

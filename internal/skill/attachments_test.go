@@ -68,6 +68,37 @@ func TestAttachmentsAreUniqueSortedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestAttachmentsReferencesReturnStableSessionLabels(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+	if err := attachments.Attach(ctx, second.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachments.Attach(ctx, first.ID, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+
+	references, err := attachments.References(ctx, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []AttachmentReference{
+		{SessionID: first.ID, Title: "first"},
+		{SessionID: second.ID, Title: "second"},
+	}; !slices.Equal(references, want) {
+		t.Fatalf("references = %#v, want %#v", references, want)
+	}
+}
+
 func TestAttachmentsCascadeWithSession(t *testing.T) {
 	ctx := context.Background()
 	st, sessions := openAttachmentTestStore(t)
