@@ -144,6 +144,9 @@ func main() {
 		Providers: providers,
 		Sessions:  sessions,
 		Skills:    skills,
+		SkillSources: dashboard.CapabilitySkillSources{
+			LocalRoots: []string{"allowed"},
+		},
 		Catalogue: fixtureCatalogue{},
 	}
 
@@ -661,7 +664,7 @@ func (s *fixtureSkills) Stage(context.Context, skillinstall.StageRequest) (skill
 	return skillinstall.Manifest{
 		Name: "fixture-reviewed", Description: "Reviewed fixture skill",
 		SourceRef: "fixture", ContentDigest: "sha256:fixture", StageID: "stage-fixture",
-		ExpiresAt: fixtureNow.Add(time.Minute), Audit: skillinstall.AuditView{Passed: true},
+		ExpiresAt: fixtureNow.Add(7 * 24 * time.Hour), Audit: skillinstall.AuditView{Passed: true},
 		Files: []skillinstall.FileEntry{},
 	}, nil
 }

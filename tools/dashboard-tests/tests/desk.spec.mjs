@@ -538,7 +538,7 @@ test("reduced motion suppresses animation and preserves an overflow-free desk", 
 test("skill installation stays inactive until explicit activation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the staged install flow once.");
   await page.goto(deskURL("capabilities"));
-  await page.getByLabel("Allowed local path").fill("/allowed/fixture-reviewed");
+  await page.getByLabel("Local skill path").fill("/allowed/fixture-reviewed");
   await page.getByRole("button", { name: "Stage review", exact: true }).click();
 
   const review = page.locator("#capability-skill-review");
