@@ -206,10 +206,11 @@ func (e *ProfileEditor) List() (ProfileListView, error) {
 	for _, name := range providerconfig.SortedKeys(cfg.Agent.Profiles) {
 		view.Profiles = append(view.Profiles, e.fields(name, cfg.Agent.Profiles[name]))
 	}
+	// SortedKeys already orders these, and sanitizing cannot reorder them:
+	// it only rewrites secret-shaped substrings.
 	for _, name := range providerconfig.SortedKeys(cfg.Agent.Groups) {
 		view.Groups = append(view.Groups, sanitizeDashboardString(name))
 	}
-	sort.Strings(view.Groups)
 	return view, nil
 }
 
