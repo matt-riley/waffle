@@ -197,7 +197,7 @@ func (c *Client) Exec(ctx context.Context, useIDOrName string, args ...interface
 			}
 			return content, isError, nil
 		}
-		if !errors.Is(qerr, sql.ErrNoRows) && !errors.Is(qerr, context.DeadlineExceeded) && !errors.Is(qerr, context.Canceled) && !isBusyErr(qerr) {
+		if !errors.Is(qerr, sql.ErrNoRows) && !errors.Is(qerr, context.DeadlineExceeded) && !errors.Is(qerr, context.Canceled) && !IsBusyErr(qerr) {
 			return "", false, fmt.Errorf("sandbox: poll result: %w", qerr)
 		}
 		select {
@@ -272,11 +272,12 @@ func (c *Client) Reclaim(ctx context.Context, useIDs []string) (map[string]llm.T
 	return out, nil
 }
 
-// isBusyErr reports whether err is SQLite's transient SQLITE_BUSY
+// IsBusyErr reports whether err is SQLite's transient SQLITE_BUSY
 // ("database is locked"), which lock contention on the shared mount can
 // surface instead of a context deadline. It is a retryable condition, not
-// a transport failure; the heartbeat detector decides whether to give up.
-func isBusyErr(err error) bool {
+// a transport failure; the caller decides whether to give up. Exported so
+// observers of the queue outside this package classify contention the same way.
+func IsBusyErr(err error) bool {
 	var se *sqlite.Error
 	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
 }

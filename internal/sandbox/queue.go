@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS results (
     created_at TEXT NOT NULL
 ) STRICT`
 
+// OpenQueueReader opens an existing queue file for reading without creating or
+// migrating its schema. Observers outside the client/runner pair use it so they
+// inherit the same pragmas — notably busy_timeout — instead of opening the file
+// bare and getting SQLITE_BUSY the moment the pair is mid-write.
+func OpenQueueReader(path string) (*sql.DB, error) {
+	return openQueueDB(path, "")
+}
+
 // openQueueDB opens one side of the queue and initializes its schema when
 // provided. Both client and runner pass the idempotent schema for each file,
 // so either process can start first.
