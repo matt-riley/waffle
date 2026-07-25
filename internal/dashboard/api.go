@@ -33,7 +33,10 @@ type APIConfig struct {
 	Posture *PostureService
 	// Profiles is the structured agent-profile editor (#194). Optional: when
 	// nil the editor is not mounted at all.
-	Profiles       *ProfileEditor
+	Profiles *ProfileEditor
+	// Setup is the bootstrap prerequisite projection (#192). Optional: when
+	// nil the checklist endpoints are not mounted.
+	Setup          *SetupService
 	Restart        RestartScheduler
 	RestartOutcome MutationOutcomeObserver
 	Version        string

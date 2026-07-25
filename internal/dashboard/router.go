@@ -77,6 +77,23 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 			},
 		})
 	}
+	if config.Setup != nil {
+		// Without an idempotency store the read-only checklist still mounts;
+		// only the identity action, which is a guarded mutation, drops out.
+		routes := SetupRouteConfig{Service: config.Setup, Restart: config.Restart}
+		if config.Idempotency != nil {
+			routes.Mutation = func(limit int64, next http.Handler) http.Handler {
+				return NewMutationHandler(
+					config.Security,
+					config.Idempotency,
+					limit,
+					next,
+					composeRestartOutcomeObservers(config.Hub, config.RestartOutcome),
+				)
+			}
+		}
+		RegisterSetupRoutes(mux, routes)
+	}
 	if config.Capabilities != nil && config.Idempotency != nil {
 		RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
 			Service: config.Capabilities,

@@ -23,6 +23,10 @@ templ Shell(view ShellView) {
 			// Capabilities (per profile), so both sections load it (#193).
 			if view.ActiveSection == "capabilities" || view.ActiveSection == "today" || view.ActiveSection == "" {
 				@PostureAssets(view)
+				// Capabilities renders the full setup checklist; Today loads
+				// the same module for its banner, so an install that cannot
+				// open a conversation still says why (#192).
+				@SetupAssets(view)
 			}
 		</head>
 		<body data-request-token={ view.RequestToken }>

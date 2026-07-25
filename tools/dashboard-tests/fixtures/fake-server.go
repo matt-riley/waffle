@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -167,6 +168,7 @@ func main() {
 	obs.MarkSchedulerTick()
 
 	mux := http.NewServeMux()
+	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
 		Observability:     obs,
 		Security:          security,
@@ -180,6 +182,7 @@ func main() {
 		Capabilities:      capabilities,
 		Restart:           fixtureRestart{},
 		Posture:           dashboard.NewPostureService(postureFixtureConfig(), nil, fixturePostureAudit{}),
+		Setup:             dashboard.NewSetupService(setupFixtureConfig(), setupIdentity, setupIdentity),
 		Version:           "dashboard-fixture",
 		ProcessGeneration: "dashboard-fixture-generation",
 		Now:               func() time.Time { return fixtureNow },
@@ -947,6 +950,34 @@ func postureFixtureConfig() config.Config {
 			},
 		},
 	}
+}
+
+// setupFixtureConfig is a partially bootstrapped install (#192): a provider and
+// a model alias are enrolled, but no alias holds the Waffle-wide default role
+// and no [agent.profile.main] exists. It carries a canary credential reference
+// so the checklist is proved not to echo one.
+func setupFixtureConfig() config.Config {
+	return config.Config{
+		Providers: map[string]config.ProviderConnection{
+			"fixture": {Type: "openai", APIKey: "secret://desk-secret-canary"},
+		},
+		Models: map[string]config.ModelTarget{
+			"primary": {Provider: "fixture", Model: "gpt-fixture"},
+		},
+		Dashboard: config.Dashboard{Enabled: true},
+	}
+}
+
+// fixtureSetupIdentity starts with no secret-store identity and flips once the
+// guarded action creates one, so the browser can prove the step actually
+// changes state rather than the client claiming it did.
+type fixtureSetupIdentity struct{ created *atomic.Bool }
+
+func (f fixtureSetupIdentity) IdentityConfigured() (bool, error) { return f.created.Load(), nil }
+
+func (f fixtureSetupIdentity) CreateIdentity() error {
+	f.created.Store(true)
+	return nil
 }
 
 type fixturePostureAudit struct{}

@@ -19,11 +19,13 @@ templ Capabilities() {
 			<span>Waiting for a new Waffle process. If it does not arrive, restart waffle serve.</span>
 		</div>
 		<nav class="capability-tabs" aria-label="Capability sections">
+			<a href="#setup-checklist">Setup</a>
 			<a href="#capability-models-panel">Models</a>
 			<a href="#capability-skills-panel">Skills</a>
 			<a href="#capability-connections-panel">Tools &amp; connections</a>
 		</nav>
 		<div class="capability-grid">
+			@SetupChecklist()
 			<section class="capability-panel" id="capability-models-panel" aria-labelledby="capability-models-title">
 				<header>
 					<p class="panel-index">01 / models</p>

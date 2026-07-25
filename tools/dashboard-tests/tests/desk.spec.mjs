@@ -189,6 +189,81 @@ test("posture shows the prompt, each policy tier, and the rule behind a refusal"
   await expect(dialog).toBeHidden();
 });
 
+test("setup reports each prerequisite and routes to the control that fixes it", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the bootstrap surface once.");
+  await page.goto(deskURL("capabilities"));
+
+  const checklist = page.locator("#setup-checklist");
+  await expect(checklist).toBeVisible();
+
+  // AC1: every prerequisite is named with its state. The fixture install has
+  // an identity and a default model outstanding, and a provider already
+  // enrolled, so all three states are on screen at once.
+  await expect(checklist.locator(".setup-step")).toHaveCount(5);
+  await expect(checklist.locator("[data-step='provider']")).toHaveAttribute(
+    "data-state",
+    "configured",
+  );
+  for (const step of ["identity", "models", "profile"]) {
+    await expect(checklist.locator(`[data-step='${step}']`)).toHaveAttribute(
+      "data-state",
+      "missing",
+    );
+  }
+
+  // AC2: a prerequisite Desk cannot satisfy states the exact command instead
+  // of offering a button that could not work.
+  const dashboardStep = checklist.locator("[data-step='dashboard']");
+  await expect(dashboardStep).toContainText("waffle setup");
+  await expect(dashboardStep.locator("button")).toHaveCount(0);
+
+  // AC2: the actions route to the existing controls rather than standing up a
+  // second form — in particular a second credential channel.
+  await checklist
+    .locator("[data-step='models']")
+    .getByRole("button", { name: "Set the default model", exact: true })
+    .click();
+  await expect(page.locator("#capability-default-alias")).toBeFocused();
+
+  await checklist
+    .locator("[data-step='profile']")
+    .getByRole("button", { name: "Create a starter profile", exact: true })
+    .click();
+  await expect(page.locator("#profile-name")).toHaveValue("main");
+  await expect(page.locator("#profile-system")).not.toHaveValue("");
+
+  // AC4: creating the identity is a guarded mutation that returns no key
+  // material, and the step only flips because the server says it did.
+  const creation = page.waitForResponse((response) =>
+    response.url().endsWith("/api/v1/desk/setup/identity"),
+  );
+  await checklist
+    .locator("[data-step='identity']")
+    .getByRole("button", { name: "Create identity", exact: true })
+    .click();
+  const created = await creation;
+  expect(created.status()).toBe(202);
+  expect(await created.text()).not.toContain("AGE-SECRET-KEY");
+  await expect(checklist.locator("[data-step='identity']")).toHaveAttribute(
+    "data-state",
+    "configured",
+  );
+
+  await expectNoHorizontalOverflow(page);
+  await expectNoCanaries(page);
+});
+
+test("Today points a partially configured install at the checklist", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the bootstrap banner once.");
+  await page.goto(deskURL("today"));
+  const banner = page.locator("#desk-setup-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Waffle is not set up yet.");
+  await banner.getByRole("link", { name: "Finish setup", exact: true }).click();
+  await expect(page.locator("#setup-checklist")).toBeVisible();
+  await expectNoCanaries(page);
+});
+
 test("all five destinations render their production section", async ({ page }) => {
   const destinations = [
     ["today", ".today", "Release review"],

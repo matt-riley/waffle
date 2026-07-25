@@ -264,6 +264,12 @@ type Agent struct {
 // ProfileNameMax is the maximum length of a profile slug (#71).
 const ProfileNameMax = 64
 
+// DefaultMainSystemPrompt is the starter system prompt for a new
+// [agent.profile.main]. Both entry points that can create one — `waffle setup`
+// and Desk's setup checklist (#192) — use it, so a profile created from the
+// browser is the same profile the CLI would have written.
+const DefaultMainSystemPrompt = "You are the owner's personal assistant."
+
 // slugNameRE is the allowed slug form shared by profile names, provider
 // connection names, and model aliases: [a-z0-9-], 1–64 chars. Empty,
 // whitespace, path separators, and shell metacharacters are rejected.
@@ -424,6 +430,41 @@ func (c Config) ResolveProfileModel(p AgentProfile) (string, error) {
 	default:
 		return m, nil
 	}
+}
+
+// ResolveProfileModelAlias resolves the model alias a profile actually runs
+// on, under an explicit provider registry. It is the one place that mapping
+// lives: the chat runtime and Desk's setup projection both call it, so a
+// profile that will not start is reported as unresolvable in exactly the same
+// terms it fails with (#192).
+//
+//	"" or "default" → [agent] default_model
+//	"utility"       → [agent] utility_model (error if unset)
+//	any other value → an alias that must exist in [model.*]
+//
+// Under the singular legacy [provider] table there are no aliases, so
+// ResolveProfileModel answers instead.
+func (c Config) ResolveProfileModelAlias(p AgentProfile) (string, error) {
+	if c.ProviderRegistrySource() != ProviderRegistryExplicit {
+		return c.ResolveProfileModel(p)
+	}
+	alias := strings.TrimSpace(p.Model)
+	switch alias {
+	case "", "default":
+		alias = c.Agent.DefaultModel
+	case "utility":
+		alias = c.Agent.UtilityModel
+		if alias == "" {
+			return "", fmt.Errorf("profile model %q requires [agent] utility_model to be set", p.Model)
+		}
+	}
+	if alias == "" {
+		return "", fmt.Errorf("agent.default_model is not configured")
+	}
+	if _, err := c.ResolveModel(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
 }
 
 // ValidProfileName reports whether name is an allowed profile slug (#71).

@@ -56,7 +56,8 @@
 # [chat]
 # socket = "/absolute/path/to/waffle/chat.sock"
 
-# Optional Waffle Desk web interface. It is disabled by default.
+# Optional Waffle Desk web interface. It is disabled by default; `waffle setup`
+# offers to enable it and prints its loopback URL.
 [dashboard]
 enabled = false
 # skill_import_roots = ["/absolute/path/to/reviewed-skills"]

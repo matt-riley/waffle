@@ -14,9 +14,11 @@ waffle setup
 ```
 
 `waffle setup` walks through secret-store identity creation (if needed), guided
-provider enrollment (credential + model aliases), and a minimal
-`[agent.profile.main]` block. Re-running setup is safe: completed steps print
-an "already configured" message and are skipped. After setup succeeds:
+provider enrollment (credential + model aliases), a minimal
+`[agent.profile.main]` block, and an offer to enable [Waffle Desk](waffle-desk.md),
+the loopback browser interface — printing its URL when enabled. Re-running setup
+is safe: completed steps print an "already configured" message and are skipped.
+After setup succeeds:
 
 ```sh
 waffle chat
