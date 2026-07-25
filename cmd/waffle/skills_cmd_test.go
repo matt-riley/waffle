@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/store"
 )
 
 func TestSkillsListJSONOutput(t *testing.T) {
@@ -87,5 +91,70 @@ func TestSkillsListJSONEmpty(t *testing.T) {
 	}
 	if list == nil || len(list) != 0 {
 		t.Fatalf("list = %+v, want empty non-nil array", list)
+	}
+}
+
+func TestSkillsListRecoversPendingUninstallBeforeDiscoveringSkills(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	skillsDir := filepath.Join(home, "workspace", "main", "skills")
+	skillDir := filepath.Join(skillsDir, "reviewer")
+	backup := filepath.Join(skillsDir, ".waffle-uninstall-reviewer")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: reviewer\ndescription: review changes\nstatus: inactive\n---\n\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, filepath.Join(home, "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := skill.SetSkillStatusRecord(ctx, st.DB, skill.StatusRecord{Name: "reviewer", Status: skill.StatusInactive, Source: "dashboard", SourceRef: "local:reviewer"}); err != nil {
+		_ = st.Close()
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(skillDir, backup); err != nil {
+		t.Fatal(err)
+	}
+	journal := map[string]any{
+		"version":   1,
+		"name":      "reviewer",
+		"skill_dir": skillDir,
+		"backup":    backup,
+		"parent":    skillsDir,
+		"previous_status": map[string]any{
+			"Name": "reviewer", "Status": skill.StatusInactive, "Source": "dashboard", "SourceRef": "local:reviewer",
+		},
+		"phase": "prepared",
+	}
+	journalBytes, err := json.Marshal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, ".waffle-uninstall-reviewer.json"), append(journalBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := skillsCmd(ctx, []string{"ls", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("skills ls --json recovery: %v", err)
+	}
+	var list []skillJSON
+	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Name != "reviewer" || list[0].Active {
+		t.Fatalf("recovered skills = %#v, want inactive reviewer", list)
+	}
+	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatalf("recovery did not restore skill before list: %v", err)
+	}
+	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery backup = %v, want absent", err)
 	}
 }

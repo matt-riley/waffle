@@ -27,8 +27,9 @@ var migrationFS embed.FS
 type Store struct {
 	DB *sql.DB
 
-	skillLifecycleMu sync.Mutex
-	SkillLifecycle   *lifecycle.Guard
+	skillLifecycleMu   sync.Mutex
+	skillLifecyclePath string
+	SkillLifecycle     *lifecycle.Guard
 }
 
 // SkillLifecycleGuard returns the process-wide guard shared by runtime and
@@ -40,7 +41,7 @@ func (s *Store) SkillLifecycleGuard() *lifecycle.Guard {
 	s.skillLifecycleMu.Lock()
 	defer s.skillLifecycleMu.Unlock()
 	if s.SkillLifecycle == nil {
-		s.SkillLifecycle = lifecycle.NewGuard()
+		s.SkillLifecycle = lifecycle.NewGuard(s.skillLifecyclePath)
 	}
 	return s.SkillLifecycle
 }
@@ -69,7 +70,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{DB: db, SkillLifecycle: lifecycle.NewGuard()}, nil
+	lockPath := filepath.Clean(path) + ".skill-lifecycle.lock"
+	return &Store{
+		DB:                 db,
+		SkillLifecycle:     lifecycle.NewGuard(lockPath),
+		skillLifecyclePath: lockPath,
+	}, nil
 }
 
 // Close closes the underlying database.

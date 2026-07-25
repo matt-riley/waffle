@@ -160,6 +160,26 @@ func TestSkillsCommandRejectsStaleRuntimeAttachAfterUninstall(t *testing.T) {
 	}
 }
 
+func TestSkillsCommandNormalizesAttachmentNameBeforeRuntimePersistence(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	writeRuntimeSkill(t, "reviewer", "review every change", skill.StatusActive, "Review every changed file.")
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandSkills, Args: "attach reviewer "}, nil); err != nil {
+		t.Fatal(err)
+	}
+	names, err := (&skill.Attachments{DB: runtime.st.DB}).List(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"reviewer"}) {
+		t.Fatalf("runtime persisted attachments = %v, want [reviewer]", names)
+	}
+}
+
 func TestSkillsCommandRejectsInactiveMissingAndOversizeAtomically(t *testing.T) {
 	ctx := context.Background()
 	runtime, _ := newRuntimeFixture(t, configuredChatModels())

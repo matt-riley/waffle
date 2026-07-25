@@ -7,23 +7,26 @@ import (
 
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/store"
 )
 
-// skillsCmd implements skill utilities: audit, activate, ls|list (#65).
+// skillsCmd implements skill utilities: audit, activate, deactivate, ls|list (#65).
 func skillsCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	_ = stderr
 	if len(args) == 0 {
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list [--json]>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|deactivate|ls|list [--json]>")
 	}
 	switch args[0] {
 	case "audit":
 		return skillsAuditCmd(ctx, args[1:], stdout)
 	case "activate":
 		return skillsActivateCmd(ctx, args[1:], stdout)
+	case "deactivate":
+		return skillsDeactivateCmd(ctx, args[1:], stdout)
 	case "ls", "list":
 		return skillsListCmd(ctx, args[1:], stdout)
 	default:
-		return fmt.Errorf("usage: waffle skills <audit|activate|ls|list [--json]>")
+		return fmt.Errorf("usage: waffle skills <audit|activate|deactivate|ls|list [--json]>")
 	}
 }
 
@@ -40,19 +43,32 @@ func skillsActivateCmd(ctx context.Context, args []string, stdout io.Writer) err
 		return fmt.Errorf("usage: waffle skills activate <name>")
 	}
 	name := args[0]
-	_, st, err := openConfigAndStore(ctx)
+	st, ws, err := openSkillsWorkspace(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	ws, err := memory.Open(memory.DefaultAgent)
-	if err != nil {
-		return err
-	}
 	if err := skill.ActivateSkill(ctx, st.DB, ws, name); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "activated skill %q — now listed in the skills index\n", name)
+	return nil
+}
+
+func skillsDeactivateCmd(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: waffle skills deactivate <name>")
+	}
+	name := args[0]
+	st, ws, err := openSkillsWorkspace(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+	if err := skill.DeactivateSkill(ctx, st.DB, ws, name); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "deactivated skill %q — no longer listed in the skills index\n", name)
 	return nil
 }
 
@@ -61,15 +77,11 @@ func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) > 0 {
 		return fmt.Errorf("usage: waffle skills ls|list [--json]")
 	}
-	_, st, err := openConfigAndStore(ctx)
+	st, ws, err := openSkillsWorkspace(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	ws, err := memory.Open(memory.DefaultAgent)
-	if err != nil {
-		return err
-	}
 	all, err := skill.Discover(ws.SkillsDir())
 	if err != nil {
 		return err
@@ -105,6 +117,23 @@ func skillsListCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s  %-10s  %s\n", s.Name, stLabel, s.Description)
 	}
 	return nil
+}
+
+func openSkillsWorkspace(ctx context.Context) (*store.Store, memory.Workspace, error) {
+	_, st, err := openConfigAndStore(ctx)
+	if err != nil {
+		return nil, memory.Workspace{}, err
+	}
+	ws, err := memory.Open(memory.DefaultAgent)
+	if err != nil {
+		_ = st.Close()
+		return nil, memory.Workspace{}, err
+	}
+	if err := skill.RecoverPendingSkillUninstalls(ctx, st.DB, ws, st.SkillLifecycleGuard()); err != nil {
+		_ = st.Close()
+		return nil, memory.Workspace{}, fmt.Errorf("recover pending skill uninstall: %w", err)
+	}
+	return st, ws, nil
 }
 
 // skillJSON is the machine-readable shape for `waffle skills ls --json`.

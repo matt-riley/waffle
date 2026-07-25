@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/lifecycle"
 	"github.com/matt-riley/waffle/internal/memory"
@@ -191,6 +192,51 @@ func TestAttachmentsRejectAttachAfterConcurrentUninstallCompletes(t *testing.T) 
 	}
 }
 
+func TestSkillLifecycleGuardsShareCanonicalStateLock(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state", "waffle.db")
+	first, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	firstGuard := first.SkillLifecycleGuard()
+	secondGuard := second.SkillLifecycleGuard()
+	if err := firstGuard.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan error, 1)
+	go func() {
+		if err := secondGuard.Lock(ctx); err != nil {
+			acquired <- err
+			return
+		}
+		secondGuard.Unlock()
+		acquired <- nil
+	}()
+	select {
+	case err := <-acquired:
+		firstGuard.Unlock()
+		t.Fatalf("second store acquired lifecycle lock while first held it: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	firstGuard.Unlock()
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second store lock after release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second store did not acquire lifecycle lock after release")
+	}
+}
+
 func TestUninstallSkillRollsBackWhenStatusDeleteFails(t *testing.T) {
 	ctx, ws, st, path, guard := newInactiveSkillFixture(t)
 	attachments := &Attachments{DB: st.DB, Workspace: ws, Lifecycle: guard}
@@ -274,6 +320,52 @@ func TestRecoverPendingUninstallRestoresVisibleSkillAndStatusAfterRestart(t *tes
 	}
 	assertStatusRecord(t, reopened.DB, "reviewer", StatusInactive, "local:reviewer")
 	assertNoUninstallArtifacts(t, ws, "reviewer")
+}
+
+func TestRecoverPendingUninstallUsesCanonicalDirectoryWhenFrontmatterNameDiffers(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	ws := memory.Workspace{Dir: filepath.Join(root, "workspace")}
+	path := filepath.Join(ws.SkillsDir(), "reviewer-files", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: reviewer\nstatus: inactive\n---\n\n# Review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, filepath.Join(root, "state", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name: "reviewer", Status: StatusInactive, Source: "dashboard", SourceRef: "local:reviewer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := uninstallAfterPhase
+	uninstallAfterPhase = func(phase string) error {
+		if phase == "status_removed" {
+			return errors.New("simulated interruption")
+		}
+		return nil
+	}
+	t.Cleanup(func() { uninstallAfterPhase = previous })
+	guard := st.SkillLifecycleGuard()
+	attachments := &Attachments{DB: st.DB, Workspace: ws, Lifecycle: guard}
+	if err := UninstallSkill(ctx, st.DB, ws, "reviewer", attachments, guard); err == nil {
+		t.Fatal("uninstall succeeded, want simulated interruption")
+	}
+	if err := RecoverPendingSkillUninstalls(ctx, st.DB, ws, guard); err != nil {
+		t.Fatalf("recover mismatched skill directory: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("canonical skill directory was not restored: %v", err)
+	}
+	assertStatusRecord(t, st.DB, "reviewer", StatusInactive, "local:reviewer")
+	if _, err := os.Stat(filepath.Join(ws.SkillsDir(), ".waffle-uninstall-reviewer-files")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected directory-name staging artifact: %v", err)
+	}
 }
 
 func newInactiveSkillFixture(t *testing.T) (context.Context, memory.Workspace, *store.Store, string, *lifecycle.Guard) {

@@ -653,12 +653,21 @@ func TestWorkspaceCapabilitySkillsPreservesReviewedProvenanceAndInactiveInstall(
 	if err := skills.Activate(t.Context(), "reviewed-skill"); err != nil {
 		t.Fatal(err)
 	}
-	if err := skills.Attach(t.Context(), current.ID, "reviewed-skill"); err != nil {
+	if err := skills.Attach(t.Context(), current.ID, " reviewed-skill \t"); err != nil {
 		t.Fatal(err)
 	}
 	listed, err := skills.List(t.Context(), current.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var attached bool
+	for _, item := range listed {
+		if item.Name == "reviewed-skill" {
+			attached = item.Attached
+		}
+	}
+	if !attached {
+		t.Fatalf("normalized dashboard attachment missing: %#v", listed)
 	}
 	if len(listed) != 1 || !listed[0].Active || !listed[0].Attached {
 		t.Fatalf("listed skills = %#v", listed)

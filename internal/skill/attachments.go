@@ -27,11 +27,14 @@ type AttachmentReference struct {
 
 // Attach idempotently associates a skill name with a session.
 func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error {
+	name = strings.TrimSpace(name)
 	if err := a.validate(sessionID, name); err != nil {
 		return err
 	}
 	if a.Lifecycle != nil {
-		a.Lifecycle.Lock()
+		if err := a.Lifecycle.Lock(ctx); err != nil {
+			return fmt.Errorf("lock skill lifecycle for attach: %w", err)
+		}
 		defer a.Lifecycle.Unlock()
 	}
 	if a.Workspace.Dir != "" {
@@ -39,8 +42,8 @@ func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error 
 		if err != nil {
 			return fmt.Errorf("check skill before attach: %w", err)
 		}
-		if _, ok := Find(active, strings.TrimSpace(name)); !ok {
-			return fmt.Errorf("%w: skill %q is not active or installed", ErrSkillNotFound, strings.TrimSpace(name))
+		if _, ok := Find(active, name); !ok {
+			return fmt.Errorf("%w: skill %q is not active or installed", ErrSkillNotFound, name)
 		}
 	}
 	_, err := a.DB.ExecContext(ctx, `
@@ -56,6 +59,7 @@ func (a *Attachments) Attach(ctx context.Context, sessionID, name string) error 
 
 // Detach idempotently removes a skill association from a session.
 func (a *Attachments) Detach(ctx context.Context, sessionID, name string) error {
+	name = strings.TrimSpace(name)
 	if err := a.validate(sessionID, name); err != nil {
 		return err
 	}
@@ -108,7 +112,8 @@ func (a *Attachments) References(ctx context.Context, name string) (out []Attach
 	if a == nil || a.DB == nil {
 		return nil, errors.New("attachments database required")
 	}
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return nil, errors.New("skill name required")
 	}
 	rows, err := a.DB.QueryContext(ctx, `

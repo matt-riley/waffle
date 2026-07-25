@@ -771,6 +771,7 @@ func (r *chatRuntime) commandSkills(ctx context.Context, args string, emit func(
 }
 
 func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	name = strings.TrimSpace(name)
 	r.mu.Lock()
 	if r.current == nil || r.agent == nil {
 		r.mu.Unlock()

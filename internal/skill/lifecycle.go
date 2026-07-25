@@ -88,7 +88,9 @@ func UninstallSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name s
 	if guard == nil {
 		guard = lifecycle.NewGuard()
 	}
-	guard.Lock()
+	if err := guard.Lock(ctx); err != nil {
+		return fmt.Errorf("lock skill lifecycle for uninstall: %w", err)
+	}
 	defer guard.Unlock()
 	if err := recoverPendingSkillUninstallsLocked(ctx, db, ws); err != nil {
 		return err
@@ -182,7 +184,9 @@ func RecoverPendingSkillUninstalls(ctx context.Context, db *sql.DB, ws memory.Wo
 	if guard == nil {
 		guard = lifecycle.NewGuard()
 	}
-	guard.Lock()
+	if err := guard.Lock(ctx); err != nil {
+		return fmt.Errorf("lock skill lifecycle for recovery: %w", err)
+	}
 	defer guard.Unlock()
 	return recoverPendingSkillUninstallsLocked(ctx, db, ws)
 }
@@ -197,7 +201,8 @@ func recoverPendingSkillUninstallsLocked(ctx context.Context, db *sql.DB, ws mem
 		return fmt.Errorf("read skill uninstall recovery directory: %w", err)
 	}
 	journals := make(map[string]uninstallJournal)
-	backups := make(map[string]bool)
+	journalPaths := make(map[string]string)
+	backups := make(map[string]string)
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
@@ -214,18 +219,30 @@ func recoverPendingSkillUninstallsLocked(ctx context.Context, db *sql.DB, ws mem
 			if err := validateUninstallJournal(parent, journalPath, journal); err != nil {
 				return err
 			}
-			journals[journal.Name] = journal
+			key := filepath.Clean(journal.SkillDir)
+			if _, exists := journals[key]; exists {
+				return fmt.Errorf("%w: multiple journals reference skill directory %q", ErrUninstallRecovery, key)
+			}
+			journals[key] = journal
+			journalPaths[key] = journalPath
 		case strings.HasPrefix(name, ".waffle-uninstall-"):
-			backups[strings.TrimPrefix(name, ".waffle-uninstall-")] = true
+			backups[name] = filepath.Join(parent, name)
 		}
 	}
-	for name := range backups {
-		if _, ok := journals[name]; !ok {
-			return fmt.Errorf("%w: orphaned staged skill %q has no journal", ErrUninstallRecovery, name)
+	for backupName, backupPath := range backups {
+		matched := false
+		for _, journal := range journals {
+			if filepath.Clean(journal.Backup) == filepath.Clean(backupPath) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%w: orphaned staged skill %q has no journal", ErrUninstallRecovery, backupName)
 		}
 	}
-	for name, journal := range journals {
-		if err := recoverUninstallJournal(ctx, db, journal, uninstallJournalPath(parent, name)); err != nil {
+	for skillDir, journal := range journals {
+		if err := recoverUninstallJournal(ctx, db, journal, journalPaths[skillDir]); err != nil {
 			return err
 		}
 	}
@@ -236,9 +253,10 @@ func validateUninstallJournal(parent, journalPath string, journal uninstallJourn
 	if journal.Version != 1 || !lifecycleSkillNamePattern.MatchString(journal.Name) {
 		return fmt.Errorf("%w: invalid journal identity", ErrUninstallRecovery)
 	}
-	wantSkillDir := filepath.Join(parent, journal.Name)
+	skillDir := filepath.Clean(journal.SkillDir)
 	wantBackup := filepath.Join(parent, ".waffle-uninstall-"+journal.Name)
-	if filepath.Clean(journalPath) != uninstallJournalPath(parent, journal.Name) || filepath.Clean(journal.Parent) != parent || filepath.Clean(journal.SkillDir) != wantSkillDir || filepath.Clean(journal.Backup) != wantBackup {
+	skillDirName := filepath.Base(skillDir)
+	if filepath.Clean(journalPath) != uninstallJournalPath(parent, journal.Name) || filepath.Clean(journal.Parent) != parent || filepath.Dir(skillDir) != parent || skillDirName == "" || skillDirName == "." || skillDirName == ".." || strings.HasPrefix(skillDirName, ".waffle-uninstall-") || filepath.Clean(journal.Backup) != wantBackup {
 		return fmt.Errorf("%w: journal paths do not match skill root", ErrUninstallRecovery)
 	}
 	if journal.Phase != "prepared" && journal.Phase != "committed" {

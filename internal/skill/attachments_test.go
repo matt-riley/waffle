@@ -68,6 +68,44 @@ func TestAttachmentsAreUniqueSortedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestAttachmentsNormalizeSkillNamesBeforePersisting(t *testing.T) {
+	ctx := context.Background()
+	st, sessions := openAttachmentTestStore(t)
+	sess, err := sessions.Create(ctx, "normalized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := &Attachments{DB: st.DB}
+
+	if err := attachments.Attach(ctx, sess.ID, " reviewer \t"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"reviewer"}; !slices.Equal(got, want) {
+		t.Fatalf("attachments = %v, want %v", got, want)
+	}
+	references, err := attachments.References(ctx, " reviewer ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references) != 1 || references[0].SessionID != sess.ID {
+		t.Fatalf("references = %#v, want session %q", references, sess.ID)
+	}
+	if err := attachments.Detach(ctx, sess.ID, " reviewer "); err != nil {
+		t.Fatal(err)
+	}
+	got, err = attachments.List(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("attachments after normalized detach = %v, want empty", got)
+	}
+}
+
 func TestAttachmentsReferencesReturnStableSessionLabels(t *testing.T) {
 	ctx := context.Background()
 	st, sessions := openAttachmentTestStore(t)
