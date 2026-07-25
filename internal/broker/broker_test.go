@@ -1040,3 +1040,241 @@ func TestGitRepoScopeBindReadRevoke(t *testing.T) {
 		t.Fatal("binding survived RevokeSession")
 	}
 }
+
+func TestTokenExpiresOnProxyAndGitCredential(t *testing.T) {
+	// AC1: expired tokens stop authorizing both faces.
+	// AC4: expiry driven by b.now().
+	clock := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	st := openStore(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	b := New(st, []Upstream{{Name: "x", BaseURL: upstream.URL, Header: "x-api-key", Value: "k"}})
+	b.TokenTTL = time.Hour
+	b.Now = func() time.Time { return clock }
+	b.GitCredential = func(context.Context, string, string, string) (string, string, error) {
+		return "user", "pass", nil
+	}
+	b.BindGitRepo("sess", "owner/A")
+
+	token, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	// Still valid before TTL.
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pre-expiry proxy status=%d", resp.StatusCode)
+	}
+
+	// Advance past TTL.
+	clock = clock.Add(time.Hour + time.Second)
+
+	req, _ = http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-expiry proxy status=%d, want 401", resp.StatusCode)
+	}
+
+	// Re-mint so git face has a live session binding only after renewal path;
+	// this request uses the expired token (already swept on prior lookup).
+	req, _ = http.NewRequest(http.MethodPost, front.URL+"/git-credential",
+		strings.NewReader("protocol=https\nhost=github.com\npath=owner/A.git\n"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-expiry git-credential status=%d, want 401", resp.StatusCode)
+	}
+}
+
+func TestExpiredTokenSweepsSessionMaps(t *testing.T) {
+	// AC2: expired entries leave tokens/sessions/gitScope/limits/budgets.
+	clock := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	b := New(nil, nil)
+	b.TokenTTL = time.Minute
+	b.Now = func() time.Time { return clock }
+	b.BindGitRepo("sess", "owner/A")
+
+	token, err := b.MintScoped(context.Background(), "sess", "budget-k", usage.Limits{TokensPerDay: 9})
+	if err != nil {
+		t.Fatalf("MintScoped: %v", err)
+	}
+	if got := b.session(token); got != "sess" {
+		t.Fatalf("session before expiry = %q", got)
+	}
+	if repo, ok := b.GitRepoScope("sess"); !ok || repo != "owner/A" {
+		t.Fatalf("git scope before expiry = (%q, %v)", repo, ok)
+	}
+
+	clock = clock.Add(time.Minute + time.Nanosecond)
+	if got := b.session(token); got != "" {
+		t.Fatalf("session after expiry = %q, want empty", got)
+	}
+
+	b.mu.Lock()
+	_, tokenPresent := b.tokens[token]
+	_, sessionPresent := b.sessions["sess"]
+	_, gitPresent := b.gitScope["sess"]
+	_, limitsPresent := b.limits["sess"]
+	_, budgetPresent := b.budgets["sess"]
+	b.mu.Unlock()
+	if tokenPresent || sessionPresent || gitPresent || limitsPresent || budgetPresent {
+		t.Fatalf("maps after expiry: token=%v session=%v git=%v limits=%v budget=%v",
+			tokenPresent, sessionPresent, gitPresent, limitsPresent, budgetPresent)
+	}
+}
+
+func TestRemintAfterExpiryAuthorizesAgain(t *testing.T) {
+	// AC3: session outliving TTL continues via re-mint.
+	clock := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	b := New(nil, []Upstream{{Name: "x", BaseURL: upstream.URL, Header: "x-api-key", Value: "k"}})
+	b.TokenTTL = time.Hour
+	b.Now = func() time.Time { return clock }
+
+	first, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("first Mint: %v", err)
+	}
+	clock = clock.Add(2 * time.Hour)
+	if got := b.session(first); got != "" {
+		t.Fatalf("expired first token still resolves to %q", got)
+	}
+
+	second, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("re-mint: %v", err)
+	}
+	if second == first {
+		t.Fatal("re-mint returned the same token string")
+	}
+	if got := b.session(second); got != "sess" {
+		t.Fatalf("fresh token session = %q", got)
+	}
+
+	front := httptest.NewServer(b)
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+second)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-minted token status=%d", resp.StatusCode)
+	}
+}
+
+func TestExpiredVsUnknownAuditActions(t *testing.T) {
+	// AC5: rejected-because-expired is distinguishable from unknown.
+	clock := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "x", BaseURL: "http://127.0.0.1:1", Header: "x-api-key", Value: "k"}})
+	b.TokenTTL = time.Hour
+	b.Now = func() time.Time { return clock }
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	// Unknown token.
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer wk_unknown_token_xx")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown status=%d", resp.StatusCode)
+	}
+	var action, sessionID, detail string
+	if err := st.DB.QueryRow(`SELECT action, session, detail FROM broker_audit WHERE action='denied' ORDER BY id DESC LIMIT 1`).Scan(&action, &sessionID, &detail); err != nil {
+		t.Fatalf("unknown audit: %v", err)
+	}
+	if action != "denied" || sessionID != "" || !strings.Contains(detail, "/x/v1/thing") {
+		t.Fatalf("unknown audit action=%q session=%q detail=%q", action, sessionID, detail)
+	}
+
+	// Expired token.
+	token, err := b.Mint(context.Background(), "sess-exp")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	clock = clock.Add(time.Hour + time.Second)
+	req, _ = http.NewRequest(http.MethodPost, front.URL+"/x/v1/thing", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired status=%d", resp.StatusCode)
+	}
+	if err := st.DB.QueryRow(`SELECT action, session, detail FROM broker_audit WHERE action='expired' ORDER BY id DESC LIMIT 1`).Scan(&action, &sessionID, &detail); err != nil {
+		t.Fatalf("expired audit: %v", err)
+	}
+	if action != "expired" || sessionID != "sess-exp" || !strings.Contains(detail, "/x/v1/thing") {
+		t.Fatalf("expired audit action=%q session=%q detail=%q", action, sessionID, detail)
+	}
+
+	var deniedCount, expiredCount int
+	if err := st.DB.QueryRow(`SELECT COUNT(*) FROM broker_audit WHERE action='denied'`).Scan(&deniedCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB.QueryRow(`SELECT COUNT(*) FROM broker_audit WHERE action='expired'`).Scan(&expiredCount); err != nil {
+		t.Fatal(err)
+	}
+	if deniedCount < 1 || expiredCount != 1 {
+		t.Fatalf("audit counts denied=%d expired=%d", deniedCount, expiredCount)
+	}
+}
+
+func TestTokenValidUntilExactExpiry(t *testing.T) {
+	// Token authorizes while expiresAt.After(now); rejects at the exact instant.
+	clock := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	b := New(nil, nil)
+	b.TokenTTL = time.Hour
+	b.Now = func() time.Time { return clock }
+
+	token, err := b.Mint(context.Background(), "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One nanosecond before expiry: still valid.
+	clock = clock.Add(time.Hour - time.Nanosecond)
+	if got := b.session(token); got != "sess" {
+		t.Fatalf("just before expiry session=%q", got)
+	}
+	// Exact expiry: invalid.
+	clock = clock.Add(time.Nanosecond)
+	if got := b.session(token); got != "" {
+		t.Fatalf("at exact expiry session=%q, want empty", got)
+	}
+}

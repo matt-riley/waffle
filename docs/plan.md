@@ -184,8 +184,8 @@ Lifecycle:
    `.devcontainer/devcontainer.json`, use that image; else a per-repo or
    global default dev image (git + language toolchains). It creates a named
    volume, starts the container with the `waffle runner` bind-mount, and
-   clones the repo using a broker-minted short-lived token (see secret
-   management). The token is used once by the runner and never stored.
+   clones the repo using a broker-minted `wk_` session token with a 24h TTL
+   (see secret management). The token is used once by the runner and never stored.
 2. **Work.** The session's tools execute in the container. Git pushes use
    the `waffle` binary itself as the repo's `credential.helper`: on demand it
    asks the host broker for a fresh token scoped to that one repository, so
@@ -206,7 +206,7 @@ shows open workspaces, their repos, branches, and dirty state.
 ### Secret management
 
 Layered, with one rule throughout: **raw secrets exist only in the host
-store; everything else gets short-lived, scoped derivatives.**
+store; everything else gets scoped, time-bounded derivatives.**
 
 - **Store.** `internal/secret` defines a `Store` interface. Default backend:
   an age-encrypted file `~/.waffle/secrets.age` whose key lives in the OS
@@ -219,13 +219,15 @@ store; everything else gets short-lived, scoped derivatives.**
   the gateway. Secrets never appear in config, SQLite, or logs.
 - **Broker.** A host-side credential broker (part of the gateway, sibling of
   the provider proxy) is the only component that reads the store on behalf
-  of sessions. It authenticates callers with per-session `wk_` tokens and
-  applies the session's policy. It has three faces:
+  of sessions. It authenticates callers with per-session `wk_` tokens
+  (**24h TTL**, `broker.DefaultTokenTTL`; expired tokens are rejected and
+  swept; resume/re-mint issues a fresh token) and applies the session's
+  policy. It has three faces:
   - *LLM:* the provider proxy — injects the real API key upstream
     (unchanged from the base plan).
-  - *Git:* mints short-lived, least-privilege repo credentials — a GitHub
+  - *Git:* mints least-privilege repo credentials — a GitHub
     App installation token or fine-grained PAT scoped to the single repo,
-    ~1 h TTL — for workspace clone/push.
+    ~1 h TTL for installation tokens — for workspace clone/push.
   - *HTTP:* an egress proxy that injects `Authorization` headers for
     allowlisted hosts, so a sandboxed tool can call an API it is entitled
     to without ever seeing the key (nanoclaw's Agent Vault pattern).
@@ -234,7 +236,8 @@ store; everything else gets short-lived, scoped derivatives.**
   (`[redacted:github/pat]`) — protects against the "cat ~/.netrc into the
   transcript" class of leak even on the host executor.
 - **Audit.** Every broker grant is a SQLite row: session, secret name,
-  scope, TTL, timestamp.
+  scope, TTL, timestamp. Expired `wk_` presentations are audited as
+  `action=expired`, distinct from unknown/missing tokens (`action=denied`).
 
 Threat model in one line: a fully compromised session (prompt injection,
 malicious repo code) can spend its own scoped tokens until they expire, but
