@@ -214,6 +214,25 @@ function createHarness({
     createTextNode: (text) => new FakeTextNode(text),
     querySelector: (selector) => elements[selector] || null,
   };
+  const railCalls = [];
+  const waffleDeskRail = {
+    connectionStates: {
+      connecting: "connecting",
+      connected: "connected",
+      degraded: "degraded",
+      disconnected: "disconnected",
+    },
+    modelScopes: {
+      session: "session",
+      waffleWide: "waffle-wide",
+    },
+    setConnection(state) {
+      railCalls.push({ kind: "connection", state });
+    },
+    setModel(alias, scope) {
+      railCalls.push({ kind: "model", alias, scope });
+    },
+  };
   const calls = [];
   const timers = [];
   const cancelResponse = deferred();
@@ -300,6 +319,7 @@ function createHarness({
     fetch,
     location: { href },
     URL,
+    waffleDeskRail,
     setTimeout: (fn, delay) => {
       const handle = { fn, delay, cleared: false };
       timers.push(handle);
@@ -319,6 +339,7 @@ function createHarness({
     elements,
     EventSource: FakeEventSource,
     timers,
+    railCalls,
     turnResponse,
     runTimers: async () => {
       const due = timers.splice(0, timers.length);
@@ -349,6 +370,30 @@ test("bootstrap replaces stale in-memory authority and seeds the native event cu
   assert.equal(open.options.headers["X-Waffle-Desk-Token"], "fresh-token");
   assert.equal(harness.EventSource.instances.length, 1);
   assert.equal(harness.EventSource.instances[0].url, "/api/v1/desk/events?after=42");
+  assert.deepEqual(
+    harness.railCalls.filter((call) => call.kind === "model"),
+    [{ kind: "model", alias: "old-model", scope: "session" }],
+  );
+  assert.equal(
+    harness.railCalls.some(
+      (call) => call.kind === "connection" && call.state === "connected",
+    ),
+    true,
+  );
+});
+
+test("rail stays live while SSE reconnects after a stream drop", async () => {
+  const harness = createHarness();
+  await flush();
+  harness.railCalls.length = 0;
+
+  harness.EventSource.instances[0].emit("error", {});
+  await flush();
+
+  // Recoverable drops reconnect; the desk is not torn down to disconnected.
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-connection-text"].textContent, "Reconnecting");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
 });
 
 test("open at desk selects exactly one requested persisted session", async () => {

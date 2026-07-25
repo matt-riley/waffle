@@ -163,15 +163,6 @@
   font-weight: 400;
 }
 
-#workspace-open-form input {
-  background: var(--paper);
-  border: 1px solid var(--ink);
-  color: var(--ink);
-  min-height: 2.75rem;
-  padding: 0.65rem 0.75rem;
-  width: 100%;
-}
-
 .workspace-danger {
   background: var(--danger);
   color: var(--paper);

@@ -40,6 +40,16 @@ func TestWorkspacesRendersLifecycleControlsAndNativeDialogs(t *testing.T) {
 			t.Errorf("Workspaces view missing %q", required)
 		}
 	}
+	// List container must not announce full re-renders; status regions keep aria-live.
+	listIdx := strings.Index(body, `id="workspaces-list"`)
+	if listIdx < 0 {
+		t.Fatal("missing workspaces-list")
+	}
+	end := strings.Index(body[listIdx:], ">")
+	openTag := body[listIdx : listIdx+end+1]
+	if strings.Contains(openTag, `aria-live`) {
+		t.Errorf("workspaces-list must not carry aria-live: %s", openTag)
+	}
 	for _, forbidden := range []string{"force close", `name="force"`, `id="workspace-force"`} {
 		if strings.Contains(strings.ToLower(body), forbidden) {
 			t.Errorf("Workspaces view contains forbidden force control %q", forbidden)

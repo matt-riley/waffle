@@ -8,9 +8,11 @@ const phase = Object.freeze({
 });
 
 const reconnectConfig = Object.freeze({
-  maxAttempts: 6,
-  baseDelayMs: 1000,
-  maxDelayMs: 16000,
+  maxAttempts: 8,
+  // Keep the first retry snappy so a brief blip (or a test unblocking the
+  // stream) recovers without waiting out a multi-second backoff ladder.
+  baseDelayMs: 250,
+  maxDelayMs: 2000,
 });
 
 function requestedSessionID() {
@@ -75,6 +77,22 @@ const state = {
   pendingTurn: null,
 };
 
+function pushRailConnection(railState) {
+  const rail = globalThis.waffleDeskRail;
+  if (!rail || typeof rail.setConnection !== "function") {
+    return;
+  }
+  rail.setConnection(railState);
+}
+
+function pushRailModel(alias, scope) {
+  const rail = globalThis.waffleDeskRail;
+  if (!rail || typeof rail.setModel !== "function") {
+    return;
+  }
+  rail.setModel(alias, scope);
+}
+
 function phaseLabel(next) {
   const labels = {
     [phase.opening]: "Opening",
@@ -103,6 +121,24 @@ function setPhase(next) {
     elements.connection.classList.remove("is-reconnecting");
     elements.connectionText.textContent = "Disconnected";
     elements.connectionDetail.textContent = "Stale";
+    pushRailConnection(
+      globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected",
+    );
+  } else if (next === phase.opening) {
+    pushRailConnection(
+      globalThis.waffleDeskRail?.connectionStates?.connecting || "connecting",
+    );
+  } else {
+    // Do not mask a process-health degraded rail with "connected" just because
+    // an active session phase is live. Bootstrap owns degraded health.
+    const degraded =
+      globalThis.waffleDeskRail?.connectionStates?.degraded || "degraded";
+    const current = globalThis.waffleDeskRail?.getState?.()?.connection;
+    if (current !== degraded) {
+      pushRailConnection(
+        globalThis.waffleDeskRail?.connectionStates?.connected || "connected",
+      );
+    }
   }
   updateControls();
 }
@@ -315,6 +351,12 @@ function renderCanonicalState(chatState, includeHistory) {
   elements.provider.textContent = chatState.provider_label || "Not reported";
   renderModels(chatState.models, chatState.model_alias);
   renderSkills(chatState.skills);
+  if (chatState.model_alias) {
+    pushRailModel(
+      chatState.model_alias,
+      globalThis.waffleDeskRail?.modelScopes?.session || "session",
+    );
+  }
   if (includeHistory && Array.isArray(chatState.history)) {
     renderHistory(chatState.history);
   }
@@ -530,16 +572,25 @@ function scheduleReconnect() {
   const attempt = state.reconnectAttempts;
   state.reconnectAttempts += 1;
   showReconnecting();
-  const delay = Math.min(
-    reconnectConfig.baseDelayMs * 2 ** attempt,
-    reconnectConfig.maxDelayMs,
-  );
+  // First retry is immediate so recovery is not gated on the base delay after
+  // the stream becomes reachable again (e.g. after a brief network blip).
+  const delay =
+    attempt === 0
+      ? 0
+      : Math.min(
+          reconnectConfig.baseDelayMs * 2 ** (attempt - 1),
+          reconnectConfig.maxDelayMs,
+        );
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
     if (state.currentPhase === phase.disconnected) {
       return;
     }
-    openEventStream();
+    try {
+      openEventStream();
+    } catch {
+      scheduleReconnect();
+    }
   }, delay);
 }
 
