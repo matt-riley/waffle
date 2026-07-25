@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 // enrolledManager returns a manager whose config already carries a working
@@ -39,6 +41,20 @@ func editConfigOutOfBand(t *testing.T, manager *Manager) {
 		t.Fatal(err)
 	}
 	updated := append(existing, []byte("\n[dashboard]\nenabled = true\n")...)
+	if err := os.WriteFile(manager.ConfigPath, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// touchConfig makes a further hash-changing edit that stays valid TOML, for
+// simulating a config that moves on while a probe is in flight.
+func touchConfig(t *testing.T, manager *Manager) {
+	t.Helper()
+	existing, err := os.ReadFile(manager.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := append(existing, []byte("\n# edited again\n")...)
 	if err := os.WriteFile(manager.ConfigPath, updated, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,5 +188,99 @@ func TestVerifyReadinessReportsLockContention(t *testing.T) {
 	}
 	if refreshed {
 		t.Error("VerifyReadiness() refreshed = true while the config was locked")
+	}
+}
+
+func TestVerifyReadinessDoesNotHoldTheLockAcrossTheProbe(t *testing.T) {
+	// Status reads take the same lock. Holding it across the probe stalled every
+	// Desk provider read for the probe's own timeout — 30s in production — which
+	// is how this surfaced: a capabilities request during startup timed out.
+	manager := enrolledManager(t)
+	editConfigOutOfBand(t, manager)
+
+	// Status also probes health once the generation matches, so only the first
+	// call — VerifyReadiness's — may block.
+	probing := make(chan struct{})
+	release := make(chan struct{})
+	var blockOnce sync.Once
+	manager.Health = func(context.Context) error {
+		blocking := false
+		blockOnce.Do(func() { blocking = true })
+		if blocking {
+			close(probing)
+			<-release
+		}
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.VerifyReadiness(context.Background())
+		done <- err
+	}()
+
+	<-probing
+	// The probe is in flight. A status read must not block behind it.
+	statusDone := make(chan error, 1)
+	go func() {
+		_, statusErr := manager.Status(context.Background())
+		statusDone <- statusErr
+	}()
+	select {
+	case statusErr := <-statusDone:
+		if statusErr != nil {
+			t.Errorf("Status() during an in-flight probe: %v", statusErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Status() blocked while the readiness probe ran: the lock is held across the probe")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("VerifyReadiness() error = %v", err)
+	}
+	if got := readinessState(t, manager); got != "ready" {
+		t.Errorf("state after verification = %q, want ready", got)
+	}
+}
+
+func TestVerifyReadinessDiscardsAProbeWhoseConfigChanged(t *testing.T) {
+	// A probe result describes one exact config. If the file changes while the
+	// probe is in flight, recording it would claim readiness for bytes that were
+	// never probed.
+	manager := enrolledManager(t)
+	editConfigOutOfBand(t, manager)
+
+	probing := make(chan struct{})
+	release := make(chan struct{})
+	var blockOnce sync.Once
+	manager.Health = func(context.Context) error {
+		blocking := false
+		blockOnce.Do(func() { blocking = true })
+		if blocking {
+			close(probing)
+			<-release
+		}
+		return nil
+	}
+
+	done := make(chan bool, 1)
+	go func() {
+		refreshed, err := manager.VerifyReadiness(context.Background())
+		if err != nil {
+			t.Errorf("VerifyReadiness() error = %v", err)
+		}
+		done <- refreshed
+	}()
+
+	<-probing
+	touchConfig(t, manager) // the config moves on underneath the probe
+	close(release)
+
+	if refreshed := <-done; refreshed {
+		t.Error("VerifyReadiness() recorded a generation for a config it never probed")
+	}
+	if got := readinessState(t, manager); got != "installed" {
+		t.Errorf("state = %q, want installed", got)
 	}
 }

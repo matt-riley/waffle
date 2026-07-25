@@ -1793,36 +1793,76 @@ func (m *Manager) rollbackJournal(ctx context.Context, j *transactionJournal) er
 // An unproven outcome is not an error: a failing probe, an unresolvable default
 // model, or a missing probe callback all leave the marker untouched so the state
 // stays Installed.
-func (m *Manager) VerifyReadiness(ctx context.Context) (refreshed bool, err error) {
+// The lock is deliberately not held across the probe. Status reads such as
+// Snapshot take the same lock, so holding it around a call that may wait out its
+// own timeout would stall every Desk provider read for that long. The probe runs
+// unlocked and the generation is only committed under the lock once the config it
+// describes is confirmed unchanged.
+func (m *Manager) VerifyReadiness(ctx context.Context) (bool, error) {
+	configBytes, generation, needed, err := m.readinessProbeNeeded(ctx)
+	if err != nil || !needed {
+		return false, err
+	}
+	if m.Health == nil {
+		return false, nil
+	}
+	if err := m.Health(ctx); err != nil {
+		return false, nil
+	}
+	return m.commitProvenReadiness(ctx, configBytes, generation)
+}
+
+// readinessProbeNeeded reports whether a probe is worth running, returning the
+// config it examined so the caller can confirm nothing changed underneath.
+func (m *Manager) readinessProbeNeeded(ctx context.Context) (
+	configBytes []byte, generation []byte, needed bool, err error,
+) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+
+	configBytes, err = os.ReadFile(m.ConfigPath)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if cfg.Agent.DefaultModel == "" {
+		return nil, nil, false, nil
+	}
+	if _, resolveErr := cfg.ResolveModel(cfg.Agent.DefaultModel); resolveErr != nil {
+		return nil, nil, false, nil
+	}
+	generation = generationBytes(configBytes)
+	existing, readErr := os.ReadFile(m.readyPath())
+	if readErr == nil && string(existing) == string(generation) {
+		return nil, nil, false, nil
+	}
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return nil, nil, false, readErr
+	}
+	return configBytes, generation, true, nil
+}
+
+// commitProvenReadiness records a passed probe, but only while the config still
+// hashes to what was probed. A concurrent edit or transaction between the probe
+// and here means the result describes a configuration that is no longer on disk.
+func (m *Manager) commitProvenReadiness(ctx context.Context, probed, generation []byte) (refreshed bool, err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { err = errors.Join(err, lease.Release()) }()
 
-	configBytes, err := os.ReadFile(m.ConfigPath)
+	current, err := os.ReadFile(m.ConfigPath)
 	if err != nil {
 		return false, err
 	}
-	cfg, err := config.Load(m.ConfigPath)
-	if err != nil {
-		return false, err
-	}
-	if cfg.Agent.DefaultModel == "" {
-		return false, nil
-	}
-	if _, err := cfg.ResolveModel(cfg.Agent.DefaultModel); err != nil {
-		return false, nil
-	}
-	generation := generationBytes(configBytes)
-	existing, err := os.ReadFile(m.readyPath())
-	if err == nil && string(existing) == string(generation) {
-		return false, nil
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	if m.Health == nil || m.Health(ctx) != nil {
+	if string(current) != string(probed) {
 		return false, nil
 	}
 	if err := writeDurable(m.readyPath(), generation, 0o600); err != nil {
