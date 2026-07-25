@@ -12,6 +12,12 @@ templ Shell(view ShellView) {
 			if view.ActiveSection == "workspaces" {
 				@WorkspaceAssets(view)
 			}
+			if view.ActiveSection == "memory" {
+				@MemoryAssets(view)
+			}
+			if view.ActiveSection == "capabilities" {
+				@CapabilitiesAssets()
+			}
 		</head>
 		<body data-request-token={ view.RequestToken }>
 			<a class="skip-link" href="#main-content">Skip to main content</a>
@@ -26,7 +32,7 @@ templ Shell(view ShellView) {
 						case "memory":
 							@Memory(view)
 						case "capabilities":
-							@Capabilities(CapabilitiesView{AssetVersion: CapabilitiesAssetVersion()})
+							@Capabilities()
 						default:
 							@Today(view)
 					}
