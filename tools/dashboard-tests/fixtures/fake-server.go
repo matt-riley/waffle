@@ -59,7 +59,7 @@ func main() {
 	defer func() { _ = listener.Close() }()
 
 	entropy := &counterReader{}
-	security, err := dashboard.NewSecurity(listener.Addr().String(), entropy)
+	security, err := dashboard.NewSecurity(listener.Addr().String(), dashboard.TailnetOptions{}, entropy)
 	if err != nil {
 		fatal(err)
 	}
