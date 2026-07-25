@@ -44,6 +44,7 @@ templ Today(view ShellView) {
 					<label for="desk-message">Message Waffle</label>
 					<textarea id="desk-message" name="message" rows="4" placeholder="Ask Waffle to help…" required></textarea>
 					<p class="composer-hint">Enter adds a new line. Send when the thought is ready.</p>
+					<p id="desk-composer-status" class="composer-status" role="status" aria-live="polite" hidden></p>
 					<div class="composer-actions">
 						<button id="desk-cancel" type="button" class="cancel-button" disabled>Cancel turn</button>
 						<button id="desk-send" type="submit" class="send-button" disabled>Send message</button>
@@ -62,7 +63,7 @@ templ Today(view ShellView) {
 					<select id="desk-model" name="model" disabled>
 						<option value={ view.ModelAlias }>{ view.ModelAlias }</option>
 					</select>
-					<p>Changes this conversation only.</p>
+					<p id="desk-model-status">Changes this conversation only.</p>
 				</div>
 				<div class="model-field session-skill-field">
 					<label for="desk-skill">Session skill</label>

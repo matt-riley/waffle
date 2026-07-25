@@ -21,13 +21,30 @@ class FakeElement {
     this.classList = {
       toggle: (name, force) => {
         const classes = new Set(this.className.split(/\s+/).filter(Boolean));
-        if (force) {
+        if (force === undefined) {
+          if (classes.has(name)) {
+            classes.delete(name);
+          } else {
+            classes.add(name);
+          }
+        } else if (force) {
           classes.add(name);
         } else {
           classes.delete(name);
         }
         this.className = [...classes].join(" ");
       },
+      add: (name) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        classes.add(name);
+        this.className = [...classes].join(" ");
+      },
+      remove: (name) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        classes.delete(name);
+        this.className = [...classes].join(" ");
+      },
+      contains: (name) => this.className.split(/\s+/).includes(name),
     };
   }
 
@@ -127,6 +144,22 @@ function jsonResponse(body, ok = true) {
   };
 }
 
+function defaultChatState(overrides = {}) {
+  return {
+    session_id: "session-1",
+    title: "",
+    connection_mode: "Shared session",
+    profile: "default",
+    workspace: "No workspace",
+    provider_label: "Test provider",
+    model_alias: "old-model",
+    models: [{ alias: "old-model", provider: "test", current: true }],
+    skills: [{ name: "review", description: "Review changes", attached: false }],
+    history: [],
+    ...overrides,
+  };
+}
+
 function createHarness({
   href = "http://127.0.0.1/desk/?section=today",
   bootstrap = {
@@ -136,6 +169,9 @@ function createHarness({
     health: {},
     status: {},
   },
+  commandHandler,
+  turnHandler,
+  cancelHandler,
 } = {}) {
   const selectors = [
     ".desk-shell",
@@ -155,7 +191,9 @@ function createHarness({
     "#desk-message",
     "#desk-send",
     "#desk-cancel",
+    "#desk-composer-status",
     "#desk-model",
+    "#desk-model-status",
     "#desk-skill",
     "#desk-skill-toggle",
     "#desk-skill-status",
@@ -166,6 +204,9 @@ function createHarness({
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
   elements["#desk-tool-activity"].appendChild(elements["#desk-empty-activity"]);
+  elements["#desk-composer-status"].hidden = true;
+  elements["#desk-model-status"].textContent = "Changes this conversation only.";
+  elements["#desk-skill-status"].textContent = "Changes this conversation only.";
 
   const document = {
     body: { dataset: { requestToken: "stale-token" } },
@@ -174,6 +215,7 @@ function createHarness({
     querySelector: (selector) => elements[selector] || null,
   };
   const calls = [];
+  const timers = [];
   const cancelResponse = deferred();
   const turnResponse = deferred();
   const fetch = async (path, options) => {
@@ -184,39 +226,29 @@ function createHarness({
     if (path === "/api/v1/desk/chat/open") {
       return jsonResponse({
         client_id: "client-1",
-        state: {
-          session_id: "session-1",
-          title: "",
-          connection_mode: "Shared session",
-          profile: "default",
-          workspace: "No workspace",
-          provider_label: "Test provider",
-          model_alias: "old-model",
-          models: [{ alias: "old-model", provider: "test", current: true }],
-          skills: [{ name: "review", description: "Review changes", attached: false }],
-          history: [],
-        },
+        state: defaultChatState(),
       });
     }
     if (path === "/api/v1/desk/chat/command") {
+      if (commandHandler) {
+        return commandHandler({ path, options });
+      }
       return jsonResponse({
-        state: {
-          session_id: "session-1",
-          title: "",
-          connection_mode: "Shared session",
-          profile: "default",
-          workspace: "No workspace",
-          provider_label: "Test provider",
-          model_alias: "old-model",
-          models: [{ alias: "old-model", provider: "test", current: true }],
+        state: defaultChatState({
           skills: [{ name: "review", description: "Review changes", attached: true }],
-        },
+        }),
       });
     }
     if (path === "/api/v1/desk/chat/turn") {
+      if (turnHandler) {
+        return turnHandler({ path, options });
+      }
       return turnResponse.promise;
     }
     if (path === "/api/v1/desk/chat/cancel") {
+      if (cancelHandler) {
+        return cancelHandler({ path, options });
+      }
       return cancelResponse.promise;
     }
     return jsonResponse({});
@@ -229,6 +261,7 @@ function createHarness({
       this.url = url;
       this.listeners = new Map();
       this.closed = false;
+      this.onopen = null;
       FakeEventSource.instances.push(this);
     }
 
@@ -239,9 +272,17 @@ function createHarness({
     }
 
     emit(type, envelope) {
-      const event = { data: JSON.stringify(envelope) };
+      const event = {
+        data: envelope === undefined ? "" : JSON.stringify(envelope),
+      };
       for (const listener of this.listeners.get(type) || []) {
         listener(event);
+      }
+    }
+
+    open() {
+      if (typeof this.onopen === "function") {
+        this.onopen();
       }
     }
 
@@ -249,6 +290,7 @@ function createHarness({
       this.closed = true;
     }
   }
+  FakeEventSource.instances = [];
 
   const context = vm.createContext({
     console,
@@ -258,6 +300,16 @@ function createHarness({
     fetch,
     location: { href },
     URL,
+    setTimeout: (fn, delay) => {
+      const handle = { fn, delay, cleared: false };
+      timers.push(handle);
+      return handle;
+    },
+    clearTimeout: (handle) => {
+      if (handle) {
+        handle.cleared = true;
+      }
+    },
   });
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
@@ -266,7 +318,17 @@ function createHarness({
     cancelResponse,
     elements,
     EventSource: FakeEventSource,
+    timers,
     turnResponse,
+    runTimers: async () => {
+      const due = timers.splice(0, timers.length);
+      for (const timer of due) {
+        if (!timer.cleared) {
+          timer.fn();
+        }
+      }
+      await flush();
+    },
   };
 }
 
@@ -515,9 +577,9 @@ test("late cancel rejection cannot overwrite a disconnected turn", async () => {
 
   const cancellation = harness.elements["#desk-cancel"].listener("click")();
   await flush();
-  harness.EventSource.instances[0].emit("error", {});
+  harness.EventSource.instances[0].emit("resync_required", {});
   const disconnectedMessage =
-    "The live connection closed. Refresh before sending again.";
+    "Live updates expired. Refresh to load canonical state.";
   assert.equal(
     harness.elements["#desk-stale-message"].textContent,
     disconnectedMessage,
@@ -533,4 +595,176 @@ test("late cancel rejection cannot overwrite a disconnected turn", async () => {
     disconnectedMessage,
   );
   assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+});
+
+test("failed model change stays live and reports the error next to the control", async () => {
+  const harness = createHarness({
+    commandHandler: async () =>
+      jsonResponse({ code: "model_not_found", message: "Model not found." }, false),
+  });
+  await flush();
+
+  harness.elements["#desk-model"].value = "missing-model";
+  await harness.elements["#desk-model"].listener("change")();
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+  assert.equal(harness.elements["#desk-model"].disabled, false);
+  assert.equal(harness.elements["#desk-message"].disabled, false);
+  assert.equal(harness.elements["#desk-model-status"].textContent, "Model not found.");
+  assert.equal(harness.elements["#desk-model-status"].classList.contains("is-error"), true);
+  assert.equal(harness.EventSource.instances[0].closed, false);
+});
+
+test("failed skill toggle stays live and reports the error next to the control", async () => {
+  const harness = createHarness({
+    commandHandler: async () =>
+      jsonResponse({ code: "skill_error", message: "Skill unavailable." }, false),
+  });
+  await flush();
+
+  harness.elements["#desk-skill"].value = "review";
+  await harness.elements["#desk-skill-toggle"].listener("click")();
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+  assert.equal(harness.elements["#desk-skill-toggle"].disabled, false);
+  assert.equal(harness.elements["#desk-skill-status"].textContent, "Skill unavailable.");
+  assert.equal(harness.elements["#desk-skill-status"].classList.contains("is-error"), true);
+  assert.equal(harness.EventSource.instances[0].closed, false);
+});
+
+test("rejected turn keeps composer text and reuses Idempotency-Key on retry", async () => {
+  let turnCalls = 0;
+  const harness = createHarness({
+    turnHandler: async () => {
+      turnCalls += 1;
+      if (turnCalls === 1) {
+        return jsonResponse(
+          { code: "turn_rejected", message: "Turn rejected by policy." },
+          false,
+        );
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+
+  const message = harness.elements["#desk-message"];
+  message.value = "Careful question";
+  const submit = harness.elements["#desk-composer"].listener("submit");
+  await submit({ preventDefault() {} });
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(message.value, "Careful question");
+  assert.equal(
+    harness.elements["#desk-composer-status"].textContent,
+    "Turn rejected by policy.",
+  );
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+
+  const firstKey = mutationCalls(harness, "/api/v1/desk/chat/turn")[0].options.headers[
+    "Idempotency-Key"
+  ];
+  await submit({ preventDefault() {} });
+  await flush();
+
+  const turnPosts = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turnPosts.length, 2);
+  assert.equal(turnPosts[1].options.headers["Idempotency-Key"], firstKey);
+  assert.deepEqual(JSON.parse(turnPosts[1].options.body), {
+    client_id: "client-1",
+    text: "Careful question",
+  });
+});
+
+test("network failure after turn leaves is unrecoverable and names the cause", async () => {
+  const harness = createHarness({
+    turnHandler: async () => {
+      throw new TypeError("Failed to fetch");
+    },
+  });
+  await flush();
+
+  const message = harness.elements["#desk-message"];
+  message.value = "Maybe delivered";
+  await harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "disconnected");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
+  assert.match(
+    harness.elements["#desk-stale-message"].textContent,
+    /could not reach Waffle|turn outcome is unknown/i,
+  );
+  assert.equal(message.value, "Maybe delivered");
+});
+
+test("dropped SSE reconnects automatically from the last cursor", async () => {
+  const harness = createHarness();
+  await flush();
+
+  const first = harness.EventSource.instances[0];
+  first.emit("state", {
+    cursor: 50,
+    resource: "chat",
+    resource_id: "client-1",
+    type: "state",
+    data: {
+      state: defaultChatState({ title: "Live", connection_mode: "Shared session" }),
+    },
+  });
+  first.emit("error", {});
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+  assert.equal(harness.elements["#desk-connection-text"].textContent, "Reconnecting");
+  assert.equal(harness.elements["#desk-message"].disabled, false);
+  assert.equal(first.closed, true);
+  assert.equal(harness.timers.length, 1);
+
+  await harness.runTimers();
+
+  assert.equal(harness.EventSource.instances.length, 2);
+  const second = harness.EventSource.instances[1];
+  assert.equal(second.url, "/api/v1/desk/events?after=50");
+  second.open();
+  assert.equal(harness.elements["#desk-connection-text"].textContent, "Shared session");
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+});
+
+test("resync_required still surfaces the stale banner", async () => {
+  const harness = createHarness();
+  await flush();
+
+  harness.EventSource.instances[0].emit("resync_required", {});
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "disconnected");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
+  assert.equal(
+    harness.elements["#desk-stale-message"].textContent,
+    "Live updates expired. Refresh to load canonical state.",
+  );
+});
+
+test("unparseable SSE frame does not tear down the desk", async () => {
+  const harness = createHarness();
+  await flush();
+
+  const stream = harness.EventSource.instances[0];
+  const listeners = stream.listeners.get("state") || [];
+  for (const listener of listeners) {
+    listener({ data: "{not-json" });
+  }
+  await flush();
+
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+  assert.equal(stream.closed, false);
+  assert.equal(harness.elements["#desk-message"].disabled, false);
 });

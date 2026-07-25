@@ -271,6 +271,14 @@ h3 {
   background: var(--danger);
 }
 
+.connection.is-reconnecting {
+  color: var(--ginger-dark);
+}
+
+.connection.is-reconnecting .connection-light {
+  background: var(--ginger);
+}
+
 .stale-banner {
   align-items: center;
   background: #f3d8cf;
@@ -437,10 +445,16 @@ h3 {
 }
 
 .composer-hint,
+.composer-status,
 .model-field p {
   color: var(--muted);
   font-size: 0.75rem;
   margin: 0;
+}
+
+.composer-status.is-error,
+.model-field p.is-error {
+  color: var(--danger);
 }
 
 .composer-actions {

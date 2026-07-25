@@ -55,6 +55,11 @@ func TestTodayClientStaticContract(t *testing.T) {
 		`const staleClientID = state.clientID`,
 		`generation: 0`,
 		`generation !== state.generation`,
+		`function scheduleReconnect()`,
+		`resync_required`,
+		`error.network`,
+		`idempotencyKey`,
+		`state.eventCursor`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("Today client missing static contract %q", required)
@@ -67,13 +72,19 @@ func TestTodayClientStaticContract(t *testing.T) {
 		"retryTurn",
 		"retryMutation",
 		"console.",
-		"setTimeout(",
 		"turnDoneSeen",
 		"turnRequestPending",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Today client contains forbidden behavior %q", forbidden)
 		}
+	}
+	// Bounded reconnect uses setTimeout; unbounded polling must not appear.
+	if !strings.Contains(source, "setTimeout(") {
+		t.Error("Today client missing bounded reconnect timer")
+	}
+	if strings.Contains(source, "setInterval(") {
+		t.Error("Today client must not use setInterval")
 	}
 	if got := strings.Count(source, `postMutation("/api/v1/desk/chat/turn"`); got != 1 {
 		t.Errorf("turn mutation call sites = %d, want exactly 1", got)
