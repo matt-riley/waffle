@@ -852,7 +852,10 @@ const (
 // heartbeat must not make the first inspection command declare the newly
 // started runner dead.
 func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, startedAt time.Time) error {
-	db, err := sql.Open("sqlite", filepath.Join(m.queueDir(ws.ID), "outbound.db"))
+	// Open through the queue's own opener: a bare sql.Open inherits no
+	// busy_timeout, so reading this file while the runner is mid-write returns
+	// SQLITE_BUSY immediately instead of waiting.
+	db, err := sandbox.OpenQueueReader(filepath.Join(m.queueDir(ws.ID), "outbound.db"))
 	if err != nil {
 		return fmt.Errorf("open inspection runner heartbeat: %w", err)
 	}
@@ -887,11 +890,17 @@ func waitForInspectionHeartbeat(ctx context.Context, startedAt time.Time, timeou
 	defer cancel()
 	for {
 		heartbeatAt, err := heartbeat(waitCtx)
-		if err != nil {
+		switch {
+		case err == nil:
+			if heartbeatAt.After(startedAt) {
+				return nil
+			}
+		case sandbox.IsBusyErr(err):
+			// The runner holds the queue mid-write. This loop exists to wait, so
+			// contention is "not yet", not a failed inspection: retry until the
+			// deadline rather than abandoning a closeable workspace.
+		default:
 			return fmt.Errorf("read inspection runner heartbeat: %w", err)
-		}
-		if heartbeatAt.After(startedAt) {
-			return nil
 		}
 
 		select {
