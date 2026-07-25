@@ -3,6 +3,8 @@ package skill
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -431,6 +433,180 @@ body
 	}
 	if names["inactive-one"] {
 		t.Fatal("inactive skill listed")
+	}
+}
+
+// fakeSkillStatusRows drives scanSkillStatusRows failure paths without a real DB.
+type fakeSkillStatusRows struct {
+	// pairs are (name, status) rows returned by Next/Scan in order.
+	pairs [][2]string
+	// failScanAt is the 0-based index at which Scan returns scanErr (if non-nil).
+	failScanAt int
+	scanErr    error
+	// iterErr is returned from Err() after iteration ends.
+	iterErr error
+	i       int
+	scanned int
+}
+
+func (f *fakeSkillStatusRows) Next() bool {
+	if f.i >= len(f.pairs) {
+		return false
+	}
+	f.i++
+	return true
+}
+
+func (f *fakeSkillStatusRows) Scan(dest ...any) error {
+	idx := f.i - 1
+	if f.scanErr != nil && idx == f.failScanAt {
+		return f.scanErr
+	}
+	if idx < 0 || idx >= len(f.pairs) {
+		return errors.New("scan past end")
+	}
+	if len(dest) != 2 {
+		return fmt.Errorf("scan: want 2 dests, got %d", len(dest))
+	}
+	namePtr, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("scan: dest[0] not *string")
+	}
+	statusPtr, ok := dest[1].(*string)
+	if !ok {
+		return errors.New("scan: dest[1] not *string")
+	}
+	*namePtr = f.pairs[idx][0]
+	*statusPtr = f.pairs[idx][1]
+	f.scanned++
+	return nil
+}
+
+func (f *fakeSkillStatusRows) Err() error { return f.iterErr }
+
+func TestFilterActiveFailClosedOnSkillStatusErrors(t *testing.T) {
+	// Skills that would become active if overrides were silently empty (#197).
+	all := []Skill{
+		{Name: "third-party", raw: "---\nname: third-party\nstatus: inactive\n---\n"},
+		{Name: "legacy", raw: "---\nname: legacy\n---\n"},
+	}
+
+	t.Run("query failure", func(t *testing.T) {
+		ctx := context.Background()
+		st, err := store.Open(ctx, filepath.Join(t.TempDir(), "filter.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Close so subsequent Query fails (sql: database is closed).
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := FilterActive(all, st.DB)
+		if err == nil {
+			t.Fatal("FilterActive succeeded with unavailable skill_status store")
+		}
+		if got != nil {
+			t.Fatalf("on query failure want nil skills, got %#v", got)
+		}
+		if !strings.Contains(err.Error(), "skill_status") {
+			t.Fatalf("error = %v, want skill_status context", err)
+		}
+	})
+
+	t.Run("scan failure", func(t *testing.T) {
+		rows := &fakeSkillStatusRows{
+			pairs:      [][2]string{{"third-party", StatusInactive}, {"legacy", StatusActive}},
+			failScanAt: 0,
+			scanErr:    errors.New("forced scan failure"),
+		}
+		got, err := scanSkillStatusRows(rows)
+		if err == nil {
+			t.Fatal("scanSkillStatusRows succeeded on Scan failure")
+		}
+		if got != nil {
+			t.Fatalf("on scan failure want nil map, got %#v", got)
+		}
+		if !strings.Contains(err.Error(), "skill_status scan") {
+			t.Fatalf("error = %v, want skill_status scan context", err)
+		}
+		// Fail closed through FilterActive when overrides cannot be built:
+		// inject via closed DB is query path; scan is unit-tested above.
+		// Assert Scan path never partially populates.
+		if rows.scanned != 0 {
+			t.Fatalf("scanned %d rows before failure, want 0 partial success", rows.scanned)
+		}
+	})
+
+	t.Run("mid-iteration failure", func(t *testing.T) {
+		rows := &fakeSkillStatusRows{
+			pairs:   [][2]string{{"third-party", StatusInactive}},
+			iterErr: errors.New("forced rows.Err"),
+		}
+		got, err := scanSkillStatusRows(rows)
+		if err == nil {
+			t.Fatal("scanSkillStatusRows succeeded on rows.Err")
+		}
+		if got != nil {
+			t.Fatalf("on iterate failure want nil map, got %#v", got)
+		}
+		if !strings.Contains(err.Error(), "skill_status iterate") {
+			t.Fatalf("error = %v, want skill_status iterate context", err)
+		}
+	})
+}
+
+func TestFilterActiveDBOverrideAndLegacyDefault(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "override.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Explicit inactive row wins even if frontmatter says active (deny-by-default
+	// for third-party installs that write skill_status inactive).
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name:   "third-party",
+		Status: StatusInactive,
+		Source: "install",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	all := []Skill{
+		{Name: "third-party", raw: "---\nname: third-party\nstatus: active\n---\n"},
+		// No skill_status row and no frontmatter status → active (#65 legacy).
+		{Name: "legacy", raw: "---\nname: legacy\n---\n"},
+	}
+	got, err := FilterActive(all, st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	if names["third-party"] {
+		t.Fatal("skill with explicit inactive skill_status row must stay inactive")
+	}
+	if !names["legacy"] {
+		t.Fatal("legacy skill with no row and no frontmatter status must stay active")
+	}
+}
+
+func TestScanSkillStatusRowsHappyPath(t *testing.T) {
+	rows := &fakeSkillStatusRows{
+		pairs: [][2]string{
+			{"a", StatusActive},
+			{"b", StatusInactive},
+		},
+	}
+	got, err := scanSkillStatusRows(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["a"] != StatusActive || got["b"] != StatusInactive {
+		t.Fatalf("got %#v", got)
 	}
 }
 
