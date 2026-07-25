@@ -6,7 +6,11 @@ import vm from "node:vm";
 const source = await readFile(new URL("./assets/capabilities.js", import.meta.url), "utf8");
 
 class FakeElement {
-  constructor() {
+  constructor({ id = "", type = "", name = "", tagName = "DIV" } = {}) {
+    this.id = id;
+    this.type = type;
+    this.name = name;
+    this.tagName = tagName;
     this.value = "";
     this.hidden = false;
     this.disabled = false;
@@ -14,6 +18,9 @@ class FakeElement {
     this.dataset = {};
     this.listeners = new Map();
     this.childNodes = [];
+    this.attributes = {};
+    this.focused = false;
+    this.controls = null;
   }
 
   set innerHTML(_value) {
@@ -35,6 +42,63 @@ class FakeElement {
 
   replaceChildren(...children) {
     this.childNodes = children;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      ? this.attributes[name]
+      : null;
+  }
+
+  removeAttribute(name) {
+    delete this.attributes[name];
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  querySelector(selector) {
+    if (selector === 'button[type="submit"]') {
+      if (Array.isArray(this.controls)) {
+        return this.controls.find((control) => control && control.type === "submit") || null;
+      }
+      return null;
+    }
+    if (selector.startsWith("[name=")) {
+      const name = selector.slice('[name="'.length, -2);
+      if (Array.isArray(this.controls)) {
+        return this.controls.find((control) => control && control.name === name) || null;
+      }
+      return null;
+    }
+    if (selector.startsWith("#")) {
+      const id = selector.slice(1);
+      if (Array.isArray(this.controls)) {
+        return this.controls.find((control) => control && control.id === id) || null;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  querySelectorAll(selector) {
+    if (!Array.isArray(this.controls)) {
+      return [];
+    }
+    if (selector === "input, button, select, textarea") {
+      return this.controls.slice();
+    }
+    if (selector === "input, select, textarea") {
+      return this.controls.filter(
+        (control) => control && control.type !== "submit" && control.type !== "button",
+      );
+    }
+    return [];
   }
 }
 
@@ -63,6 +127,7 @@ function deferredResponse() {
 
 function createHarness({
   providerResponse = response({}, true, 202),
+  defaultResponse = response({ restart_required: false }),
   catalogueResponse = response({ connection: "primary", models: [] }),
   connectionResponse = response([]),
   connectionResponses = null,
@@ -70,6 +135,7 @@ function createHarness({
   skills = [],
   deferTimers = false,
   clock = false,
+  uuidSequence = null,
 } = {}) {
   const selectors = [
     "#desk-capabilities",
@@ -79,6 +145,7 @@ function createHarness({
     "#capability-skills",
     "#capability-connections",
     "#capability-provider-form",
+    "#capability-provider-status",
     "#capability-provider-name",
     "#capability-provider-type",
     "#capability-provider-base-url",
@@ -86,27 +153,78 @@ function createHarness({
     "#capability-provider-model-id",
     "#capability-provider-credential",
     "#capability-default-form",
+    "#capability-default-status",
     "#capability-default-alias",
     "#capability-utility-form",
+    "#capability-utility-status",
     "#capability-utility-alias",
     "#capability-model-form",
+    "#capability-model-status",
     "#capability-model-connection",
     "#capability-model-alias",
     "#capability-model-id",
     "#capability-catalogue-form",
+    "#capability-catalogue-status",
     "#capability-catalogue-connection",
     "#capability-catalogue-search",
     "#capability-catalogue-summary",
     "#capability-catalogue-results",
+    "#capability-skill-stage-form",
+    "#capability-skill-stage-status",
+    "#capability-skill-local-path",
+    "#capability-skill-git-url",
+    "#capability-skill-commit",
+    "#capability-skill-review",
+    "#capability-skill-preview",
+    "#capability-skill-install",
+    "#capability-skill-install-status",
   ];
-  const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
+  const elements = Object.fromEntries(
+    selectors.map((selector) => {
+      const id = selector.startsWith("#") ? selector.slice(1) : "";
+      return [selector, new FakeElement({ id })];
+    }),
+  );
+
+  const wireField = (selector, name) => {
+    const el = elements[selector];
+    el.name = name;
+    el.tagName = "INPUT";
+    el.type = selector.includes("credential") ? "password" : "text";
+    return el;
+  };
+
   elements["#capability-provider-name"].value = "openai";
+  wireField("#capability-provider-name", "connection_name");
   elements["#capability-provider-type"].value = "openai";
+  wireField("#capability-provider-type", "type");
+  wireField("#capability-provider-base-url", "base_url");
   elements["#capability-provider-model-alias"].value = "gpt";
+  wireField("#capability-provider-model-alias", "model_alias");
   elements["#capability-provider-model-id"].value = "gpt-test";
+  wireField("#capability-provider-model-id", "model_id");
   elements["#capability-provider-credential"].value = "sk-super-private";
-  const providerSubmit = new FakeElement();
-  providerSubmit.type = "submit";
+  wireField("#capability-provider-credential", "api_key");
+
+  wireField("#capability-default-alias", "alias");
+  wireField("#capability-utility-alias", "alias");
+  wireField("#capability-model-connection", "connection_name");
+  wireField("#capability-model-alias", "alias");
+  wireField("#capability-model-id", "upstream_model");
+  wireField("#capability-catalogue-connection", "connection");
+  wireField("#capability-skill-local-path", "local_path");
+  wireField("#capability-skill-git-url", "git_url");
+  wireField("#capability-skill-commit", "commit");
+
+  elements["#capability-provider-form"].setAttribute("aria-describedby", "capability-provider-status");
+  elements["#capability-default-form"].setAttribute("aria-describedby", "capability-default-status");
+  elements["#capability-utility-form"].setAttribute("aria-describedby", "capability-utility-status");
+  elements["#capability-model-form"].setAttribute("aria-describedby", "capability-model-status");
+  elements["#capability-catalogue-form"].setAttribute("aria-describedby", "capability-catalogue-status");
+  elements["#capability-skill-stage-form"].setAttribute("aria-describedby", "capability-skill-stage-status");
+
+  const providerSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  providerSubmit.textContent = "Enroll provider";
   elements["#capability-provider-form"].controls = [
     elements["#capability-provider-name"],
     elements["#capability-provider-type"],
@@ -116,18 +234,59 @@ function createHarness({
     elements["#capability-provider-credential"],
     providerSubmit,
   ];
-  elements["#capability-default-form"].controls = [elements["#capability-default-alias"]];
-  elements["#capability-utility-form"].controls = [elements["#capability-utility-alias"]];
+
+  const defaultSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  defaultSubmit.textContent = "Set default";
+  elements["#capability-default-form"].controls = [
+    elements["#capability-default-alias"],
+    defaultSubmit,
+  ];
+
+  const utilitySubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  utilitySubmit.textContent = "Set utility model";
+  elements["#capability-utility-form"].controls = [
+    elements["#capability-utility-alias"],
+    utilitySubmit,
+  ];
+
+  const modelSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  modelSubmit.textContent = "Add model";
   elements["#capability-model-form"].controls = [
     elements["#capability-model-connection"],
     elements["#capability-model-alias"],
     elements["#capability-model-id"],
+    modelSubmit,
   ];
+
+  const catalogueSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  catalogueSubmit.textContent = "Refresh catalogue";
+  elements["#capability-catalogue-form"].controls = [
+    elements["#capability-catalogue-connection"],
+    catalogueSubmit,
+  ];
+
+  const stageSubmit = new FakeElement({ type: "submit", tagName: "BUTTON" });
+  stageSubmit.textContent = "Stage review";
+  elements["#capability-skill-stage-form"].controls = [
+    elements["#capability-skill-local-path"],
+    elements["#capability-skill-git-url"],
+    elements["#capability-skill-commit"],
+    stageSubmit,
+  ];
+
+  elements["#capability-skill-install"].type = "button";
+  elements["#capability-skill-install"].textContent = "Install inactive";
+  elements["#capability-skill-install"].setAttribute(
+    "aria-describedby",
+    "capability-skill-install-status",
+  );
+
   const calls = [];
   const timers = [];
   let bootstrapPolls = 0;
   let connectionFetches = 0;
   let nowMs = 0;
+  let uuidIndex = 0;
   const fetch = async (path, options = {}) => {
     calls.push({ path, options });
     if (path === "/api/v1/desk/capabilities") {
@@ -153,6 +312,9 @@ function createHarness({
     if (path === "/api/v1/desk/providers") {
       return providerResponse;
     }
+    if (path === "/api/v1/desk/models/default") {
+      return defaultResponse;
+    }
     if (path === "/api/v1/desk/models/catalogue/refresh") {
       return catalogueResponse;
     }
@@ -174,7 +336,16 @@ function createHarness({
   };
   const context = vm.createContext({
     console,
-    crypto: { randomUUID: () => "idempotency-key" },
+    crypto: {
+      randomUUID: () => {
+        if (Array.isArray(uuidSequence) && uuidSequence.length > 0) {
+          const value = uuidSequence[Math.min(uuidIndex, uuidSequence.length - 1)];
+          uuidIndex += 1;
+          return value;
+        }
+        return "idempotency-key";
+      },
+    },
     document,
     fetch,
     Date: clock
@@ -201,6 +372,8 @@ function createHarness({
     calls,
     elements,
     providerSubmit,
+    defaultSubmit,
+    catalogueSubmit,
     timers,
     async runTimersUntilIdle(maxSteps = 100) {
       let steps = 0;
@@ -289,6 +462,10 @@ test("manual restart outcome stops polling and shows a terminal message", async 
   assert.equal(
     harness.elements["#capability-status"].textContent,
     "Change committed; restart waffle serve to apply.",
+  );
+  assert.equal(
+    harness.elements["#capability-provider-status"].textContent,
+    "Provider enrolled.",
   );
   assert.equal(harness.elements["#capability-restart-status"].hidden, false);
   assert.match(
@@ -380,12 +557,17 @@ test("provider credential is cleared after failure and never appears in safe UI"
 
   assert.equal(harness.elements["#capability-provider-credential"].value, "");
   assert.equal(
-    harness.elements["#capability-status"].textContent,
+    harness.elements["#capability-provider-status"].textContent,
     "capability request could not be completed",
   );
   assert.equal(
-    harness.elements["#capability-status"].textContent.includes("sk-super-private"),
+    harness.elements["#capability-provider-status"].textContent.includes("sk-super-private"),
     false,
+  );
+  assert.equal(
+    harness.elements["#capability-default-status"].textContent,
+    "",
+    "failure must not leak into another form status",
   );
 });
 
@@ -412,6 +594,10 @@ test("catalogue refresh renders results and search filters without another reque
   assert.equal(
     harness.elements["#capability-catalogue-summary"].textContent,
     "2 models from primary.",
+  );
+  assert.equal(
+    harness.elements["#capability-catalogue-status"].textContent,
+    "Catalogue refreshed.",
   );
   assert.equal(
     harness.calls.filter((call) => call.path === "/api/v1/desk/models/catalogue/refresh").length,
@@ -501,6 +687,7 @@ test("an older overlapping load cannot overwrite newer post-mutation connections
   const list = harness.elements["#capability-connections"];
   assert.equal(list.childNodes[0].childNodes[0].textContent, "newer-mcp");
   assert.equal(harness.elements["#capability-status"].textContent, "Capabilities are current.");
+  assert.equal(harness.elements["#capability-provider-status"].textContent, "Provider enrolled.");
 
   olderConnections.resolve([
     { name: "older-mcp", kind: "mcp", status: "configured" },
@@ -509,4 +696,151 @@ test("an older overlapping load cannot overwrite newer post-mutation connections
 
   assert.equal(list.childNodes[0].childNodes[0].textContent, "newer-mcp");
   assert.equal(harness.elements["#capability-status"].textContent, "Capabilities are current.");
+});
+
+test("form failures stay on the form that caused them (AC1)", async () => {
+  const harness = createHarness({
+    providerResponse: response({
+      code: "capability_failed",
+      message: "provider enrollment failed",
+    }, false, 400),
+  });
+  await flush();
+
+  await harness.elements["#capability-provider-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(
+    harness.elements["#capability-provider-status"].textContent,
+    "provider enrollment failed",
+  );
+  assert.equal(harness.elements["#capability-default-status"].textContent, "");
+  assert.equal(harness.elements["#capability-catalogue-status"].textContent, "");
+
+  harness.elements["#capability-default-alias"].value = "gpt";
+  await harness.elements["#capability-default-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(
+    harness.elements["#capability-provider-status"].textContent,
+    "provider enrollment failed",
+    "activity in another form must not erase the first form status",
+  );
+  assert.equal(
+    harness.elements["#capability-default-status"].textContent,
+    "Waffle-wide default changed.",
+  );
+});
+
+test("double submit produces exactly one in-flight request (AC5)", async () => {
+  const deferred = deferredResponse();
+  const harness = createHarness({
+    providerResponse: deferred.promise,
+  });
+  await flush();
+
+  const submit = harness.elements["#capability-provider-form"].listener("submit");
+  const first = submit({ preventDefault() {} });
+  const second = submit({ preventDefault() {} });
+  await flush();
+
+  const inFlight = harness.calls.filter((call) => call.path === "/api/v1/desk/providers");
+  assert.equal(inFlight.length, 1, "double submit must not start a second request");
+  assert.equal(harness.providerSubmit.disabled, true);
+  assert.equal(harness.providerSubmit.textContent, "Working…");
+  assert.equal(harness.elements["#capability-provider-status"].textContent, "Working…");
+
+  deferred.resolve({ restart_required: false });
+  await Promise.all([first, second]);
+  await flush();
+
+  assert.equal(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/providers").length,
+    1,
+  );
+  assert.equal(harness.providerSubmit.disabled, false);
+  assert.equal(harness.providerSubmit.textContent, "Enroll provider");
+});
+
+test("unchanged resubmit reuses Idempotency-Key until success (AC3)", async () => {
+  let defaultHits = 0;
+  const defaultResponse = {
+    then(onFulfilled) {
+      defaultHits += 1;
+      if (defaultHits === 1) {
+        return Promise.resolve(
+          response({ code: "capability_failed", message: "temporary failure" }, false, 503),
+        ).then(onFulfilled);
+      }
+      return Promise.resolve(response({ restart_required: false })).then(onFulfilled);
+    },
+  };
+  const harness = createHarness({
+    defaultResponse,
+    uuidSequence: ["key-a", "key-b", "key-c"],
+  });
+  harness.elements["#capability-default-alias"].value = "gpt";
+  await flush();
+
+  await harness.elements["#capability-default-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  await harness.elements["#capability-default-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const defaultPosts = harness.calls.filter((call) => call.path === "/api/v1/desk/models/default");
+  assert.equal(defaultPosts.length, 2);
+  assert.equal(defaultPosts[0].options.headers["Idempotency-Key"], "key-a");
+  assert.equal(
+    defaultPosts[1].options.headers["Idempotency-Key"],
+    "key-a",
+    "same body must reuse the prior key after failure",
+  );
+
+  // Successful path cleared the key; a later identical submit mints a new one.
+  await harness.elements["#capability-default-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const afterSuccess = harness.calls.filter((call) => call.path === "/api/v1/desk/models/default");
+  assert.equal(afterSuccess.length, 3);
+  assert.equal(afterSuccess[2].options.headers["Idempotency-Key"], "key-b");
+});
+
+test("empty required field sets aria-invalid and focuses it (AC4)", async () => {
+  const harness = createHarness();
+  await flush();
+
+  harness.elements["#capability-default-alias"].value = "";
+  await harness.elements["#capability-default-form"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(
+    harness.elements["#capability-default-alias"].getAttribute("aria-invalid"),
+    "true",
+  );
+  assert.equal(harness.elements["#capability-default-alias"].focused, true);
+  assert.equal(
+    harness.elements["#capability-default-status"].textContent,
+    "Fill in the required field.",
+  );
+  assert.equal(
+    harness.elements["#capability-default-form"].getAttribute("aria-describedby"),
+    "capability-default-status",
+  );
+  assert.equal(
+    harness.calls.filter((call) => call.path === "/api/v1/desk/models/default").length,
+    0,
+  );
 });

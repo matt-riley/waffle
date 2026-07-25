@@ -8,6 +8,7 @@ if (root) {
     skills: document.querySelector("#capability-skills"),
     connections: document.querySelector("#capability-connections"),
     providerForm: document.querySelector("#capability-provider-form"),
+    providerStatus: document.querySelector("#capability-provider-status"),
     providerName: document.querySelector("#capability-provider-name"),
     providerType: document.querySelector("#capability-provider-type"),
     providerBaseURL: document.querySelector("#capability-provider-base-url"),
@@ -15,29 +16,36 @@ if (root) {
     providerModelID: document.querySelector("#capability-provider-model-id"),
     providerCredential: document.querySelector("#capability-provider-credential"),
     defaultForm: document.querySelector("#capability-default-form"),
+    defaultStatus: document.querySelector("#capability-default-status"),
     defaultAlias: document.querySelector("#capability-default-alias"),
     utilityForm: document.querySelector("#capability-utility-form"),
+    utilityStatus: document.querySelector("#capability-utility-status"),
     utilityAlias: document.querySelector("#capability-utility-alias"),
     modelForm: document.querySelector("#capability-model-form"),
+    modelStatus: document.querySelector("#capability-model-status"),
     modelConnection: document.querySelector("#capability-model-connection"),
     modelAlias: document.querySelector("#capability-model-alias"),
     modelID: document.querySelector("#capability-model-id"),
     catalogueForm: document.querySelector("#capability-catalogue-form"),
+    catalogueStatus: document.querySelector("#capability-catalogue-status"),
     catalogueConnection: document.querySelector("#capability-catalogue-connection"),
     catalogueSearch: document.querySelector("#capability-catalogue-search"),
     catalogueSummary: document.querySelector("#capability-catalogue-summary"),
     catalogueResults: document.querySelector("#capability-catalogue-results"),
     stageForm: document.querySelector("#capability-skill-stage-form"),
+    stageStatus: document.querySelector("#capability-skill-stage-status"),
     stageLocal: document.querySelector("#capability-skill-local-path"),
     stageGit: document.querySelector("#capability-skill-git-url"),
     stageCommit: document.querySelector("#capability-skill-commit"),
     review: document.querySelector("#capability-skill-review"),
     preview: document.querySelector("#capability-skill-preview"),
     install: document.querySelector("#capability-skill-install"),
+    installStatus: document.querySelector("#capability-skill-install-status"),
   };
 
   const RESTART_POLL_INTERVAL_MS = 1000;
   const RESTART_POLL_TIMEOUT_MS = 60_000;
+  const PENDING_LABEL = "Working…";
 
   const state = {
     requestToken: document.body.dataset.requestToken || "",
@@ -47,10 +55,102 @@ if (root) {
     staged: null,
     restarting: false,
     loadGeneration: 0,
+    formIntents: Object.create(null),
   };
 
-  function setStatus(message) {
-    elements.status.textContent = message;
+  function setPageStatus(message) {
+    if (elements.status) {
+      elements.status.textContent = message;
+    }
+  }
+
+  function formStatusNode(form) {
+    if (!form) return null;
+    if (form === elements.providerForm) return elements.providerStatus;
+    if (form === elements.defaultForm) return elements.defaultStatus;
+    if (form === elements.utilityForm) return elements.utilityStatus;
+    if (form === elements.modelForm) return elements.modelStatus;
+    if (form === elements.catalogueForm) return elements.catalogueStatus;
+    if (form === elements.stageForm) return elements.stageStatus;
+    const describedBy = form.getAttribute?.("aria-describedby") || "";
+    if (describedBy && typeof document.querySelector === "function") {
+      return document.querySelector(`#${describedBy.split(/\s+/)[0]}`);
+    }
+    return null;
+  }
+
+  function setFormStatus(form, message, tone = "") {
+    const node = formStatusNode(form);
+    if (!node) return;
+    node.textContent = message || "";
+    if (tone) {
+      node.dataset.tone = tone;
+    } else if (node.dataset) {
+      delete node.dataset.tone;
+    }
+  }
+
+  function setControlStatus(statusNode, message, tone = "") {
+    if (!statusNode) return;
+    statusNode.textContent = message || "";
+    if (tone) {
+      statusNode.dataset.tone = tone;
+    } else if (statusNode.dataset) {
+      delete statusNode.dataset.tone;
+    }
+  }
+
+  function clearFieldInvalid(form) {
+    if (!form) return;
+    const markValid = (field) => {
+      if (!field || typeof field.removeAttribute !== "function") {
+        if (field && field.attributes) {
+          delete field.attributes["aria-invalid"];
+        }
+        return;
+      }
+      field.removeAttribute("aria-invalid");
+    };
+    if (typeof form.querySelectorAll === "function") {
+      for (const field of form.querySelectorAll("input, select, textarea")) {
+        markValid(field);
+      }
+    }
+    if (Array.isArray(form.controls)) {
+      for (const control of form.controls) {
+        if (control && control.type !== "submit" && control.type !== "button") {
+          markValid(control);
+        }
+      }
+    }
+  }
+
+  function setFieldInvalid(field) {
+    if (!field) return;
+    if (typeof field.setAttribute === "function") {
+      field.setAttribute("aria-invalid", "true");
+    } else if (field.attributes) {
+      field.attributes["aria-invalid"] = "true";
+    }
+    if (typeof field.focus === "function") {
+      field.focus();
+    }
+  }
+
+  function findSubmitControl(form) {
+    if (!form) return null;
+    if (typeof form.querySelector === "function") {
+      const button = form.querySelector('button[type="submit"]');
+      if (button) return button;
+    }
+    if (Array.isArray(form.controls)) {
+      for (const control of form.controls) {
+        if (control && control.type === "submit") {
+          return control;
+        }
+      }
+    }
+    return null;
   }
 
   function restartPendingForms() {
@@ -85,12 +185,22 @@ if (root) {
       return;
     }
     if (typeof elements.skills.querySelectorAll === "function") {
-      for (const button of elements.skills.querySelectorAll(
+      const buttons = elements.skills.querySelectorAll(
         'button[data-skill-activate="true"]',
-      )) {
-        button.disabled = disabled;
+      );
+      // Real DOM returns a NodeList (possibly empty). A fake harness that
+      // implements querySelectorAll but stores cards only in childNodes falls
+      // through to the tree walk below when nothing matched.
+      if (buttons && buttons.length > 0) {
+        for (const button of buttons) {
+          button.disabled = disabled;
+        }
+        return;
       }
-      return;
+      // Empty NodeList on a real element means there are no activate buttons.
+      if (buttons && typeof buttons.length === "number" && !Array.isArray(elements.skills.childNodes)) {
+        return;
+      }
     }
     // Fake/test harness: walk rendered skill cards without a real DOM.
     const visit = (node) => {
@@ -156,6 +266,9 @@ if (root) {
         typeof payload.message === "string"
           ? payload.message
           : "Capability request could not be completed.";
+      if (typeof payload.field === "string" && payload.field) {
+        error.field = payload.field;
+      }
       throw error;
     }
     return payload;
@@ -203,7 +316,37 @@ if (root) {
     return bootstrap;
   }
 
-  async function postMutation(path, body) {
+  function mutationIntent(formKey, path, body) {
+    const serialized = JSON.stringify(body);
+    const existing = state.formIntents[formKey];
+    if (
+      existing &&
+      existing.path === path &&
+      existing.serialized === serialized
+    ) {
+      return existing;
+    }
+    const intent = {
+      path,
+      serialized,
+      key: crypto.randomUUID(),
+    };
+    state.formIntents[formKey] = intent;
+    return intent;
+  }
+
+  function clearFormIntent(formKey) {
+    delete state.formIntents[formKey];
+  }
+
+  async function postMutation(path, body, formKey) {
+    const intent = formKey
+      ? mutationIntent(formKey, path, body)
+      : {
+          path,
+          serialized: JSON.stringify(body),
+          key: crypto.randomUUID(),
+        };
     const response = await fetch(path, {
       method: "POST",
       credentials: "same-origin",
@@ -212,15 +355,102 @@ if (root) {
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-Waffle-Desk-Token": state.requestToken,
-        "Idempotency-Key": crypto.randomUUID(),
+        "Idempotency-Key": intent.key,
       },
-      body: JSON.stringify(body),
+      body: intent.serialized,
     });
     return readJSON(response);
   }
 
   function clearNode(node) {
     node.replaceChildren();
+  }
+
+  function findFieldByName(form, name) {
+    if (!form || !name) return null;
+    if (typeof form.querySelector === "function") {
+      const byName = form.querySelector(`[name="${name}"]`);
+      if (byName) return byName;
+    }
+    if (Array.isArray(form.controls)) {
+      for (const control of form.controls) {
+        if (control && control.name === name) return control;
+      }
+    }
+    return null;
+  }
+
+  function validateRequiredFields(form, fields) {
+    clearFieldInvalid(form);
+    for (const field of fields) {
+      if (!field) continue;
+      const value = typeof field.value === "string" ? field.value.trim() : "";
+      if (!value) {
+        setFieldInvalid(field);
+        setFormStatus(form, "Fill in the required field.", "error");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function applyFieldError(form, error) {
+    if (!error || typeof error.field !== "string" || !error.field) {
+      return;
+    }
+    const field = findFieldByName(form, error.field);
+    if (field) {
+      setFieldInvalid(field);
+    }
+  }
+
+  async function withSubmitPending(form, run, { statusNode, pendingLabel = PENDING_LABEL } = {}) {
+    if (!form) {
+      return run(null);
+    }
+    if (form.dataset.submitting === "true" || form.dataset.restartLocked === "true") {
+      return null;
+    }
+    if (state.restarting && restartPendingForms().includes(form)) {
+      return null;
+    }
+
+    const submit = findSubmitControl(form);
+    const originalLabel = submit ? submit.textContent : "";
+    form.dataset.submitting = "true";
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = pendingLabel;
+    }
+    if (statusNode) {
+      setControlStatus(statusNode, pendingLabel, "pending");
+    } else {
+      setFormStatus(form, pendingLabel, "pending");
+    }
+
+    try {
+      return await run(submit);
+    } finally {
+      form.dataset.submitting = "false";
+      if (submit) {
+        submit.textContent = originalLabel;
+        const locked =
+          state.restarting ||
+          form.dataset.restartLocked === "true";
+        if (!locked) {
+          submit.disabled = false;
+        }
+      }
+      // Leave success/error text in place; only clear pending tone if still pending.
+      if (statusNode && statusNode.dataset?.tone === "pending") {
+        setControlStatus(statusNode, statusNode.textContent, "");
+      } else if (!statusNode) {
+        const node = formStatusNode(form);
+        if (node && node.dataset?.tone === "pending") {
+          setFormStatus(form, node.textContent, "");
+        }
+      }
+    }
   }
 
   function renderModels(providerState) {
@@ -268,13 +498,33 @@ if (root) {
         // Always re-read state so re-renders during restart-wait stay locked.
         activate.disabled = state.restarting;
         activate.addEventListener("click", async () => {
-          if (state.restarting) {
+          if (state.restarting || activate.disabled) {
             return;
           }
-          await runMutation(
-            () => postMutation(`/api/v1/desk/skills/${encodeURIComponent(item.name)}/activate`, {}),
-            "Skill activated.",
-          );
+          activate.disabled = true;
+          const original = activate.textContent;
+          activate.textContent = PENDING_LABEL;
+          try {
+            const result = await postMutation(
+              `/api/v1/desk/skills/${encodeURIComponent(item.name)}/activate`,
+              {},
+              `skill-activate:${item.name}`,
+            );
+            clearFormIntent(`skill-activate:${item.name}`);
+            setPageStatus("Skill activated.");
+            if (result.restart_required) {
+              await handleRestartRequired(result);
+            } else {
+              await loadCapabilities();
+            }
+          } catch (error) {
+            setPageStatus(error.safeMessage || "Capability request could not be completed.");
+          } finally {
+            activate.textContent = original;
+            if (!state.restarting) {
+              activate.disabled = false;
+            }
+          }
         });
         card.appendChild(activate);
       }
@@ -393,7 +643,7 @@ if (root) {
     renderModels(snapshot.providers);
     renderSkills(snapshot.skills);
     renderConnections(connections);
-    setStatus("Capabilities are current.");
+    setPageStatus("Capabilities are current.");
     return true;
   }
 
@@ -405,7 +655,7 @@ if (root) {
     state.restarting = false;
     setRestartFormsDisabled(false);
     if (statusMessage) {
-      setStatus(statusMessage);
+      setPageStatus(statusMessage);
     }
   }
 
@@ -481,91 +731,170 @@ if (root) {
     await pollRestart(outcome);
   }
 
-  async function runMutation(action, successMessage) {
-    try {
-      const result = await action();
-      setStatus(successMessage);
-      if (result.restart_required) {
-        await handleRestartRequired(result);
-      } else {
-        await loadCapabilities();
-      }
-      return result;
-    } catch (error) {
-      setStatus(error.safeMessage || "Capability request could not be completed.");
+  async function runFormMutation({
+    form,
+    formKey,
+    path,
+    body,
+    successMessage,
+    requiredFields = [],
+    onSuccess,
+  }) {
+    if (!validateRequiredFields(form, requiredFields)) {
       return null;
     }
+
+    return withSubmitPending(form, async () => {
+      try {
+        const result = await postMutation(path, body, formKey);
+        clearFormIntent(formKey);
+        setFormStatus(form, successMessage, "");
+        if (onSuccess) {
+          await onSuccess(result);
+        } else if (result.restart_required) {
+          await handleRestartRequired(result);
+        } else {
+          await loadCapabilities();
+        }
+        return result;
+      } catch (error) {
+        applyFieldError(form, error);
+        setFormStatus(
+          form,
+          error.safeMessage || "Capability request could not be completed.",
+          "error",
+        );
+        return null;
+      }
+    });
   }
 
   elements.providerForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = elements.providerForm;
+    const required = [
+      elements.providerName,
+      elements.providerType,
+      elements.providerAlias,
+      elements.providerModelID,
+    ];
+    if (!validateRequiredFields(form, required)) {
+      return;
+    }
+
     const alias = elements.providerAlias.value.trim();
     const modelID = elements.providerModelID.value.trim();
-    let result;
-    try {
-      result = await postMutation("/api/v1/desk/providers", {
-        connection_name: elements.providerName.value.trim(),
-        type: elements.providerType.value.trim(),
-        base_url: elements.providerBaseURL.value.trim(),
-        api_key: elements.providerCredential.value,
-        models: { [alias]: { model: modelID } },
-        default_model: alias,
-      });
-    } catch (error) {
-      setStatus(error.safeMessage || "Capability request could not be completed.");
-      return;
-    } finally {
-      elements.providerCredential.value = "";
-    }
-    setStatus("Provider enrolled.");
-    if (result.restart_required) {
-      await handleRestartRequired(result);
-    } else {
-      await loadCapabilities();
-    }
+    const body = {
+      connection_name: elements.providerName.value.trim(),
+      type: elements.providerType.value.trim(),
+      base_url: elements.providerBaseURL.value.trim(),
+      api_key: elements.providerCredential.value,
+      models: { [alias]: { model: modelID } },
+      default_model: alias,
+    };
+
+    await withSubmitPending(form, async () => {
+      try {
+        let result;
+        try {
+          result = await postMutation("/api/v1/desk/providers", body, "provider");
+          clearFormIntent("provider");
+          setFormStatus(form, "Provider enrolled.", "");
+        } finally {
+          // Always clear the credential field after an enroll attempt.
+          elements.providerCredential.value = "";
+        }
+        if (result.restart_required) {
+          await handleRestartRequired(result);
+        } else {
+          await loadCapabilities();
+        }
+      } catch (error) {
+        applyFieldError(form, error);
+        setFormStatus(
+          form,
+          error.safeMessage || "Capability request could not be completed.",
+          "error",
+        );
+      }
+    });
   });
 
   elements.defaultForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await runMutation(
-      () => postMutation("/api/v1/desk/models/default", { alias: elements.defaultAlias.value.trim() }),
-      "Waffle-wide default changed.",
-    );
+    await runFormMutation({
+      form: elements.defaultForm,
+      formKey: "default",
+      path: "/api/v1/desk/models/default",
+      body: { alias: elements.defaultAlias.value.trim() },
+      successMessage: "Waffle-wide default changed.",
+      requiredFields: [elements.defaultAlias],
+    });
   });
 
   elements.utilityForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await runMutation(
-      () => postMutation("/api/v1/desk/models/utility", { alias: elements.utilityAlias.value.trim() }),
-      "Utility model changed.",
-    );
+    await runFormMutation({
+      form: elements.utilityForm,
+      formKey: "utility",
+      path: "/api/v1/desk/models/utility",
+      body: { alias: elements.utilityAlias.value.trim() },
+      successMessage: "Utility model changed.",
+      requiredFields: [elements.utilityAlias],
+    });
   });
 
   elements.modelForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await runMutation(
-      () => postMutation("/api/v1/desk/models", {
+    await runFormMutation({
+      form: elements.modelForm,
+      formKey: "model",
+      path: "/api/v1/desk/models",
+      body: {
         connection_name: elements.modelConnection.value.trim(),
         alias: elements.modelAlias.value.trim(),
         upstream_model: elements.modelID.value.trim(),
-      }),
-      "Model added.",
-    );
+      },
+      successMessage: "Model added.",
+      requiredFields: [
+        elements.modelConnection,
+        elements.modelAlias,
+        elements.modelID,
+      ],
+    });
   });
 
   elements.catalogueForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    try {
-      const result = await postMutation("/api/v1/desk/models/catalogue/refresh", {
-        connection: elements.catalogueConnection.value.trim(),
-      });
-      state.catalogueConnection = result.connection || elements.catalogueConnection.value.trim();
-      state.catalogueModels = Array.isArray(result.models) ? result.models : [];
-      renderCatalogue();
-      setStatus("Catalogue refreshed.");
-    } catch (error) {
-      setStatus(error.safeMessage || "Catalogue could not be refreshed.");
+    const form = elements.catalogueForm;
+    if (!validateRequiredFields(form, [elements.catalogueConnection])) {
+      return;
     }
+    const body = {
+      connection: elements.catalogueConnection.value.trim(),
+    };
+    await withSubmitPending(form, async () => {
+      try {
+        const result = await postMutation(
+          "/api/v1/desk/models/catalogue/refresh",
+          body,
+          "catalogue",
+        );
+        clearFormIntent("catalogue");
+        state.catalogueConnection =
+          result.connection || elements.catalogueConnection.value.trim();
+        state.catalogueModels = Array.isArray(result.models) ? result.models : [];
+        renderCatalogue();
+        setFormStatus(form, "Catalogue refreshed.", "");
+      } catch (error) {
+        applyFieldError(form, error);
+        setFormStatus(
+          form,
+          error.safeMessage || "Catalogue could not be refreshed.",
+          "error",
+        );
+      }
+    });
   });
 
   elements.catalogueSearch?.addEventListener("input", () => {
@@ -574,33 +903,75 @@ if (root) {
 
   elements.stageForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    try {
-      state.staged = await postMutation("/api/v1/desk/skills/stage", {
-        local_path: elements.stageLocal.value.trim(),
-        git_url: elements.stageGit.value.trim(),
-        commit: elements.stageCommit.value.trim(),
-      });
-      elements.preview.textContent = JSON.stringify(state.staged, null, 2);
-      elements.review.hidden = false;
-      setStatus("Review the complete manifest before installing.");
-    } catch (error) {
-      setStatus(error.safeMessage || "Skill review could not be staged.");
+    const form = elements.stageForm;
+    clearFieldInvalid(form);
+    const localPath = elements.stageLocal.value.trim();
+    const gitURL = elements.stageGit.value.trim();
+    if (!localPath && !gitURL) {
+      setFieldInvalid(elements.stageLocal);
+      setFormStatus(form, "Provide a local path or Git URL.", "error");
+      return;
     }
+    const body = {
+      local_path: localPath,
+      git_url: gitURL,
+      commit: elements.stageCommit.value.trim(),
+    };
+    await withSubmitPending(form, async () => {
+      try {
+        state.staged = await postMutation("/api/v1/desk/skills/stage", body, "skill-stage");
+        clearFormIntent("skill-stage");
+        elements.preview.textContent = JSON.stringify(state.staged, null, 2);
+        elements.review.hidden = false;
+        setFormStatus(form, "Review the complete manifest before installing.", "");
+      } catch (error) {
+        applyFieldError(form, error);
+        setFormStatus(
+          form,
+          error.safeMessage || "Skill review could not be staged.",
+          "error",
+        );
+      }
+    });
   });
 
   elements.install?.addEventListener("click", async () => {
     if (!state.staged) return;
-    const installed = await runMutation(
-      () => postMutation("/api/v1/desk/skills/install", {
-        stage_id: state.staged.stage_id,
-        digest: state.staged.content_digest,
-      }),
-      "Skill installed inactive.",
-    );
-    if (installed) {
+    if (elements.install.disabled) return;
+    const original = elements.install.textContent;
+    elements.install.disabled = true;
+    elements.install.textContent = PENDING_LABEL;
+    setControlStatus(elements.installStatus, PENDING_LABEL, "pending");
+    try {
+      const result = await postMutation(
+        "/api/v1/desk/skills/install",
+        {
+          stage_id: state.staged.stage_id,
+          digest: state.staged.content_digest,
+        },
+        "skill-install",
+      );
+      clearFormIntent("skill-install");
+      setControlStatus(elements.installStatus, "Skill installed inactive.", "");
       state.staged = null;
       elements.preview.textContent = "";
       elements.review.hidden = true;
+      if (result.restart_required) {
+        await handleRestartRequired(result);
+      } else {
+        await loadCapabilities();
+      }
+    } catch (error) {
+      setControlStatus(
+        elements.installStatus,
+        error.safeMessage || "Capability request could not be completed.",
+        "error",
+      );
+    } finally {
+      elements.install.textContent = original;
+      if (!state.restarting) {
+        elements.install.disabled = false;
+      }
     }
   });
 
@@ -612,6 +983,6 @@ if (root) {
   }
 
   void initialize().catch((error) => {
-    setStatus(error.safeMessage || "Capabilities could not be loaded.");
+    setPageStatus(error.safeMessage || "Capabilities could not be loaded.");
   });
 }

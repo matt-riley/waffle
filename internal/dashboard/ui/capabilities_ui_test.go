@@ -36,6 +36,21 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`aria-live="polite"`,
 		`Connection health only`,
 		`Credentials, endpoints, commands, environment, and tool policy details stay private.`,
+		`aria-describedby="capability-default-status"`,
+		`id="capability-default-status"`,
+		`aria-describedby="capability-utility-status"`,
+		`id="capability-utility-status"`,
+		`aria-describedby="capability-catalogue-status"`,
+		`id="capability-catalogue-status"`,
+		`aria-describedby="capability-model-status"`,
+		`id="capability-model-status"`,
+		`aria-describedby="capability-skill-stage-status"`,
+		`id="capability-skill-stage-status"`,
+		`aria-describedby="capability-skill-install-status"`,
+		`id="capability-skill-install-status"`,
+		`aria-describedby="capability-provider-status"`,
+		`id="capability-provider-status"`,
+		`class="capability-form-status"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Capabilities markup missing %q:\n%s", want, body)
@@ -104,7 +119,8 @@ func TestCapabilitiesConnectionsStayReadableOnNarrowScreens(t *testing.T) {
 		}
 	}
 	// Input chrome lives in the shared app.css baseline, not section CSS.
-	if strings.Contains(body, ".capability-panel input") {
+	// Field-level aria-invalid highlights are allowed.
+	if regexp.MustCompile(`\.capability-panel\s+input\s*\{`).MatchString(body) {
 		t.Error("capabilities.css must not redeclare input control baseline")
 	}
 }
