@@ -1,7 +1,7 @@
 // Package broker is the host-side credential broker (docs/plan.md,
 // "Secret management"). One rule: raw keys exist only here. Sandboxes hold
-// short-lived wk_ session tokens and talk to the broker, which injects the
-// real credential upstream. Phase 4 ships the LLM face (Anthropic and
+// wk_ session tokens (DefaultTokenTTL) and talk to the broker, which injects
+// the real credential upstream. Phase 4 ships the LLM face (Anthropic and
 // OpenAI-compatible passthrough); the git and egress faces arrive with
 // repo workspaces (phase 5).
 package broker
@@ -29,6 +29,18 @@ import (
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/usage"
 )
+
+// DefaultTokenTTL is how long a minted wk_ session token authorizes broker
+// requests on the upstream-proxy and git-credential faces. After expiry the
+// token is rejected and its map entries are swept; long-running work renews
+// via Mint/MintScoped (workspace resume already replaces the token).
+const DefaultTokenTTL = 24 * time.Hour
+
+// tokenEntry is one minted wk_ token and its lifetime.
+type tokenEntry struct {
+	sessionID string
+	expiresAt time.Time
+}
 
 // Upstream is one provider the broker can front.
 type Upstream struct {
@@ -70,14 +82,16 @@ type Broker struct {
 	GitBackend string
 
 	mu       sync.Mutex
-	tokens   map[string]string // token → session id
-	sessions map[string]string // session id → current token
-	gitScope map[string]string // session id → bound repo (owner/name)
+	tokens   map[string]tokenEntry // token → session + expiry
+	sessions map[string]string     // session id → current token
+	gitScope map[string]string     // session id → bound repo (owner/name)
 	limits   map[string]usage.Limits
 	budgets  map[string]string
 	Usage    *usage.Store
 	Limits   usage.Limits
-	// Now is injectable for deterministic budget-boundary tests.
+	// TokenTTL is the lifetime of minted wk_ tokens. Zero means DefaultTokenTTL.
+	TokenTTL time.Duration
+	// Now is injectable for deterministic budget-boundary and TTL tests.
 	Now func() time.Time
 }
 
@@ -88,13 +102,20 @@ func (b *Broker) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (b *Broker) tokenTTL() time.Duration {
+	if b.TokenTTL > 0 {
+		return b.TokenTTL
+	}
+	return DefaultTokenTTL
+}
+
 // New builds a broker over the given upstreams; st may be nil to skip
 // audit persistence (tests).
 func New(st *store.Store, upstreams []Upstream) *Broker {
 	b := &Broker{
 		upstreams: map[string]*httputil.ReverseProxy{},
 		egress:    map[string]*EgressTarget{},
-		tokens:    map[string]string{},
+		tokens:    map[string]tokenEntry{},
 		sessions:  map[string]string{},
 		gitScope:  map[string]string{},
 		limits:    map[string]usage.Limits{},
@@ -161,11 +182,16 @@ func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits u
 		return "", fmt.Errorf("mint broker token: %w", err)
 	}
 	token := "wk_" + raw
+	now := b.now()
+	entry := tokenEntry{
+		sessionID: sessionID,
+		expiresAt: now.Add(b.tokenTTL()),
+	}
 	b.mu.Lock()
 	if old := b.sessions[sessionID]; old != "" {
 		delete(b.tokens, old)
 	}
-	b.tokens[token] = sessionID
+	b.tokens[token] = entry
 	b.sessions[sessionID] = token
 	if scoped {
 		b.limits[sessionID] = limits
@@ -185,11 +211,8 @@ func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits u
 // Revoke invalidates a token (session ended).
 func (b *Broker) Revoke(token string) {
 	b.mu.Lock()
-	if sessionID := b.tokens[token]; sessionID != "" && b.sessions[sessionID] == token {
-		delete(b.sessions, sessionID)
-		delete(b.gitScope, sessionID)
-		delete(b.limits, sessionID)
-		delete(b.budgets, sessionID)
+	if entry, ok := b.tokens[token]; ok && b.sessions[entry.sessionID] == token {
+		b.clearSessionMapsLocked(entry.sessionID)
 	}
 	delete(b.tokens, token)
 	b.mu.Unlock()
@@ -200,12 +223,38 @@ func (b *Broker) RevokeSession(sessionID string) {
 	b.mu.Lock()
 	if token := b.sessions[sessionID]; token != "" {
 		delete(b.tokens, token)
-		delete(b.sessions, sessionID)
 	}
+	b.clearSessionMapsLocked(sessionID)
+	b.mu.Unlock()
+}
+
+// clearSessionMapsLocked drops session-keyed state. Caller holds b.mu.
+func (b *Broker) clearSessionMapsLocked(sessionID string) {
+	delete(b.sessions, sessionID)
 	delete(b.gitScope, sessionID)
 	delete(b.limits, sessionID)
 	delete(b.budgets, sessionID)
-	b.mu.Unlock()
+}
+
+// dropTokenLocked removes a token and, when it is still the session's current
+// token, the session's git/limit/budget maps. Caller holds b.mu.
+func (b *Broker) dropTokenLocked(token string, sessionID string) {
+	delete(b.tokens, token)
+	if b.sessions[sessionID] == token {
+		b.clearSessionMapsLocked(sessionID)
+	}
+}
+
+// sweepExpiredLocked removes every token whose expiresAt is not after now.
+// Caller holds b.mu.
+func (b *Broker) sweepExpiredLocked() {
+	now := b.now()
+	for token, entry := range b.tokens {
+		if entry.expiresAt.After(now) {
+			continue
+		}
+		b.dropTokenLocked(token, entry.sessionID)
+	}
 }
 
 // BindGitRepo records the repo a session is entitled to, so the git-credential
@@ -228,17 +277,36 @@ func (b *Broker) GitRepoScope(sessionID string) (string, bool) {
 	return repo, ok
 }
 
-// session resolves a bearer token to its session, or "".
+// session resolves a valid (non-expired) bearer token to its session, or "".
+// Expired tokens are swept and treated as absent.
 func (b *Broker) session(token string) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.tokens[token]
+	sessionID, _, _, expired := b.usageScope(token)
+	if expired {
+		return ""
+	}
+	return sessionID
 }
 
-func (b *Broker) usageScope(token string) (sessionID, budgetKey string, limits usage.Limits) {
+// usageScope resolves a token. On success expired is false and sessionID is
+// set. When the token existed but its TTL elapsed, expired is true, sessionID
+// is the former session (for audit only — do not authorize), and maps are
+// swept. Unknown tokens return empty sessionID and expired false.
+func (b *Broker) usageScope(token string) (sessionID, budgetKey string, limits usage.Limits, expired bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	sessionID = b.tokens[token]
+	entry, ok := b.tokens[token]
+	if !ok {
+		b.sweepExpiredLocked()
+		return "", "", usage.Limits{}, false
+	}
+	now := b.now()
+	if !entry.expiresAt.After(now) {
+		former := entry.sessionID
+		b.dropTokenLocked(token, former)
+		b.sweepExpiredLocked()
+		return former, "", usage.Limits{}, true
+	}
+	sessionID = entry.sessionID
 	budgetKey = sessionID
 	limits = b.Limits
 	if scoped, ok := b.limits[sessionID]; ok {
@@ -247,7 +315,8 @@ func (b *Broker) usageScope(token string) (sessionID, budgetKey string, limits u
 	if key := b.budgets[sessionID]; key != "" {
 		budgetKey = key
 	}
-	return
+	b.sweepExpiredLocked()
+	return sessionID, budgetKey, limits, false
 }
 
 // ServeHTTP implements the broker's HTTP face: /<upstream>/<path>, bearer
@@ -265,7 +334,14 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	budgetKey := ""
 	limits := b.Limits
 	if strings.HasPrefix(token, "wk_") {
-		sessionID, budgetKey, limits = b.usageScope(token)
+		var expired bool
+		sessionID, budgetKey, limits, expired = b.usageScope(token)
+		if expired {
+			// Distinguish expired from unknown in broker_audit (action=expired).
+			b.record(r.Context(), token, sessionID, "expired", r.URL.Path)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 	if sessionID == "" {
 		b.record(r.Context(), token, "", "denied", r.URL.Path)
@@ -881,7 +957,7 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 	if _, err := b.audit.ExecContext(ctx, `
 		INSERT INTO broker_audit (at, token_prefix, session, action, detail)
 		VALUES (?, ?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), prefix, sessionID, action, detail); err != nil {
+		b.now().Format(time.RFC3339Nano), prefix, sessionID, action, detail); err != nil {
 		slog.Default().Error("broker audit insert failed", "err", err, "token_prefix", prefix, "action", action)
 	}
 }
