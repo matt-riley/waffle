@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.5](https://github.com/matt-riley/waffle/compare/v0.8.4...v0.8.5) (2026-07-25)
+
+
+### Bug Fixes
+
+* **schedule:** recheck enabled state after a skipped retry-wait loop ([#199](https://github.com/matt-riley/waffle/issues/199)) ([ed253a6](https://github.com/matt-riley/waffle/commit/ed253a6a880f544b6632b72cf881ac253e1c8908)), closes [#196](https://github.com/matt-riley/waffle/issues/196)
+
 ## [0.8.4](https://github.com/matt-riley/waffle/compare/v0.8.3...v0.8.4) (2026-07-24)
 
 
