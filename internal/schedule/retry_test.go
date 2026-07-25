@@ -436,6 +436,48 @@ func TestPendingRetryRechecksPauseAndDisableAtDeadline(t *testing.T) {
 	}
 }
 
+// TestAwaitRetryReadySkippedLoopRereadsBeforeEnabledCheck covers the
+// interleaving from #196 directly, without relying on timing: a retry
+// deadline that has already elapsed by the time the wait loop's condition is
+// first evaluated means the loop body never runs. Regression would reuse the
+// pre-wait snapshot for the Enabled check instead of reloading, so a disable
+// that landed between the snapshot and the check would be missed.
+func TestAwaitRetryReadySkippedLoopRereadsBeforeEnabledCheck(t *testing.T) {
+	c := newManualClock()
+	p := &sequenceProvider{}
+	jobs, s, j := retryFixture(t, p, c)
+	past := c.Now().Add(-time.Second)
+	_, err := jobs.db.Exec(`UPDATE jobs SET attempt=1,next_retry=?,max_attempts=2 WHERE id=?`, past.Format(time.RFC3339Nano), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleSnapshot, err := jobs.Get(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !staleSnapshot.Enabled {
+		t.Fatal("fixture job must start enabled")
+	}
+	// Simulate the race: disable the job in the store after staleSnapshot was
+	// captured, mirroring a disable landing between fire's initial snapshot
+	// and its enabled check.
+	if _, err := jobs.db.Exec(`UPDATE jobs SET enabled=0 WHERE id=?`, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The deadline is already in the past, so the wait loop's condition is
+	// false on first evaluation and its body never runs.
+	if !staleSnapshot.NextRetry.IsZero() && c.Now().Before(staleSnapshot.NextRetry) {
+		t.Fatal("test setup invalid: deadline must already be elapsed")
+	}
+	fresh, ready := s.awaitRetryReady(context.Background(), staleSnapshot)
+	if ready {
+		t.Fatal("awaitRetryReady reported ready for a job disabled before the check")
+	}
+	if fresh.Enabled {
+		t.Fatal("awaitRetryReady did not reload the job's current enabled state")
+	}
+}
+
 func TestMaxAttemptsOnePreservesSingleRunBehavior(t *testing.T) {
 	c := newManualClock()
 	p := &sequenceProvider{failFor: 1}
