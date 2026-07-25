@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -15,19 +16,17 @@ func TestStaticAssetsCachedAtInit(t *testing.T) {
 		"app.css",
 		"app.js",
 		"today.js",
-		"tasks.js",
 		"workspaces.css",
-		"workspaces.js",
 		"memory.css",
-		"memory.js",
 		"capabilities.css",
-		"capabilities.js",
 		"posture.css",
 		"posture.js",
 		"profiles.css",
 		"profiles.js",
 		"setup.css",
 		"setup.js",
+		"htmx.min.js",
+		"waffle-htmx.js",
 	}
 	for _, name := range required {
 		asset, ok := staticAssets[name]
@@ -166,10 +165,9 @@ func TestSectionAssetSeamsUseSharedCache(t *testing.T) {
 		serve func(http.ResponseWriter, *http.Request, string) bool
 		file  string
 	}{
-		{"tasks", ServeTaskAsset, "tasks.js"},
 		{"workspaces", ServeWorkspaceAsset, "workspaces.css"},
-		{"memory", ServeMemoryAsset, "memory.js"},
-		{"capabilities", ServeCapabilitiesAsset, "capabilities.js"},
+		{"memory", ServeMemoryAsset, "memory.css"},
+		{"capabilities", ServeCapabilitiesAsset, "capabilities.css"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +192,22 @@ func TestAssetVersionStableAndNonEmpty(t *testing.T) {
 	}
 	if CapabilitiesAssetVersion() == "" {
 		t.Fatal("CapabilitiesAssetVersion empty")
+	}
+}
+
+func TestHtmxRuntimeIsPinnedAndEmbedded(t *testing.T) {
+	if got := HtmxAssetDigest(); got != HtmxSHA256 {
+		t.Fatalf("htmx digest = %q, want pinned %q", got, HtmxSHA256)
+	}
+	version, source, digest := HtmxAssetProvenance()
+	if version != HtmxVersion || digest != HtmxSHA256 || source == "" {
+		t.Fatalf("unexpected htmx provenance: version=%q source=%q digest=%q", version, source, digest)
+	}
+	body := string(staticAssets["htmx.min.js"].body)
+	for _, forbidden := range []string{"cdn.jsdelivr.net", "unpkg.com", "ajax.googleapis.com"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("vendored htmx runtime references external host %q", forbidden)
+		}
 	}
 }
 

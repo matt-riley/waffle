@@ -65,8 +65,6 @@ func TestWorkspaceAssetsAreAdditiveVersionedAndResponsive(t *testing.T) {
 	body := rendered.String()
 	for _, required := range []string{
 		`/desk/assets/workspaces.css?v=asset-version`,
-		`/desk/assets/workspaces.js?v=asset-version`,
-		`type="module"`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("WorkspaceAssets missing %q", required)
@@ -98,7 +96,6 @@ func TestServeWorkspaceAssetClaimsOnlyWorkspaceAssets(t *testing.T) {
 		name        string
 		contentType string
 	}{
-		{name: "workspaces.js", contentType: "text/javascript"},
 		{name: "workspaces.css", contentType: "text/css"},
 	} {
 		rec := httptest.NewRecorder()

@@ -10,11 +10,11 @@ templ Tasks(view ShellView) {
 			<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
 		</header>
 		<div class="task-filters" aria-label="Filter tasks">
-			<button class="task-filter" type="button" data-task-filter="all" aria-pressed="true">All</button>
-			<button class="task-filter" type="button" data-task-filter="active" aria-pressed="false">Active</button>
-			<button class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false">Scheduled</button>
-			<button class="task-filter" type="button" data-task-filter="completed" aria-pressed="false">Completed</button>
-			<button class="task-filter" type="button" data-task-filter="attention" aria-pressed="false">Attention</button>
+			<button class="task-filter" type="button" data-task-filter="all" aria-pressed="true" hx-get="/api/v1/desk/tasks?filter=all" hx-target="#tasks-list" hx-swap="outerHTML">All</button>
+			<button class="task-filter" type="button" data-task-filter="active" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=active" hx-target="#tasks-list" hx-swap="outerHTML">Active</button>
+			<button class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=scheduled" hx-target="#tasks-list" hx-swap="outerHTML">Scheduled</button>
+			<button class="task-filter" type="button" data-task-filter="completed" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=completed" hx-target="#tasks-list" hx-swap="outerHTML">Completed</button>
+			<button class="task-filter" type="button" data-task-filter="attention" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=attention" hx-target="#tasks-list" hx-swap="outerHTML">Attention</button>
 		</div>
 		<div class="tasks-errors" id="tasks-errors" role="status" aria-live="polite" hidden></div>
 		<div class="tasks-layout">
@@ -25,7 +25,7 @@ templ Tasks(view ShellView) {
 						<h2 id="tasks-board-title">Runs and schedules</h2>
 					</div>
 				</div>
-				<div class="task-list" id="tasks-list"></div>
+				<div class="task-list" id="tasks-list" hx-get="/api/v1/desk/tasks?filter=all" hx-trigger="load" hx-target="this" hx-swap="outerHTML"></div>
 				<p class="tasks-empty" id="tasks-empty">Loading task evidence…</p>
 			</section>
 			<aside class="schedule-editor" aria-labelledby="schedule-editor-title">
@@ -35,7 +35,7 @@ templ Tasks(view ShellView) {
 						<h2 id="schedule-editor-title">Set the next rhythm</h2>
 					</div>
 				</div>
-				<form id="task-schedule-form">
+				<form id="task-schedule-form" hx-post="/api/v1/desk/tasks/schedules" hx-target="#task-schedule-status" hx-swap="innerHTML" data-waffle-json="true">
 					<input id="task-schedule-id" name="id" type="hidden"/>
 					<label for="task-schedule-name">Name</label>
 					<input id="task-schedule-name" name="name" required/>

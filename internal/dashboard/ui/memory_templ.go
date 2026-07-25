@@ -42,20 +42,7 @@ func MemoryAssets(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><script type=\"module\" src=\"")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		var templ_7745c5c3_Var3 string
-		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(AssetURL("memory.js", view.AssetVersion))
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 5, Col: 69}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -79,12 +66,12 @@ func Memory(view ShellView) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var4 == nil {
-			templ_7745c5c3_Var4 = templ.NopComponent
+		templ_7745c5c3_Var3 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var3 == nil {
+			templ_7745c5c3_Var3 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Attributed recall</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session-id\">Session ID</label> <input id=\"memory-session-id\" name=\"session_id\" autocomplete=\"off\" placeholder=\"session-…\"><p id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></p></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Attributed recall</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\" hx-get=\"/api/v1/desk/memory\" hx-target=\"#memory-results\" hx-swap=\"outerHTML\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session-id\">Session ID</label> <input id=\"memory-session-id\" name=\"session_id\" autocomplete=\"off\" placeholder=\"session-…\"><p id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></p></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" data-waffle-dialog-cancel type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

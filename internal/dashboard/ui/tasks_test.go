@@ -3,8 +3,6 @@ package ui
 import (
 	"bytes"
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -94,19 +92,5 @@ func TestAppCSSIncludesInputInSharedControlBaseline(t *testing.T) {
 	// font: inherit selector list must include input.
 	if !regexp.MustCompile(`(?s)a,\s*button,\s*select,\s*textarea,\s*input\s*\{[^}]*font:\s*inherit`).MatchString(css) {
 		t.Error("input must share font: inherit with a, button, select, textarea")
-	}
-}
-
-func TestServeTaskAssetServesOnlyTasksClient(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/desk/assets/tasks.js", nil)
-	if !ServeTaskAsset(rec, req, "tasks.js") {
-		t.Fatal("tasks.js was not served")
-	}
-	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/javascript") {
-		t.Fatalf("asset response = %d %q", rec.Code, rec.Header().Get("Content-Type"))
-	}
-	if ServeTaskAsset(httptest.NewRecorder(), req, "today.js") {
-		t.Fatal("Tasks asset seam claimed an unrelated asset")
 	}
 }

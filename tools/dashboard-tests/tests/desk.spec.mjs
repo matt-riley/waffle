@@ -285,6 +285,41 @@ test("all five destinations render their production section", async ({ page }) =
   }
 });
 
+test("form-and-list sections swap real embedded htmx fragments", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the htmx fragment contract once.");
+
+  const cases = [
+    ["capabilities", "/api/v1/desk/capabilities?part=models", "#capability-models"],
+    ["tasks", "/api/v1/desk/tasks?filter=all", "#tasks-list"],
+    ["workspaces", "/api/v1/desk/workspaces", "#workspaces-list"],
+  ];
+  for (const [section, route, target] of cases) {
+    const fragment = page.waitForResponse(
+      (response) =>
+        response.url().includes(route) &&
+        response.request().headers()["hx-request"] === "true",
+    );
+    await page.goto(deskURL(section));
+    const response = await fragment;
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toContain("text/html");
+    await expect(page.locator(target)).toHaveAttribute("data-waffle-fragment", "true");
+  }
+
+  await page.goto(deskURL("memory"));
+  await page.getByLabel("Search turns, summaries, and notes").fill("release artifact");
+  const memoryFragment = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/v1/desk/memory") &&
+      response.request().headers()["hx-request"] === "true",
+  );
+  await page.getByRole("button", { name: "Search memory", exact: true }).click();
+  const memoryResponse = await memoryFragment;
+  expect(memoryResponse.status()).toBe(200);
+  expect(memoryResponse.headers()["content-type"]).toContain("text/html");
+  await expect(page.locator("#memory-results")).toHaveAttribute("data-waffle-fragment", "true");
+});
+
 test("Today sends a streamed reply and confirms cancellation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

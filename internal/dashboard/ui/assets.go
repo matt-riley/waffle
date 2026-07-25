@@ -45,19 +45,10 @@ func ServeAsset(w http.ResponseWriter, r *http.Request, name string) bool {
 	return writeStaticAsset(w, r, asset)
 }
 
-// ServeTaskAsset is the additive asset seam used by the shared shell asset
-// registry when the Tasks section is composed into Desk.
-func ServeTaskAsset(w http.ResponseWriter, r *http.Request, name string) bool {
-	if name != "tasks.js" {
-		return false
-	}
-	return ServeAsset(w, r, name)
-}
-
 // ServeWorkspaceAsset is the additive asset seam used when the Workspaces
 // section is composed into the shared Desk shell.
 func ServeWorkspaceAsset(w http.ResponseWriter, r *http.Request, name string) bool {
-	if name != "workspaces.js" && name != "workspaces.css" {
+	if name != "workspaces.css" {
 		return false
 	}
 	return ServeAsset(w, r, name)
@@ -66,7 +57,7 @@ func ServeWorkspaceAsset(w http.ResponseWriter, r *http.Request, name string) bo
 // ServeMemoryAsset is the additive asset seam used by the shared shell asset
 // registry when the Memory section is composed into Desk.
 func ServeMemoryAsset(w http.ResponseWriter, r *http.Request, name string) bool {
-	if name != "memory.js" && name != "memory.css" {
+	if name != "memory.css" {
 		return false
 	}
 	return ServeAsset(w, r, name)

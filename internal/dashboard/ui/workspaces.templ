@@ -2,7 +2,6 @@ package ui
 
 templ WorkspaceAssets(view ShellView) {
 	<link rel="stylesheet" href={ AssetURL("workspaces.css", view.AssetVersion) }/>
-	<script type="module" src={ AssetURL("workspaces.js", view.AssetVersion) }></script>
 }
 
 templ Workspaces(view ShellView) {
@@ -15,11 +14,11 @@ templ Workspaces(view ShellView) {
 			<button id="workspace-open-button" class="workspace-primary" type="button">Open repository</button>
 		</header>
 		<div class="workspaces-errors" id="workspaces-errors" role="status" aria-live="polite" hidden></div>
-		<div class="workspaces-grid" id="workspaces-list"></div>
+		<div class="workspaces-grid" id="workspaces-list" hx-get="/api/v1/desk/workspaces" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 		<p class="workspaces-empty" id="workspaces-empty">Loading workspaces…</p>
 
 		<dialog id="workspace-open-dialog" aria-labelledby="workspace-open-title">
-			<form id="workspace-open-form">
+			<form id="workspace-open-form" hx-post="/api/v1/desk/workspaces/open" hx-target="#workspace-open-status" hx-swap="innerHTML" data-waffle-json="true">
 				<header class="workspace-dialog-header">
 					<p class="panel-index">01 / repository</p>
 					<h2 id="workspace-open-title">Open a guarded workspace</h2>
@@ -57,7 +56,7 @@ templ Workspaces(view ShellView) {
 				</dl>
 				<p id="workspace-close-status" class="workspace-dialog-status" aria-live="polite"></p>
 				<div class="workspace-dialog-actions">
-					<button id="workspace-close-cancel" type="button">Cancel</button>
+					<button id="workspace-close-cancel" data-waffle-dialog-cancel type="button">Cancel</button>
 					<button id="workspace-close-confirm" class="workspace-danger" type="button" disabled>Close workspace</button>
 				</div>
 			</div>

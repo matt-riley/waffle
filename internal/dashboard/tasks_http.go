@@ -51,7 +51,7 @@ type TaskRouteConfig struct {
 // calls this with its process-scoped dependencies.
 func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 	service := NewTasksService(config.Operations)
-	mux.Handle("GET /api/v1/desk/tasks", newTasksReadHandler(service))
+	mux.Handle("GET /api/v1/desk/tasks", negotiateFragments(newTasksReadHandler(service)))
 	if config.Schedules == nil || config.Security == nil || config.Idempotency == nil {
 		return
 	}
@@ -64,7 +64,7 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 		if timeout <= 0 {
 			timeout = defaultTaskMutationTimeout
 		}
-		protected := NewDetachedMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, next, timeout)
+		protected := NewDetachedMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, negotiateFragments(next), timeout)
 		return preserveResponseType(protected)
 	}
 	mux.Handle("POST /api/v1/desk/tasks/schedules", mutation(newTaskScheduleCreateHandler(config.Schedules, events)))
@@ -131,9 +131,7 @@ func newTaskScheduleCreateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		view := scheduleTaskView(*job)
 		publishTaskScheduleEvent(events, TaskScheduleCreatedEvent, view)
-		writeJSON(w, http.StatusCreated, struct {
-			Task TaskView `json:"task"`
-		}{Task: view})
+		writeJSON(w, http.StatusCreated, TaskMutationResponse{Task: view})
 	})
 }
 
@@ -168,9 +166,7 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 		}
 		view := scheduleTaskView(*job)
 		publishTaskScheduleEvent(events, TaskScheduleUpdatedEvent, view)
-		writeJSON(w, http.StatusOK, struct {
-			Task TaskView `json:"task"`
-		}{Task: view})
+		writeJSON(w, http.StatusOK, TaskMutationResponse{Task: view})
 	})
 }
 

@@ -1,0 +1,77 @@
+package ui
+
+templ FragmentList(view FragmentView) {
+	<div id={ view.ID } class={ view.Class } data-waffle-fragment="true" hx-get={ view.GetURL } hx-trigger={ view.Trigger } hx-target="this" hx-swap="outerHTML">
+		if view.Status != "" {
+			<p class="waffle-fragment-status" role="status">{ view.Status }</p>
+		}
+		if len(view.Items) == 0 {
+			<p class="waffle-fragment-empty">{ view.Empty }</p>
+		}
+		for _, item := range view.Items {
+			<article class={ item.Class } data-waffle-id={ item.ID } data-task-id={ item.DataTaskID } data-workspace-id={ item.DataWorkspaceID } data-status={ item.Kind }>
+				if item.Kind != "" {
+					<p class="waffle-fragment-kind">{ item.Kind }</p>
+				}
+				<h3>{ item.Title }</h3>
+				if item.Detail != "" {
+					if item.DetailClass != "" {
+						<p class={ item.DetailClass }>{ item.Detail }</p>
+					} else {
+						<p class="waffle-fragment-detail">{ item.Detail }</p>
+					}
+				}
+				if len(item.Fields) > 0 {
+					<dl class="waffle-fragment-facts">
+						for _, field := range item.Fields {
+							<div><dt>{ field.Label }</dt><dd>{ field.Value }</dd></div>
+						}
+					</dl>
+				}
+				if len(item.Actions) > 0 {
+					<div class="waffle-fragment-actions">
+						for _, action := range item.Actions {
+							if action.Method == "get" {
+								<a class={ action.Class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
+							} else if len(action.Fields) > 0 {
+								<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
+									for _, field := range action.Fields {
+										<input type="hidden" name={ field.Label } value={ field.Value }/>
+									}
+									<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit">{ action.Label }</button>
+								</form>
+							} else {
+								<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
+									<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit" hx-disabled-elt="this">{ action.Label }</button>
+								</form>
+							}
+						}
+					</div>
+				}
+			</article>
+		}
+	</div>
+	for _, options := range view.OptionLists {
+		<select id={ options.ID } name={ options.Name } required?={ options.Required } hx-swap-oob="outerHTML">
+			if len(options.Options) == 0 {
+				<option value="">No available choices</option>
+			}
+			for _, option := range options.Options {
+				<option value={ option.Value }>{ option.Label }</option>
+			}
+		</select>
+	}
+	for _, swap := range view.TextSwaps {
+		<p id={ swap.ID } hx-swap-oob="outerHTML">{ swap.Text }</p>
+	}
+}
+
+templ FragmentStatus(view FragmentStatusView) {
+	<div class="waffle-fragment-status" role="status" data-waffle-error={ view.Error }>{ view.Message }</div>
+	if view.RestartRequired {
+		<div id="capability-restart-status" class="capability-restart" role="status" aria-live="polite" hx-swap-oob="outerHTML">
+			<strong>Restart required.</strong>
+			<span>Waiting for a new Waffle process. If it does not arrive, restart waffle serve.</span>
+		</div>
+	}
+}

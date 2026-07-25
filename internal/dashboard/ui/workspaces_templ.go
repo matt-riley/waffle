@@ -42,20 +42,7 @@ func WorkspaceAssets(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><script type=\"module\" src=\"")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		var templ_7745c5c3_Var3 string
-		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(AssetURL("workspaces.js", view.AssetVersion))
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `workspaces.templ`, Line: 5, Col: 73}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -79,25 +66,25 @@ func Workspaces(view ShellView) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var4 == nil {
-			templ_7745c5c3_Var4 = templ.NopComponent
+		templ_7745c5c3_Var3 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var3 == nil {
+			templ_7745c5c3_Var3 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<section class=\"workspaces\" data-section=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<section class=\"workspaces\" data-section=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var5 string
-		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(view.ActiveSection)
+		var templ_7745c5c3_Var4 string
+		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.ResolveAttributeValue(view.ActiveSection)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `workspaces.templ`, Line: 9, Col: 62}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `workspaces.templ`, Line: 8, Col: 62}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var4)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\" aria-labelledby=\"workspaces-title\"><header class=\"workspaces-header\"><div><p class=\"eyebrow\">Workspaces / guarded repositories</p><h1 id=\"workspaces-title\">Where Waffle is working</h1></div><button id=\"workspace-open-button\" class=\"workspace-primary\" type=\"button\">Open repository</button></header><div class=\"workspaces-errors\" id=\"workspaces-errors\" role=\"status\" aria-live=\"polite\" hidden></div><div class=\"workspaces-grid\" id=\"workspaces-list\"></div><p class=\"workspaces-empty\" id=\"workspaces-empty\">Loading workspaces…</p><dialog id=\"workspace-open-dialog\" aria-labelledby=\"workspace-open-title\"><form id=\"workspace-open-form\"><header class=\"workspace-dialog-header\"><p class=\"panel-index\">01 / repository</p><h2 id=\"workspace-open-title\">Open a guarded workspace</h2><p>Use an exact owner/repo. The configured profile and network posture stay visible on the workspace.</p></header><p id=\"workspace-open-prerequisite\" class=\"workspace-dialog-prerequisite\" role=\"status\" aria-live=\"polite\" hidden></p><label for=\"workspace-repository\">Repository</label> <input id=\"workspace-repository\" name=\"repository\" placeholder=\"owner/repo\" autocomplete=\"off\" required> <label for=\"workspace-profile\">Profile <span>(optional)</span></label> <input id=\"workspace-profile\" name=\"profile\" placeholder=\"reviewer\" autocomplete=\"off\"><p id=\"workspace-open-status\" class=\"workspace-dialog-status\" aria-live=\"polite\"></p><div class=\"workspace-dialog-actions\"><button id=\"workspace-open-cancel\" type=\"button\">Cancel</button> <button class=\"workspace-primary\" type=\"submit\">Open workspace</button></div></form></dialog> <dialog id=\"workspace-close-dialog\" aria-labelledby=\"workspace-close-title\"><div class=\"workspace-close-content\"><header class=\"workspace-dialog-header\"><p class=\"panel-index\">02 / safety check</p><h2 id=\"workspace-close-title\">Review workspace close</h2><p>The repository is inspected again when you confirm. Unsaved or unpushed work always stops the close.</p></header><dl class=\"workspace-evidence\"><div><dt>Working tree</dt><dd id=\"workspace-close-dirty\">Checking…</dd></div><div><dt>Unpushed commits</dt><dd id=\"workspace-close-unpushed\">Checking…</dd></div></dl><p id=\"workspace-close-status\" class=\"workspace-dialog-status\" aria-live=\"polite\"></p><div class=\"workspace-dialog-actions\"><button id=\"workspace-close-cancel\" type=\"button\">Cancel</button> <button id=\"workspace-close-confirm\" class=\"workspace-danger\" type=\"button\" disabled>Close workspace</button></div></div></dialog></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "\" aria-labelledby=\"workspaces-title\"><header class=\"workspaces-header\"><div><p class=\"eyebrow\">Workspaces / guarded repositories</p><h1 id=\"workspaces-title\">Where Waffle is working</h1></div><button id=\"workspace-open-button\" class=\"workspace-primary\" type=\"button\">Open repository</button></header><div class=\"workspaces-errors\" id=\"workspaces-errors\" role=\"status\" aria-live=\"polite\" hidden></div><div class=\"workspaces-grid\" id=\"workspaces-list\" hx-get=\"/api/v1/desk/workspaces\" hx-trigger=\"load, waffle:refresh from:body\" hx-target=\"this\" hx-swap=\"outerHTML\"></div><p class=\"workspaces-empty\" id=\"workspaces-empty\">Loading workspaces…</p><dialog id=\"workspace-open-dialog\" aria-labelledby=\"workspace-open-title\"><form id=\"workspace-open-form\" hx-post=\"/api/v1/desk/workspaces/open\" hx-target=\"#workspace-open-status\" hx-swap=\"innerHTML\" data-waffle-json=\"true\"><header class=\"workspace-dialog-header\"><p class=\"panel-index\">01 / repository</p><h2 id=\"workspace-open-title\">Open a guarded workspace</h2><p>Use an exact owner/repo. The configured profile and network posture stay visible on the workspace.</p></header><p id=\"workspace-open-prerequisite\" class=\"workspace-dialog-prerequisite\" role=\"status\" aria-live=\"polite\" hidden></p><label for=\"workspace-repository\">Repository</label> <input id=\"workspace-repository\" name=\"repository\" placeholder=\"owner/repo\" autocomplete=\"off\" required> <label for=\"workspace-profile\">Profile <span>(optional)</span></label> <input id=\"workspace-profile\" name=\"profile\" placeholder=\"reviewer\" autocomplete=\"off\"><p id=\"workspace-open-status\" class=\"workspace-dialog-status\" aria-live=\"polite\"></p><div class=\"workspace-dialog-actions\"><button id=\"workspace-open-cancel\" type=\"button\">Cancel</button> <button class=\"workspace-primary\" type=\"submit\">Open workspace</button></div></form></dialog> <dialog id=\"workspace-close-dialog\" aria-labelledby=\"workspace-close-title\"><div class=\"workspace-close-content\"><header class=\"workspace-dialog-header\"><p class=\"panel-index\">02 / safety check</p><h2 id=\"workspace-close-title\">Review workspace close</h2><p>The repository is inspected again when you confirm. Unsaved or unpushed work always stops the close.</p></header><dl class=\"workspace-evidence\"><div><dt>Working tree</dt><dd id=\"workspace-close-dirty\">Checking…</dd></div><div><dt>Unpushed commits</dt><dd id=\"workspace-close-unpushed\">Checking…</dd></div></dl><p id=\"workspace-close-status\" class=\"workspace-dialog-status\" aria-live=\"polite\"></p><div class=\"workspace-dialog-actions\"><button id=\"workspace-close-cancel\" data-waffle-dialog-cancel type=\"button\">Cancel</button> <button id=\"workspace-close-confirm\" class=\"workspace-danger\" type=\"button\" disabled>Close workspace</button></div></div></dialog></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

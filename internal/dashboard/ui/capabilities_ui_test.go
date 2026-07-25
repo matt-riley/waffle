@@ -95,8 +95,6 @@ func TestCapabilitiesAssetsAreVersionedInHead(t *testing.T) {
 	version := CapabilitiesAssetVersion()
 	for _, required := range []string{
 		`/desk/assets/capabilities.css?v=` + version,
-		`/desk/assets/capabilities.js?v=` + version,
-		`type="module"`,
 		`rel="stylesheet"`,
 	} {
 		if !strings.Contains(body, required) {
@@ -147,7 +145,7 @@ func TestTodayComponentExposesSessionSkillControls(t *testing.T) {
 }
 
 func TestServeCapabilitiesAssetIsAdditiveAndImmutable(t *testing.T) {
-	for _, name := range []string{"capabilities.js", "capabilities.css"} {
+	for _, name := range []string{"capabilities.css"} {
 		request := httptest.NewRequest(http.MethodGet, "/desk/assets/"+name, nil)
 		response := httptest.NewRecorder()
 		if !ServeCapabilitiesAsset(response, request, name) {

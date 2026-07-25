@@ -2,7 +2,6 @@ package ui
 
 templ MemoryAssets(view ShellView) {
 	<link rel="stylesheet" href={ AssetURL("memory.css", view.AssetVersion) }/>
-	<script type="module" src={ AssetURL("memory.js", view.AssetVersion) }></script>
 }
 
 templ Memory(view ShellView) {
@@ -17,7 +16,7 @@ templ Memory(view ShellView) {
 		</header>
 		<div class="memory-layout">
 			<div class="memory-search-panel">
-				<form id="memory-search-form" class="memory-search-form">
+				<form id="memory-search-form" class="memory-search-form" hx-get="/api/v1/desk/memory" hx-target="#memory-results" hx-swap="outerHTML">
 					<label for="memory-query">Search turns, summaries, and notes</label>
 					<div class="memory-search-row">
 						<input id="memory-query" name="query" type="search" maxlength="1024" autocomplete="off" placeholder="What do you need to recall?"/>
@@ -43,7 +42,7 @@ templ Memory(view ShellView) {
 			<ul id="memory-forget-exclusions"></ul>
 			<p>This confirmation expires after 60 seconds.</p>
 			<div class="memory-dialog-actions">
-				<button id="memory-forget-cancel" type="button" autofocus>Cancel</button>
+				<button id="memory-forget-cancel" data-waffle-dialog-cancel type="button" autofocus>Cancel</button>
 				<button id="memory-forget-confirm" class="danger-button" type="button">Forget note</button>
 			</div>
 		</dialog>

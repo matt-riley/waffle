@@ -7,6 +7,9 @@ templ Shell(view ShellView) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ view.Title }</title>
+			if view.ActiveSection != "today" {
+				@HtmxAssets(view)
+			}
 			<link rel="stylesheet" href={ AssetURL("app.css", view.AssetVersion) }/>
 			<script type="module" src={ AssetURL("app.js", view.AssetVersion) }></script>
 			if view.ActiveSection == "workspaces" {

@@ -65,8 +65,6 @@ func TestMemoryAssetsAreAdditiveVersioned(t *testing.T) {
 	body := rendered.String()
 	for _, required := range []string{
 		`/desk/assets/memory.css?v=asset-version`,
-		`/desk/assets/memory.js?v=asset-version`,
-		`type="module"`,
 		`rel="stylesheet"`,
 	} {
 		if !strings.Contains(body, required) {
@@ -75,7 +73,7 @@ func TestMemoryAssetsAreAdditiveVersioned(t *testing.T) {
 	}
 }
 
-func TestMemoryStylesAndClientKeepDynamicContentSafe(t *testing.T) {
+func TestMemoryStylesRemainScoped(t *testing.T) {
 	cssBytes, err := assetFiles.ReadFile("assets/memory.css")
 	if err != nil {
 		t.Fatal(err)
@@ -94,42 +92,10 @@ func TestMemoryStylesAndClientKeepDynamicContentSafe(t *testing.T) {
 		}
 	}
 
-	jsBytes, err := assetFiles.ReadFile("assets/memory.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(jsBytes)
-	for _, required := range []string{
-		"textContent",
-		"replaceChildren",
-		"crypto.randomUUID()",
-		"X-Waffle-Desk-Token",
-		"Idempotency-Key",
-		"showModal",
-		"setTimeout",
-		"/api/v1/desk/memory",
-	} {
-		if !strings.Contains(js, required) {
-			t.Errorf("Memory client missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{
-		"innerHTML",
-		"localStorage",
-		"sessionStorage",
-		"console.",
-		"provider/delete",
-		"backup/delete",
-		"Undo",
-	} {
-		if strings.Contains(js, forbidden) {
-			t.Errorf("Memory client contains forbidden %q", forbidden)
-		}
-	}
 }
 
 func TestServeMemoryAssetServesOnlyMemoryAssets(t *testing.T) {
-	for _, name := range []string{"memory.js", "memory.css"} {
+	for _, name := range []string{"memory.css"} {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, "/desk/assets/"+name, nil)
 		if !ServeMemoryAsset(recorder, request, name) {

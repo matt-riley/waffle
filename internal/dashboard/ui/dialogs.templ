@@ -1,0 +1,97 @@
+package ui
+
+templ WorkspaceCloseDialog(view WorkspaceCloseDialogView) {
+	<dialog id="workspace-close-dialog" open data-waffle-dialog-focus={ view.FocusID } aria-labelledby="workspace-close-title">
+		<div class="workspace-close-content">
+			<header class="workspace-dialog-header">
+				<p class="panel-index">02 / safety check</p>
+				<h2 id="workspace-close-title">Review workspace close</h2>
+				<p>The repository is inspected again when you confirm. Unsaved or unpushed work always stops the close.</p>
+			</header>
+			<dl class="workspace-evidence">
+				<div><dt>Working tree</dt><dd id="workspace-close-dirty">{ view.Dirty }</dd></div>
+				<div><dt>Unpushed commits</dt><dd id="workspace-close-unpushed">{ view.Unpushed }</dd></div>
+			</dl>
+			<p id="workspace-close-status" class="workspace-dialog-status" aria-live="polite"></p>
+			<form hx-post={ view.PreviewURL } hx-target="#workspace-close-dialog" hx-swap="outerHTML" data-waffle-json="true">
+				<input type="hidden" name="preview_token" value={ view.PreviewToken }/>
+				<div class="workspace-dialog-actions">
+					<button id="workspace-close-cancel" data-waffle-dialog-cancel type="button">Cancel</button>
+					if view.Eligible {
+						<button id="workspace-close-confirm" class="workspace-danger" type="submit">Close workspace</button>
+					} else {
+						<button id="workspace-close-confirm" class="workspace-danger" type="submit" disabled>Close workspace</button>
+					}
+				</div>
+			</form>
+		</div>
+	</dialog>
+}
+
+templ MemoryForgetDialog(view MemoryForgetDialogView) {
+	<dialog id="memory-forget-dialog" open class="memory-forget-dialog" aria-labelledby="memory-forget-title">
+		<h2 id="memory-forget-title">Archive this note?</h2>
+		<p id="memory-forget-note">{ view.Excerpt }</p>
+		<p id="memory-forget-scope">{ view.Scope }</p>
+		<ul id="memory-forget-exclusions">
+			for _, exclusion := range view.Excludes {
+				<li>Does not erase { exclusion }.</li>
+			}
+		</ul>
+		<p>This confirmation expires after 60 seconds.</p>
+		<form hx-post={ view.PreviewURL } hx-target="#memory-forget-dialog" hx-swap="outerHTML" data-waffle-json="true">
+			<input type="hidden" name="preview_token" value={ view.PreviewToken }/>
+			<div class="memory-dialog-actions">
+				<button id="memory-forget-cancel" data-waffle-dialog-cancel type="button" autofocus>Cancel</button>
+				<button id="memory-forget-confirm" class="danger-button" type="submit">Forget note</button>
+			</div>
+		</form>
+	</dialog>
+}
+
+templ SkillReview(view SkillReviewView) {
+	<section id="capability-skill-review" class="skill-review" aria-labelledby="capability-skill-review-title">
+		<h3 id="capability-skill-review-title">Review manifest and diff</h3>
+		<div id="capability-skill-preview" class="skill-review-content">
+			<p><strong>Name:</strong> { view.Name }</p>
+			<p><strong>Description:</strong> { view.Description }</p>
+			<p><strong>Source:</strong> { view.SourceRef }</p>
+			<p><strong>Content digest:</strong> { view.ContentDigest }</p>
+			<div class="skill-review-audit" data-passed={ view.AuditPassed }>
+				<strong>{ view.AuditTitle }</strong>
+				if len(view.Flags) == 0 {
+					<p>{ view.AuditMessage }</p>
+				}
+				if len(view.Flags) > 0 {
+					<ul>
+						for _, flag := range view.Flags {
+							<li>{ flag }</li>
+						}
+					</ul>
+				}
+			</div>
+			if len(view.Files) > 0 {
+				<table class="skill-review-files">
+					<caption>Reviewed files</caption>
+					<thead><tr><th scope="col">Path</th><th scope="col">Size</th><th scope="col">SHA-256</th><th scope="col">Preview</th></tr></thead>
+					<tbody>
+						for _, file := range view.Files {
+							<tr class="skill-review-file"><td>{ file.Path }</td><td>{ file.Size } bytes</td><td>{ file.SHA256 }</td><td><details><summary>Open preview</summary><pre>{ file.Preview }</pre></details></td></tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+		<p id="capability-skill-review-expires" class="skill-review-expiry" role="status">Review expires at { view.ExpiresAt }.</p>
+		<form hx-post="/api/v1/desk/skills/install" hx-target="#capability-skill-review" hx-swap="outerHTML" data-waffle-json="true">
+			<input type="hidden" name="stage_id" value={ view.StageID }/>
+			<input type="hidden" name="digest" value={ view.ContentDigest }/>
+				if view.AuditPassed {
+					<button type="submit">Install inactive</button>
+				} else {
+					<button type="submit" disabled>Install inactive</button>
+				}
+			<p id="capability-skill-install-status" class="capability-form-status" role="status" aria-live="polite"></p>
+		</form>
+	</section>
+}
