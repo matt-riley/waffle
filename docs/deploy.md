@@ -203,7 +203,28 @@ ssh -N -L 8422:127.0.0.1:8422 user@host
 open http://127.0.0.1:8422/desk/
 ```
 
-Do not expose the Desk through a public bind, hostname, or reverse proxy.
+For access from a phone or any other tailnet device without port forwarding,
+enable `[dashboard.tailnet]` and publish the same loopback listener to the
+tailnet only. The bind address does not change:
+
+```sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8422
+```
+
+Requests admitted that way must carry an allowlisted Tailscale login, and may
+reach only `/desk/` and `/api/v1/desk/*` — `/status` and `/healthz` stay
+loopback-only. The full boundary, the exposure trade-offs, and
+`tailscale serve reset` as the withdrawal step are documented in
+[Waffle Desk tailnet access](waffle-desk.md#tailnet-access). Consider a tailnet
+grant restricting `tcp:443` on the host to your own devices as defence in depth.
+
+On a host where Waffle's runtime config is already installed, `[dashboard]` and
+`[dashboard.tailnet]` have to be edited in the live config file, not in a
+first-install seed. Preserve the file's owner and `0600` mode: managed rollouts
+validate both and will fail a later deploy if they drift.
+
+Do not expose the Desk through a public bind, hostname, reverse proxy, or
+Tailscale Funnel.
 It remains behind the existing loopback/admin security boundary and reuses the
 configured provider, workspace, session, and memory services owned by
 `waffle serve`; it is not a public administration surface or a separate

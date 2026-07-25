@@ -136,12 +136,26 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	var dashboardClients *dashboard.ChatClients
 	var dashboardGeneration string
 	if cfg.Dashboard.Enabled {
-		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, dashboardRandom)
+		security, err := dashboard.NewSecurity(cfg.Gateway.StatusListen, dashboard.TailnetOptions{
+			Enabled:       cfg.Dashboard.Tailnet.Enabled,
+			ServeHost:     cfg.Dashboard.Tailnet.ServeHost,
+			AllowedLogins: cfg.Dashboard.Tailnet.AllowedLogins,
+		}, dashboardRandom)
 		if err != nil {
 			return fmt.Errorf("dashboard security: %w", err)
 		}
 		// Desk mutations write to the shared policy_audit table (#152).
 		security.SetPolicyAuditDB(st.DB)
+		if cfg.Dashboard.Tailnet.Enabled {
+			// Log the login, never the allowlist: a mismatch is otherwise an
+			// unexplained 403 on a surface with no other diagnostic.
+			security.SetLoginRejectionObserver(func(login string) {
+				log.Warn("desk tailnet login rejected", "login", login)
+			})
+			log.Info("desk tailnet access enabled",
+				"serve_host", cfg.Dashboard.Tailnet.ServeHost,
+				"allowed_logins", len(cfg.Dashboard.Tailnet.AllowedLogins))
+		}
 		dashboardSecurity = security
 		dashboardGeneration, err = newDashboardProcessGeneration(dashboardRandom)
 		if err != nil {

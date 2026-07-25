@@ -64,6 +64,26 @@ enabled = false
 # bounded codeload archive; private/authenticated repositories fail closed.
 # skill_git_hosts = ["github.com"]
 
+# Optional tailnet access for Desk. Disabled by default. This does NOT change
+# the bind address: gateway.status_listen stays loopback-only, and that is what
+# makes the Tailscale identity headers trustworthy. Requests admitted through
+# this path may address only /desk/ and /api/v1/desk/*; /status and /healthz
+# stay loopback-only in every configuration.
+#
+# Required companion command on the same host, which persists across reboots:
+#   tailscale serve --bg --https=443 http://127.0.0.1:8422
+#
+# Never combine this with Tailscale Funnel: Funnel is public, and Desk rejects
+# any request Serve marks as a Funnel request.
+# [dashboard.tailnet]
+# enabled = true
+# The exact MagicDNS name Serve answers on. A bare DNS name, never an IP or port.
+# serve_host = "waffle.example-tailnet.ts.net"
+# Tailscale logins permitted to use Desk, as tailscaled reports them. SSO logins
+# are not email addresses (for example "user@github"). Tagged devices send no
+# login and are always rejected.
+# allowed_logins = ["user@github"]
+
 [agent]
 default_profile = "main"
 

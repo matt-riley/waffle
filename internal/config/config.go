@@ -69,9 +69,26 @@ type Chat struct {
 
 // Dashboard configures the optional Waffle Desk web interface.
 type Dashboard struct {
-	Enabled          bool     `toml:"enabled"`
-	SkillImportRoots []string `toml:"skill_import_roots"`
-	SkillGitHosts    []string `toml:"skill_git_hosts"`
+	Enabled          bool             `toml:"enabled"`
+	SkillImportRoots []string         `toml:"skill_import_roots"`
+	SkillGitHosts    []string         `toml:"skill_git_hosts"`
+	Tailnet          DashboardTailnet `toml:"tailnet"`
+}
+
+// DashboardTailnet authorizes Desk requests that arrive through a
+// `tailscale serve` reverse proxy running on this host. It does not change the
+// bind address: gateway.status_listen stays loopback-only, which is what makes
+// the Tailscale identity headers trustworthy in the first place.
+type DashboardTailnet struct {
+	Enabled bool `toml:"enabled"`
+	// ServeHost is the exact MagicDNS name Serve answers on. Requests whose
+	// Host does not match it are never admitted through this path.
+	ServeHost string `toml:"serve_host"`
+	// AllowedLogins are the Tailscale logins permitted to use Desk. These are
+	// login names as tailscaled reports them (for example "user@github"), not
+	// necessarily email addresses. Tagged devices send no login and are always
+	// rejected.
+	AllowedLogins []string `toml:"allowed_logins"`
 }
 
 // PolicyConfig holds [[policy.rule]] entries (#66).
@@ -789,6 +806,8 @@ type Gateway struct {
 	Listen string `toml:"listen"`
 	// StatusListen is the unauthenticated local run-status API. It must stay
 	// loopback-only to avoid exposing session metadata and usage remotely.
+	// [dashboard.tailnet] can authorize proxied Desk requests on this listener
+	// without moving the bind address; /status and /healthz remain loopback-only.
 	StatusListen string `toml:"status_listen"`
 }
 
@@ -932,6 +951,9 @@ func Load(path string) (Config, error) {
 	}
 	if err := validateLoopbackListen(cfg.Gateway.StatusListen); err != nil {
 		return Config{}, fmt.Errorf("gateway.status_listen: %w", err)
+	}
+	if err := validateDashboardTailnet(cfg.Dashboard); err != nil {
+		return Config{}, fmt.Errorf("dashboard.tailnet: %w", err)
 	}
 	if err := validateChatSocket(cfg.Chat.Socket); err != nil {
 		return Config{}, fmt.Errorf("chat.socket: %w", err)
@@ -1244,6 +1266,52 @@ func validateFetch(f Fetch) error {
 		if err != nil || host == "" || port == "" {
 			return fmt.Errorf("allow_private entry %q must be a CIDR or host:port", entry)
 		}
+	}
+	return nil
+}
+
+// validateDashboardTailnet fails closed on any incomplete tailnet Desk opt-in.
+// Logins are not validated as email addresses: tailscaled reports SSO logins in
+// forms like "user@github" that no email shape check would accept.
+func validateDashboardTailnet(d Dashboard) error {
+	if !d.Tailnet.Enabled {
+		if d.Tailnet.ServeHost != "" || len(d.Tailnet.AllowedLogins) > 0 {
+			return fmt.Errorf("serve_host and allowed_logins require enabled = true")
+		}
+		return nil
+	}
+	if !d.Enabled {
+		return fmt.Errorf("requires dashboard.enabled = true")
+	}
+	host := strings.TrimSpace(d.Tailnet.ServeHost)
+	if host == "" {
+		return fmt.Errorf("serve_host is required")
+	}
+	if host != d.Tailnet.ServeHost {
+		return fmt.Errorf("serve_host must not have leading or trailing whitespace")
+	}
+	if strings.ContainsAny(host, "/:@*") {
+		return fmt.Errorf("serve_host %q must be a bare DNS name without scheme, port, or wildcard", host)
+	}
+	if net.ParseIP(host) != nil {
+		return fmt.Errorf("serve_host %q must be a MagicDNS name, not an IP address", host)
+	}
+	if !strings.Contains(host, ".") {
+		return fmt.Errorf("serve_host %q must be the fully qualified MagicDNS name", host)
+	}
+	if len(d.Tailnet.AllowedLogins) == 0 {
+		return fmt.Errorf("allowed_logins must list at least one login")
+	}
+	seen := make(map[string]struct{}, len(d.Tailnet.AllowedLogins))
+	for _, login := range d.Tailnet.AllowedLogins {
+		if login == "" || strings.TrimSpace(login) != login || strings.ContainsAny(login, " \t") {
+			return fmt.Errorf("allowed_logins entry %q must be a non-empty login without whitespace", login)
+		}
+		lowered := strings.ToLower(login)
+		if _, duplicate := seen[lowered]; duplicate {
+			return fmt.Errorf("allowed_logins entry %q is duplicated", login)
+		}
+		seen[lowered] = struct{}{}
 	}
 	return nil
 }

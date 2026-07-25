@@ -26,7 +26,9 @@ waffle serve
 ```
 
 Keep the listener on loopback. Do not expose Desk with a public bind, public
-reverse proxy, public hostname, or Tailscale Serve rule.
+reverse proxy, public hostname, or Tailscale Funnel. A tailnet-only
+`tailscale serve` rule is permitted, and only when `[dashboard.tailnet]` is
+configured — see [tailnet access](#tailnet-access).
 
 For a managed host, forward the existing loopback listener:
 
@@ -39,14 +41,103 @@ Use the equivalent local forwarding command with Tailscale SSH, then open
 
 ## Access boundary
 
-Desk has no login layer and its first release does not provide remote
-authentication. Reads rely on the numeric loopback listener plus the strict
-`Host`, `Origin`, and `Sec-Fetch-Site` boundary. Mutations additionally require
-the process-scoped `X-Waffle-Desk-Token` and an `Idempotency-Key`.
+Desk admits a request through exactly one of two profiles, selected by `Host`.
+Anything else is rejected.
+
+The **loopback profile** is the default and only enabled boundary. It requires
+the numeric loopback (or `localhost`) `Host` for the configured listener, no
+cross-site `Sec-Fetch-Site`, and an `Origin` that, when present, is the same
+`http` origin. It has no login layer: reads rely on the loopback listener
+itself.
+
+The **tailnet profile** exists only when `[dashboard.tailnet]` is configured. It
+authenticates the caller's Tailscale identity and is described below.
+
+Mutations on both profiles additionally require the process-scoped
+`X-Waffle-Desk-Token` and an `Idempotency-Key`.
 
 The process token is a CSRF control delivered to the same-origin Desk. It is not
 a bearer credential and must not be treated as authentication for a public
-listener, reverse proxy, or remote client.
+listener, reverse proxy, or remote client. That remains true on the tailnet
+profile: authentication there is the Tailscale identity, never the token.
+
+## Tailnet access
+
+This path lets a phone or any other tailnet device open Desk without SSH port
+forwarding. It does not move the bind address. `gateway.status_listen` stays
+loopback-only, so the only process that can reach the socket over the network is
+`tailscaled` on the same host — which is precisely what makes the identity
+headers it injects trustworthy, because it strips any inbound copy of them
+first.
+
+Configure Waffle:
+
+```toml
+[dashboard]
+enabled = true
+
+[dashboard.tailnet]
+enabled = true
+serve_host = "waffle.example-tailnet.ts.net"
+allowed_logins = ["user@github"]
+```
+
+Then publish the existing loopback listener to the tailnet only. `--bg` persists
+across reboots and tailscaled restarts:
+
+```sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8422
+```
+
+Open `https://waffle.example-tailnet.ts.net/desk/`. The certificate is a
+publicly trusted Let's Encrypt certificate for the tailnet DNS name, so no
+certificate needs installing on the phone. MagicDNS resolves the name while the
+Tailscale app is connected.
+
+A request is admitted through this profile only when every one of these holds:
+
+- The `Host` is exactly the configured `serve_host`, with or without `:443`.
+- The path is under `/desk/` or `/api/v1/desk/`. `/status` and `/healthz` are
+  never reachable through this profile, including via path traversal.
+- No `Tailscale-Funnel-Request` header is present.
+- `X-Forwarded-Proto` is `https`.
+- `Sec-Fetch-Site`, when present, is `same-origin` or `none`. This is stricter
+  than the loopback rule on purpose: sibling MagicDNS names in the same tailnet
+  are same-site.
+- `Origin`, when present, is `https://<serve_host>`.
+- `Tailscale-User-Login` is non-empty and listed in `allowed_logins`.
+
+`allowed_logins` holds login names as tailscaled reports them. SSO logins are
+not email addresses — a GitHub-authenticated tailnet reports `user@github`.
+Verify the exact value once: a rejected login is logged as
+`desk tailnet login rejected` with the login it received, so an allowlist
+mismatch names itself instead of being a silent 403.
+
+Consequences worth deciding deliberately:
+
+- The allowlist is per **user**, not per device. Every device logged in as an
+  allowed login can open Desk. Restricting to specific devices requires a
+  tailnet grant on `tcp:443`, because the identity headers do not distinguish
+  one of your devices from another.
+- Tagged devices — CI runners, tagged servers — send no login and always fail
+  closed.
+- Node sharing populates the identity headers for the share recipient, so the
+  allowlist is what keeps a shared node from granting Desk access.
+- Enabling HTTPS certificates publishes the host's MagicDNS name to public
+  Certificate Transparency logs.
+- A local process on the serve host can still forge these headers over loopback.
+  That is unchanged: any such process can already reach Desk directly on the
+  loopback `Host` and read the process token out of the shell. Restrict who can
+  execute code on the host, and keep the listener on loopback.
+
+To withdraw tailnet access, remove the serve rule and the config:
+
+```sh
+sudo tailscale serve reset
+```
+
+Revoking a lost device is a Tailscale admin console action. There is no bearer
+credential on the device to rotate and nothing to change in Waffle.
 
 ## Scope and safety rules
 

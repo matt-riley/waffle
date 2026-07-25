@@ -64,7 +64,7 @@ Live provider evals require `WAFFLE_EVAL_LIVE=1` and a configured provider; they
 - Never commit `config.toml`, generated databases, identities, or secrets. `config.toml` stores `secret://` references only, never secret values.
 - Configuration is strict: use `config.example.toml` as the contract; don't add permissive fallback behavior for unknown or invalid policy/configuration.
 - Treat migrations, secret-store changes, and sandbox/network-policy changes as compatibility- and security-sensitive — document rollback/compatibility and any required operational changes in the PR description.
-- The gateway status endpoint (`[gateway] status_listen`, default `127.0.0.1:8422`) must stay loopback-only.
+- The gateway status endpoint (`[gateway] status_listen`, default `127.0.0.1:8422`) must stay loopback-only. `[dashboard.tailnet]` may authorize Desk requests proxied to that listener by a same-host `tailscale serve`, authenticated by allowlisted Tailscale identity headers; it must never move the bind address, and `/status` and `/healthz` must stay loopback-only in every configuration.
 
 ## Commit & PR conventions
 

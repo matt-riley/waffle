@@ -229,6 +229,99 @@ func TestLoadRejectsNonLoopbackStatusListener(t *testing.T) {
 	}
 }
 
+func TestLoadDashboardTailnetOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[dashboard]
+enabled = true
+
+[dashboard.tailnet]
+enabled = true
+serve_host = "waffle.tail848095.ts.net"
+allowed_logins = ["matt-riley@github"]
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Dashboard.Tailnet.Enabled {
+		t.Error("Dashboard.Tailnet.Enabled = false, want true")
+	}
+	if got, want := cfg.Dashboard.Tailnet.ServeHost, "waffle.tail848095.ts.net"; got != want {
+		t.Errorf("ServeHost = %q, want %q", got, want)
+	}
+	// SSO logins are not email addresses and must survive load unchanged.
+	if got, want := cfg.Dashboard.Tailnet.AllowedLogins, []string{"matt-riley@github"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedLogins = %v, want %v", got, want)
+	}
+	// The tailnet opt-in must never move the bind address off loopback.
+	if got, want := cfg.Gateway.StatusListen, "127.0.0.1:8422"; got != want {
+		t.Errorf("StatusListen = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRejectsIncompleteDashboardTailnet(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+	}{
+		{
+			name: "missing serve host",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "serve host is an ip",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"100.64.0.1\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "serve host carries a port",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net:443\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "serve host carries a scheme",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"https://waffle.tail848095.ts.net\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "serve host is not fully qualified",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "no allowed logins",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net\"\n",
+		},
+		{
+			name: "empty allowed login",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net\"\nallowed_logins = [\"\"]\n",
+		},
+		{
+			name: "duplicate allowed login",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net\"\nallowed_logins = [\"matt-riley@github\", \"Matt-Riley@GitHub\"]\n",
+		},
+		{
+			name: "tailnet access without the dashboard",
+			toml: "[dashboard]\nenabled = false\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "settings without the opt-in",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nserve_host = \"waffle.tail848095.ts.net\"\nallowed_logins = [\"matt-riley@github\"]\n",
+		},
+		{
+			name: "unknown tailnet key",
+			toml: "[dashboard]\nenabled = true\n\n[dashboard.tailnet]\nenabled = true\nserve_host = \"waffle.tail848095.ts.net\"\nallowed_logins = [\"matt-riley@github\"]\nallow_all = true\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tt.toml)
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted an incomplete dashboard.tailnet opt-in, want error")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, "[gateway]\nlisten = \"x\"\nlistne_typo = true\n")
