@@ -32,7 +32,8 @@ body {
 a,
 button,
 select,
-textarea {
+textarea,
+input {
   font: inherit;
 }
 
@@ -40,9 +41,11 @@ a {
   color: inherit;
 }
 
+/* Text-like controls share chrome; leave checkbox/radio/range/file/hidden native. */
 button,
 select,
-textarea {
+textarea,
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]) {
   border: 1px solid var(--ink);
   border-radius: 0;
 }
@@ -73,16 +76,19 @@ button:active:not(:disabled) {
 
 button:disabled,
 select:disabled,
-textarea:disabled {
+textarea:disabled,
+input:disabled {
   cursor: not-allowed;
   opacity: 0.56;
 }
 
 select,
-textarea {
+textarea,
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]) {
   background: var(--paper);
   color: var(--ink);
   max-width: 100%;
+  min-height: 2.75rem;
   padding: 0.75rem;
   width: 100%;
 }
@@ -691,15 +697,6 @@ h3 {
 .schedule-editor label span {
   color: var(--muted);
   font-weight: 400;
-}
-
-.schedule-editor input {
-  background: var(--paper);
-  border: 1px solid var(--ink);
-  color: var(--ink);
-  min-height: 2.75rem;
-  padding: 0.65rem 0.75rem;
-  width: 100%;
 }
 
 .schedule-enabled {

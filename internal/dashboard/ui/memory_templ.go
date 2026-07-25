@@ -8,7 +8,7 @@ package ui
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-func Memory(view ShellView) templ.Component {
+func MemoryAssets(view ShellView) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -55,7 +55,36 @@ func Memory(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script><section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Attributed recall</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\" aria-live=\"polite\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session-id\">Session ID</label> <input id=\"memory-session-id\" name=\"session_id\" autocomplete=\"off\" placeholder=\"session-…\"><p id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></p></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		return nil
+	})
+}
+
+func Memory(view ShellView) templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var4 == nil {
+			templ_7745c5c3_Var4 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Attributed recall</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session-id\">Session ID</label> <input id=\"memory-session-id\" name=\"session_id\" autocomplete=\"off\" placeholder=\"session-…\"><p id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></p></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

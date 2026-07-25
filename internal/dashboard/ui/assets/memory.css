@@ -78,11 +78,10 @@
 
 .memory-attach-panel input {
   background: rgba(255, 255, 255, 0.09);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.2);
   border-radius: 0.75rem;
   color: inherit;
   padding: 0.8rem;
-  width: 100%;
 }
 
 .memory-search-form label {
@@ -97,11 +96,12 @@
 
 .memory-search-row input {
   background: var(--memory-paper);
-  border: 1px solid var(--memory-line);
+  border-color: var(--memory-line);
   border-radius: 999px;
   flex: 1;
   min-width: 0;
   padding: 0.9rem 1.2rem;
+  width: auto;
 }
 
 .memory-search-row button,
