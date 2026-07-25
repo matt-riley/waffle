@@ -175,6 +175,57 @@ func TestChatClientReattachesOnlyWithServerIssuedLeaseAndRotatesProof(t *testing
 	}
 }
 
+func TestChatClientRejectsExpiredPreviousReattachProof(t *testing.T) {
+	now := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
+	backend := &fakeChatBackend{}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{15}, 96)),
+	)
+	clients.now = func() time.Time { return now }
+
+	previous, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, previous); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(time.Minute)
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, previous); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("expired previous proof error = %v, want client not found", err)
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("expired previous proof created backend; opens = %d", backend.openCount())
+	}
+}
+
+func TestChatClientConsumesPreviousReattachProofAfterFallback(t *testing.T) {
+	backend := &fakeChatBackend{}
+	clients := NewChatClients(
+		func(context.Context) (chat.Backend, error) { return backend, nil },
+		bytes.NewReader(bytes.Repeat([]byte{16}, 96)),
+	)
+
+	previous, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, previous); err != nil {
+		t.Fatalf("fallback reattach: %v", err)
+	}
+	if _, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, previous); !errors.Is(err, errChatClientNotFound) {
+		t.Fatalf("reused fallback proof error = %v, want client not found", err)
+	}
+	if backend.openCount() != 1 {
+		t.Fatalf("reused fallback proof created backend; opens = %d", backend.openCount())
+	}
+}
+
 func TestChatClientLeaseRejectsStalePageCloseAfterReattach(t *testing.T) {
 	backend := &fakeChatBackend{}
 	clients := NewChatClients(

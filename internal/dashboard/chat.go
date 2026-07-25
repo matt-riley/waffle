@@ -21,7 +21,10 @@ import (
 const (
 	defaultChatClientLimit = 64
 	defaultChatIdleTTL     = 30 * time.Minute
-	chatIDAttempts         = 8
+	// defaultChatReattachRecoveryTTL bounds the previous proof kept solely for
+	// retrying a reattach response that was lost in transit.
+	defaultChatReattachRecoveryTTL = 30 * time.Second
+	chatIDAttempts                 = 8
 )
 
 var (
@@ -38,6 +41,7 @@ type chatClient struct {
 	state           chat.State
 	reattachToken   string
 	previousToken   string
+	previousExpires time.Time
 	lastActive      time.Time
 	busy            bool
 	done            chan struct{}
@@ -238,7 +242,8 @@ func (c *ChatClients) Open(ctx context.Context, options chat.OpenOptions) (strin
 
 // OpenWithLease opens a new backend or reattaches to the exact existing
 // browser owner proven by prior. Successful reattachment rotates the current
-// proof while retaining the previous proof for one lost-response recovery.
+// proof while retaining the previous proof for one lost-response recovery
+// within a short bounded window.
 func (c *ChatClients) OpenWithLease(
 	ctx context.Context,
 	options chat.OpenOptions,
@@ -316,14 +321,20 @@ func (c *ChatClients) reattach(prior ChatClientLease) (ChatClientLease, chat.Sta
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	client, ok := c.clients[prior.ClientID]
-	if !ok || c.shutting || client.isRetiring() ||
-		(!sameReattachToken(client.reattachToken, prior.ReattachToken) &&
-			!sameReattachToken(client.previousToken, prior.ReattachToken)) {
+	if !ok || c.shutting || client.isRetiring() {
+		return ChatClientLease{}, chat.State{}, errChatClientNotFound
+	}
+	now := c.now()
+	currentProof := sameReattachToken(client.reattachToken, prior.ReattachToken)
+	previousProof := sameReattachToken(client.previousToken, prior.ReattachToken) &&
+		now.Before(client.previousExpires)
+	if !currentProof && !previousProof {
 		return ChatClientLease{}, chat.State{}, errChatClientNotFound
 	}
 	client.previousToken = client.reattachToken
+	client.previousExpires = now.Add(defaultChatReattachRecoveryTTL)
 	client.reattachToken = nextToken
-	client.lastActive = c.now()
+	client.lastActive = now
 	return ChatClientLease{
 		ClientID:      prior.ClientID,
 		ReattachToken: nextToken,
