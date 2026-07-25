@@ -722,6 +722,50 @@ func (s *Scheduler) startFire(ctx context.Context, j Job) {
 	s.fire(ctx, j)
 }
 
+// awaitRetryReady waits out a pending retry deadline, if any, then reports
+// whether the job is still eligible to run. current is a snapshot taken
+// before the wait (or before this call, if there is no pending retry); the
+// returned Job is always freshly reloaded from the store, and Enabled and
+// Paused are both rechecked against that fresh state at the same point —
+// whether or not the wait loop actually ran — so a disable or pause that
+// lands anywhere before this check, including one that arrives while the
+// deadline has already elapsed and the loop body never executes, is never
+// missed in favor of a stale pre-wait snapshot.
+func (s *Scheduler) awaitRetryReady(ctx context.Context, current *Job) (*Job, bool) {
+	clock := clockOrReal(s.Clock)
+	for !current.NextRetry.IsZero() && clock.Now().Before(current.NextRetry) {
+		timer := clock.NewTimer(current.NextRetry.Sub(clock.Now()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return current, false
+		case <-timer.C():
+		}
+		reloaded, err := s.Store.Get(context.WithoutCancel(ctx), current.ID)
+		if err != nil {
+			s.Log.Error("reload job at retry deadline", "job", current.ID, "err", err)
+			return current, false
+		}
+		current = reloaded
+	}
+	reloaded, err := s.Store.Get(context.WithoutCancel(ctx), current.ID)
+	if err != nil {
+		s.Log.Error("reload job before enabled check", "job", current.ID, "err", err)
+		return current, false
+	}
+	current = reloaded
+	if !current.Enabled {
+		return current, false
+	}
+	if s.Usage != nil {
+		paused, err := s.Usage.Paused(ctx)
+		if err != nil || paused {
+			return current, false
+		}
+	}
+	return current, true
+}
+
 func (s *Scheduler) fire(ctx context.Context, j Job) {
 	if s.Usage != nil {
 		paused, err := s.Usage.Paused(ctx)
@@ -734,30 +778,11 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		s.Log.Error("load job before firing", "job", j.ID, "err", err)
 		return
 	}
-	clock := clockOrReal(s.Clock)
-	for !current.NextRetry.IsZero() && clock.Now().Before(current.NextRetry) {
-		timer := clock.NewTimer(current.NextRetry.Sub(clock.Now()))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C():
-		}
-		current, err = s.Store.Get(context.WithoutCancel(ctx), j.ID)
-		if err != nil {
-			s.Log.Error("reload job at retry deadline", "job", j.ID, "err", err)
-			return
-		}
-	}
-	if !current.Enabled {
+	current, ready := s.awaitRetryReady(ctx, current)
+	if !ready {
 		return
 	}
-	if s.Usage != nil {
-		paused, err := s.Usage.Paused(ctx)
-		if err != nil || paused {
-			return
-		}
-	}
+	clock := clockOrReal(s.Clock)
 	j = *current
 	s.Log.Info("job firing", "job", j.ID, "name", j.Name)
 	policy := s.Policy.normalized()
