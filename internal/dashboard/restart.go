@@ -67,15 +67,28 @@ type RestartScheduleOutcome struct {
 	Message   string `json:"message"`
 }
 
+// PlannedRestartReporter optionally announces the client-facing outcome known
+// before Schedule runs. Schedulers that omit it are treated as scheduled until
+// the after-response callback reports the real result via the event hub.
+// Implement this for any mode that will always return ErrManualRestartRequired
+// (standalone, test doubles, wrappers) so the HTTP response does not claim a
+// managed restart will occur.
+type PlannedRestartReporter interface {
+	PlannedRestart() RestartScheduleOutcome
+}
+
+// PlannedRestart reports the standalone client outcome before Schedule runs.
+func (StandaloneRestartScheduler) PlannedRestart() RestartScheduleOutcome {
+	return RestartScheduleOutcome{
+		Code:    RestartCodeManualRestartRequired,
+		Message: restartMessageManual,
+	}
+}
+
 // plannedRestartOutcome is the client-facing outcome known before Schedule runs.
-// Standalone is always manual; every other scheduler is treated as scheduled
-// until the after-response callback reports otherwise via the event hub.
 func plannedRestartOutcome(scheduler RestartScheduler) RestartScheduleOutcome {
-	if _, ok := scheduler.(StandaloneRestartScheduler); ok {
-		return RestartScheduleOutcome{
-			Code:    RestartCodeManualRestartRequired,
-			Message: restartMessageManual,
-		}
+	if reporter, ok := scheduler.(PlannedRestartReporter); ok {
+		return reporter.PlannedRestart()
 	}
 	return RestartScheduleOutcome{
 		Scheduled: true,

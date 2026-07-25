@@ -77,6 +77,36 @@ if (root) {
         }
       }
     }
+    setSkillActivateButtonsDisabled(disabled);
+  }
+
+  function setSkillActivateButtonsDisabled(disabled) {
+    if (!elements.skills) {
+      return;
+    }
+    if (typeof elements.skills.querySelectorAll === "function") {
+      for (const button of elements.skills.querySelectorAll(
+        'button[data-skill-activate="true"]',
+      )) {
+        button.disabled = disabled;
+      }
+      return;
+    }
+    // Fake/test harness: walk rendered skill cards without a real DOM.
+    const visit = (node) => {
+      if (!node) {
+        return;
+      }
+      if (node.dataset && node.dataset.skillActivate === "true") {
+        node.disabled = disabled;
+      }
+      if (Array.isArray(node.childNodes)) {
+        for (const child of node.childNodes) {
+          visit(child);
+        }
+      }
+    };
+    visit(elements.skills);
   }
 
   function setRestartBanner({ title, detail, hidden }) {
@@ -233,9 +263,14 @@ if (root) {
       if (!item.active && item.name) {
         const activate = document.createElement("button");
         activate.type = "button";
+        activate.dataset.skillActivate = "true";
         activate.textContent = "Activate";
+        // Always re-read state so re-renders during restart-wait stay locked.
         activate.disabled = state.restarting;
         activate.addEventListener("click", async () => {
+          if (state.restarting) {
+            return;
+          }
           await runMutation(
             () => postMutation(`/api/v1/desk/skills/${encodeURIComponent(item.name)}/activate`, {}),
             "Skill activated.",

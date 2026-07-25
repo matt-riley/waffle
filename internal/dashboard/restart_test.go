@@ -48,6 +48,27 @@ func TestPlannedRestartOutcomeMatchesSchedulerMode(t *testing.T) {
 	if scheduled.Code != RestartCodeScheduled || !scheduled.Scheduled {
 		t.Fatalf("managed planned = %#v", scheduled)
 	}
+	// Wrappers that implement PlannedRestartReporter must not require a concrete
+	// StandaloneRestartScheduler type assertion.
+	manualWrapper := plannedRestartOutcome(manualRestartPlanner{})
+	if manualWrapper.Code != RestartCodeManualRestartRequired || manualWrapper.Scheduled {
+		t.Fatalf("reporter wrapper planned = %#v", manualWrapper)
+	}
+}
+
+// manualRestartPlanner is a non-Standalone scheduler that still plans manual
+// restart via PlannedRestartReporter.
+type manualRestartPlanner struct{}
+
+func (manualRestartPlanner) Schedule(context.Context, string) error {
+	return ErrManualRestartRequired
+}
+
+func (manualRestartPlanner) PlannedRestart() RestartScheduleOutcome {
+	return RestartScheduleOutcome{
+		Code:    RestartCodeManualRestartRequired,
+		Message: restartMessageManual,
+	}
 }
 
 func TestPublishRestartOutcomeSealsAndOmitsHostDetail(t *testing.T) {

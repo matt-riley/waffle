@@ -67,6 +67,7 @@ function createHarness({
   connectionResponse = response([]),
   connectionResponses = null,
   bootstrapGenerations = ["process-old", "process-old", "process-new"],
+  skills = [],
   deferTimers = false,
   clock = false,
 } = {}) {
@@ -138,7 +139,7 @@ function createHarness({
           providers: {},
           models: {},
         },
-        skills: [],
+        skills,
       });
     }
     if (path === "/api/v1/desk/connections") {
@@ -222,11 +223,21 @@ async function flush() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+function findSkillActivateButton(skillsRoot) {
+  for (const card of skillsRoot.childNodes) {
+    for (const child of card.childNodes || []) {
+      if (child.dataset && child.dataset.skillActivate === "true") {
+        return child;
+      }
+    }
+  }
+  return null;
+}
+
 test("provider credential clears and polling waits for a changed process without replay", async () => {
   const harness = createHarness({
     providerResponse: response({
       restart_required: true,
-      transaction_id: "txn-1",
       restart: {
         scheduled: true,
         code: "restart_scheduled",
@@ -256,7 +267,6 @@ test("manual restart outcome stops polling and shows a terminal message", async 
   const harness = createHarness({
     providerResponse: response({
       restart_required: true,
-      transaction_id: "txn-manual",
       restart: {
         scheduled: false,
         code: "manual_restart_required",
@@ -291,12 +301,12 @@ test("manual restart outcome stops polling and shows a terminal message", async 
   );
   assert.equal(harness.providerSubmit.disabled, false);
   assert.equal(
-    harness.calls.some((call) => JSON.stringify(call).includes("txn-manual")),
+    harness.calls.some((call) => JSON.stringify(call).includes("transaction_id")),
     false,
   );
 });
 
-test("scheduled restart disables forms while waiting and reports timeout", async () => {
+test("scheduled restart disables forms and skill activate while waiting and reports timeout", async () => {
   const harness = createHarness({
     providerResponse: response({
       restart_required: true,
@@ -307,10 +317,15 @@ test("scheduled restart disables forms while waiting and reports timeout", async
       },
     }, true, 202),
     bootstrapGenerations: ["process-old"],
+    skills: [{ name: "review-me", active: false }],
     clock: true,
     deferTimers: true,
   });
   await flush();
+
+  const activate = findSkillActivateButton(harness.elements["#capability-skills"]);
+  assert.ok(activate, "expected skill activate button after load");
+  assert.equal(activate.disabled, false);
 
   const submitPromise = harness.elements["#capability-provider-form"].listener("submit")({
     preventDefault() {},
@@ -322,6 +337,7 @@ test("scheduled restart disables forms while waiting and reports timeout", async
     "true",
   );
   assert.equal(harness.providerSubmit.disabled, true);
+  assert.equal(activate.disabled, true, "skill activate must lock during restart wait");
   assert.equal(harness.elements["#capability-restart-status"].hidden, false);
   assert.match(
     harness.elements["#capability-restart-status"].childNodes.map((n) => n.textContent).join(" "),
@@ -342,6 +358,7 @@ test("scheduled restart disables forms while waiting and reports timeout", async
     "false",
   );
   assert.equal(harness.providerSubmit.disabled, false);
+  assert.equal(activate.disabled, false, "skill activate re-enables after wait ends");
   assert.ok(
     harness.calls.filter((call) => call.path === "/api/v1/desk/bootstrap").length > 1,
   );

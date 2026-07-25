@@ -562,16 +562,16 @@ func activateSkillHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc 
 // capabilityMutationResponse is the public body for Waffle-wide mutations that
 // may require a process restart. Restart carries the sanitized schedule
 // outcome so the browser can leave the wait state without host detail.
+// Transaction IDs stay server-side (deferRestart / logs only) and must not
+// appear in the browser-facing JSON.
 type capabilityMutationResponse struct {
 	RestartRequired bool                    `json:"restart_required"`
-	TransactionID   string                  `json:"transaction_id,omitempty"`
 	Restart         *RestartScheduleOutcome `json:"restart,omitempty"`
 }
 
 func writeCapabilityMutation(w http.ResponseWriter, result providerconfig.MutationResult, scheduler RestartScheduler) {
 	response := capabilityMutationResponse{
 		RestartRequired: result.RestartRequired,
-		TransactionID:   result.TransactionID,
 	}
 	if result.RestartRequired && scheduler != nil {
 		outcome := plannedRestartOutcome(scheduler)

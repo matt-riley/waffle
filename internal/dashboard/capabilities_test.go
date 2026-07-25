@@ -467,12 +467,16 @@ func TestCapabilitiesRestartSchedulesOnlyAfterResponseAndNeverOnReplayData(t *te
 	if scheduler.calls != 1 {
 		t.Fatalf("after-response callback repeated: %d", scheduler.calls)
 	}
-	var result providerconfig.MutationResult
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+	var body capabilityMutationResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result, providers.result) {
-		t.Fatalf("response result=%#v want=%#v", result, providers.result)
+	if !body.RestartRequired || body.Restart == nil || body.Restart.Code != RestartCodeScheduled {
+		t.Fatalf("response body=%#v", body)
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("transaction_id")) ||
+		bytes.Contains(response.Body.Bytes(), []byte("txn-1")) {
+		t.Fatalf("browser response must omit transaction_id: %s", response.Body.String())
 	}
 }
 
@@ -557,6 +561,11 @@ func TestCapabilitiesRestartOutcomeIsSanitizedAndOperatorActionable(t *testing.T
 			}
 			if bytes.Contains(response.Body.Bytes(), []byte(capabilityCredentialCanary)) {
 				t.Fatalf("response leaked credential: %s", response.Body.String())
+			}
+			// AC3: transaction IDs and host detail stay off the browser response.
+			if bytes.Contains(response.Body.Bytes(), []byte("txn-private-diagnostic")) ||
+				bytes.Contains(response.Body.Bytes(), []byte("transaction_id")) {
+				t.Fatalf("response leaked transaction_id: %s", response.Body.String())
 			}
 
 			response.RunAfterResponse()
