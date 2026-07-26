@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A main run that fails cannot be retried when the failure is a workflow-call
+  # validation error rather than a job, and the deploy path requires a run whose
+  # conclusion is success. Without a manual trigger the only recovery is an
+  # otherwise pointless commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
