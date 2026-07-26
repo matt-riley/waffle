@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.10.0](https://github.com/matt-riley/waffle/compare/v0.9.2...v0.10.0) (2026-07-26)
+
+
+### Features
+
+* **#195:** adopt htmx fragments for Desk sections ([#226](https://github.com/matt-riley/waffle/issues/226)) ([e2dea83](https://github.com/matt-riley/waffle/commit/e2dea83e96327d6497d9413b333bd335e5eb88b1))
+* **desk:** add a structured agent-profile editor ([#223](https://github.com/matt-riley/waffle/issues/223)) ([a740014](https://github.com/matt-riley/waffle/commit/a74001424a040c9fcfa67cd5ffbadd3f8833b919))
+* **desk:** complete capabilities models and providers ([#219](https://github.com/matt-riley/waffle/issues/219)) ([86d3eb1](https://github.com/matt-riley/waffle/commit/86d3eb1143faa3244fadc2cc4b7442f7757e6b5f))
+* **desk:** complete skill review and lifecycle controls ([#222](https://github.com/matt-riley/waffle/issues/222)) ([8c13096](https://github.com/matt-riley/waffle/commit/8c13096f63ef23868409157f983b2ffdebe238cd))
+* **desk:** expand Today commands and recovery ([#217](https://github.com/matt-riley/waffle/issues/217)) ([9d1bdbd](https://github.com/matt-riley/waffle/commit/9d1bdbd4db5eb26f7acc5cbbd70d404d6f20ff5b))
+* **desk:** report and satisfy setup prerequisites ([#224](https://github.com/matt-riley/waffle/issues/224)) ([83873ce](https://github.com/matt-riley/waffle/commit/83873ce298030820fccf7a52d103f3f81068fd16))
+* **desk:** show the system prompt and layered tool policy ([#221](https://github.com/matt-riley/waffle/issues/221)) ([94dbc01](https://github.com/matt-riley/waffle/commit/94dbc012e4743d4de93b5e77d62f30d1012f1aa2))
+* **desk:** surface workspace git state and GitHub connections ([#220](https://github.com/matt-riley/waffle/issues/220)) ([6806578](https://github.com/matt-riley/waffle/commit/68065789cb8cff518a76cfbad167f0b17fd0a0a8))
+
+
+### Bug Fixes
+
+* **#188:** make capability removals durable ([#225](https://github.com/matt-riley/waffle/issues/225)) ([cb152ac](https://github.com/matt-riley/waffle/commit/cb152acc1662fd6f28c818aaed5fb430907cf562))
+
 ## [0.9.2](https://github.com/matt-riley/waffle/compare/v0.9.1...v0.9.2) (2026-07-25)
 
 
