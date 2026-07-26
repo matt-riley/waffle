@@ -1041,3 +1041,69 @@ func (blockingAdapter) Run(ctx context.Context, _ chan<- channel.Message) error 
 }
 
 func (blockingAdapter) Send(context.Context, string, string) error { return nil }
+
+type failingChatBackend struct {
+	chatpkg.Backend
+	err error
+}
+
+func (b failingChatBackend) Command(context.Context, chatpkg.ParsedCommand, func(chatpkg.Event)) (chatpkg.Result, error) {
+	return chatpkg.Result{}, b.err
+}
+
+func (b failingChatBackend) Turn(context.Context, string, func(chatpkg.Event)) error {
+	return b.err
+}
+
+// The wire deliberately sanitises these errors to a generic message. If the
+// host does not log the original, the failure is invisible everywhere. Both
+// entry points carry the same risk, so both are covered.
+func TestLoggingChatBackendRecordsFailuresOnTheHost(t *testing.T) {
+	cases := []struct {
+		name    string
+		invoke  func(*loggingChatBackend) error
+		wantLog string
+	}{
+		{
+			name: "command",
+			invoke: func(b *loggingChatBackend) error {
+				_, err := b.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandRepo}, nil)
+				return err
+			},
+			wantLog: "chat command failed",
+		},
+		{
+			name: "turn",
+			invoke: func(b *loggingChatBackend) error {
+				return b.Turn(context.Background(), "some private conversation text", nil)
+			},
+			wantLog: "chat turn failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			backend := &loggingChatBackend{
+				Backend: failingChatBackend{err: errors.New("workspace setup: git clone failed")},
+				log:     slog.New(slog.NewTextHandler(&buf, nil)),
+			}
+
+			err := tc.invoke(backend)
+
+			if err == nil {
+				t.Fatal("error must still propagate to the caller")
+			}
+			logged := buf.String()
+			if !strings.Contains(logged, tc.wantLog) {
+				t.Fatalf("failure not logged:\n%s", logged)
+			}
+			if !strings.Contains(logged, "workspace setup: git clone failed") {
+				t.Fatalf("underlying cause not logged:\n%s", logged)
+			}
+			// Turn input is the conversation, not diagnostics.
+			if strings.Contains(logged, "some private conversation text") {
+				t.Fatalf("turn input must never be logged:\n%s", logged)
+			}
+		})
+	}
+}
