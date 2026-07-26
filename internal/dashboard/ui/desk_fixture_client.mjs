@@ -45,4 +45,3 @@ export async function stopFixture(child) {
   }
   await new Promise((resolve) => child.once("exit", resolve));
 }
-
