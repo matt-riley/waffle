@@ -1437,3 +1437,84 @@ func TestConnectRefusesPrivateAddressesByDefault(t *testing.T) {
 		t.Fatalf("CONNECT status = %q, want 502: a private address must not be tunnelled", status)
 	}
 }
+
+// A client that finishes writing before the origin has flushed its response
+// must still receive the rest of it. Closing both sides when either direction
+// ends would drop the in-flight bytes.
+func TestConnectRelayHalfClosesSoLateResponsesSurvive(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	body := strings.Repeat("late-response-", 512)
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Drain until the client half-closes, then reply after a pause. The
+		// pause makes the failure deterministic: a relay that tears both sides
+		// down when the first direction ends has already closed this socket.
+		_, _ = io.Copy(io.Discard, conn)
+		time.Sleep(100 * time.Millisecond)
+		_, _ = io.WriteString(conn, body)
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	status, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "localhost:"+originPort, token)
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	// Finish writing: the client→origin direction now ends.
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("reading the origin's reply: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("received %d bytes, want %d: the relay closed before the origin finished",
+			len(got), len(body))
+	}
+}
+
+// A CONNECT request has no URL path, so recording one writes a blank detail and
+// loses what the client tried to reach.
+func TestConnectDenialAuditNamesTheTarget(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	_, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "blocked.example:443", "wk_unknown")
+	_ = conn.Close()
+
+	var detail string
+	if err := st.DB.QueryRow(
+		`SELECT detail FROM broker_audit WHERE action='denied' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "blocked.example:443") {
+		t.Fatalf("denial detail = %q, want the CONNECT target named", detail)
+	}
+}

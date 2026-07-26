@@ -343,13 +343,13 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sessionID, budgetKey, limits, expired = b.usageScope(token)
 		if expired {
 			// Distinguish expired from unknown in broker_audit (action=expired).
-			b.record(r.Context(), token, sessionID, "expired", r.URL.Path)
+			b.record(r.Context(), token, sessionID, "expired", auditDetail(r))
 			denyUnauthenticated(w, r)
 			return
 		}
 	}
 	if sessionID == "" {
-		b.record(r.Context(), token, "", "denied", r.URL.Path)
+		b.record(r.Context(), token, "", "denied", auditDetail(r))
 		denyUnauthenticated(w, r)
 		return
 	}
@@ -995,6 +995,17 @@ func denyUnauthenticated(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
+// auditDetail describes what a request was for. A CONNECT request has an empty
+// URL path -- the target lives in the authority -- so recording the path would
+// write a blank detail and lose what the client was trying to reach.
+func auditDetail(r *http.Request) string {
+	if r.Method == http.MethodConnect {
+		host, port := connectTarget(r)
+		return "connect " + host + ":" + port
+	}
+	return r.URL.Path
+}
+
 // connectTarget splits a CONNECT authority into host and port, defaulting the
 // port to 443. CONNECT carries an authority, not a URL, so there is no scheme
 // to infer anything else from.
@@ -1088,18 +1099,24 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 		return
 	}
 
-	// Relay until either side finishes. Read from the buffered reader, not the
-	// raw conn: the client may already have written TLS bytes that Hijack left
-	// buffered, and reading the conn directly would lose them.
+	// Relay both directions to completion. Read from the buffered reader, not
+	// the raw conn: the client may already have written TLS bytes that Hijack
+	// left buffered, and reading the conn directly would lose them.
+	//
+	// Each direction half-closes when it ends rather than closing outright. A
+	// full close would tear down the peer's side too, so a client that finishes
+	// writing before the origin has flushed its response would lose the rest of
+	// it. Half-close signals EOF and lets the other direction drain.
 	finished := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(upstream, buffered)
+	relay := func(dst io.Writer, src io.Reader, closeWrite net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if tcp, ok := closeWrite.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
 		finished <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(client, upstream)
-		finished <- struct{}{}
-	}()
+	}
+	go relay(upstream, buffered, upstream)
+	go relay(client, upstream, client)
 	<-finished
-	// The deferred closes release the other copy.
+	<-finished
 }
