@@ -412,7 +412,7 @@ func TestManagerRejectsConnectionAndAliasCollisionsWithoutMutation(t *testing.T)
 		{name: "connection", mutate: func(*AddRequest) {}, want: "connection \"openai\" already exists"},
 		{name: "alias", mutate: func(req *AddRequest) {
 			req.ConnectionName = "second"
-		}, want: "model alias \"gpt\" already exists"},
+		}, want: "model alias already exists \"gpt\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestManager(t)
