@@ -6,7 +6,6 @@ import (
 	"net/url"
 
 	"github.com/matt-riley/waffle/internal/memory"
-	"github.com/matt-riley/waffle/internal/workset"
 )
 
 const memoryMutationMaxBodyBytes = 64 << 10
@@ -27,7 +26,7 @@ func RegisterMemoryRoutes(mux *http.ServeMux, config MemoryRouteConfig) {
 	if config.Events != nil {
 		service.events = config.Events
 	}
-	mux.Handle("GET /api/v1/desk/memory", newMemorySearchHandler(service))
+	mux.Handle("GET /api/v1/desk/memory", negotiateFragments(newMemorySearchHandler(service)))
 	if config.Security == nil || config.Idempotency == nil {
 		return
 	}
@@ -36,7 +35,7 @@ func RegisterMemoryRoutes(mux *http.ServeMux, config MemoryRouteConfig) {
 			config.Security,
 			config.Idempotency,
 			memoryMutationMaxBodyBytes,
-			next,
+			negotiateFragments(next),
 		)
 		return preserveResponseType(protected)
 	}
@@ -58,9 +57,7 @@ func newMemorySearchHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			Hits []MemoryHit `json:"hits"`
-		}{Hits: hits})
+		writeJSON(w, http.StatusOK, MemorySearchResponse{Hits: hits})
 	})
 }
 
@@ -75,9 +72,7 @@ func newMemoryAttachHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			Entry *workset.Entry `json:"entry"`
-		}{Entry: entry})
+		writeJSON(w, http.StatusOK, MemoryAttachResponse{Entry: entry})
 	})
 }
 

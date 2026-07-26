@@ -21,6 +21,7 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`Waffle-wide default`,
 		`Utility model`,
 		`id="capability-catalogue-form"`,
+		`hx-target="#capability-catalogue-results"`,
 		`id="capability-catalogue-search"`,
 		`id="capability-catalogue-results"`,
 		`Refresh catalogue`,
@@ -54,6 +55,8 @@ func TestCapabilitiesComponentHasExplicitScopesAndReviewedInstall(t *testing.T) 
 		`id="capability-skill-install-status"`,
 		`aria-describedby="capability-provider-status"`,
 		`id="capability-provider-status"`,
+		`hx-post="/api/v1/desk/providers/test"`,
+		`hx-include="#capability-provider-form"`,
 		`class="capability-form-status"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -95,8 +98,6 @@ func TestCapabilitiesAssetsAreVersionedInHead(t *testing.T) {
 	version := CapabilitiesAssetVersion()
 	for _, required := range []string{
 		`/desk/assets/capabilities.css?v=` + version,
-		`/desk/assets/capabilities.js?v=` + version,
-		`type="module"`,
 		`rel="stylesheet"`,
 	} {
 		if !strings.Contains(body, required) {
@@ -147,7 +148,7 @@ func TestTodayComponentExposesSessionSkillControls(t *testing.T) {
 }
 
 func TestServeCapabilitiesAssetIsAdditiveAndImmutable(t *testing.T) {
-	for _, name := range []string{"capabilities.js", "capabilities.css"} {
+	for _, name := range []string{"capabilities.css"} {
 		request := httptest.NewRequest(http.MethodGet, "/desk/assets/"+name, nil)
 		response := httptest.NewRecorder()
 		if !ServeCapabilitiesAsset(response, request, name) {

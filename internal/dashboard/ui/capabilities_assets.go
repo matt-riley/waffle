@@ -19,7 +19,7 @@ func CapabilitiesAssetURL(name, version string) string {
 // ServeCapabilitiesAsset is an additive asset seam for the shared shell
 // handler. Contents come from the process-start static asset cache.
 func ServeCapabilitiesAsset(w http.ResponseWriter, r *http.Request, name string) bool {
-	if name != "capabilities.js" && name != "capabilities.css" {
+	if name != "capabilities.css" {
 		return false
 	}
 	return ServeAsset(w, r, name)
@@ -27,7 +27,7 @@ func ServeCapabilitiesAsset(w http.ResponseWriter, r *http.Request, name string)
 
 func hashCapabilityAssets() string {
 	hash := sha256.New()
-	for _, name := range []string{"capabilities.css", "capabilities.js"} {
+	for _, name := range []string{"capabilities.css"} {
 		asset, ok := staticAssets[name]
 		if !ok {
 			panic("dashboard ui: missing capabilities asset " + name)

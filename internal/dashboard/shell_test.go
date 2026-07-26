@@ -212,12 +212,14 @@ func TestShellServesVersionedEmbeddedAssets(t *testing.T) {
 	}
 	for _, required := range []string{
 		`today: "today.js"`,
-		`tasks: "tasks.js"`,
 		`moduleURL.searchParams.set("v", version)`,
 	} {
 		if !strings.Contains(appModule.Body.String(), required) {
 			t.Errorf("app module missing versioned Today loader %q", required)
 		}
+	}
+	if strings.Contains(appModule.Body.String(), `tasks: "tasks.js"`) {
+		t.Fatal("migrated Tasks section must not be bootstrapped by the bespoke client")
 	}
 
 	asset := httptest.NewRecorder()

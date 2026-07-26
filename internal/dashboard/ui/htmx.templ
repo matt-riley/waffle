@@ -1,0 +1,6 @@
+package ui
+
+templ HtmxAssets(view ShellView) {
+	<script defer src={ AssetURL("htmx.min.js", view.AssetVersion) }></script>
+	<script defer src={ AssetURL("waffle-htmx.js", view.AssetVersion) }></script>
+}

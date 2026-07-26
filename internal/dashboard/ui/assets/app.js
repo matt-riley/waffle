@@ -210,7 +210,6 @@ void hydrateRail();
 const section = document.querySelector(".desk-shell")?.dataset.activeSection || "today";
 const moduleName = {
   today: "today.js",
-  tasks: "tasks.js",
 }[section];
 
 if (moduleName) {

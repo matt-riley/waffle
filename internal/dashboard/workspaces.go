@@ -431,10 +431,10 @@ func RegisterWorkspaceRoutes(mux *http.ServeMux, routeConfig WorkspaceRouteConfi
 		routeConfig.Operations.Events = routeConfig.Events
 	}
 	service := NewWorkspacesService(routeConfig.Operations, routeConfig.Egress)
-	mux.Handle("GET /api/v1/desk/workspaces", newWorkspaceListHandler(service))
+	mux.Handle("GET /api/v1/desk/workspaces", negotiateFragments(newWorkspaceListHandler(service)))
 	// Git status is a GET: it changes nothing, so it carries no preview token
 	// and is not wrapped in the mutation guard (#181).
-	mux.Handle("GET /api/v1/desk/workspaces/{id}/git", newWorkspaceGitHandler(service))
+	mux.Handle("GET /api/v1/desk/workspaces/{id}/git", negotiateFragments(newWorkspaceGitHandler(service)))
 	if routeConfig.Security == nil || routeConfig.Idempotency == nil {
 		return
 	}
@@ -443,7 +443,7 @@ func RegisterWorkspaceRoutes(mux *http.ServeMux, routeConfig WorkspaceRouteConfi
 			routeConfig.Security,
 			routeConfig.Idempotency,
 			workspaceMutationMaxBodyBytes,
-			next,
+			negotiateFragments(next),
 		)
 		return preserveResponseType(protected)
 	}
@@ -460,6 +460,21 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 		snapshot, err := service.Read(r.Context())
 		if err != nil {
 			writeWorkspaceError(w, http.StatusServiceUnavailable, "workspaces_unavailable", "workspaces are temporarily unavailable")
+			return
+		}
+		if wantsHTMLRequest(r) {
+			git := make(map[string]WorkspaceGitView, len(snapshot.Workspaces))
+			for _, item := range snapshot.Workspaces {
+				if item.Status == workspace.StatusClosed {
+					continue
+				}
+				view, gitErr := service.GitStatus(r.Context(), item.ID)
+				if gitErr != nil {
+					view = WorkspaceGitView{WorkspaceID: item.ID, Reason: "Git status could not be read from this workspace."}
+				}
+				git[item.ID] = view
+			}
+			writeJSON(w, http.StatusOK, WorkspaceFragmentSnapshot{Snapshot: snapshot, Git: git})
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)

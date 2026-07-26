@@ -674,12 +674,12 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	if mux == nil || routeConfig.Service == nil {
 		return
 	}
-	mux.Handle("GET /api/v1/desk/capabilities", capabilitiesSnapshotHandler(routeConfig.Service))
+	mux.Handle("GET /api/v1/desk/capabilities", negotiateFragments(capabilitiesSnapshotHandler(routeConfig.Service)))
 	if routeConfig.Mutation == nil {
 		return
 	}
 	mutation := func(limit int64, handler http.HandlerFunc) http.Handler {
-		return routeConfig.Mutation(limit, handler)
+		return routeConfig.Mutation(limit, negotiateFragments(handler))
 	}
 	mux.Handle("POST /api/v1/desk/models/session", mutation(capabilityMutationMaxBodyBytes, sessionModelHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/models/default", mutation(capabilityMutationMaxBodyBytes, globalAliasHandler(routeConfig, false)))

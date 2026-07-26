@@ -266,6 +266,9 @@ type errorResponse struct {
 
 // writeJSON writes value as the JSON response body with the given status.
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	if writeNegotiatedValue(w, status, value) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
@@ -278,7 +281,12 @@ func preserveResponseType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capture := newResponseCapture()
 		next.ServeHTTP(capture, r)
-		if json.Valid(capture.body.Bytes()) {
+		header := capture.committedHeader
+		if header == nil {
+			header = capture.header
+		}
+		copyResponseHeader(w.Header(), header)
+		if w.Header().Get("Content-Type") == "" && json.Valid(capture.body.Bytes()) {
 			w.Header().Set("Content-Type", "application/json")
 		}
 		w.WriteHeader(capture.status)
