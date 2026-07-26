@@ -373,6 +373,9 @@ func TestCapabilitiesModelRemovalRestoresSessionsWhenRevisionChangesAfterApply(t
 	if got := sessions.sessions["session-1"].ModelAlias; got != "gpt" {
 		t.Fatalf("session alias after revision mismatch = %q, want gpt", got)
 	}
+	if sessions.replacedFrom != "" || sessions.replacedTo != "" {
+		t.Fatalf("session replacement during revision mismatch = %q -> %q, want no replacement", sessions.replacedFrom, sessions.replacedTo)
+	}
 }
 
 func TestCapabilitiesProviderRemovalNamesAliasesAndPreservesReferencedRefusal(t *testing.T) {
@@ -1366,6 +1369,7 @@ func TestWriteCapabilityErrorMapsKnownSentinels(t *testing.T) {
 		code   string
 	}{
 		{"session_not_found", session.ErrNotFound, http.StatusNotFound, "session_not_found"},
+		{"session_model_changed", session.ErrModelAliasChanged, http.StatusConflict, "session_model_changed"},
 		{"model_not_found", ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found"},
 		{"skill_not_found", ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found"},
 		{"replacement_required", ErrCapabilityReplacementRequired, http.StatusConflict, "replacement_required"},
@@ -1493,6 +1497,7 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 		skillinstall.ErrStageChanged,
 		skillinstall.ErrDigestMismatch,
 		providerconfig.ErrLocked,
+		session.ErrModelAliasChanged,
 		providerconfig.ErrReferenced,
 		providerconfig.ErrDeferredRestartPending,
 		providerconfig.ErrDeferredHealth,
@@ -1601,6 +1606,9 @@ func (f *fakeCapabilityProviders) RemoveModelWithExpectedRevision(_ context.Cont
 
 func (f *fakeCapabilityProviders) RemoveModelWithModeAtRevision(ctx context.Context, alias, replacement, expectedRevision string, changes []providerconfig.SessionAliasChange, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
 	f.removeModelExpectedRevision = expectedRevision
+	if errors.Is(f.mutationErr, providerconfig.ErrRevisionMismatch) {
+		return f.removeModel(alias, replacement, expectedRevision)
+	}
 	if f.sessionStore != nil {
 		modelChanges := make([]session.ModelAliasChange, 0, len(changes))
 		for _, change := range changes {

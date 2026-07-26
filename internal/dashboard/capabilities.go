@@ -1148,6 +1148,7 @@ type capabilityErrorMapping struct {
 // First matching errors.Is wins. Unmapped errors keep the generic fallback.
 var capabilityErrorMappings = []capabilityErrorMapping{
 	{session.ErrNotFound, http.StatusNotFound, "session_not_found", "session was not found"},
+	{session.ErrModelAliasChanged, http.StatusConflict, "session_model_changed", "session model changed; refresh and try again"},
 	{ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found", "model alias was not found"},
 	{ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
 	{skill.ErrSkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
