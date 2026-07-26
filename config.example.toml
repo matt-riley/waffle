@@ -85,6 +85,30 @@ enabled = false
 # login and are always rejected.
 # allowed_logins = ["user@github"]
 
+# Credential broker for repo workspaces. Empty (the default) disables it, and
+# that also stops waffle passing --add-host waffle-host:host-gateway to
+# workspace containers -- netlock then cannot resolve waffle-host and every
+# `waffle ws` container exits 1. Set it to open repo workspaces under `serve`.
+#
+# Bind an address the containers can route to, not loopback: they reach the
+# host through the waffle-host alias, which resolves to the Docker bridge
+# gateway. Prefer that bridge address over a wildcard bind so the broker is not
+# published to other interfaces, and make sure the host firewall permits the
+# workspace subnet to reach this port -- a default-deny INPUT policy blocks
+# container-to-host traffic. Requests still require a `wk_` session token.
+# [broker]
+# listen = "172.17.0.1:8423"
+
+# Optional GitHub App for repo workspaces. Waffle mints short-lived
+# installation tokens scoped to the single repo a session is bound to: the git
+# credential a container receives carries contents:write only, while the
+# host-side github_pr tool mints a separate pull_requests:write token that
+# never enters the sandbox. Grant the app both permissions to use both.
+# [github.app]
+# app_id = 123456
+# installation_id = 12345678
+# private_key = "secret://github/app-private-key"
+
 [agent]
 default_profile = "main"
 
@@ -105,7 +129,7 @@ model = "default"
 sandbox = "docker"
 [agent.profile.researcher.tools]
 allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]
-deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr"]
 
 # --- reviewer: read-only code critique -------------------------------------
 [agent.profile.reviewer]
@@ -114,7 +138,7 @@ model = "default"
 sandbox = "docker"
 [agent.profile.reviewer.tools]
 allow = ["read_file", "search", "recall", "expand_output", "expand_context"]
-deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr"]
 
 # Surface binds (CLI):
 #   waffle session profile telegram:42 reviewer

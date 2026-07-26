@@ -20,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/mcp"
@@ -35,6 +36,7 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workset"
+	"github.com/matt-riley/waffle/internal/workspace"
 	"golang.org/x/term"
 )
 
@@ -432,6 +434,28 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 	}
 	if cfg.Agent.Learn {
 		hostToolList = append(hostToolList, memory.DistillTool{WS: ws, Gate: &memory.Gate{Mode: cfg.Memory.WriteGate, WS: ws}})
+	}
+	// Opening a pull request needs pull_requests:write, which the workspace git
+	// credential deliberately never carries — anything inside a container can
+	// read its credentials back out with `git credential fill`. So the tool runs
+	// on the host, mints a token for one call, and scopes it to the repo the
+	// session's workspace is bound to. A missing or misconfigured app is not an
+	// error here: the tool simply is not offered.
+	if app, appErr := newGitHubApp(cfg); appErr == nil && app != nil {
+		bindings := &workspace.Manager{DB: sessions.DB()}
+		hostToolList = append(hostToolList, gitcred.PullRequestTool{
+			App: app,
+			Repo: func(ctx context.Context, sessionID string) (string, error) {
+				// Reuse the manager's own lookup rather than repeating the
+				// query: this is the same binding the broker scopes git
+				// credentials by, and a second copy could drift from it.
+				bound, err := bindings.ForSession(ctx, sessionID)
+				if err != nil {
+					return "", err
+				}
+				return bound.Repo, nil
+			},
+		})
 	}
 	hostTools := tool.NewRegistry(hostToolList...)
 

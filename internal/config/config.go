@@ -486,6 +486,9 @@ var knownProfileTools = map[string]bool{
 	"remember": true, "memory_update": true, "recall": true, "distill_skill": true,
 	"workspace_update": true, "expand_output": true, "expand_context": true,
 	"spawn_subagent": true,
+	// Opens a pull request for the repo the session's workspace is bound to.
+	// Host-side: the pull-request token is never handed to a container.
+	"github_pr": true,
 	// codeintel
 	"code_find_symbol": true, "code_references": true, "code_callers": true,
 	"code_structure": true, "code_blast_radius": true, "code_suggest_tests": true,

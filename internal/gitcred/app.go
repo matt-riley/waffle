@@ -79,28 +79,66 @@ func (a *App) jwt(now time.Time) (string, error) {
 	return unsigned + "." + enc.EncodeToString(sig), nil
 }
 
-// Credential returns a GitHub credential for the canonical owner/repo path.
-func (a *App) Credential(ctx context.Context, repo string) (string, string, error) {
+// Permission sets requested when minting an installation token. Each caller
+// asks for the narrowest set that does its job: the git credential handed to a
+// workspace can only push code, and never gains the ability to open a pull
+// request even though the same app grants it.
+var (
+	permContentsWrite = map[string]string{"contents": "write"}
+	permPullRequests  = map[string]string{"pull_requests": "write"}
+)
+
+// SplitRepo validates and splits a canonical owner/repo path.
+func SplitRepo(repo string) (owner, name string, err error) {
 	repo = strings.Trim(strings.TrimSuffix(repo, ".git"), "/")
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("invalid github repo scope %q", repo)
 	}
+	return parts[0], parts[1], nil
+}
+
+// Credential returns a GitHub credential for the canonical owner/repo path.
+func (a *App) Credential(ctx context.Context, repo string) (string, string, error) {
+	owner, name, err := SplitRepo(repo)
+	if err != nil {
+		return "", "", err
+	}
+	// Compose the cache key from the split parts rather than re-normalising the
+	// raw input: a second copy of that logic could drift from SplitRepo and
+	// silently change which entry a lookup hits.
+	cacheKey := strings.ToLower(owner + "/" + name)
 	now := a.now().UTC()
 	a.mu.Lock()
-	cached, ok := a.tokens[strings.ToLower(repo)]
+	cached, ok := a.tokens[cacheKey]
 	a.mu.Unlock()
 	if ok && now.Add(5*time.Minute).Before(cached.expires) {
 		return "x-access-token", cached.value, nil
 	}
-	token, expires, err := a.mint(ctx, parts[1], now)
+	token, expires, err := a.mint(ctx, name, permContentsWrite, now)
 	if err != nil {
 		return "", "", err
 	}
 	a.mu.Lock()
-	a.tokens[strings.ToLower(repo)] = cachedToken{value: token, expires: expires}
+	a.tokens[cacheKey] = cachedToken{value: token, expires: expires}
 	a.mu.Unlock()
 	return "x-access-token", token, nil
+}
+
+// PullRequestToken mints a token that may open a pull request on repo, and
+// nothing else. It is deliberately not cached alongside Credential's tokens:
+// the two carry different permissions, and one cache keyed only by repo would
+// hand a pull-request token to a workspace asking for git access.
+func (a *App) PullRequestToken(ctx context.Context, repo string) (string, error) {
+	_, name, err := SplitRepo(repo)
+	if err != nil {
+		return "", err
+	}
+	token, _, err := a.mint(ctx, name, permPullRequests, a.now().UTC())
+	if err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // Verify reports whether the configured app credentials can still mint an
@@ -108,19 +146,19 @@ func (a *App) Credential(ctx context.Context, repo string) (string, string, erro
 // token, its value, and the app identifiers never leave this call. Callers use
 // it as a health probe only.
 func (a *App) Verify(ctx context.Context) error {
-	_, _, err := a.mint(ctx, "", a.now().UTC())
+	_, _, err := a.mint(ctx, "", permContentsWrite, a.now().UTC())
 	return err
 }
 
 // mint exchanges the app JWT for an installation token. An empty repository
 // requests the installation's default scope, which Verify uses as a health
 // probe without naming a repository.
-func (a *App) mint(ctx context.Context, repository string, now time.Time) (token string, expires time.Time, err error) {
+func (a *App) mint(ctx context.Context, repository string, permissions map[string]string, now time.Time) (token string, expires time.Time, err error) {
 	jwt, err := a.jwt(now)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("sign github app JWT: %w", err)
 	}
-	request := map[string]any{"permissions": map[string]string{"contents": "write"}}
+	request := map[string]any{"permissions": permissions}
 	if repository != "" {
 		request["repositories"] = []string{repository}
 	}
