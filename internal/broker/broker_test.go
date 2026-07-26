@@ -1,9 +1,12 @@
 package broker
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1276,5 +1279,161 @@ func TestTokenValidUntilExactExpiry(t *testing.T) {
 	clock = clock.Add(time.Nanosecond)
 	if got := b.session(token); got != "" {
 		t.Fatalf("at exact expiry session=%q, want empty", got)
+	}
+}
+
+// connectThroughBroker performs a CONNECT against the broker and returns the
+// response line plus the hijacked connection when the tunnel is established.
+func connectThroughBroker(t *testing.T, brokerAddr, authority, proxyAuth string) (string, net.Conn) {
+	t.Helper()
+	conn, err := net.Dial("tcp", brokerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n"
+	if proxyAuth != "" {
+		req += "Proxy-Authorization: Basic " +
+			base64.StdEncoding.EncodeToString([]byte(proxyAuth+":")) + "\r\n"
+	}
+	req += "\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(status), conn
+}
+
+// HTTPS cannot be forward-proxied by URL rewriting, so without a tunnel every
+// https:// fetch from a workspace fails -- git clone and every package manager.
+func TestConnectTunnelsToAnAllowlistedHostEndToEnd(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 5)
+		if _, readErr := io.ReadFull(conn, buf); readErr != nil {
+			return
+		}
+		_, _ = conn.Write([]byte("pong:" + string(buf)))
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// safeDialContext refuses private addresses, so the allowlisted host must
+	// be the loopback origin reached by name; use the literal the dialer will
+	// resolve, and assert the refusal separately below.
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	// The default dialer refuses private addresses, which a loopback origin is.
+	// Overridden only to exercise the relay; the refusal itself is asserted in
+	// TestConnectRefusesPrivateAddressesByDefault.
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	status, conn := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("tunnel relay failed: %v", err)
+	}
+	if string(reply) != "pong:hello" {
+		t.Fatalf("tunnel payload = %q, want %q", reply, "pong:hello")
+	}
+}
+
+// curl and git only retry with credentials after a 407. A 401 surfaces as a
+// hard "CONNECT tunnel failed, response 401" with credentials never sent.
+func TestConnectWithoutCredentialsChallengesWith407(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	status, conn := connectThroughBroker(t, addr, "github.com:443", "")
+	defer func() { _ = conn.Close() }()
+
+	if !strings.Contains(status, "407") {
+		t.Fatalf("CONNECT status = %q, want 407 so the client retries with credentials", status)
+	}
+}
+
+func TestConnectRefusesHostsAndPortsOutsideTheAllowlist(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetEgress([]EgressTarget{{Host: "github.com", BaseURL: "https://github.com"}})
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	for _, tc := range []struct {
+		name      string
+		authority string
+	}{
+		{"host not allowlisted", "evil.example:443"},
+		{"port not allowlisted", "github.com:22"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, conn := connectThroughBroker(t, addr, tc.authority, token)
+			defer func() { _ = conn.Close() }()
+			if !strings.Contains(status, "403") {
+				t.Fatalf("CONNECT status = %q, want 403", status)
+			}
+		})
+	}
+}
+
+// The tunnel must not become a way to reach the host's own network. The
+// rewriting path is protected by safeDialContext; the tunnel uses the same
+// dialer by default, and this pins that it is not quietly bypassed.
+func TestConnectRefusesPrivateAddressesByDefault(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.DialEgress != nil {
+		t.Fatal("DialEgress must default to the private-address-refusing dialer")
+	}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "https://localhost"}})
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	status, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "localhost:443", token)
+	defer func() { _ = conn.Close() }()
+
+	if !strings.Contains(status, "502") {
+		t.Fatalf("CONNECT status = %q, want 502: a private address must not be tunnelled", status)
 	}
 }

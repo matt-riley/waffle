@@ -80,6 +80,11 @@ type Broker struct {
 	GitCredential GitCredentialFunc
 	// GitBackend is audit metadata, never a secret. Typical values are pat or github-app.
 	GitBackend string
+	// DialEgress dials a CONNECT tunnel target. Nil means safeDialContext,
+	// which resolves the name and refuses private addresses; leave it nil
+	// outside tests, where an override is the only way to reach a loopback
+	// origin without disabling that refusal for everyone.
+	DialEgress func(ctx context.Context, network, address string) (net.Conn, error)
 
 	mu       sync.Mutex
 	tokens   map[string]tokenEntry // token → session + expiry
@@ -339,13 +344,13 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if expired {
 			// Distinguish expired from unknown in broker_audit (action=expired).
 			b.record(r.Context(), token, sessionID, "expired", r.URL.Path)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			denyUnauthenticated(w, r)
 			return
 		}
 	}
 	if sessionID == "" {
 		b.record(r.Context(), token, "", "denied", r.URL.Path)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		denyUnauthenticated(w, r)
 		return
 	}
 	requestAt := b.now()
@@ -360,6 +365,14 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// HTTPS cannot be forward-proxied by rewriting an absolute URL: the client
+	// asks for a tunnel and then speaks TLS to the origin through it. Without
+	// this, every https:// fetch from a workspace fails -- git clone, and every
+	// package manager too.
+	if r.Method == http.MethodConnect {
+		b.serveConnect(w, r, token, sessionID)
+		return
+	}
 	if r.URL.Path == "/git-credential" {
 		b.serveGitCredential(w, r, token, sessionID)
 		return
@@ -960,4 +973,133 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 		b.now().Format(time.RFC3339Nano), prefix, sessionID, action, detail); err != nil {
 		slog.Default().Error("broker audit insert failed", "err", err, "token_prefix", prefix, "action", action)
 	}
+}
+
+// proxyStyleRequest reports whether the client is talking to the broker as an
+// HTTP proxy rather than calling its API face. A CONNECT request, or an
+// absolute request URI, is only ever produced by a proxy client.
+func proxyStyleRequest(r *http.Request) bool {
+	return r.Method == http.MethodConnect || r.URL.IsAbs()
+}
+
+// denyUnauthenticated refuses a request that carried no usable session token.
+// A proxy client needs 407 with a challenge, not 401: curl and git only retry
+// with credentials after a 407, so a 401 surfaces as a hard "CONNECT tunnel
+// failed" with the credentials never sent.
+func denyUnauthenticated(w http.ResponseWriter, r *http.Request) {
+	if proxyStyleRequest(r) {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="waffle"`)
+		http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
+		return
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// connectTarget splits a CONNECT authority into host and port, defaulting the
+// port to 443. CONNECT carries an authority, not a URL, so there is no scheme
+// to infer anything else from.
+func connectTarget(r *http.Request) (host, port string) {
+	authority := r.Host
+	if authority == "" {
+		authority = r.URL.Host
+	}
+	host, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		return strings.ToLower(authority), "443"
+	}
+	return strings.ToLower(host), port
+}
+
+// serveConnect tunnels a TLS connection to an allowlisted egress host.
+//
+// Authorisation is the same host allowlist the rewriting path uses, which is
+// all that path ever enforced: it never inspected paths or bodies. The target
+// is dialled through safeDialContext, so the private-address refusal that
+// protects the rewriting path protects the tunnel too, and the connection goes
+// to the address that was actually resolved rather than one a later lookup
+// might return.
+//
+// Bytes are relayed without inspection, so the client's TLS session runs
+// end to end: the broker never sees the request, the response, or the
+// credential the client sends.
+func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, sessionID string) {
+	host, port := connectTarget(r)
+	if host == "" {
+		http.Error(w, "connect requires a host", http.StatusBadRequest)
+		return
+	}
+	b.mu.Lock()
+	target := b.egress[host]
+	b.mu.Unlock()
+	if target == nil {
+		b.record(r.Context(), token, sessionID, "denied", "connect "+host)
+		http.Error(w, "egress host not allowlisted", http.StatusForbidden)
+		return
+	}
+	base, err := url.Parse(target.BaseURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
+		http.Error(w, "invalid egress target", http.StatusInternalServerError)
+		return
+	}
+	wantPort := base.Port()
+	if wantPort == "" {
+		wantPort = "443"
+		if base.Scheme == "http" {
+			wantPort = "80"
+		}
+	}
+	if port != wantPort {
+		b.record(r.Context(), token, sessionID, "denied", "connect port "+host+":"+port)
+		http.Error(w, "egress port not allowlisted", http.StatusForbidden)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connect is not supported here", http.StatusInternalServerError)
+		return
+	}
+	// Dial before hijacking: while the ResponseWriter is still intact a failure
+	// can be reported as a normal status rather than a silently dropped socket.
+	dial := b.DialEgress
+	if dial == nil {
+		dial = safeDialContext
+	}
+	upstream, err := dial(r.Context(), "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		b.record(r.Context(), token, sessionID, "denied", "connect dial "+host)
+		http.Error(w, "egress dial failed", http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = upstream.Close() }()
+
+	client, buffered, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "connect hijack failed", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	b.record(r.Context(), token, sessionID, "connect", host+":"+port)
+	if _, err := buffered.WriteString("HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+		return
+	}
+	if err := buffered.Flush(); err != nil {
+		return
+	}
+
+	// Relay until either side finishes. Read from the buffered reader, not the
+	// raw conn: the client may already have written TLS bytes that Hijack left
+	// buffered, and reading the conn directly would lose them.
+	finished := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upstream, buffered)
+		finished <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, upstream)
+		finished <- struct{}{}
+	}()
+	<-finished
+	// The deferred closes release the other copy.
 }
