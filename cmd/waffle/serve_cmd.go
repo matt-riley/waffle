@@ -113,10 +113,18 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	}()
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	sessionOwners := newChatSessionOwners()
+	// Declared here so the runtime factory below can close over it. serve owns
+	// the credential broker, and /repo has to reuse it: starting a second one
+	// would try to bind the address serve already holds, which is why /repo
+	// could never open a workspace under serve.
+	var serveBroker *broker.Broker
 	runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
 		runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
 		if runtimeErr == nil {
 			runtime.sessionOwners = sessionOwners
+			// Assigned by the time any chat connection is served.
+			runtime.wsBroker = serveBroker
+			runtime.wsURL = serveBrokerURL(cfg.Broker.Listen)
 		}
 		return runtime, runtimeErr
 	}
@@ -209,7 +217,6 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	}
 	defer cleanup()
 
-	var serveBroker *broker.Broker
 	var brokerDone <-chan struct{}
 	if cfg.Broker.Listen != "" {
 		// Bind synchronously so a busy address fails startup instead of
