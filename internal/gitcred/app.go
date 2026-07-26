@@ -100,14 +100,17 @@ func SplitRepo(repo string) (owner, name string, err error) {
 
 // Credential returns a GitHub credential for the canonical owner/repo path.
 func (a *App) Credential(ctx context.Context, repo string) (string, string, error) {
-	_, name, err := SplitRepo(repo)
+	owner, name, err := SplitRepo(repo)
 	if err != nil {
 		return "", "", err
 	}
-	repo = strings.Trim(strings.TrimSuffix(repo, ".git"), "/")
+	// Compose the cache key from the split parts rather than re-normalising the
+	// raw input: a second copy of that logic could drift from SplitRepo and
+	// silently change which entry a lookup hits.
+	cacheKey := strings.ToLower(owner + "/" + name)
 	now := a.now().UTC()
 	a.mu.Lock()
-	cached, ok := a.tokens[strings.ToLower(repo)]
+	cached, ok := a.tokens[cacheKey]
 	a.mu.Unlock()
 	if ok && now.Add(5*time.Minute).Before(cached.expires) {
 		return "x-access-token", cached.value, nil
@@ -117,7 +120,7 @@ func (a *App) Credential(ctx context.Context, repo string) (string, string, erro
 		return "", "", err
 	}
 	a.mu.Lock()
-	a.tokens[strings.ToLower(repo)] = cachedToken{value: token, expires: expires}
+	a.tokens[cacheKey] = cachedToken{value: token, expires: expires}
 	a.mu.Unlock()
 	return "x-access-token", token, nil
 }

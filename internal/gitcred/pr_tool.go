@@ -83,10 +83,16 @@ func (t PullRequestTool) Run(ctx context.Context, input json.RawMessage) (string
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
 	}
-	for name, value := range map[string]string{"title": in.Title, "head": in.Head, "base": in.Base} {
-		if strings.TrimSpace(value) == "" {
-			return "", fmt.Errorf("%s is required", name)
-		}
+	// Checked in a fixed order: ranging a map would name whichever blank field
+	// the runtime happened to visit first, so an agent retrying against the
+	// message could be told about a different field each time.
+	switch {
+	case strings.TrimSpace(in.Title) == "":
+		return "", fmt.Errorf("title is required")
+	case strings.TrimSpace(in.Head) == "":
+		return "", fmt.Errorf("head is required")
+	case strings.TrimSpace(in.Base) == "":
+		return "", fmt.Errorf("base is required")
 	}
 
 	// Deny by default: an unbound session gets no pull request, exactly as it
