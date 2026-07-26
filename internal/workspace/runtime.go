@@ -156,7 +156,12 @@ func workspaceRunArgs(opts ContainerOpts) []string {
 	if opts.ProxyURL != "" {
 		proxyURL := opts.ProxyURL
 		if opts.ProxyToken != "" {
-			proxyURL = strings.Replace(proxyURL, "://", "://"+opts.ProxyToken+"@", 1)
+			// Trailing colon: the token is the username and the password is
+			// empty. Without it git sees a userinfo with no password, asks the
+			// credential helper for one against the *proxy* host, and the
+			// helper refuses every host but the repo's -- so the clone fails
+			// with "could not read Password for http://wk_...@waffle-host".
+			proxyURL = strings.Replace(proxyURL, "://", "://"+opts.ProxyToken+":@", 1)
 		}
 		// Uppercase and lowercase: curl/git honor the former; busybox wget
 		// the latter. NO_PROXY keeps broker calls off the proxy path.
