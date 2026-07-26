@@ -25,6 +25,10 @@ jobs:
           version: 2026.7.12
           install: true
           cache: true
+          cache_save: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - run: go run ./cmd/waffle eval
 
   dashboard-browser:
@@ -38,6 +42,10 @@ jobs:
           version: 2026.7.12
           install: true
           cache: true
+          cache_save: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - name: Verify browser runtime
         run: |
           test "$(node --version)" = "v26.1.0"
@@ -50,22 +58,23 @@ jobs:
         run: mise run dashboard-check
 
   ci:
-    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@main
+    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       build: true
       vet: true
       test: true
+      save-cache: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
       cancel-in-progress: true
       concurrency-suffix: ci
 
   lint:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@main
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       cancel-in-progress: true
       concurrency-suffix: lint
 
   security:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@main
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       cancel-in-progress: true
       concurrency-suffix: security
@@ -84,6 +93,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - name: Build artifact
         run: >
           scripts/build-linux-artifact.sh
@@ -108,6 +121,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - name: Check Linux artifact reproducibility
         run: bash scripts/check-linux-artifact-repro.sh
 
