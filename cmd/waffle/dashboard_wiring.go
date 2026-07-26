@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/dashboard"
@@ -105,6 +106,26 @@ func newDashboardCapabilities(
 	})
 	providers.SetSessionRecovery(func(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
 		return sessions.RestoreModelAliases(ctx, toModelChanges(changes))
+	})
+	providers.SetSessionAliasPlanner(func(ctx context.Context, alias, replacement string) ([]providerconfig.SessionAliasChange, error) {
+		ids, err := sessions.ModelAliasReferences(ctx, alias)
+		if err != nil {
+			return nil, err
+		}
+		changes := make([]providerconfig.SessionAliasChange, 0, len(ids))
+		updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		for _, id := range ids {
+			current, getErr := sessions.Get(ctx, id)
+			if getErr != nil {
+				return nil, getErr
+			}
+			changes = append(changes, providerconfig.SessionAliasChange{
+				SessionID: id, From: alias, To: replacement,
+				FromVersion: current.ModelAliasVersion, ToVersion: current.ModelAliasVersion + 1,
+				FromUpdatedAt: current.UpdatedAt.UTC().Format(time.RFC3339Nano), ToUpdatedAt: updatedAt,
+			})
+		}
+		return changes, nil
 	})
 	home, err := config.Home()
 	if err != nil {

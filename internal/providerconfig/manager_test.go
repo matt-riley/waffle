@@ -302,6 +302,43 @@ func TestManagerModeAwareRemovalReturnsDeferredMutation(t *testing.T) {
 	}
 }
 
+func TestManagerModelRemovalRefreshesSessionPlanUnderProviderLock(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, true)
+	planned := []SessionAliasChange{{
+		SessionID: "session-1", From: "gpt", To: "", FromVersion: 1, ToVersion: 2,
+		FromUpdatedAt: "2026-07-25T23:00:00Z", ToUpdatedAt: "2026-07-25T23:01:00Z",
+	}}
+	var applied []SessionAliasChange
+	locked := false
+	m.SetSessionAliasPlanner(func(ctx context.Context, alias, replacement string) ([]SessionAliasChange, error) {
+		if alias != "gpt" || replacement != "" {
+			t.Fatalf("planner inputs = %q, %q", alias, replacement)
+		}
+		lease, err := instance.Default(m.LockPath).Acquire(ctx)
+		locked = errors.Is(err, instance.ErrHeld)
+		if lease != nil {
+			_ = lease.Release()
+		}
+		return planned, nil
+	})
+	m.SetSessionApply(func(_ context.Context, changes []SessionAliasChange) error {
+		applied = append([]SessionAliasChange(nil), changes...)
+		return nil
+	})
+	m.SetSessionRecovery(func(context.Context, []SessionAliasChange) error { return nil })
+
+	if _, err := m.RemoveModelWithMode(context.Background(), "gpt", "", CommitAndReconcile); err != nil {
+		t.Fatalf("RemoveModelWithMode: %v", err)
+	}
+	if !locked {
+		t.Fatal("session planner ran outside the provider lock")
+	}
+	if !reflect.DeepEqual(applied, planned) {
+		t.Fatalf("applied session changes = %#v, want %#v", applied, planned)
+	}
+}
+
 func TestManagerInstalledWithoutDefaultAndTestConnection(t *testing.T) {
 	m := newTestManager(t)
 	req := validAddRequest()

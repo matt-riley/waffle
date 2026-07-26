@@ -71,6 +71,10 @@ type capabilityRevisionProviderRemover interface {
 	RemoveWithExpectedRevision(context.Context, string, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 }
 
+type capabilityLockedProviderSnapshot interface {
+	WithLockedSnapshot(context.Context, func(context.Context, providerconfig.Listing) error) error
+}
+
 type CapabilitySkills interface {
 	List(context.Context, string) ([]CapabilitySkill, error)
 	Attach(context.Context, string, string) error
@@ -217,11 +221,20 @@ func (c *Capabilities) SetSessionModel(ctx context.Context, sessionID, alias str
 	if err != nil {
 		return err
 	}
+	alias = strings.TrimSpace(alias)
+	if locked, ok := c.Providers.(capabilityLockedProviderSnapshot); ok {
+		return locked.WithLockedSnapshot(ctx, func(lockedCtx context.Context, snapshot providerconfig.Listing) error {
+			if _, ok := snapshot.Models[alias]; !ok {
+				return ErrCapabilityModelNotFound
+			}
+			return c.Sessions.SetModelAliasIfVersion(lockedCtx, sessionID, alias, current.ModelAliasVersion)
+		})
+	}
 	snapshot, err := c.Providers.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	if _, ok := snapshot.Models[strings.TrimSpace(alias)]; !ok {
+	if _, ok := snapshot.Models[alias]; !ok {
 		return ErrCapabilityModelNotFound
 	}
 	return c.Sessions.SetModelAliasIfVersion(ctx, sessionID, alias, current.ModelAliasVersion)

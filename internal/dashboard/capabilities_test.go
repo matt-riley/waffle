@@ -70,7 +70,7 @@ func TestCapabilitiesSessionModelRejectsRemovalAfterProviderSnapshot(t *testing.
 		snapshot: providerconfig.Listing{Models: map[string]providerconfig.ModelSummary{
 			"gpt": {Provider: "openai", Model: "gpt"},
 		}},
-		snapshotHook: func() {
+		lockedSnapshotHook: func() {
 			if err := sessions.SetModelAlias(context.Background(), "sess-1", ""); err != nil {
 				t.Fatalf("simulate SessionApply: %v", err)
 			}
@@ -83,6 +83,28 @@ func TestCapabilitiesSessionModelRejectsRemovalAfterProviderSnapshot(t *testing.
 	}
 	if got := sessions.sessions["sess-1"].ModelAlias; got != "" {
 		t.Fatalf("stale session model restored alias %q", got)
+	}
+}
+
+func TestCapabilitiesSessionModelRejectsProviderRemovalWhileWriting(t *testing.T) {
+	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Models: map[string]providerconfig.ModelSummary{
+			"gpt": {Provider: "openai", Model: "gpt"},
+		},
+	}}
+	providers.lockedSnapshotHook = func() {
+		providers.snapshot.Models = map[string]providerconfig.ModelSummary{}
+	}
+	sessions := &fakeCapabilitySessions{sessions: map[string]*session.Session{
+		"sess-1": {ID: "sess-1"},
+	}}
+
+	err := (&Capabilities{Providers: providers, Sessions: sessions}).SetSessionModel(t.Context(), "sess-1", "gpt")
+	if !errors.Is(err, ErrCapabilityModelNotFound) {
+		t.Fatalf("session model error = %v, want provider removal rejection", err)
+	}
+	if sessions.setAlias != "" {
+		t.Fatalf("session alias = %q, want unchanged", sessions.setAlias)
 	}
 }
 
@@ -1515,6 +1537,7 @@ type fakeCapabilityProviders struct {
 	removeModelHook             func() error
 	sessionStore                *fakeCapabilitySessions
 	removeProviderName          string
+	lockedSnapshotHook          func()
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -1528,6 +1551,13 @@ func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.List
 		f.snapshotHook()
 	}
 	return f.snapshot, nil
+}
+
+func (f *fakeCapabilityProviders) WithLockedSnapshot(ctx context.Context, fn func(context.Context, providerconfig.Listing) error) error {
+	if f.lockedSnapshotHook != nil {
+		f.lockedSnapshotHook()
+	}
+	return fn(ctx, f.snapshot)
 }
 
 func (f *fakeCapabilityProviders) AddWithMode(_ context.Context, request providerconfig.AddRequest, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {

@@ -116,6 +116,12 @@ type SessionRecovery func(context.Context, []SessionAliasChange) error
 // journal while the provider manager lock is held.
 type SessionApply func(context.Context, []SessionAliasChange) error
 
+// SessionAliasPlanner snapshots the current session transitions while the
+// provider manager lock is held. This closes the gap where a stale session
+// writer could race a model removal after the initial preview saw no session
+// reference.
+type SessionAliasPlanner func(context.Context, string, string) ([]SessionAliasChange, error)
+
 type sessionAliasChangesContextKey struct{}
 
 // CatalogSnapshot is the private provider catalogue input for one enrollment.
@@ -221,10 +227,11 @@ type Manager struct {
 	RestoreService func(context.Context, bool) error
 	// AfterCommit is an observation/fault-injection hook. It is invoked after
 	// the named resource ("secret" then "config") is durably committed.
-	AfterCommit     func(resource string) error
-	CrashAfterPhase func(phase string) error
-	SessionApply    SessionApply
-	SessionRecovery SessionRecovery
+	AfterCommit         func(resource string) error
+	CrashAfterPhase     func(phase string) error
+	SessionApply        SessionApply
+	SessionRecovery     SessionRecovery
+	SessionAliasPlanner SessionAliasPlanner
 	// afterReadStatus is a deterministic concurrency-test seam.
 	afterReadStatus func()
 }
@@ -242,6 +249,14 @@ func (m *Manager) SetSessionRecovery(handler SessionRecovery) {
 func (m *Manager) SetSessionApply(handler SessionApply) {
 	if m != nil {
 		m.SessionApply = handler
+	}
+}
+
+// SetSessionAliasPlanner wires the process-local session participant that
+// refreshes model-removal transitions under the provider lock.
+func (m *Manager) SetSessionAliasPlanner(handler SessionAliasPlanner) {
+	if m != nil {
+		m.SessionAliasPlanner = handler
 	}
 }
 
@@ -893,6 +908,13 @@ func (m *Manager) removeModel(ctx context.Context, alias, replacement, expectedR
 			return fmt.Errorf("replacement model alias %q does not exist", replacement)
 		}
 	}
+	if m.SessionAliasPlanner != nil {
+		changes, planErr := m.SessionAliasPlanner(ctx, alias, replacement)
+		if planErr != nil {
+			return fmt.Errorf("plan session aliases: %w", planErr)
+		}
+		ctx = context.WithValue(ctx, sessionAliasChangesContextKey{}, append([]SessionAliasChange(nil), changes...))
+	}
 	for name, profile := range before.cfg.Agent.Profiles {
 		if profile.Model == alias && replacement == "" {
 			return fmt.Errorf("model alias %q is referenced by agent profile %q; use --replace-with", alias, name)
@@ -1035,6 +1057,10 @@ func (m *Manager) Snapshot(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
+	return listingFromConfig(cfg, status), nil
+}
+
+func listingFromConfig(cfg config.Config, status Status) Listing {
 	providers := make(map[string]ProviderSummary, len(cfg.Providers))
 	for name, connection := range cfg.Providers {
 		providers[name] = ProviderSummary{Type: connection.Type, BaseURL: connection.BaseURL, MaxTokens: connection.MaxTokens}
@@ -1049,7 +1075,33 @@ func (m *Manager) Snapshot(ctx context.Context) (Listing, error) {
 		UtilityModel: cfg.Agent.UtilityModel,
 		Providers:    providers,
 		Models:       models,
-	}, nil
+	}
+}
+
+// WithLockedSnapshot runs fn with a credential-free provider snapshot while
+// retaining the provider manager lock for the callback. Session model writes
+// use this boundary so a removal cannot commit between validation and CAS.
+func (m *Manager) WithLockedSnapshot(ctx context.Context, fn func(context.Context, Listing) error) (err error) {
+	if fn == nil {
+		return errors.New("locked provider snapshot callback is required")
+	}
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return err
+	}
+	status, err := m.statusFromConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	return fn(ctx, listingFromConfig(cfg, status))
 }
 
 // List returns a deterministic, credential-free JSON document.
