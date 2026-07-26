@@ -27,6 +27,8 @@ jobs:
           cache: true
           cache_save: false
       - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - run: go run ./cmd/waffle eval
 
   dashboard-browser:
@@ -42,6 +44,8 @@ jobs:
           cache: true
           cache_save: false
       - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - name: Verify browser runtime
         run: |
           test "$(node --version)" = "v26.1.0"
@@ -54,7 +58,7 @@ jobs:
         run: mise run dashboard-check
 
   ci:
-    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@4a0dec66090291decadfc989abc466b56368b929
+    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       build: true
       vet: true
@@ -64,13 +68,13 @@ jobs:
       concurrency-suffix: ci
 
   lint:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@4a0dec66090291decadfc989abc466b56368b929
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       cancel-in-progress: true
       concurrency-suffix: lint
 
   security:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@4a0dec66090291decadfc989abc466b56368b929
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
     with:
       cancel-in-progress: true
       concurrency-suffix: security
@@ -91,6 +95,8 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
       - name: Build artifact
         run: >
           scripts/build-linux-artifact.sh
