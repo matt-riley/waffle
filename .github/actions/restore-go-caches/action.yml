@@ -1,0 +1,31 @@
+name: Restore Go caches
+description: Restore the shared Go module and rolling build caches without saving
+
+runs:
+  using: composite
+  steps:
+    - name: Detect Go cache metadata
+      id: metadata
+      shell: bash
+      run: |
+        {
+          echo "version=$(go env GOVERSION)"
+          echo "module_cache=$(go env GOMODCACHE)"
+          echo "build_cache=$(go env GOCACHE)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore Go module cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ steps.metadata.outputs.module_cache }}
+        key: go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
+        restore-keys: |
+          go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-
+
+    - name: Restore Go build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ steps.metadata.outputs.build_cache }}
+        key: go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-

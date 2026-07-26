@@ -26,28 +26,7 @@ jobs:
           install: true
           cache: true
           cache_save: false
-      - name: Detect Go cache metadata
-        id: go-cache-metadata
-        run: |
-          {
-            echo "version=$(go env GOVERSION)"
-            echo "module_cache=$(go env GOMODCACHE)"
-            echo "build_cache=$(go env GOCACHE)"
-          } >> "$GITHUB_OUTPUT"
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.module_cache }}
-          key: go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-
-      - name: Restore Go build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.build_cache }}
-          key: go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
-          restore-keys: |
-            go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-
+      - uses: ./.github/actions/restore-go-caches
       - run: go run ./cmd/waffle eval
 
   dashboard-browser:
@@ -62,28 +41,7 @@ jobs:
           install: true
           cache: true
           cache_save: false
-      - name: Detect Go cache metadata
-        id: go-cache-metadata
-        run: |
-          {
-            echo "version=$(go env GOVERSION)"
-            echo "module_cache=$(go env GOMODCACHE)"
-            echo "build_cache=$(go env GOCACHE)"
-          } >> "$GITHUB_OUTPUT"
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.module_cache }}
-          key: go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-
-      - name: Restore Go build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.build_cache }}
-          key: go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
-          restore-keys: |
-            go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-
+      - uses: ./.github/actions/restore-go-caches
       - name: Verify browser runtime
         run: |
           test "$(node --version)" = "v26.1.0"
@@ -132,28 +90,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Detect Go cache metadata
-        id: go-cache-metadata
-        run: |
-          {
-            echo "version=$(go env GOVERSION)"
-            echo "module_cache=$(go env GOMODCACHE)"
-            echo "build_cache=$(go env GOCACHE)"
-          } >> "$GITHUB_OUTPUT"
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.module_cache }}
-          key: go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-
-      - name: Restore Go build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ${{ steps.go-cache-metadata.outputs.build_cache }}
-          key: go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
-          restore-keys: |
-            go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-
+      - uses: ./.github/actions/restore-go-caches
       - name: Build artifact
         run: >
           scripts/build-linux-artifact.sh
