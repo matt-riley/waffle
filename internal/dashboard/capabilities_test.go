@@ -62,6 +62,52 @@ func TestCapabilitiesSessionModelIsolatedFromGlobalRoles(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesSessionModelRejectsRemovalAfterProviderSnapshot(t *testing.T) {
+	sessions := &fakeCapabilitySessions{sessions: map[string]*session.Session{
+		"sess-1": {ID: "sess-1", ModelAlias: "gpt"},
+	}}
+	providers := &fakeCapabilityProviders{
+		snapshot: providerconfig.Listing{Models: map[string]providerconfig.ModelSummary{
+			"gpt": {Provider: "openai", Model: "gpt"},
+		}},
+		lockedSnapshotHook: func() {
+			if err := sessions.SetModelAlias(context.Background(), "sess-1", ""); err != nil {
+				t.Fatalf("simulate SessionApply: %v", err)
+			}
+		},
+	}
+	capabilities := &Capabilities{Providers: providers, Sessions: sessions}
+
+	if err := capabilities.SetSessionModel(t.Context(), "sess-1", "gpt"); !errors.Is(err, session.ErrModelAliasChanged) {
+		t.Fatalf("stale session model error = %v, want ErrModelAliasChanged", err)
+	}
+	if got := sessions.sessions["sess-1"].ModelAlias; got != "" {
+		t.Fatalf("stale session model restored alias %q", got)
+	}
+}
+
+func TestCapabilitiesSessionModelRejectsProviderRemovalWhileWriting(t *testing.T) {
+	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
+		Models: map[string]providerconfig.ModelSummary{
+			"gpt": {Provider: "openai", Model: "gpt"},
+		},
+	}}
+	providers.lockedSnapshotHook = func() {
+		providers.snapshot.Models = map[string]providerconfig.ModelSummary{}
+	}
+	sessions := &fakeCapabilitySessions{sessions: map[string]*session.Session{
+		"sess-1": {ID: "sess-1"},
+	}}
+
+	err := (&Capabilities{Providers: providers, Sessions: sessions}).SetSessionModel(t.Context(), "sess-1", "gpt")
+	if !errors.Is(err, ErrCapabilityModelNotFound) {
+		t.Fatalf("session model error = %v, want provider removal rejection", err)
+	}
+	if sessions.setAlias != "" {
+		t.Fatalf("session alias = %q, want unchanged", sessions.setAlias)
+	}
+}
+
 func TestCapabilitiesSnapshotCombinesModelsAndSessionSkills(t *testing.T) {
 	providers := &fakeCapabilityProviders{snapshot: providerconfig.Listing{
 		State:        "ready",
@@ -172,6 +218,224 @@ func TestCapabilitiesSnapshotRetriesTransientProviderLock(t *testing.T) {
 	}
 	if providers.snapshotCalls != 2 {
 		t.Fatalf("snapshot calls = %d, want 2", providers.snapshotCalls)
+	}
+}
+
+func TestCapabilitiesModelRemovalPreviewNamesEveryReference(t *testing.T) {
+	providers := &fakeCapabilityProviders{modelPreview: providerconfig.ModelRemovalPreview{
+		Alias: "gpt", Provider: "openai", Default: true, Utility: true,
+		Profiles: []string{"reviewer"}, Revision: "revision-1",
+	}}
+	sessions := &fakeCapabilitySessions{modelRefs: map[string][]string{
+		"gpt": {"session-b", "session-a"},
+	}}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Sessions:  sessions,
+		Previews:  NewPreviewStore(func() time.Time { return time.Unix(1_000, 0) }, previewEntropy(1)),
+	}
+
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Target != "gpt" || !preview.ReplacementRequired || preview.PreviewToken == "" {
+		t.Fatalf("preview = %#v", preview)
+	}
+	if len(preview.References) != 5 || preview.References[0].Kind != "default" || preview.References[1].Kind != "utility" {
+		t.Fatalf("references = %#v", preview.References)
+	}
+	if preview.References[2].Kind != "profile" || preview.References[2].Name != "reviewer" ||
+		preview.References[3].Kind != "session" || preview.References[4].Name != "session-b" {
+		t.Fatalf("references = %#v", preview.References)
+	}
+}
+
+func TestCapabilitiesModelRemovalConfirmationRejectsStaleStateBeforeMutation(t *testing.T) {
+	providers := &fakeCapabilityProviders{modelPreview: providerconfig.ModelRemovalPreview{
+		Alias: "gpt", Provider: "openai", Revision: "revision-1",
+	}}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Sessions:  &fakeCapabilitySessions{modelRefs: map[string][]string{}},
+		Previews:  NewPreviewStore(nil, previewEntropy(1)),
+	}
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers.modelPreview.Revision = "revision-2"
+	if _, err := capabilities.ConfirmModelRemoval(t.Context(), "gpt", "", preview.PreviewToken); !errors.Is(err, ErrPreviewMismatch) {
+		t.Fatalf("stale confirmation error = %v, want ErrPreviewMismatch", err)
+	}
+	if providers.removeModelCalls != 0 {
+		t.Fatalf("provider removal calls = %d, want zero", providers.removeModelCalls)
+	}
+}
+
+func TestCapabilitiesModelRemovalConfirmationUsesExplicitReplacementForSessions(t *testing.T) {
+	providers := &fakeCapabilityProviders{modelPreview: providerconfig.ModelRemovalPreview{
+		Alias: "gpt", Provider: "openai", Default: true, Revision: "revision-1",
+	}, result: providerconfig.MutationResult{RestartRequired: true, TransactionID: "txn-remove-model"}}
+	sessions := &fakeCapabilitySessions{
+		modelRefs: map[string][]string{"gpt": {"session-1"}},
+		sessions:  map[string]*session.Session{"session-1": {ID: "session-1", ModelAlias: "gpt"}},
+	}
+	providers.sessionStore = sessions
+	capabilities := &Capabilities{
+		Providers: providers,
+		Sessions:  sessions,
+		Previews:  NewPreviewStore(nil, previewEntropy(1)),
+	}
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := capabilities.ConfirmModelRemoval(t.Context(), "gpt", "small", preview.PreviewToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || providers.removeModelAlias != "gpt" || providers.removeModelReplacement != "small" {
+		t.Fatalf("result=%#v removal=%q/%q", result, providers.removeModelAlias, providers.removeModelReplacement)
+	}
+	if providers.removeModelExpectedRevision != "revision-1" {
+		t.Fatalf("expected revision = %q, want revision-1", providers.removeModelExpectedRevision)
+	}
+	if sessions.replacedFrom != "gpt" || sessions.replacedTo != "small" {
+		t.Fatalf("session replacement = %q -> %q", sessions.replacedFrom, sessions.replacedTo)
+	}
+}
+
+func TestCapabilitiesModelRemovalRestoresSessionsWhenProviderRemovalFails(t *testing.T) {
+	sessions := &fakeCapabilitySessions{
+		modelRefs: map[string][]string{"gpt": {"session-1", "session-2"}},
+		sessions: map[string]*session.Session{
+			"session-1": {ID: "session-1", ModelAlias: "gpt"},
+			"session-2": {ID: "session-2", ModelAlias: "gpt"},
+		},
+	}
+	var providerSawReplacement bool
+	providers := &fakeCapabilityProviders{
+		modelPreview: providerconfig.ModelRemovalPreview{
+			Alias: "gpt", Provider: "openai", Revision: "revision-1", Default: true,
+		},
+		removeModelHook: func() error {
+			providerSawReplacement = true
+			for _, value := range sessions.sessions {
+				if value.ModelAlias != "small" {
+					providerSawReplacement = false
+				}
+			}
+			return errors.New("provider removal failed")
+		},
+	}
+	providers.sessionStore = sessions
+	capabilities := &Capabilities{
+		Providers: providers,
+		Sessions:  sessions,
+		Previews:  NewPreviewStore(nil, previewEntropy(1)),
+	}
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capabilities.ConfirmModelRemoval(t.Context(), "gpt", "small", preview.PreviewToken); err == nil {
+		t.Fatal("provider removal unexpectedly succeeded")
+	}
+	if !providerSawReplacement {
+		t.Fatal("provider removal was not attempted after session reassignment")
+	}
+	for id, value := range sessions.sessions {
+		if value.ModelAlias != "gpt" {
+			t.Fatalf("session %s alias = %q, want removed alias restored after failed removal", id, value.ModelAlias)
+		}
+	}
+}
+
+func TestCapabilitiesModelRemovalRestoresSessionsWhenRevisionChangesAfterApply(t *testing.T) {
+	sessions := &fakeCapabilitySessions{
+		modelRefs: map[string][]string{"gpt": {"session-1"}},
+		sessions:  map[string]*session.Session{"session-1": {ID: "session-1", ModelAlias: "gpt"}},
+	}
+	providers := &fakeCapabilityProviders{
+		modelPreview: providerconfig.ModelRemovalPreview{Alias: "gpt", Provider: "openai", Revision: "revision-1"},
+		mutationErr:  providerconfig.ErrRevisionMismatch,
+	}
+	providers.sessionStore = sessions
+	capabilities := &Capabilities{Providers: providers, Sessions: sessions, Previews: NewPreviewStore(nil, previewEntropy(1))}
+	preview, err := capabilities.PreviewModelRemoval(t.Context(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capabilities.ConfirmModelRemoval(t.Context(), "gpt", "small", preview.PreviewToken); !errors.Is(err, ErrPreviewMismatch) {
+		t.Fatalf("revision mismatch error = %v, want ErrPreviewMismatch", err)
+	}
+	if got := sessions.sessions["session-1"].ModelAlias; got != "gpt" {
+		t.Fatalf("session alias after revision mismatch = %q, want gpt", got)
+	}
+	if sessions.replacedFrom != "" || sessions.replacedTo != "" {
+		t.Fatalf("session replacement during revision mismatch = %q -> %q, want no replacement", sessions.replacedFrom, sessions.replacedTo)
+	}
+}
+
+func TestCapabilitiesProviderRemovalNamesAliasesAndPreservesReferencedRefusal(t *testing.T) {
+	providers := &fakeCapabilityProviders{
+		providerPreview: providerconfig.ProviderRemovalPreview{
+			Name: "openai", ModelAliases: []string{"gpt"}, Revision: "revision-1",
+		},
+		mutationErr: providerconfig.ErrReferenced,
+	}
+	capabilities := &Capabilities{
+		Providers: providers,
+		Previews:  NewPreviewStore(nil, previewEntropy(1)),
+	}
+	preview, err := capabilities.PreviewProviderRemoval(t.Context(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Target != "openai" || len(preview.References) != 1 || preview.References[0].Name != "gpt" {
+		t.Fatalf("provider preview = %#v", preview)
+	}
+	_, err = capabilities.ConfirmProviderRemoval(t.Context(), "openai", preview.PreviewToken)
+	if !errors.Is(err, providerconfig.ErrReferenced) {
+		t.Fatalf("provider confirmation error = %v", err)
+	}
+}
+
+func TestCapabilitiesProviderRemovalRouteUsesStableReferencedGuidance(t *testing.T) {
+	providers := &fakeCapabilityProviders{
+		providerPreview: providerconfig.ProviderRemovalPreview{
+			Name: "openai", ModelAliases: []string{"gpt"}, Revision: "revision-1",
+		},
+		mutationErr: providerconfig.ErrReferenced,
+	}
+	mux := http.NewServeMux()
+	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
+		Service:  &Capabilities{Providers: providers, Previews: NewPreviewStore(nil, previewEntropy(1))},
+		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+		Restart:  fakeRestartScheduler{},
+	})
+	previewResponse := httptest.NewRecorder()
+	mux.ServeHTTP(previewResponse, httptest.NewRequest(http.MethodGet, "/api/v1/desk/providers/openai/removal-preview", nil))
+	var preview CapabilityRemovalPreview
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	confirmResponse := newAfterResponseRecorder()
+	mux.ServeHTTP(confirmResponse, httptest.NewRequest(http.MethodPost, "/api/v1/desk/providers/openai/remove", strings.NewReader(
+		`{"preview_token":"`+preview.PreviewToken+`"}`)))
+	if confirmResponse.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	var response errorResponse
+	if err := json.Unmarshal(confirmResponse.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != "provider_referenced" || response.Message != "provider connection is still referenced by model aliases" {
+		t.Fatalf("error response = %#v", response)
+	}
+	if strings.Contains(confirmResponse.Body.String(), capabilityCredentialCanary) {
+		t.Fatalf("response leaked credential: %s", confirmResponse.Body.String())
 	}
 }
 
@@ -1062,22 +1326,35 @@ func TestCapabilitiesRestartOutcomeIsDeliveredToEventHub(t *testing.T) {
 	}
 }
 
-func TestRegisterCapabilitiesRoutesHasNoRemovalEndpoints(t *testing.T) {
+func TestRegisterCapabilitiesRoutesProvidesRemovalPreviewAndConfirm(t *testing.T) {
+	providers := &fakeCapabilityProviders{modelPreview: providerconfig.ModelRemovalPreview{
+		Alias: "gpt", Provider: "openai", Revision: "revision-1",
+	}, result: providerconfig.MutationResult{RestartRequired: true, TransactionID: "txn-remove"}}
+	sessions := &fakeCapabilitySessions{modelRefs: map[string][]string{}}
+	previews := NewPreviewStore(nil, previewEntropy(1))
 	mux := http.NewServeMux()
 	RegisterCapabilitiesRoutes(mux, CapabilitiesRouteConfig{
-		Service:  &Capabilities{},
+		Service:  &Capabilities{Providers: providers, Sessions: sessions, Previews: previews},
 		Mutation: func(_ int64, next http.Handler) http.Handler { return next },
+		Restart:  fakeRestartScheduler{},
 	})
-	for _, path := range []string{
-		"/api/v1/desk/models/remove",
-		"/api/v1/desk/providers/remove",
-		"/api/v1/desk/skills/review/remove",
-	} {
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("%s status = %d, want 404", path, response.Code)
-		}
+	previewResponse := httptest.NewRecorder()
+	mux.ServeHTTP(previewResponse, httptest.NewRequest(http.MethodGet, "/api/v1/desk/models/gpt/removal-preview", nil))
+	if previewResponse.Code != http.StatusOK || !strings.Contains(previewResponse.Body.String(), `"preview_token"`) {
+		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
+	}
+	var preview CapabilityRemovalPreview
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	confirmResponse := newAfterResponseRecorder()
+	mux.ServeHTTP(confirmResponse, httptest.NewRequest(http.MethodPost, "/api/v1/desk/models/gpt/remove", strings.NewReader(
+		`{"preview_token":"`+preview.PreviewToken+`","replacement":""}`)))
+	if confirmResponse.Code != http.StatusAccepted {
+		t.Fatalf("confirm status=%d body=%s", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	if strings.Contains(confirmResponse.Body.String(), "txn-remove") || strings.Contains(confirmResponse.Body.String(), capabilityCredentialCanary) {
+		t.Fatalf("confirm leaked private value: %s", confirmResponse.Body.String())
 	}
 }
 
@@ -1092,8 +1369,11 @@ func TestWriteCapabilityErrorMapsKnownSentinels(t *testing.T) {
 		code   string
 	}{
 		{"session_not_found", session.ErrNotFound, http.StatusNotFound, "session_not_found"},
+		{"session_model_changed", session.ErrModelAliasChanged, http.StatusConflict, "session_model_changed"},
 		{"model_not_found", ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found"},
 		{"skill_not_found", ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found"},
+		{"replacement_required", ErrCapabilityReplacementRequired, http.StatusConflict, "replacement_required"},
+		{"preview_mismatch", ErrPreviewMismatch, http.StatusConflict, "preview_invalid"},
 		{"after_response_unavailable", ErrAfterResponseUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable"},
 		{"capabilities_unavailable", ErrCapabilitiesUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable"},
 
@@ -1217,6 +1497,7 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 		skillinstall.ErrStageChanged,
 		skillinstall.ErrDigestMismatch,
 		providerconfig.ErrLocked,
+		session.ErrModelAliasChanged,
 		providerconfig.ErrReferenced,
 		providerconfig.ErrDeferredRestartPending,
 		providerconfig.ErrDeferredHealth,
@@ -1240,17 +1521,28 @@ func TestWriteCapabilityErrorTableCoversDeclaredSentinels(t *testing.T) {
 }
 
 type fakeCapabilityProviders struct {
-	snapshot        providerconfig.Listing
-	snapshotErrs    []error
-	snapshotCalls   int
-	result          providerconfig.MutationResult
-	mutationErr     error
-	mutations       int
-	lastAPIKey      string
-	testErr         error
-	lastProspective providerconfig.ProspectiveProbeRequest
-	prospectiveErr  error
-	lastAdd         providerconfig.AddModelRequest
+	snapshot                    providerconfig.Listing
+	snapshotErrs                []error
+	snapshotCalls               int
+	result                      providerconfig.MutationResult
+	mutationErr                 error
+	mutations                   int
+	lastAPIKey                  string
+	testErr                     error
+	lastProspective             providerconfig.ProspectiveProbeRequest
+	prospectiveErr              error
+	lastAdd                     providerconfig.AddModelRequest
+	modelPreview                providerconfig.ModelRemovalPreview
+	providerPreview             providerconfig.ProviderRemovalPreview
+	snapshotHook                func()
+	removeModelCalls            int
+	removeModelAlias            string
+	removeModelReplacement      string
+	removeModelExpectedRevision string
+	removeModelHook             func() error
+	sessionStore                *fakeCapabilitySessions
+	removeProviderName          string
+	lockedSnapshotHook          func()
 }
 
 func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -1260,7 +1552,17 @@ func (f *fakeCapabilityProviders) Snapshot(context.Context) (providerconfig.List
 		f.snapshotErrs = f.snapshotErrs[1:]
 		return providerconfig.Listing{}, err
 	}
+	if f.snapshotHook != nil {
+		f.snapshotHook()
+	}
 	return f.snapshot, nil
+}
+
+func (f *fakeCapabilityProviders) WithLockedSnapshot(ctx context.Context, fn func(context.Context, providerconfig.Listing) error) error {
+	if f.lockedSnapshotHook != nil {
+		f.lockedSnapshotHook()
+	}
+	return fn(ctx, f.snapshot)
 }
 
 func (f *fakeCapabilityProviders) AddWithMode(_ context.Context, request providerconfig.AddRequest, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
@@ -1285,6 +1587,63 @@ func (f *fakeCapabilityProviders) ActivateUtilityModelWithMode(context.Context, 
 	return f.mutationResult()
 }
 
+func (f *fakeCapabilityProviders) PreviewModelRemoval(context.Context, string) (providerconfig.ModelRemovalPreview, error) {
+	return f.modelPreview, nil
+}
+
+func (f *fakeCapabilityProviders) PreviewProviderRemoval(context.Context, string) (providerconfig.ProviderRemovalPreview, error) {
+	return f.providerPreview, nil
+}
+
+func (f *fakeCapabilityProviders) RemoveModelWithMode(_ context.Context, alias, replacement string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	return f.removeModel(alias, replacement, "")
+}
+
+func (f *fakeCapabilityProviders) RemoveModelWithExpectedRevision(_ context.Context, alias, replacement, expectedRevision string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeModelExpectedRevision = expectedRevision
+	return f.removeModel(alias, replacement, expectedRevision)
+}
+
+func (f *fakeCapabilityProviders) RemoveModelWithModeAtRevision(ctx context.Context, alias, replacement, expectedRevision string, changes []providerconfig.SessionAliasChange, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeModelExpectedRevision = expectedRevision
+	if errors.Is(f.mutationErr, providerconfig.ErrRevisionMismatch) {
+		return f.removeModel(alias, replacement, expectedRevision)
+	}
+	if f.sessionStore != nil {
+		modelChanges := make([]session.ModelAliasChange, 0, len(changes))
+		for _, change := range changes {
+			modelChanges = append(modelChanges, session.ModelAliasChange{
+				SessionID: change.SessionID, OriginalAlias: change.From, ReplacementAlias: change.To,
+			})
+		}
+		if err := f.sessionStore.ReplaceModelAliases(ctx, modelChanges); err != nil {
+			return providerconfig.MutationResult{}, err
+		}
+	}
+	return f.removeModel(alias, replacement, expectedRevision)
+}
+
+func (f *fakeCapabilityProviders) removeModel(alias, replacement, _ string) (providerconfig.MutationResult, error) {
+	f.removeModelCalls++
+	f.removeModelAlias, f.removeModelReplacement = alias, replacement
+	if f.removeModelHook != nil {
+		if err := f.removeModelHook(); err != nil {
+			return providerconfig.MutationResult{}, err
+		}
+	}
+	return f.mutationResult()
+}
+
+func (f *fakeCapabilityProviders) RemoveWithMode(_ context.Context, name string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeProviderName = name
+	return f.mutationResult()
+}
+
+func (f *fakeCapabilityProviders) RemoveWithExpectedRevision(_ context.Context, name, _ string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	f.removeProviderName = name
+	return f.mutationResult()
+}
+
 func (f *fakeCapabilityProviders) Test(context.Context, string) error { return f.testErr }
 
 func (f *fakeCapabilityProviders) TestProspective(_ context.Context, request providerconfig.ProspectiveProbeRequest) error {
@@ -1303,9 +1662,12 @@ func (f *fakeCapabilityProviders) mutationResult() (providerconfig.MutationResul
 }
 
 type fakeCapabilitySessions struct {
-	sessions   map[string]*session.Session
-	setSession string
-	setAlias   string
+	sessions     map[string]*session.Session
+	setSession   string
+	setAlias     string
+	modelRefs    map[string][]string
+	replacedFrom string
+	replacedTo   string
 }
 
 func (f *fakeCapabilitySessions) Get(_ context.Context, id string) (*session.Session, error) {
@@ -1323,6 +1685,62 @@ func (f *fakeCapabilitySessions) SetModelAlias(_ context.Context, id, alias stri
 	}
 	f.setSession, f.setAlias = id, alias
 	f.sessions[id].ModelAlias = alias
+	f.sessions[id].ModelAliasVersion++
+	return nil
+}
+
+func (f *fakeCapabilitySessions) SetModelAliasIfVersion(_ context.Context, id, alias string, expectedVersion int64) error {
+	value, ok := f.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	if value.ModelAliasVersion != expectedVersion {
+		return fmt.Errorf("%w: %s", session.ErrModelAliasChanged, id)
+	}
+	f.setSession, f.setAlias = id, alias
+	value.ModelAlias = alias
+	value.ModelAliasVersion++
+	return nil
+}
+
+func (f *fakeCapabilitySessions) ModelAliasReferences(_ context.Context, alias string) ([]string, error) {
+	return append([]string(nil), f.modelRefs[alias]...), nil
+}
+
+func (f *fakeCapabilitySessions) ReplaceModelAlias(_ context.Context, from, to string) error {
+	f.replacedFrom, f.replacedTo = from, to
+	for _, value := range f.sessions {
+		if value.ModelAlias == from {
+			value.ModelAlias = to
+		}
+	}
+	return nil
+}
+
+func (f *fakeCapabilitySessions) ReplaceModelAliases(_ context.Context, changes []session.ModelAliasChange) error {
+	if len(changes) > 0 {
+		f.replacedFrom, f.replacedTo = changes[0].OriginalAlias, changes[0].ReplacementAlias
+	}
+	for _, change := range changes {
+		value, ok := f.sessions[change.SessionID]
+		if !ok || value.ModelAlias != change.OriginalAlias {
+			return errors.New("session alias changed")
+		}
+	}
+	for _, change := range changes {
+		f.sessions[change.SessionID].ModelAlias = change.ReplacementAlias
+	}
+	return nil
+}
+
+func (f *fakeCapabilitySessions) RestoreModelAliases(_ context.Context, changes []session.ModelAliasChange) error {
+	for _, change := range changes {
+		value, ok := f.sessions[change.SessionID]
+		if !ok || value.ModelAlias != change.ReplacementAlias {
+			continue
+		}
+		value.ModelAlias = change.OriginalAlias
+	}
 	return nil
 }
 

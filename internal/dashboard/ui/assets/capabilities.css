@@ -102,6 +102,24 @@
   border-bottom: 0;
 }
 
+.capability-removal-preview {
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+  padding: 0.7rem;
+}
+
+.capability-removal-preview p,
+.capability-removal-preview ul {
+  margin: 0;
+}
+
+.capability-removal-preview ul {
+  padding-left: 1.25rem;
+}
+
 .capability-card p,
 .scope-note {
   color: var(--muted);

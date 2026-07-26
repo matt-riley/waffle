@@ -19,7 +19,10 @@ import (
 )
 
 // ErrNotFound is returned when a session doesn't exist.
-var ErrNotFound = errors.New("session not found")
+var (
+	ErrNotFound          = errors.New("session not found")
+	ErrModelAliasChanged = errors.New("session model alias changed")
+)
 
 // Store persists sessions and turns.
 type Store struct {
@@ -44,12 +47,26 @@ func (s *Store) nowStr() string { return s.clock().Format(time.RFC3339Nano) }
 
 // Session is one conversation.
 type Session struct {
-	ID         string
-	Title      string
-	Summary    string
-	ModelAlias string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID                string
+	Title             string
+	Summary           string
+	ModelAlias        string
+	ModelAliasVersion int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// ModelAliasChange records one exact session choice transition. The removal
+// flow uses these records rather than a broad alias update so a concurrent
+// Today edit fails closed instead of being overwritten.
+type ModelAliasChange struct {
+	SessionID            string `json:"session_id"`
+	OriginalAlias        string `json:"original_alias"`
+	ReplacementAlias     string `json:"replacement_alias"`
+	OriginalVersion      int64  `json:"original_version,omitempty"`
+	ReplacementVersion   int64  `json:"replacement_version,omitempty"`
+	OriginalUpdatedAt    string `json:"original_updated_at,omitempty"`
+	ReplacementUpdatedAt string `json:"replacement_updated_at,omitempty"`
 }
 
 // Create starts a new session.
@@ -106,7 +123,7 @@ func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
 // SetModelAlias records the configured model alias selected for a session.
 func (s *Store) SetModelAlias(ctx context.Context, id, alias string) error {
 	result, err := s.db.ExecContext(ctx,
-		"UPDATE sessions SET model_alias = ?, updated_at = ? WHERE id = ?",
+		"UPDATE sessions SET model_alias = ?, model_alias_version = model_alias_version + 1, updated_at = ? WHERE id = ?",
 		strings.TrimSpace(alias), s.nowStr(), id)
 	if err != nil {
 		return fmt.Errorf("set session model alias: %w", err)
@@ -121,11 +138,159 @@ func (s *Store) SetModelAlias(ctx context.Context, id, alias string) error {
 	return nil
 }
 
+// SetModelAliasIfVersion records a model choice only if the session has not
+// changed since the caller loaded it. Long-lived Today runtimes use this CAS
+// so a provider removal cannot be followed by a stale runtime write.
+func (s *Store) SetModelAliasIfVersion(ctx context.Context, id, alias string, expectedVersion int64) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE sessions SET model_alias = ?, model_alias_version = model_alias_version + 1, updated_at = ? WHERE id = ? AND model_alias_version = ?",
+		strings.TrimSpace(alias), s.nowStr(), id, expectedVersion)
+	if err != nil {
+		return fmt.Errorf("set session model alias: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-model result: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrModelAliasChanged, id)
+	}
+	return nil
+}
+
+// ModelAliasReferences returns persisted session IDs that explicitly select
+// alias, in deterministic order. It does not rewrite any session choice.
+func (s *Store) ModelAliasReferences(ctx context.Context, alias string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM sessions WHERE model_alias = ? ORDER BY id`, strings.TrimSpace(alias))
+	if err != nil {
+		return nil, fmt.Errorf("list model alias references: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var references []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list model alias references: %w", err)
+		}
+		references = append(references, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list model alias references: %w", err)
+	}
+	return references, nil
+}
+
+// ReplaceModelAlias moves only sessions that explicitly selected from to to.
+// Other sessions retain their local model choices.
+func (s *Store) ReplaceModelAlias(ctx context.Context, from, to string) error {
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET model_alias = ?, model_alias_version = model_alias_version + 1, updated_at = ? WHERE model_alias = ?`,
+		to, s.nowStr(), from); err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("replace model alias: %w", err)
+	}
+	return nil
+}
+
+// ReplaceModelAliases applies exact, all-or-nothing session transitions. Every
+// row must still contain its previewed alias, model-alias version, and
+// updated-at value or the transaction is rolled back without changing any
+// session.
+func (s *Store) ReplaceModelAliases(ctx context.Context, changes []ModelAliasChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("replace model aliases: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, change := range changes {
+		if change.OriginalVersion == 0 || change.OriginalUpdatedAt == "" || change.ReplacementVersion == 0 || change.ReplacementUpdatedAt == "" {
+			return errors.New("exact model alias transition version is required")
+		}
+		query := `UPDATE sessions SET model_alias = ?, model_alias_version = ?, updated_at = ? WHERE id = ? AND model_alias = ?`
+		args := []any{strings.TrimSpace(change.ReplacementAlias), change.ReplacementVersion, change.ReplacementUpdatedAt, change.SessionID, strings.TrimSpace(change.OriginalAlias), change.OriginalVersion, change.OriginalUpdatedAt}
+		query += ` AND model_alias_version = ? AND updated_at = ?`
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("replace model aliases: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read replace model aliases result: %w", err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("%w: %s", ErrModelAliasChanged, change.SessionID)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("replace model aliases: %w", err)
+	}
+	return nil
+}
+
+// RestoreModelAliases restores only rows that still contain the removal
+// replacement. A session changed by Today, or deleted meanwhile, is left
+// alone; this is the compare-and-set boundary that prevents rollback from
+// overwriting a newer user choice.
+func (s *Store) RestoreModelAliases(ctx context.Context, changes []ModelAliasChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("restore model aliases: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, change := range changes {
+		if change.OriginalVersion == 0 || change.OriginalUpdatedAt == "" || change.ReplacementVersion == 0 || change.ReplacementUpdatedAt == "" {
+			return errors.New("exact model alias recovery version is required")
+		}
+		query := `UPDATE sessions SET model_alias = ?, model_alias_version = ?, updated_at = ? WHERE id = ? AND model_alias = ?`
+		args := []any{strings.TrimSpace(change.OriginalAlias), change.OriginalVersion, change.OriginalUpdatedAt, change.SessionID, strings.TrimSpace(change.ReplacementAlias)}
+		query += ` AND model_alias_version = ? AND updated_at = ?`
+		args = append(args, change.ReplacementVersion, change.ReplacementUpdatedAt)
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("restore model aliases: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read restore model aliases result: %w", err)
+		}
+		if rows == 1 {
+			continue
+		}
+		var current string
+		err = tx.QueryRowContext(ctx, `SELECT model_alias FROM sessions WHERE id = ?`, change.SessionID).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(current) == strings.TrimSpace(change.OriginalAlias) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect model alias recovery: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("restore model aliases: %w", err)
+	}
+	return nil
+}
+
 // Get loads one session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &created, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -208,7 +373,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, created_at, updated_at
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -221,7 +386,7 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	for rows.Next() {
 		var sess Session
 		var created, updated string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &created, &updated); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)

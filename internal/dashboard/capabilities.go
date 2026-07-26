@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,14 +24,21 @@ const (
 	capabilityMutationMaxBodyBytes = 16 << 10
 	capabilitySnapshotLockWait     = time.Second
 	capabilitySnapshotRetryDelay   = 10 * time.Millisecond
+	capabilityRemovalPreviewTTL    = time.Minute
 	restartScheduleTimeout         = 5 * time.Second
 )
 
+const (
+	capabilityModelRemovalOperation    = "desk-model-removal"
+	capabilityProviderRemovalOperation = "desk-provider-removal"
+)
+
 var (
-	ErrCapabilityModelNotFound  = errors.New("capability model not found")
-	ErrCapabilitySkillNotFound  = errors.New("capability skill not found")
-	ErrAfterResponseUnavailable = errors.New("after-response scheduling unavailable")
-	ErrCapabilitiesUnavailable  = errors.New("capabilities dependency unavailable")
+	ErrCapabilityModelNotFound       = errors.New("capability model not found")
+	ErrCapabilitySkillNotFound       = errors.New("capability skill not found")
+	ErrCapabilityReplacementRequired = errors.New("capability removal requires an explicit replacement")
+	ErrAfterResponseUnavailable      = errors.New("after-response scheduling unavailable")
+	ErrCapabilitiesUnavailable       = errors.New("capabilities dependency unavailable")
 )
 
 type CapabilityProviders interface {
@@ -38,13 +47,32 @@ type CapabilityProviders interface {
 	AddModelWithMode(context.Context, providerconfig.AddModelRequest, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	ActivateModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	ActivateUtilityModelWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+	PreviewModelRemoval(context.Context, string) (providerconfig.ModelRemovalPreview, error)
+	PreviewProviderRemoval(context.Context, string) (providerconfig.ProviderRemovalPreview, error)
+	RemoveModelWithMode(context.Context, string, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+	RemoveModelWithModeAtRevision(context.Context, string, string, string, []providerconfig.SessionAliasChange, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+	RemoveWithMode(context.Context, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
 	Test(context.Context, string) error
 	TestProspective(context.Context, providerconfig.ProspectiveProbeRequest) error
 }
 
 type CapabilitySessions interface {
 	Get(context.Context, string) (*session.Session, error)
-	SetModelAlias(context.Context, string, string) error
+	SetModelAliasIfVersion(context.Context, string, string, int64) error
+	ModelAliasReferences(context.Context, string) ([]string, error)
+	ReplaceModelAlias(context.Context, string, string) error
+}
+
+type capabilityExactSessionRestorer interface {
+	RestoreModelAliases(context.Context, []session.ModelAliasChange) error
+}
+
+type capabilityRevisionProviderRemover interface {
+	RemoveWithExpectedRevision(context.Context, string, string, providerconfig.CommitMode) (providerconfig.MutationResult, error)
+}
+
+type capabilityLockedProviderSnapshot interface {
+	WithLockedSnapshot(context.Context, func(context.Context, providerconfig.Listing) error) error
 }
 
 type CapabilitySkills interface {
@@ -117,6 +145,26 @@ type CapabilityProviderTestResult struct {
 	Outcome providerconfig.ProbeOutcome `json:"outcome"`
 }
 
+// CapabilityRemovalReference names one sanitized resource that prevents a
+// removal from being treated as an implicit configuration change.
+type CapabilityRemovalReference struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// CapabilityRemovalPreview is a short-lived, credential-free destructive
+// operation preview. The token is opaque and bound server-side to the exact
+// current provider/session state.
+type CapabilityRemovalPreview struct {
+	Kind                string                       `json:"kind"`
+	Target              string                       `json:"target"`
+	Provider            string                       `json:"provider,omitempty"`
+	References          []CapabilityRemovalReference `json:"references"`
+	ReplacementRequired bool                         `json:"replacement_required"`
+	PreviewToken        string                       `json:"preview_token"`
+	ExpiresAt           time.Time                    `json:"expires_at"`
+}
+
 // Capabilities owns the narrow application operations used by the additive
 // Desk routes. It never receives or emits raw secret-store state.
 type Capabilities struct {
@@ -125,6 +173,8 @@ type Capabilities struct {
 	SkillSources CapabilitySkillSources
 	Skills       CapabilitySkills
 	Catalogue    CapabilityCatalogue
+	Previews     *PreviewStore
+	Now          func() time.Time
 }
 
 func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (CapabilitiesSnapshot, error) {
@@ -167,17 +217,27 @@ func (c *Capabilities) SetSessionModel(ctx context.Context, sessionID, alias str
 	if c == nil || c.Providers == nil || c.Sessions == nil {
 		return ErrCapabilitiesUnavailable
 	}
+	current, err := c.Sessions.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	alias = strings.TrimSpace(alias)
+	if locked, ok := c.Providers.(capabilityLockedProviderSnapshot); ok {
+		return locked.WithLockedSnapshot(ctx, func(lockedCtx context.Context, snapshot providerconfig.Listing) error {
+			if _, ok := snapshot.Models[alias]; !ok {
+				return ErrCapabilityModelNotFound
+			}
+			return c.Sessions.SetModelAliasIfVersion(lockedCtx, sessionID, alias, current.ModelAliasVersion)
+		})
+	}
 	snapshot, err := c.Providers.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	if _, ok := snapshot.Models[strings.TrimSpace(alias)]; !ok {
+	if _, ok := snapshot.Models[alias]; !ok {
 		return ErrCapabilityModelNotFound
 	}
-	if _, err := c.Sessions.Get(ctx, sessionID); err != nil {
-		return err
-	}
-	return c.Sessions.SetModelAlias(ctx, sessionID, alias)
+	return c.Sessions.SetModelAliasIfVersion(ctx, sessionID, alias, current.ModelAliasVersion)
 }
 
 func (c *Capabilities) SetDefaultModel(ctx context.Context, alias string) (providerconfig.MutationResult, error) {
@@ -206,6 +266,222 @@ func (c *Capabilities) EnrollProvider(ctx context.Context, request providerconfi
 		return providerconfig.MutationResult{}, ErrCapabilitiesUnavailable
 	}
 	return c.Providers.AddWithMode(ctx, request, providerconfig.CommitForRestart)
+}
+
+type capabilityRemovalBinding struct {
+	Kind       string                       `json:"kind"`
+	Target     string                       `json:"target"`
+	Revision   string                       `json:"revision"`
+	References []CapabilityRemovalReference `json:"references"`
+}
+
+func (c *Capabilities) now() time.Time {
+	if c != nil && c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
+}
+
+func (c *Capabilities) PreviewModelRemoval(ctx context.Context, alias string) (CapabilityRemovalPreview, error) {
+	if c == nil || c.Previews == nil {
+		return CapabilityRemovalPreview{}, ErrCapabilitiesUnavailable
+	}
+	binding, preview, err := c.currentModelRemovalBinding(ctx, alias)
+	if err != nil {
+		return CapabilityRemovalPreview{}, err
+	}
+	return c.issueRemovalPreview(binding, preview.Provider, preview.ReplacementRequired)
+}
+
+func (c *Capabilities) PreviewProviderRemoval(ctx context.Context, name string) (CapabilityRemovalPreview, error) {
+	if c == nil || c.Previews == nil {
+		return CapabilityRemovalPreview{}, ErrCapabilitiesUnavailable
+	}
+	binding, _, err := c.currentProviderRemovalBinding(ctx, name)
+	if err != nil {
+		return CapabilityRemovalPreview{}, err
+	}
+	return c.issueRemovalPreview(binding, "", false)
+}
+
+func (c *Capabilities) issueRemovalPreview(binding capabilityRemovalBinding, provider string, replacementRequired bool) (CapabilityRemovalPreview, error) {
+	resource, err := json.Marshal(binding)
+	if err != nil {
+		return CapabilityRemovalPreview{}, ErrCapabilitiesUnavailable
+	}
+	operation := capabilityModelRemovalOperation
+	if binding.Kind == "provider" {
+		operation = capabilityProviderRemovalOperation
+	}
+	token := c.Previews.Issue(operation, string(resource), capabilityRemovalPreviewTTL)
+	return CapabilityRemovalPreview{
+		Kind: binding.Kind, Target: binding.Target, Provider: provider,
+		References:          append([]CapabilityRemovalReference(nil), binding.References...),
+		ReplacementRequired: replacementRequired, PreviewToken: token,
+		ExpiresAt: c.now().Add(capabilityRemovalPreviewTTL),
+	}, nil
+}
+
+func (c *Capabilities) currentModelRemovalBinding(ctx context.Context, alias string) (capabilityRemovalBinding, CapabilityRemovalPreview, error) {
+	if c == nil || c.Providers == nil || c.Sessions == nil {
+		return capabilityRemovalBinding{}, CapabilityRemovalPreview{}, ErrCapabilitiesUnavailable
+	}
+	state, err := c.Providers.PreviewModelRemoval(ctx, strings.TrimSpace(alias))
+	if err != nil {
+		return capabilityRemovalBinding{}, CapabilityRemovalPreview{}, err
+	}
+	sessionIDs, err := c.Sessions.ModelAliasReferences(ctx, state.Alias)
+	if err != nil {
+		return capabilityRemovalBinding{}, CapabilityRemovalPreview{}, err
+	}
+	sort.Strings(sessionIDs)
+	references := make([]CapabilityRemovalReference, 0, len(state.Profiles)+len(sessionIDs)+2)
+	if state.Default {
+		references = append(references, CapabilityRemovalReference{Kind: "default", Name: "default"})
+	}
+	if state.Utility {
+		references = append(references, CapabilityRemovalReference{Kind: "utility", Name: "utility"})
+	}
+	for _, name := range state.Profiles {
+		references = append(references, CapabilityRemovalReference{Kind: "profile", Name: name})
+	}
+	for _, id := range sessionIDs {
+		references = append(references, CapabilityRemovalReference{Kind: "session", Name: id})
+	}
+	binding := capabilityRemovalBinding{Kind: "model", Target: state.Alias, Revision: state.Revision, References: references}
+	return binding, CapabilityRemovalPreview{
+		Kind: binding.Kind, Target: binding.Target, Provider: state.Provider,
+		References: references, ReplacementRequired: len(references) > 0,
+	}, nil
+}
+
+func (c *Capabilities) currentProviderRemovalBinding(ctx context.Context, name string) (capabilityRemovalBinding, CapabilityRemovalPreview, error) {
+	if c == nil || c.Providers == nil {
+		return capabilityRemovalBinding{}, CapabilityRemovalPreview{}, ErrCapabilitiesUnavailable
+	}
+	state, err := c.Providers.PreviewProviderRemoval(ctx, strings.TrimSpace(name))
+	if err != nil {
+		return capabilityRemovalBinding{}, CapabilityRemovalPreview{}, err
+	}
+	references := make([]CapabilityRemovalReference, 0, len(state.ModelAliases))
+	for _, alias := range state.ModelAliases {
+		references = append(references, CapabilityRemovalReference{Kind: "model_alias", Name: alias})
+	}
+	return capabilityRemovalBinding{Kind: "provider", Target: state.Name, Revision: state.Revision, References: references}, CapabilityRemovalPreview{
+		Kind: "provider", Target: state.Name, References: references,
+	}, nil
+}
+
+func encodeCapabilityRemovalBinding(binding capabilityRemovalBinding) (string, error) {
+	data, err := json.Marshal(binding)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (c *Capabilities) ConfirmModelRemoval(ctx context.Context, alias, replacement, token string) (providerconfig.MutationResult, error) {
+	if c == nil || c.Providers == nil || c.Sessions == nil || c.Previews == nil {
+		return providerconfig.MutationResult{}, ErrCapabilitiesUnavailable
+	}
+	resource, err := c.Previews.ConsumeBound(token, capabilityModelRemovalOperation)
+	if err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	var bound capabilityRemovalBinding
+	if err := json.Unmarshal([]byte(resource), &bound); err != nil || bound.Kind != "model" || bound.Target != strings.TrimSpace(alias) {
+		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	current, preview, err := c.currentModelRemovalBinding(ctx, alias)
+	if err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	currentResource, err := encodeCapabilityRemovalBinding(current)
+	if err != nil || resource != currentResource {
+		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	replacement = strings.TrimSpace(replacement)
+	if preview.ReplacementRequired && replacement == "" {
+		return providerconfig.MutationResult{}, ErrCapabilityReplacementRequired
+	}
+
+	var journalChanges []providerconfig.SessionAliasChange
+	for _, reference := range current.References {
+		if reference.Kind != "session" {
+			continue
+		}
+		value, getErr := c.Sessions.Get(ctx, reference.Name)
+		if getErr != nil {
+			return providerconfig.MutationResult{}, getErr
+		}
+		if value.ModelAlias != current.Target {
+			return providerconfig.MutationResult{}, ErrPreviewMismatch
+		}
+		journalChanges = append(journalChanges, providerconfig.SessionAliasChange{
+			SessionID: reference.Name, From: current.Target, To: replacement,
+			FromVersion: value.ModelAliasVersion, ToVersion: value.ModelAliasVersion + 1,
+			FromUpdatedAt: value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			ToUpdatedAt:   c.now().UTC().Format(time.RFC3339Nano),
+		})
+	}
+	result, err := c.Providers.RemoveModelWithModeAtRevision(ctx, current.Target, replacement, current.Revision, journalChanges, providerconfig.CommitForRestart)
+	if err == nil {
+		return result, nil
+	}
+	restoreErr := c.restoreSessionAliasChanges(ctx, journalChanges)
+	if errors.Is(err, providerconfig.ErrRevisionMismatch) {
+		return providerconfig.MutationResult{}, errors.Join(ErrPreviewMismatch, restoreErr)
+	}
+	return providerconfig.MutationResult{}, errors.Join(err, restoreErr)
+}
+
+func (c *Capabilities) restoreSessionAliasChanges(ctx context.Context, changes []providerconfig.SessionAliasChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	restorer, ok := c.Sessions.(capabilityExactSessionRestorer)
+	if !ok {
+		return errors.New("exact session alias restoration is unavailable")
+	}
+	modelChanges := make([]session.ModelAliasChange, 0, len(changes))
+	for _, change := range changes {
+		modelChanges = append(modelChanges, session.ModelAliasChange{
+			SessionID: change.SessionID, OriginalAlias: change.From, ReplacementAlias: change.To,
+			OriginalVersion: change.FromVersion, ReplacementVersion: change.ToVersion,
+			OriginalUpdatedAt: change.FromUpdatedAt, ReplacementUpdatedAt: change.ToUpdatedAt,
+		})
+	}
+	return restorer.RestoreModelAliases(ctx, modelChanges)
+}
+
+func (c *Capabilities) ConfirmProviderRemoval(ctx context.Context, name, token string) (providerconfig.MutationResult, error) {
+	if c == nil || c.Providers == nil || c.Previews == nil {
+		return providerconfig.MutationResult{}, ErrCapabilitiesUnavailable
+	}
+	resource, err := c.Previews.ConsumeBound(token, capabilityProviderRemovalOperation)
+	if err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	var bound capabilityRemovalBinding
+	if err := json.Unmarshal([]byte(resource), &bound); err != nil || bound.Kind != "provider" || bound.Target != strings.TrimSpace(name) {
+		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	current, _, err := c.currentProviderRemovalBinding(ctx, name)
+	if err != nil {
+		return providerconfig.MutationResult{}, err
+	}
+	currentResource, err := encodeCapabilityRemovalBinding(current)
+	if err != nil || resource != currentResource {
+		return providerconfig.MutationResult{}, ErrPreviewMismatch
+	}
+	if remover, ok := c.Providers.(capabilityRevisionProviderRemover); ok {
+		result, err := remover.RemoveWithExpectedRevision(ctx, current.Target, current.Revision, providerconfig.CommitForRestart)
+		if errors.Is(err, providerconfig.ErrRevisionMismatch) {
+			return providerconfig.MutationResult{}, ErrPreviewMismatch
+		}
+		return result, err
+	}
+	return c.Providers.RemoveWithMode(ctx, current.Target, providerconfig.CommitForRestart)
 }
 
 func (c *Capabilities) TestProvider(ctx context.Context, name string) (CapabilityProviderTestResult, error) {
@@ -392,7 +668,7 @@ type CapabilitiesRouteConfig struct {
 	Restart  RestartScheduler
 }
 
-// RegisterCapabilitiesRoutes mounts only the additive Task 4 API endpoints.
+// RegisterCapabilitiesRoutes mounts the Desk capability API endpoints.
 // The caller owns security, idempotency, the shared router, and server wiring.
 func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRouteConfig) {
 	if mux == nil || routeConfig.Service == nil {
@@ -410,9 +686,13 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	mux.Handle("POST /api/v1/desk/models/utility", mutation(capabilityMutationMaxBodyBytes, globalAliasHandler(routeConfig, true)))
 	mux.Handle("POST /api/v1/desk/models/catalogue/refresh", mutation(capabilityMutationMaxBodyBytes, catalogueRefreshHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/models", mutation(capabilityMutationMaxBodyBytes, addModelHandler(routeConfig)))
+	mux.Handle("GET /api/v1/desk/models/{alias}/removal-preview", modelRemovalPreviewHandler(routeConfig.Service))
+	mux.Handle("POST /api/v1/desk/models/{alias}/remove", mutation(capabilityMutationMaxBodyBytes, modelRemovalHandler(routeConfig)))
 	mux.Handle("POST /api/v1/desk/providers", mutation(CapabilityProviderMaxBodyBytes, providerEnrollmentHandler(routeConfig)))
 	mux.Handle("POST /api/v1/desk/providers/test", mutation(CapabilityProviderMaxBodyBytes, providerProspectiveTestHandler(routeConfig.Service)))
 	mux.Handle("POST /api/v1/desk/providers/{name}/test", mutation(capabilityMutationMaxBodyBytes, providerTestHandler(routeConfig.Service)))
+	mux.Handle("GET /api/v1/desk/providers/{name}/removal-preview", providerRemovalPreviewHandler(routeConfig.Service))
+	mux.Handle("POST /api/v1/desk/providers/{name}/remove", mutation(capabilityMutationMaxBodyBytes, providerRemovalHandler(routeConfig)))
 	mux.Handle("POST /api/v1/desk/skills/session/attach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, true)))
 	mux.Handle("POST /api/v1/desk/skills/session/detach", mutation(capabilityMutationMaxBodyBytes, sessionSkillHandler(routeConfig.Service, false)))
 	mux.Handle("POST /api/v1/desk/skills/stage", mutation(capabilityMutationMaxBodyBytes, stageSkillHandler(routeConfig.Service)))
@@ -420,6 +700,79 @@ func RegisterCapabilitiesRoutes(mux *http.ServeMux, routeConfig CapabilitiesRout
 	mux.Handle("POST /api/v1/desk/skills/{name}/activate", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "activate")))
 	mux.Handle("POST /api/v1/desk/skills/{name}/deactivate", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "deactivate")))
 	mux.Handle("POST /api/v1/desk/skills/{name}/uninstall", mutation(capabilityMutationMaxBodyBytes, skillLifecycleHandler(routeConfig, "uninstall")))
+}
+
+func modelRemovalPreviewHandler(service *Capabilities) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		preview, err := service.PreviewModelRemoval(r.Context(), r.PathValue("alias"))
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	})
+}
+
+func modelRemovalHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		after, ok := w.(AfterResponseWriter)
+		if !ok || routeConfig.Restart == nil {
+			writeCapabilityError(w, ErrAfterResponseUnavailable)
+			return
+		}
+		var request struct {
+			PreviewToken string `json:"preview_token"`
+			Replacement  string `json:"replacement"`
+		}
+		if !decodeCapabilityRequest(w, r, &request) {
+			return
+		}
+		result, err := routeConfig.Service.ConfirmModelRemoval(
+			r.Context(), r.PathValue("alias"), request.Replacement, request.PreviewToken,
+		)
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		deferRestart(after, routeConfig.Restart, result.TransactionID)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
+	}
+}
+
+func providerRemovalPreviewHandler(service *Capabilities) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		preview, err := service.PreviewProviderRemoval(r.Context(), r.PathValue("name"))
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	})
+}
+
+func providerRemovalHandler(routeConfig CapabilitiesRouteConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		after, ok := w.(AfterResponseWriter)
+		if !ok || routeConfig.Restart == nil {
+			writeCapabilityError(w, ErrAfterResponseUnavailable)
+			return
+		}
+		var request struct {
+			PreviewToken string `json:"preview_token"`
+		}
+		if !decodeCapabilityRequest(w, r, &request) {
+			return
+		}
+		result, err := routeConfig.Service.ConfirmProviderRemoval(
+			r.Context(), r.PathValue("name"), request.PreviewToken,
+		)
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		deferRestart(after, routeConfig.Restart, result.TransactionID)
+		writeCapabilityMutation(w, result, routeConfig.Restart)
+	}
 }
 
 func capabilitiesSnapshotHandler(service *Capabilities) http.Handler {
@@ -795,11 +1148,18 @@ type capabilityErrorMapping struct {
 // First matching errors.Is wins. Unmapped errors keep the generic fallback.
 var capabilityErrorMappings = []capabilityErrorMapping{
 	{session.ErrNotFound, http.StatusNotFound, "session_not_found", "session was not found"},
+	{session.ErrModelAliasChanged, http.StatusConflict, "session_model_changed", "session model changed; refresh and try again"},
 	{ErrCapabilityModelNotFound, http.StatusNotFound, "model_not_found", "model alias was not found"},
 	{ErrCapabilitySkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
 	{skill.ErrSkillNotFound, http.StatusNotFound, "skill_not_found", "skill was not found"},
 	{skill.ErrSkillActive, http.StatusConflict, "skill_active", "deactivate the skill before uninstalling it"},
 	{skill.ErrSkillAttached, http.StatusConflict, "skill_attached", "skill is still attached to one or more sessions"},
+	{ErrCapabilityReplacementRequired, http.StatusConflict, "replacement_required", "choose an explicit replacement for every current reference before removing this model alias"},
+	{ErrPreviewExpired, http.StatusConflict, "preview_invalid", "removal confirmation is invalid or expired; request a new preview"},
+	{ErrPreviewEvicted, http.StatusConflict, "preview_invalid", "removal confirmation is invalid or expired; request a new preview"},
+	{ErrPreviewMismatch, http.StatusConflict, "preview_invalid", "removal confirmation no longer matches current state; request a new preview"},
+	{ErrPreviewUnknown, http.StatusConflict, "preview_invalid", "removal confirmation is invalid or expired; request a new preview"},
+	{ErrPreviewUsed, http.StatusConflict, "preview_invalid", "removal confirmation was already used; request a new preview"},
 	{ErrAfterResponseUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
 	{ErrCapabilitiesUnavailable, http.StatusServiceUnavailable, "capabilities_unavailable", "capabilities are unavailable"},
 

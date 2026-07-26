@@ -44,6 +44,22 @@ func TestPreviewTokenBindingsAreExact(t *testing.T) {
 	}
 }
 
+func TestPreviewTokenReturnsBoundResourceOnlyOnce(t *testing.T) {
+	store := NewPreviewStore(fixedPreviewClock(time.Unix(1_600, 0)), previewEntropy(1))
+	token := store.Issue("provider-removal", "openai|revision-1", time.Minute)
+
+	resource, err := store.ConsumeBound(token, "provider-removal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource != "openai|revision-1" {
+		t.Fatalf("bound resource = %q", resource)
+	}
+	if _, err := store.ConsumeBound(token, "provider-removal"); !errors.Is(err, ErrPreviewUsed) {
+		t.Fatalf("replay error = %v", err)
+	}
+}
+
 func TestPreviewTokenExpiresAndPruningPreservesExpiredOutcome(t *testing.T) {
 	now := time.Unix(2_000, 0)
 	store := NewPreviewStore(func() time.Time { return now }, previewEntropy(2))

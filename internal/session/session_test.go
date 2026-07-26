@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,12 +92,221 @@ func TestSessionModelAliasPersistsAcrossGetLatestAndList(t *testing.T) {
 		t.Fatalf("Get = %+v, %v", got, err)
 	}
 	latest, err := sessions.Latest(ctx)
-	if err != nil || latest.ModelAlias != "claude" {
+	if err != nil || latest.ModelAlias != "claude" || latest.ModelAliasVersion != 1 {
 		t.Fatalf("Latest = %+v, %v", latest, err)
 	}
 	list, err := sessions.List(ctx, 10)
-	if err != nil || len(list) != 1 || list[0].ModelAlias != "claude" {
+	if err != nil || len(list) != 1 || list[0].ModelAlias != "claude" || list[0].ModelAliasVersion != 1 {
 		t.Fatalf("List = %+v, %v", list, err)
+	}
+}
+
+func TestModelAliasReferencesAreDeterministic(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := sessions.Create(ctx, "third")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		id    string
+		alias string
+	}{
+		{first.ID, "removed"},
+		{second.ID, "kept"},
+		{third.ID, "removed"},
+	} {
+		if err := sessions.SetModelAlias(ctx, item.id, item.alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := sessions.ModelAliasReferences(ctx, "removed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{first.ID, third.ID}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("references = %v, want %v", got, want)
+	}
+	empty, err := sessions.ModelAliasReferences(ctx, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("missing references = %v, want empty", empty)
+	}
+}
+
+func TestReplaceModelAliasOnlyMovesExplicitlySelectedSessions(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	removed, err := sessions.Create(ctx, "removed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := sessions.Create(ctx, "kept")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, removed.ID, "removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, kept.ID, "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ReplaceModelAlias(ctx, "removed", "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	gotRemoved, err := sessions.Get(ctx, removed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotKept, err := sessions.Get(ctx, kept.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRemoved.ModelAlias != "replacement" || gotKept.ModelAlias != "kept" {
+		t.Fatalf("session aliases = %q/%q", gotRemoved.ModelAlias, gotKept.ModelAlias)
+	}
+}
+
+func TestModelAliasRecoveryIsExactAndDoesNotOverwriteNewerChoices(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []*Session{first, second} {
+		if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err = sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := []ModelAliasChange{
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: first.ModelAliasVersion, ReplacementVersion: first.ModelAliasVersion + 1, OriginalUpdatedAt: first.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: second.ModelAliasVersion, ReplacementVersion: second.ModelAliasVersion + 1, OriginalUpdatedAt: second.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+	}
+	if err := sessions.ReplaceModelAliases(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, first.ID, "today-newer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.RestoreModelAliases(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	gotFirst, err := sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSecond, err := sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst.ModelAlias != "today-newer" || gotSecond.ModelAlias != "removed" {
+		t.Fatalf("recovered aliases = %q/%q, want newer choice/original", gotFirst.ModelAlias, gotSecond.ModelAlias)
+	}
+}
+
+func TestModelAliasRecoveryPreservesConcurrentSameValueChoice(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	item, err := sessions.Create(ctx, "same value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sessions.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := ModelAliasChange{
+		SessionID: item.ID, OriginalAlias: "removed", ReplacementAlias: "replacement",
+		OriginalVersion: before.ModelAliasVersion, ReplacementVersion: before.ModelAliasVersion + 1,
+		OriginalUpdatedAt: before.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z",
+	}
+	if err := sessions.ReplaceModelAliases(ctx, []ModelAliasChange{change}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, item.ID, "replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.RestoreModelAliases(ctx, []ModelAliasChange{change}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sessions.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ModelAlias != "replacement" || got.ModelAliasVersion != change.ReplacementVersion+1 {
+		t.Fatalf("same-value concurrent choice = alias %q version %d, want replacement version %d", got.ModelAlias, got.ModelAliasVersion, change.ReplacementVersion+1)
+	}
+}
+
+func TestReplaceModelAliasesIsAllOrNothingWhenOneReferenceChanged(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	first, err := sessions.Create(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []*Session{first, second} {
+		if err := sessions.SetModelAlias(ctx, item.ID, "removed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err = sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = sessions.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetModelAlias(ctx, second.ID, "today-newer"); err != nil {
+		t.Fatal(err)
+	}
+	changes := []ModelAliasChange{
+		{SessionID: first.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: first.ModelAliasVersion, ReplacementVersion: first.ModelAliasVersion + 1, OriginalUpdatedAt: first.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+		{SessionID: second.ID, OriginalAlias: "removed", ReplacementAlias: "replacement", OriginalVersion: second.ModelAliasVersion, ReplacementVersion: second.ModelAliasVersion + 1, OriginalUpdatedAt: second.UpdatedAt.Format(time.RFC3339Nano), ReplacementUpdatedAt: "2026-07-25T22:00:00Z"},
+	}
+	if err := sessions.ReplaceModelAliases(ctx, changes); err == nil {
+		t.Fatal("replacement unexpectedly succeeded after a concurrent session choice")
+	}
+	gotFirst, err := sessions.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst.ModelAlias != "removed" {
+		t.Fatalf("first alias = %q, want unchanged after all-or-nothing failure", gotFirst.ModelAlias)
 	}
 }
 

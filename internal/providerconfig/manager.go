@@ -32,9 +32,8 @@ import (
 var (
 	// ErrLocked means another provider mutation owns the host lock.
 	ErrLocked = errors.New("provider configuration is locked")
-	// ErrAliasConflict is wrapped by the stable legacy error text for a
-	// requested model alias that already exists.
-	ErrAliasConflict = errors.New("model alias")
+	// ErrAliasConflict identifies a requested model alias that already exists.
+	ErrAliasConflict = errors.New("model alias already exists")
 	// ErrReferenced means a connection cannot be removed while model aliases
 	// still point at it.
 	ErrReferenced = errors.New("provider connection is referenced")
@@ -50,6 +49,9 @@ var (
 	// ErrDeferredIntegrity means an awaiting-restart journal is not bound to
 	// the exact config generation currently committed on disk.
 	ErrDeferredIntegrity = errors.New("deferred provider transaction integrity check failed")
+	// ErrRevisionMismatch means a mutation's preview no longer describes the
+	// config held under the provider manager lock.
+	ErrRevisionMismatch = errors.New("provider configuration revision mismatch")
 )
 
 // Probe validates one concrete provider/model pair without mutating live state.
@@ -90,6 +92,36 @@ type MutationResult struct {
 	RestartRequired bool   `json:"restart_required"`
 	TransactionID   string `json:"transaction_id,omitempty"`
 }
+
+// SessionAliasChange binds one persisted session to the exact alias transition
+// in a model-removal transaction. It is deliberately credential-free and
+// scoped to one session ID.
+type SessionAliasChange struct {
+	SessionID     string `json:"session_id"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	FromVersion   int64  `json:"from_version,omitempty"`
+	ToVersion     int64  `json:"to_version,omitempty"`
+	FromUpdatedAt string `json:"from_updated_at,omitempty"`
+	ToUpdatedAt   string `json:"to_updated_at,omitempty"`
+}
+
+// SessionRecovery restores session choices after provider files are rolled
+// back. Implementations must use the recorded alias, version, and updated-at
+// values so a newer Today choice is never overwritten.
+type SessionRecovery func(context.Context, []SessionAliasChange) error
+
+// SessionApply applies the exact session transitions recorded in a provider
+// journal while the provider manager lock is held.
+type SessionApply func(context.Context, []SessionAliasChange) error
+
+// SessionAliasPlanner snapshots the current session transitions while the
+// provider manager lock is held. This closes the gap where a stale session
+// writer could race a model removal after the initial preview saw no session
+// reference.
+type SessionAliasPlanner func(context.Context, string, string) ([]SessionAliasChange, error)
+
+type sessionAliasChangesContextKey struct{}
 
 // CatalogSnapshot is the private provider catalogue input for one enrollment.
 type CatalogSnapshot struct {
@@ -144,6 +176,25 @@ type Listing struct {
 	Models       map[string]ModelSummary    `json:"models"`
 }
 
+// ModelRemovalPreview is the credential-free provider state needed to confirm
+// an alias removal. Revision binds the preview to the exact config bytes.
+type ModelRemovalPreview struct {
+	Alias    string
+	Provider string
+	Default  bool
+	Utility  bool
+	Profiles []string
+	Revision string
+}
+
+// ProviderRemovalPreview is the credential-free provider state needed to
+// confirm a connection removal.
+type ProviderRemovalPreview struct {
+	Name         string
+	ModelAliases []string
+	Revision     string
+}
+
 // ProviderSummary is the public, credential-free part of a connection.
 type ProviderSummary struct {
 	Type      string `json:"type"`
@@ -175,10 +226,37 @@ type Manager struct {
 	RestoreService func(context.Context, bool) error
 	// AfterCommit is an observation/fault-injection hook. It is invoked after
 	// the named resource ("secret" then "config") is durably committed.
-	AfterCommit     func(resource string) error
-	CrashAfterPhase func(phase string) error
+	AfterCommit         func(resource string) error
+	CrashAfterPhase     func(phase string) error
+	SessionApply        SessionApply
+	SessionRecovery     SessionRecovery
+	SessionAliasPlanner SessionAliasPlanner
 	// afterReadStatus is a deterministic concurrency-test seam.
 	afterReadStatus func()
+}
+
+// SetSessionRecovery wires the process-local half of the durable model-removal
+// participant. The journal supplies exact changes after a process restart.
+func (m *Manager) SetSessionRecovery(handler SessionRecovery) {
+	if m != nil {
+		m.SessionRecovery = handler
+	}
+}
+
+// SetSessionApply wires the process-local session participant for model
+// removal transactions.
+func (m *Manager) SetSessionApply(handler SessionApply) {
+	if m != nil {
+		m.SessionApply = handler
+	}
+}
+
+// SetSessionAliasPlanner wires the process-local session participant that
+// refreshes model-removal transitions under the provider lock.
+func (m *Manager) SetSessionAliasPlanner(handler SessionAliasPlanner) {
+	if m != nil {
+		m.SessionAliasPlanner = handler
+	}
 }
 
 type commitModeContextKey struct{}
@@ -269,7 +347,7 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 	}
 	for alias := range req.Models {
 		if _, exists := before.cfg.Models[alias]; exists {
-			return fmt.Errorf("%w %q already exists", ErrAliasConflict, alias)
+			return fmt.Errorf("%w %q", ErrAliasConflict, alias)
 		}
 	}
 	scopeID, err := m.newCatalogScope()
@@ -347,7 +425,26 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (err error) {
 }
 
 // Remove deletes an unreferenced connection and its scoped credential.
-func (m *Manager) Remove(ctx context.Context, name string) (err error) {
+func (m *Manager) Remove(ctx context.Context, name string) error {
+	_, err := m.RemoveWithMode(ctx, name, CommitAndReconcile)
+	return err
+}
+
+// RemoveWithMode deletes an unreferenced connection using the requested
+// commit lifecycle.
+func (m *Manager) RemoveWithMode(ctx context.Context, name string, mode CommitMode) (MutationResult, error) {
+	return m.RemoveWithExpectedRevision(ctx, name, "", mode)
+}
+
+// RemoveWithExpectedRevision deletes a connection only when expectedRevision
+// still identifies the config held under the manager lock at commit time.
+func (m *Manager) RemoveWithExpectedRevision(ctx context.Context, name, expectedRevision string, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		return m.remove(modeCtx, name, expectedRevision)
+	})
+}
+
+func (m *Manager) remove(ctx context.Context, name, expectedRevision string) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err
@@ -400,7 +497,76 @@ func (m *Manager) Remove(ctx context.Context, name string) (err error) {
 		return err
 	}
 	defer func() { _ = os.Remove(secretStage) }()
-	return m.commit(ctx, before, configStage, secretStage, candidate, "")
+	return m.commitWithExpectedRevision(ctx, before, configStage, secretStage, candidate, "", expectedRevision)
+}
+
+// PreviewModelRemoval returns the current credential-free references for alias.
+func (m *Manager) PreviewModelRemoval(ctx context.Context, alias string) (ModelRemovalPreview, error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	defer func() { _ = lease.Release() }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	if !config.ValidModelAlias(alias) {
+		return ModelRemovalPreview{}, fmt.Errorf("invalid model alias %q", alias)
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
+		return ModelRemovalPreview{}, err
+	}
+	target, ok := before.cfg.Models[alias]
+	if !ok {
+		return ModelRemovalPreview{}, fmt.Errorf("model alias %q does not exist", alias)
+	}
+	profiles := make([]string, 0)
+	for name, profile := range before.cfg.Agent.Profiles {
+		if profile.Model == alias {
+			profiles = append(profiles, name)
+		}
+	}
+	sort.Strings(profiles)
+	return ModelRemovalPreview{
+		Alias: alias, Provider: target.Provider,
+		Default:  before.cfg.Agent.DefaultModel == alias,
+		Utility:  before.cfg.Agent.UtilityModel == alias,
+		Profiles: profiles,
+		Revision: transactionIDForBytes(before.configBytes),
+	}, nil
+}
+
+// PreviewProviderRemoval returns the current aliases that reference name.
+func (m *Manager) PreviewProviderRemoval(ctx context.Context, name string) (ProviderRemovalPreview, error) {
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	defer func() { _ = lease.Release() }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if !config.ValidProviderConnectionName(name) {
+		return ProviderRemovalPreview{}, fmt.Errorf("invalid connection name %q", name)
+	}
+	before, err := m.capture(ctx)
+	if err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if err := ensureCanonicalManagedSource(before.configBytes, before.cfg); err != nil {
+		return ProviderRemovalPreview{}, err
+	}
+	if _, ok := before.cfg.Providers[name]; !ok {
+		return ProviderRemovalPreview{}, fmt.Errorf("provider connection %q does not exist", name)
+	}
+	return ProviderRemovalPreview{
+		Name: name, ModelAliases: referencedAliases(before.cfg, name),
+		Revision: transactionIDForBytes(before.configBytes),
+	}, nil
 }
 
 // Test probes the first alias for a named connection using its encrypted key.
@@ -540,7 +706,7 @@ func (m *Manager) addModel(ctx context.Context, req AddModelRequest) (err error)
 		return err
 	}
 	if _, ok := before.cfg.Models[req.Alias]; ok {
-		return fmt.Errorf("%w %q already exists", ErrAliasConflict, req.Alias)
+		return fmt.Errorf("%w %q", ErrAliasConflict, req.Alias)
 	}
 
 	target := config.ModelTarget{Provider: req.ConnectionName, Model: req.UpstreamModel}
@@ -687,7 +853,37 @@ func (m *Manager) activateModel(ctx context.Context, alias string, utility bool)
 // RemoveModel deletes an alias. replacement reassigns default, utility, and
 // profile references; without it, default/utility references are cleared and
 // profile references fail closed.
-func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (err error) {
+func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) error {
+	_, err := m.RemoveModelWithMode(ctx, alias, replacement, CommitAndReconcile)
+	return err
+}
+
+// RemoveModelWithMode deletes an alias using the requested commit lifecycle.
+func (m *Manager) RemoveModelWithMode(ctx context.Context, alias, replacement string, mode CommitMode) (MutationResult, error) {
+	return m.RemoveModelWithExpectedRevision(ctx, alias, replacement, "", mode)
+}
+
+// RemoveModelWithExpectedRevision deletes an alias only when expectedRevision
+// still identifies the config held under the manager lock immediately before
+// the durable commit. An empty revision preserves the legacy unbound API.
+func (m *Manager) RemoveModelWithExpectedRevision(ctx context.Context, alias, replacement, expectedRevision string, mode CommitMode) (MutationResult, error) {
+	return m.RemoveModelWithModeAtRevision(ctx, alias, replacement, expectedRevision, nil, mode)
+}
+
+// RemoveModelWithModeAtRevision records exact session alias changes in the
+// provider journal before committing the config mutation. If the transaction
+// later rolls back, SessionRecovery receives the same changes after provider
+// files are restored.
+func (m *Manager) RemoveModelWithModeAtRevision(ctx context.Context, alias, replacement, expectedRevision string, changes []SessionAliasChange, mode CommitMode) (MutationResult, error) {
+	return runWithCommitMode(ctx, mode, func(modeCtx context.Context) error {
+		if len(changes) > 0 {
+			modeCtx = context.WithValue(modeCtx, sessionAliasChangesContextKey{}, append([]SessionAliasChange(nil), changes...))
+		}
+		return m.removeModel(modeCtx, alias, replacement, expectedRevision)
+	})
+}
+
+func (m *Manager) removeModel(ctx context.Context, alias, replacement, expectedRevision string) (err error) {
 	lease, err := m.acquire(ctx)
 	if err != nil {
 		return err
@@ -710,6 +906,13 @@ func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (e
 		if _, ok := before.cfg.Models[replacement]; !ok {
 			return fmt.Errorf("replacement model alias %q does not exist", replacement)
 		}
+	}
+	if m.SessionAliasPlanner != nil {
+		changes, planErr := m.SessionAliasPlanner(ctx, alias, replacement)
+		if planErr != nil {
+			return fmt.Errorf("plan session aliases: %w", planErr)
+		}
+		ctx = context.WithValue(ctx, sessionAliasChangesContextKey{}, append([]SessionAliasChange(nil), changes...))
 	}
 	for name, profile := range before.cfg.Agent.Profiles {
 		if profile.Model == alias && replacement == "" {
@@ -803,7 +1006,7 @@ func (m *Manager) RemoveModel(ctx context.Context, alias, replacement string) (e
 			return redactError(probeErr, key)
 		}
 	}
-	return m.commit(ctx, before, stage, secretStage, candidate, "")
+	return m.commitWithExpectedRevision(ctx, before, stage, secretStage, candidate, "", expectedRevision)
 }
 
 func equalMaps[V comparable](a, b map[string]V) bool {
@@ -853,6 +1056,10 @@ func (m *Manager) Snapshot(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
+	return listingFromConfig(cfg, status), nil
+}
+
+func listingFromConfig(cfg config.Config, status Status) Listing {
 	providers := make(map[string]ProviderSummary, len(cfg.Providers))
 	for name, connection := range cfg.Providers {
 		providers[name] = ProviderSummary{Type: connection.Type, BaseURL: connection.BaseURL, MaxTokens: connection.MaxTokens}
@@ -867,7 +1074,33 @@ func (m *Manager) Snapshot(ctx context.Context) (Listing, error) {
 		UtilityModel: cfg.Agent.UtilityModel,
 		Providers:    providers,
 		Models:       models,
-	}, nil
+	}
+}
+
+// WithLockedSnapshot runs fn with a credential-free provider snapshot while
+// retaining the provider manager lock for the callback. Session model writes
+// use this boundary so a removal cannot commit between validation and CAS.
+func (m *Manager) WithLockedSnapshot(ctx context.Context, fn func(context.Context, Listing) error) (err error) {
+	if fn == nil {
+		return errors.New("locked provider snapshot callback is required")
+	}
+	lease, err := m.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lease.Release()) }()
+	if err := m.recoverLocked(ctx); err != nil {
+		return err
+	}
+	cfg, err := config.Load(m.ConfigPath)
+	if err != nil {
+		return err
+	}
+	status, err := m.statusFromConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	return fn(ctx, listingFromConfig(cfg, status))
 }
 
 // List returns a deterministic, credential-free JSON document.
@@ -1035,10 +1268,32 @@ func (m *Manager) stageSecrets(original []byte, mutate func(secret.Store) error)
 }
 
 func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, key string) (err error) {
+	return m.commitWithExpectedRevision(ctx, before, configStage, secretStage, candidate, key, "")
+}
+
+func (m *Manager) commitWithExpectedRevision(ctx context.Context, before snapshot, configStage, secretStage string, candidate config.Config, key, expectedRevision string) (err error) {
 	state := commitState(ctx)
+	if expectedRevision != "" {
+		current, readErr := os.ReadFile(m.ConfigPath)
+		if readErr != nil {
+			return readErr
+		}
+		if transactionIDForBytes(current) != expectedRevision {
+			return ErrRevisionMismatch
+		}
+	}
 	transactionID, err := transactionIDForStage(configStage)
 	if err != nil {
 		return err
+	}
+	sessionAliasChanges, _ := ctx.Value(sessionAliasChangesContextKey{}).([]SessionAliasChange)
+	if len(sessionAliasChanges) > 0 && (m.SessionApply == nil || m.SessionRecovery == nil) {
+		return errors.New("session transaction handlers are not configured")
+	}
+	for _, change := range sessionAliasChanges {
+		if change.FromVersion == 0 || change.ToVersion != change.FromVersion+1 || change.FromUpdatedAt == "" || change.ToUpdatedAt == "" {
+			return errors.New("exact session alias transition version is required")
+		}
 	}
 	journal := transactionJournal{
 		Phase: "prepared", ConfigExisted: before.configExist, SecretExisted: before.secretExist,
@@ -1046,6 +1301,7 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 		SecretMode: uint32(before.secretMode), ReadyMode: uint32(before.readyMode),
 		ServiceActive: before.serviceActive, TransactionID: transactionID,
 	}
+	journal.SessionAliasChanges = append([]SessionAliasChange(nil), sessionAliasChanges...)
 	if err := writeBackups(m, before); err != nil {
 		return err
 	}
@@ -1058,6 +1314,14 @@ func (m *Manager) commit(ctx context.Context, before snapshot, configStage, secr
 		}
 		err = errors.Join(redactError(err, key), redactError(m.recoverLocked(ctx), key))
 	}()
+	if len(sessionAliasChanges) > 0 {
+		if err = m.SessionApply(ctx, sessionAliasChanges); err != nil {
+			return fmt.Errorf("apply session aliases: %w", err)
+		}
+		if err = m.crashPoint("session_applied"); err != nil {
+			return err
+		}
+	}
 
 	if secretStage != "" {
 		if err = commitStage(secretStage, m.SecretsPath, 0o600); err != nil {
@@ -1768,15 +2032,16 @@ func writeBackups(m *Manager, before snapshot) error {
 }
 
 type transactionJournal struct {
-	Phase         string `json:"phase"`
-	TransactionID string `json:"transaction_id,omitempty"`
-	ConfigExisted bool   `json:"config_existed"`
-	SecretExisted bool   `json:"secret_existed"`
-	ReadyExisted  bool   `json:"ready_existed"`
-	ConfigMode    uint32 `json:"config_mode"`
-	SecretMode    uint32 `json:"secret_mode"`
-	ReadyMode     uint32 `json:"ready_mode"`
-	ServiceActive bool   `json:"service_active"`
+	Phase               string               `json:"phase"`
+	TransactionID       string               `json:"transaction_id,omitempty"`
+	ConfigExisted       bool                 `json:"config_existed"`
+	SecretExisted       bool                 `json:"secret_existed"`
+	ReadyExisted        bool                 `json:"ready_existed"`
+	ConfigMode          uint32               `json:"config_mode"`
+	SecretMode          uint32               `json:"secret_mode"`
+	ReadyMode           uint32               `json:"ready_mode"`
+	ServiceActive       bool                 `json:"service_active"`
+	SessionAliasChanges []SessionAliasChange `json:"session_alias_changes,omitempty"`
 }
 
 func (m *Manager) journalPath() string { return m.LockPath + ".transaction.json" }
@@ -1856,6 +2121,14 @@ func (m *Manager) rollbackJournal(ctx context.Context, j *transactionJournal) er
 	}
 	if err := m.RestoreService(ctx, j.ServiceActive); err != nil {
 		return fmt.Errorf("restore previous service state: %w", err)
+	}
+	if len(j.SessionAliasChanges) > 0 {
+		if m.SessionRecovery == nil {
+			return errors.New("cannot recover provider transaction: session recovery handler is not configured")
+		}
+		if err := m.SessionRecovery(ctx, j.SessionAliasChanges); err != nil {
+			return fmt.Errorf("restore session aliases: %w", err)
+		}
 	}
 	if err := m.advanceJournal(j, "rolled_back"); err != nil {
 		return err
