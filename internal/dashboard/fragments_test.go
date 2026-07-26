@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,28 @@ func TestFragmentNegotiationEscapesHTMLAndKeepsJSONFallback(t *testing.T) {
 	if jsonResponse.Code != http.StatusOK || !strings.HasPrefix(jsonResponse.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("JSON response = %d %q", jsonResponse.Code, jsonResponse.Header().Get("Content-Type"))
 	}
+	if got := jsonResponse.Header()["Vary"]; !reflect.DeepEqual(got, []string{"Accept", "HX-Request"}) {
+		t.Fatalf("JSON Vary = %#v, want additive Accept and HX-Request values", got)
+	}
 	var payload CapabilitiesSnapshot
 	if err := json.Unmarshal(jsonResponse.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("JSON fallback: %v", err)
+	}
+}
+
+func TestFragmentNegotiationSetsCombinedHTMLVaryBeforeHandler(t *testing.T) {
+	var seen string
+	handler := negotiateFragments(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		seen = w.Header().Get("Vary")
+		writeJSON(w, http.StatusOK, CapabilitiesSnapshot{})
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/capabilities", nil)
+	request.Header.Set("Accept", "text/html")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if seen != "Accept, HX-Request" {
+		t.Fatalf("Vary visible to HTML handler = %q, want combined header", seen)
 	}
 }
 

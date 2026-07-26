@@ -42,12 +42,13 @@ type wantsHTMLWriter interface {
 
 func negotiateFragments(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Vary", "Accept")
-		w.Header().Add("Vary", "HX-Request")
 		if !wantsHTMLRequest(r) {
+			w.Header().Add("Vary", "Accept")
+			w.Header().Add("Vary", "HX-Request")
 			next.ServeHTTP(w, r)
 			return
 		}
+		w.Header().Set("Vary", "Accept, HX-Request")
 		marked := fragmentResponseWriter{ResponseWriter: w, request: r}
 		if after, ok := w.(AfterResponseWriter); ok {
 			next.ServeHTTP(fragmentAfterResponseWriter{fragmentResponseWriter: marked, after: after}, r)
@@ -78,7 +79,6 @@ func writeNegotiatedValue(w http.ResponseWriter, status int, value any) bool {
 	if !ok || !marked.WantsHTML() {
 		return false
 	}
-	w.Header().Set("Vary", "Accept, HX-Request")
 	if r := marked.FragmentRequest(); r != nil && r.Method != http.MethodGet && status >= 200 && status < 300 {
 		w.Header().Set("HX-Trigger", "waffle:refresh")
 	}
