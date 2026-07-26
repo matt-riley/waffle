@@ -126,7 +126,10 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			runtime.wsBroker = serveBroker
 			runtime.wsURL = serveBrokerURL(cfg.Broker.Listen)
 		}
-		return runtime, runtimeErr
+		if runtimeErr != nil {
+			return runtime, runtimeErr
+		}
+		return &loggingChatBackend{Backend: runtime, log: log}, nil
 	}
 
 	statusListener, err := net.Listen("tcp", cfg.Gateway.StatusListen)
@@ -890,4 +893,35 @@ func brokerUpstreamsWithSecretResolver(cfg config.Config, secrets secretResolver
 // such secret. Delegates to the shared helper in internal/secret.
 func resolveSecretValue(ref, envVar string) (string, error) {
 	return secret.ResolveRef(ref, envVar)
+}
+
+// loggingChatBackend records why a chat command or turn failed, on the host,
+// before the error reaches the wire.
+//
+// chatwire replaces any backend error it cannot recognise with a generic
+// "chat command failed", and Desk's writeChatError does the same. That
+// sanitising is right -- the detail can name paths, hosts and tokens, and the
+// client is not always the operator -- but nothing logged the original, so
+// every failure in this path was invisible on every surface. Diagnosing one
+// meant stopping serve and reproducing it through the CLI.
+type loggingChatBackend struct {
+	chatpkg.Backend
+	log *slog.Logger
+}
+
+func (b *loggingChatBackend) Command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	result, err := b.Backend.Command(ctx, command, emit)
+	if err != nil {
+		b.log.Error("chat command failed", "command", string(command.Name), "err", err)
+	}
+	return result, err
+}
+
+func (b *loggingChatBackend) Turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
+	// The input itself is never logged: it is the conversation.
+	if err := b.Backend.Turn(ctx, input, emit); err != nil {
+		b.log.Error("chat turn failed", "err", err)
+		return err
+	}
+	return nil
 }

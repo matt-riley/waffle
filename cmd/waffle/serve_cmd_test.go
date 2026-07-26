@@ -1041,3 +1041,35 @@ func (blockingAdapter) Run(ctx context.Context, _ chan<- channel.Message) error 
 }
 
 func (blockingAdapter) Send(context.Context, string, string) error { return nil }
+
+type failingChatBackend struct {
+	chatpkg.Backend
+	err error
+}
+
+func (b failingChatBackend) Command(context.Context, chatpkg.ParsedCommand, func(chatpkg.Event)) (chatpkg.Result, error) {
+	return chatpkg.Result{}, b.err
+}
+
+// The wire deliberately sanitises this error to "chat command failed". If the
+// host does not log the original, the failure is invisible everywhere.
+func TestLoggingChatBackendRecordsCommandFailuresOnTheHost(t *testing.T) {
+	var buf bytes.Buffer
+	backend := &loggingChatBackend{
+		Backend: failingChatBackend{err: errors.New("workspace setup: git clone failed")},
+		log:     slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+
+	_, err := backend.Command(context.Background(), chatpkg.ParsedCommand{Name: chatpkg.CommandRepo}, nil)
+
+	if err == nil {
+		t.Fatal("error must still propagate to the caller")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "chat command failed") {
+		t.Fatalf("failure not logged:\n%s", logged)
+	}
+	if !strings.Contains(logged, "workspace setup: git clone failed") {
+		t.Fatalf("underlying cause not logged:\n%s", logged)
+	}
+}
