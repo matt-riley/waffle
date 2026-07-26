@@ -493,6 +493,12 @@ func (m *Manager) queueDir(id string) string { return filepath.Join(m.QueueRoot,
 func (m *Manager) setup(ctx context.Context, client *sandbox.Client, ws *Workspace) error {
 	steps := []string{
 		"git config --global credential.helper '!waffle git-credential'",
+		// Git omits the repository path from credential requests unless this is
+		// set, so the helper is asked only for a host. The broker scopes every
+		// credential to the one repo a session is bound to and refuses a
+		// request whose path does not match -- with the path absent that check
+		// can never pass, and the clone fails with "refusing credentials for".
+		"git config --global credential.useHttpPath true",
 		"git config --global user.name waffle && git config --global user.email waffle@localhost",
 		fmt.Sprintf("git clone -- %s /work/repo", shellQuote(ws.URL)),
 	}

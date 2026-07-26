@@ -304,6 +304,11 @@ func TestOpenClonesAndBindsSession(t *testing.T) {
 	if !tools.ran("credential.helper '!waffle git-credential'") {
 		t.Error("credential helper not configured")
 	}
+	// Without this git asks the helper for a host only, and the broker refuses
+	// a credential whose path does not match the repo the session is bound to.
+	if !tools.ran("credential.useHttpPath true") {
+		t.Errorf("git would not send the repo path to the credential helper; commands = %v", tools.commands)
+	}
 	if !tools.ran("git clone -- 'https://github.com/matt-riley/waffle.git' /work/repo") {
 		t.Errorf("clone not run; commands = %v", tools.commands)
 	}
