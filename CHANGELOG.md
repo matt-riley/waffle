@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.0](https://github.com/matt-riley/waffle/compare/v0.10.0...v0.11.0) (2026-07-26)
+
+
+### Features
+
+* **broker:** tunnel HTTPS egress with CONNECT ([#236](https://github.com/matt-riley/waffle/issues/236)) ([a94d7ad](https://github.com/matt-riley/waffle/commit/a94d7ad2e15eca1ddc951fe824d98910cf0a615a))
+* **github:** open pull requests from a host-side tool ([#229](https://github.com/matt-riley/waffle/issues/229)) ([4509aa2](https://github.com/matt-riley/waffle/commit/4509aa2e6b4cf123e456e3ccdf6e82962c2c0167))
+
+
+### Bug Fixes
+
+* **serve:** give /repo workspaces the egress proxy ([#233](https://github.com/matt-riley/waffle/issues/233)) ([acd80d6](https://github.com/matt-riley/waffle/commit/acd80d6b47f349019e113eb686f0b0fa350e9a8f))
+* **serve:** let /repo reuse the broker serve already runs ([#232](https://github.com/matt-riley/waffle/issues/232)) ([e78ce12](https://github.com/matt-riley/waffle/commit/e78ce12a739a8db0bf845e340c2c4dc0ce0b4024))
+* **serve:** log why a chat command failed ([#235](https://github.com/matt-riley/waffle/issues/235)) ([fbfdd04](https://github.com/matt-riley/waffle/commit/fbfdd0402426cd693e22221c95b596e5e08fd0a0))
+* **workspace:** send the repo path to the credential helper ([#237](https://github.com/matt-riley/waffle/issues/237)) ([8936123](https://github.com/matt-riley/waffle/commit/8936123966274cb36b791482580193f20772738e))
+* **workspace:** stop git asking the broker for a proxy password ([#234](https://github.com/matt-riley/waffle/issues/234)) ([f10a225](https://github.com/matt-riley/waffle/commit/f10a2253587deb14268b71aa609b119ecc1f006d))
+
 ## [0.10.0](https://github.com/matt-riley/waffle/compare/v0.9.2...v0.10.0) (2026-07-26)
 
 
