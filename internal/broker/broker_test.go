@@ -1,9 +1,12 @@
 package broker
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1276,5 +1279,242 @@ func TestTokenValidUntilExactExpiry(t *testing.T) {
 	clock = clock.Add(time.Nanosecond)
 	if got := b.session(token); got != "" {
 		t.Fatalf("at exact expiry session=%q, want empty", got)
+	}
+}
+
+// connectThroughBroker performs a CONNECT against the broker and returns the
+// response line plus the hijacked connection when the tunnel is established.
+func connectThroughBroker(t *testing.T, brokerAddr, authority, proxyAuth string) (string, net.Conn) {
+	t.Helper()
+	conn, err := net.Dial("tcp", brokerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n"
+	if proxyAuth != "" {
+		req += "Proxy-Authorization: Basic " +
+			base64.StdEncoding.EncodeToString([]byte(proxyAuth+":")) + "\r\n"
+	}
+	req += "\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(status), conn
+}
+
+// HTTPS cannot be forward-proxied by URL rewriting, so without a tunnel every
+// https:// fetch from a workspace fails -- git clone and every package manager.
+func TestConnectTunnelsToAnAllowlistedHostEndToEnd(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 5)
+		if _, readErr := io.ReadFull(conn, buf); readErr != nil {
+			return
+		}
+		_, _ = conn.Write([]byte("pong:" + string(buf)))
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// safeDialContext refuses private addresses, so the allowlisted host must
+	// be the loopback origin reached by name; use the literal the dialer will
+	// resolve, and assert the refusal separately below.
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	// The default dialer refuses private addresses, which a loopback origin is.
+	// Overridden only to exercise the relay; the refusal itself is asserted in
+	// TestConnectRefusesPrivateAddressesByDefault.
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	status, conn := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("tunnel relay failed: %v", err)
+	}
+	if string(reply) != "pong:hello" {
+		t.Fatalf("tunnel payload = %q, want %q", reply, "pong:hello")
+	}
+}
+
+// curl and git only retry with credentials after a 407. A 401 surfaces as a
+// hard "CONNECT tunnel failed, response 401" with credentials never sent.
+func TestConnectWithoutCredentialsChallengesWith407(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	status, conn := connectThroughBroker(t, addr, "github.com:443", "")
+	defer func() { _ = conn.Close() }()
+
+	if !strings.Contains(status, "407") {
+		t.Fatalf("CONNECT status = %q, want 407 so the client retries with credentials", status)
+	}
+}
+
+func TestConnectRefusesHostsAndPortsOutsideTheAllowlist(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetEgress([]EgressTarget{{Host: "github.com", BaseURL: "https://github.com"}})
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	for _, tc := range []struct {
+		name      string
+		authority string
+	}{
+		{"host not allowlisted", "evil.example:443"},
+		{"port not allowlisted", "github.com:22"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, conn := connectThroughBroker(t, addr, tc.authority, token)
+			defer func() { _ = conn.Close() }()
+			if !strings.Contains(status, "403") {
+				t.Fatalf("CONNECT status = %q, want 403", status)
+			}
+		})
+	}
+}
+
+// The tunnel must not become a way to reach the host's own network. The
+// rewriting path is protected by safeDialContext; the tunnel uses the same
+// dialer by default, and this pins that it is not quietly bypassed.
+func TestConnectRefusesPrivateAddressesByDefault(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.DialEgress != nil {
+		t.Fatal("DialEgress must default to the private-address-refusing dialer")
+	}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "https://localhost"}})
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	status, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "localhost:443", token)
+	defer func() { _ = conn.Close() }()
+
+	if !strings.Contains(status, "502") {
+		t.Fatalf("CONNECT status = %q, want 502: a private address must not be tunnelled", status)
+	}
+}
+
+// A client that finishes writing before the origin has flushed its response
+// must still receive the rest of it. Closing both sides when either direction
+// ends would drop the in-flight bytes.
+func TestConnectRelayHalfClosesSoLateResponsesSurvive(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	body := strings.Repeat("late-response-", 512)
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Drain until the client half-closes, then reply after a pause. The
+		// pause makes the failure deterministic: a relay that tears both sides
+		// down when the first direction ends has already closed this socket.
+		_, _ = io.Copy(io.Discard, conn)
+		time.Sleep(100 * time.Millisecond)
+		_, _ = io.WriteString(conn, body)
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	status, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "localhost:"+originPort, token)
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	// Finish writing: the client→origin direction now ends.
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("reading the origin's reply: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("received %d bytes, want %d: the relay closed before the origin finished",
+			len(got), len(body))
+	}
+}
+
+// A CONNECT request has no URL path, so recording one writes a blank detail and
+// loses what the client tried to reach.
+func TestConnectDenialAuditNamesTheTarget(t *testing.T) {
+	st := openStore(t)
+	b := New(st, nil)
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	_, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "blocked.example:443", "wk_unknown")
+	_ = conn.Close()
+
+	var detail string
+	if err := st.DB.QueryRow(
+		`SELECT detail FROM broker_audit WHERE action='denied' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "blocked.example:443") {
+		t.Fatalf("denial detail = %q, want the CONNECT target named", detail)
 	}
 }
