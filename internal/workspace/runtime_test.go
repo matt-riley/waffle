@@ -441,3 +441,31 @@ func TestGitHostFromURL(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// The broker session token is the proxy username. Git treats userinfo with no
+// password as "ask the credential helper for one", and it asks against the
+// proxy host -- which the helper refuses, because it only serves the repo's
+// host. The clone then dies with "could not read Password for
+// http://wk_...@waffle-host:8423". An explicit empty password stops git asking.
+func TestWorkspaceProxyURLCarriesAnExplicitEmptyPassword(t *testing.T) {
+	m := &Manager{
+		Egress:    "none",
+		Network:   "waffle-ws",
+		BrokerURL: "http://waffle-host:8423",
+		ProxyURL:  "http://waffle-host:8423/egress",
+	}
+	ws := &Workspace{ID: "ws-1", Repo: "owner/repo", Container: "c", Volume: "v", Image: "img"}
+	args := workspaceRunArgs(m.containerOpts(ws, "wk_tok"))
+	joined := strings.Join(args, " ")
+
+	want := "http://wk_tok:@waffle-host:8423/egress"
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		if !strings.Contains(joined, key+"="+want) {
+			t.Fatalf("%s missing explicit empty password (want %s=%s):\n%s", key, key, want, joined)
+		}
+	}
+	// The password-less form is what breaks the clone; it must not appear.
+	if strings.Contains(joined, "wk_tok@waffle-host") {
+		t.Fatalf("proxy URL still has userinfo without a password:\n%s", joined)
+	}
+}
