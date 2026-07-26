@@ -195,6 +195,25 @@ if (root) {
       }
     }
     setSkillActivateButtonsDisabled(disabled);
+    setRemovalButtonsDisabled(disabled);
+  }
+
+  function setRemovalButtonsDisabled(disabled) {
+    for (const container of [elements.models, elements.connections]) {
+      if (!container) continue;
+      const visit = (node) => {
+        if (!node) return;
+        if (node.dataset && node.dataset.removalAction === "true") {
+          node.disabled = disabled;
+        }
+        if (node.childNodes && typeof node.childNodes.length === "number") {
+          for (let index = 0; index < node.childNodes.length; index += 1) {
+            visit(node.childNodes[index]);
+          }
+        }
+      };
+      visit(container);
+    }
   }
 
   function setSkillActivateButtonsDisabled(disabled) {
@@ -311,6 +330,16 @@ if (root) {
 
   async function getConnections() {
     const response = await fetch("/api/v1/desk/connections", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    return readJSON(response);
+  }
+
+  async function getRemovalPreview(path) {
+    const response = await fetch(path, {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store",
@@ -650,6 +679,25 @@ if (root) {
         }
       });
       card.appendChild(makeUtility);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.removalAction = "true";
+      remove.textContent = "Remove alias";
+      remove.disabled = state.restarting;
+      remove.addEventListener("click", async () => {
+        if (remove.disabled || state.restarting) return;
+        remove.disabled = true;
+        try {
+          const preview = await getRemovalPreview(
+            `/api/v1/desk/models/${encodeURIComponent(alias)}/removal-preview`,
+          );
+          renderModelRemovalPreview(card, alias, preview, remove);
+        } catch (error) {
+          setPageStatus(error.safeMessage || "Removal preview could not be loaded.");
+          remove.disabled = false;
+        }
+      });
+      card.appendChild(remove);
       elements.models.appendChild(card);
     }
     if (aliases.length === 0) {
@@ -837,6 +885,112 @@ if (root) {
       setTimeout(updateExpiry, 1000);
     };
     updateExpiry();
+  }
+
+  function removalReferenceLabel(kind) {
+    return {
+      default: "Waffle-wide default",
+      utility: "Utility model",
+      profile: "Agent profile",
+      session: "Persisted session",
+      model_alias: "Model alias",
+    }[kind] || "Reference";
+  }
+
+  function appendRemovalReferences(panel, references) {
+    const list = document.createElement("ul");
+    for (const reference of Array.isArray(references) ? references : []) {
+      const item = document.createElement("li");
+      item.textContent = `${removalReferenceLabel(reference?.kind)}: ${typeof reference?.name === "string" ? reference.name : "Unnamed reference"}`;
+      list.appendChild(item);
+    }
+    if (!list.childNodes.length) {
+      const item = document.createElement("li");
+      item.textContent = "No current references.";
+      list.appendChild(item);
+    }
+    panel.appendChild(list);
+  }
+
+  function removalPreviewPanel(titleText, preview) {
+    const panel = document.createElement("section");
+    panel.className = "capability-removal-preview";
+    const title = document.createElement("strong");
+    title.textContent = titleText;
+    panel.appendChild(title);
+    const expires = document.createElement("p");
+    expires.textContent = "This preview is short-lived and will be checked again before removal.";
+    panel.appendChild(expires);
+    appendRemovalReferences(panel, preview?.references);
+    return panel;
+  }
+
+  function renderModelRemovalPreview(card, alias, preview, removeTrigger) {
+    const panel = removalPreviewPanel(`Removal preview for model alias ${alias}`, preview);
+    const message = document.createElement("p");
+    message.textContent = preview?.replacement_required
+      ? "Choose an explicit replacement for every current reference before removing this alias."
+      : "No role, profile, or persisted session currently references this alias.";
+    panel.appendChild(message);
+
+    let replacement = null;
+    if (preview?.replacement_required) {
+      const label = document.createElement("label");
+      label.textContent = "Replacement model alias";
+      replacement = document.createElement("select");
+      replacement.name = "replacement";
+      replacement.required = true;
+      const aliases = Object.keys(state.providerState?.models || {})
+        .filter((value) => value !== alias)
+        .sort();
+      for (const optionValue of aliases) {
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = optionValue;
+        replacement.appendChild(option);
+      }
+      label.appendChild(replacement);
+      panel.appendChild(label);
+      if (!aliases.length) {
+        const unavailable = document.createElement("p");
+        unavailable.textContent = "Enroll another model alias before removing this referenced alias.";
+        panel.appendChild(unavailable);
+      }
+    }
+
+    if (!preview?.replacement_required || replacement?.childNodes?.length) {
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.dataset.removalAction = "true";
+      confirm.textContent = "Remove model alias";
+      confirm.disabled = state.restarting;
+      confirm.addEventListener("click", async () => {
+        if (confirm.disabled || state.restarting) return;
+        confirm.disabled = true;
+        try {
+          const result = await postMutation(
+            `/api/v1/desk/models/${encodeURIComponent(alias)}/remove`,
+            {
+              preview_token: typeof preview?.preview_token === "string" ? preview.preview_token : "",
+              replacement: replacement ? replacement.value.trim() : "",
+            },
+            `model-remove:${alias}`,
+          );
+          clearFormIntent(`model-remove:${alias}`);
+          setPageStatus("Model alias removed.");
+          if (result.restart_required) await handleRestartRequired(result);
+          else await loadCapabilities();
+        } catch (error) {
+          setPageStatus(error.safeMessage || "Model alias removal could not be completed.");
+          confirm.disabled = false;
+          if (!state.restarting && removeTrigger) {
+            removeTrigger.disabled = false;
+          }
+        }
+      });
+      panel.appendChild(confirm);
+    }
+    card.appendChild(panel);
   }
 
   function renderSkills(skills) {
@@ -1073,12 +1227,74 @@ if (root) {
         });
         card.appendChild(test);
         card.appendChild(testStatus);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.removalAction = "true";
+        remove.textContent = "Remove connection";
+        remove.disabled = state.restarting;
+        remove.addEventListener("click", async () => {
+          if (remove.disabled || state.restarting) return;
+          remove.disabled = true;
+          try {
+            const preview = await getRemovalPreview(
+              `/api/v1/desk/providers/${encodeURIComponent(item.name)}/removal-preview`,
+            );
+            renderProviderRemovalPreview(card, item.name, preview, remove);
+          } catch (error) {
+            setPageStatus(error.safeMessage || "Removal preview could not be loaded.");
+            remove.disabled = false;
+          }
+        });
+        card.appendChild(remove);
       }
       elements.connections.appendChild(card);
     }
     if (!records.length) {
       elements.connections.textContent = "No tools or connections are configured.";
     }
+  }
+
+  function renderProviderRemovalPreview(card, name, preview, originalRemove) {
+    const panel = removalPreviewPanel(`Removal preview for provider connection ${name}`, preview);
+    const references = Array.isArray(preview?.references) ? preview.references : [];
+    const message = document.createElement("p");
+    if (references.length) {
+      const aliases = references
+        .map((reference) => typeof reference?.name === "string" ? reference.name : "Unnamed alias")
+        .join(", ");
+      message.textContent = `This connection is still referenced by model aliases: ${aliases}. Remove those aliases first.`;
+      panel.appendChild(message);
+    } else {
+      message.textContent = "No model aliases currently reference this connection.";
+      panel.appendChild(message);
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.dataset.removalAction = "true";
+      confirm.textContent = "Remove provider connection";
+      confirm.disabled = state.restarting;
+      confirm.addEventListener("click", async () => {
+        if (confirm.disabled || state.restarting) return;
+        confirm.disabled = true;
+        try {
+          const result = await postMutation(
+            `/api/v1/desk/providers/${encodeURIComponent(name)}/remove`,
+            { preview_token: typeof preview?.preview_token === "string" ? preview.preview_token : "" },
+            `provider-remove:${name}`,
+          );
+          clearFormIntent(`provider-remove:${name}`);
+          setPageStatus("Provider connection removed.");
+          if (result.restart_required) await handleRestartRequired(result);
+          else await loadCapabilities();
+        } catch (error) {
+          setPageStatus(error.safeMessage || "Provider connection removal could not be completed.");
+          confirm.disabled = false;
+          if (originalRemove) originalRemove.disabled = false;
+        }
+      });
+      panel.appendChild(confirm);
+    }
+    card.appendChild(panel);
   }
 
   function renderCatalogue() {

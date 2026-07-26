@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -236,6 +237,108 @@ func TestManagerRemoveRejectsReferencedConnectionPrecisely(t *testing.T) {
 	}
 }
 
+func TestManagerPreviewRemovalBindsCurrentProviderState(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := m.PreviewModelRemoval(context.Background(), "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Alias != "gpt" || model.Provider != "openai" || !model.Default || !model.Utility || model.Revision == "" {
+		t.Fatalf("model preview = %#v", model)
+	}
+	if len(model.Profiles) != 0 {
+		t.Fatalf("model profiles = %v, want empty", model.Profiles)
+	}
+	connection, err := m.PreviewProviderRemoval(context.Background(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.Name != "openai" || connection.Revision == "" || !slices.Equal(connection.ModelAliases, []string{"gpt", "small"}) {
+		t.Fatalf("connection preview = %#v", connection)
+	}
+}
+
+func TestManagerModeAwareRemovalReturnsDeferredMutation(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, false)
+	result, err := m.RemoveModelWithMode(context.Background(), "gpt", "", CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || result.TransactionID == "" {
+		t.Fatalf("model removal result = %#v", result)
+	}
+	provider := newTestManager(t)
+	enrollConnectionWithoutRoles(t, provider, false)
+	if err := provider.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	providerResult, err := provider.RemoveWithMode(context.Background(), "openai", CommitForRestart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !providerResult.RestartRequired || providerResult.TransactionID == "" {
+		t.Fatalf("provider removal result = %#v", providerResult)
+	}
+	if _, err := os.Stat(provider.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := config.Load(provider.ConfigPath); err != nil {
+		t.Fatal(err)
+	} else if len(cfg.Models) != 0 || len(cfg.Providers) != 0 {
+		t.Fatalf("removed config = %#v", cfg)
+	}
+	store := secret.OpenFile(provider.SecretsPath, provider.Identity)
+	for _, name := range []string{"provider/openai/api-key", "provider/openai/catalog-scope"} {
+		if _, err := store.Get(name); !errors.Is(err, secret.ErrNotFound) {
+			t.Fatalf("secret %q error = %v, want ErrNotFound", name, err)
+		}
+	}
+}
+
+func TestManagerModelRemovalRefreshesSessionPlanUnderProviderLock(t *testing.T) {
+	m := newTestManager(t)
+	enrollConnectionWithoutRoles(t, m, true)
+	planned := []SessionAliasChange{{
+		SessionID: "session-1", From: "gpt", To: "", FromVersion: 1, ToVersion: 2,
+		FromUpdatedAt: "2026-07-25T23:00:00Z", ToUpdatedAt: "2026-07-25T23:01:00Z",
+	}}
+	var applied []SessionAliasChange
+	locked := false
+	m.SetSessionAliasPlanner(func(ctx context.Context, alias, replacement string) ([]SessionAliasChange, error) {
+		if alias != "gpt" || replacement != "" {
+			t.Fatalf("planner inputs = %q, %q", alias, replacement)
+		}
+		lease, err := instance.Default(m.LockPath).Acquire(ctx)
+		locked = errors.Is(err, instance.ErrHeld)
+		if lease != nil {
+			_ = lease.Release()
+		}
+		return planned, nil
+	})
+	m.SetSessionApply(func(_ context.Context, changes []SessionAliasChange) error {
+		applied = append([]SessionAliasChange(nil), changes...)
+		return nil
+	})
+	m.SetSessionRecovery(func(context.Context, []SessionAliasChange) error { return nil })
+
+	if _, err := m.RemoveModelWithMode(context.Background(), "gpt", "", CommitAndReconcile); err != nil {
+		t.Fatalf("RemoveModelWithMode: %v", err)
+	}
+	if !locked {
+		t.Fatal("session planner ran outside the provider lock")
+	}
+	if !reflect.DeepEqual(applied, planned) {
+		t.Fatalf("applied session changes = %#v, want %#v", applied, planned)
+	}
+}
+
 func TestManagerInstalledWithoutDefaultAndTestConnection(t *testing.T) {
 	m := newTestManager(t)
 	req := validAddRequest()
@@ -309,7 +412,7 @@ func TestManagerRejectsConnectionAndAliasCollisionsWithoutMutation(t *testing.T)
 		{name: "connection", mutate: func(*AddRequest) {}, want: "connection \"openai\" already exists"},
 		{name: "alias", mutate: func(req *AddRequest) {
 			req.ConnectionName = "second"
-		}, want: "model alias \"gpt\" already exists"},
+		}, want: "model alias already exists \"gpt\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestManager(t)
@@ -454,6 +557,61 @@ func TestManagerRemoveModelReassignsDefaultAndUtility(t *testing.T) {
 	}
 	if cfg.Agent.DefaultModel != "small" || cfg.Agent.UtilityModel != "small" {
 		t.Fatalf("agent aliases = default:%q utility:%q", cfg.Agent.DefaultModel, cfg.Agent.UtilityModel)
+	}
+}
+
+func TestManagerRemoveModelWithoutReplacementRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
+	m := newTestManager(t)
+	req := validAddRequest()
+	req.Models["small"] = config.ModelTarget{Model: "gpt-small"}
+	if err := m.Add(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := transactionIDForBytes(raw)
+	if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# changed after preview\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RemoveModelWithExpectedRevision(context.Background(), "gpt", "", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
+		t.Fatalf("stale removal error = %v, want ErrRevisionMismatch", err)
+	}
+	current, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(current, []byte("[models.gpt]")) {
+		t.Fatalf("stale removal deleted model alias: %s", current)
+	}
+}
+
+func TestManagerRemoveProviderRejectsStaleExpectedRevisionUnderCommitLock(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.Add(context.Background(), validAddRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveModel(context.Background(), "gpt", ""); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := transactionIDForBytes(raw)
+	if err := os.WriteFile(m.ConfigPath, append(raw, []byte("\n# changed after preview\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RemoveWithExpectedRevision(context.Background(), "openai", expectedRevision, CommitForRestart); !errors.Is(err, ErrRevisionMismatch) {
+		t.Fatalf("stale provider removal error = %v, want ErrRevisionMismatch", err)
+	}
+	current, err := os.ReadFile(m.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(current, []byte("[providers.openai]")) {
+		t.Fatalf("stale removal deleted provider: %s", current)
 	}
 }
 
