@@ -988,7 +988,12 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 		}
 	} else {
 		mgr := newWorkspaceManager(r.cfg, r.st, wsBroker)
-		mgr.BrokerURL = wsURL
+		// Configure through the shared helper rather than setting BrokerURL
+		// alone: under any egress but "full" the container is netlocked to
+		// waffle-host and reaches everything else through the broker's egress
+		// proxy. Without ProxyURL the clone has no route to the git host, so
+		// setup fails and the workspace is torn down again immediately.
+		configureServeWorkspaceManager(r.cfg, mgr, wsURL)
 		ws, client, err := mgr.OpenWithProfile(ctx, repoArg, chatProfile)
 		if err != nil {
 			return chatpkg.Result{}, err
