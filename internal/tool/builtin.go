@@ -162,13 +162,55 @@ func (WriteFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 	if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
 		return "", err
 	}
-	// 0o600 keeps newly created files private; agents are routinely asked to
-	// write secrets. os.WriteFile applies the mode only on create, so
-	// overwriting an existing file keeps its current permissions.
-	if err := os.WriteFile(in.Path, []byte(in.Content), 0o600); err != nil {
+	if err := writeFileAtomic(in.Path, []byte(in.Content)); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+}
+
+// writeFileAtomic replaces path's contents by writing a temporary file in the
+// same directory and renaming it over the target (#264). os.WriteFile opens
+// with O_TRUNC, so a crash or a full disk between truncation and close leaves
+// the file empty or half written — for agent-edited config, source, and notes
+// that is silent data loss. Same write-then-rename shape as
+// internal/secret/filestore.go, plus an fsync so the rename cannot land before
+// the data.
+//
+// An existing file keeps its permissions; a new one is created 0o600, because
+// agents are routinely asked to write secrets. Symlinks are resolved first so
+// editing through a link updates the target rather than replacing the link.
+func writeFileAtomic(path string, data []byte) error {
+	perm := fs.FileMode(0o600)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".waffle-write-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // EditFile performs exact string replacement in a file.
@@ -217,11 +259,7 @@ func (EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	}
 	content = strings.ReplaceAll(content, in.OldString, in.NewString)
 
-	info, err := os.Stat(in.Path)
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(in.Path, []byte(content), info.Mode().Perm()); err != nil {
+	if err := writeFileAtomic(in.Path, []byte(content)); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("replaced %d occurrence(s) in %s", count, in.Path), nil

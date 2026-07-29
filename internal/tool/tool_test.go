@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -114,6 +115,120 @@ func TestWriteFilePermissions(t *testing.T) {
 	}
 	if got.Mode().Perm() != want.Mode().Perm() {
 		t.Errorf("overwrite changed perm from %o to %o", want.Mode().Perm(), got.Mode().Perm())
+	}
+}
+
+// TestFileWritesAreAtomic pins the write-then-rename contract (#264): the
+// target is swapped in whole, never truncated in place, and no staging file is
+// left behind.
+func TestFileWritesAreAtomic(t *testing.T) {
+	tests := []struct {
+		name  string
+		tool  Tool
+		input func(path string) string
+		want  string
+	}{
+		{
+			name:  "edit_file",
+			tool:  EditFile{},
+			input: func(p string) string { return fmt.Sprintf(`{"path":%q,"old_string":"old","new_string":"new"}`, p) },
+			want:  "new content",
+		},
+		{
+			name:  "write_file",
+			tool:  WriteFile{},
+			input: func(p string) string { return fmt.Sprintf(`{"path":%q,"content":"new content"}`, p) },
+			want:  "new content",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "f.txt")
+			if err := os.WriteFile(path, []byte("old content"), 0o640); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if _, err := run(t, tc.tool, tc.input(path)); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			// A rename swaps in a different inode; an in-place O_TRUNC rewrite
+			// would keep the same one, which is the corruption window.
+			if os.SameFile(before, after) {
+				t.Error("file was rewritten in place, want atomic rename")
+			}
+			if got, _ := os.ReadFile(path); string(got) != tc.want {
+				t.Errorf("content = %q, want %q", got, tc.want)
+			}
+			if after.Mode().Perm() != before.Mode().Perm() {
+				t.Errorf("perm changed from %o to %o", before.Mode().Perm(), after.Mode().Perm())
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("readdir: %v", err)
+			}
+			if len(entries) != 1 {
+				t.Errorf("staging file left behind: %v", entries)
+			}
+		})
+	}
+}
+
+// TestEditFileFollowsSymlink: renaming over a symlink would replace the link
+// itself, so the target must be resolved first (#264).
+func TestEditFileFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	link := filepath.Join(dir, "link.txt")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := run(t, EditFile{}, fmt.Sprintf(`{"path":%q,"old_string":"old","new_string":"new"}`, link)); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatal("symlink was replaced by a regular file")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target = %q, want new", got)
+	}
+}
+
+// TestEditFileFailureKeepsOriginal: a write that cannot be staged must leave
+// the original readable, not a truncated remnant (#264).
+func TestEditFileFailureKeepsOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if _, err := run(t, EditFile{}, fmt.Sprintf(`{"path":%q,"old_string":"old","new_string":"new"}`, path)); err == nil {
+		t.Fatal("edit succeeded in an unwritable directory")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "old content" {
+		t.Errorf("original damaged: %q", got)
 	}
 }
 
