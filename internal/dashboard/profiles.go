@@ -64,6 +64,8 @@ type ProfileFieldsView struct {
 	MaxTokens       int      `json:"max_tokens"`
 	MaxIterations   int      `json:"max_iterations"`
 	AllowedChildren []string `json:"allowed_children"`
+	// FileRoots confines the profile's file tools (#269).
+	FileRoots []string `json:"file_roots"`
 }
 
 type ProfileListView struct {
@@ -243,6 +245,7 @@ func (e *ProfileEditor) fields(name string, profile config.AgentProfile) Profile
 		MaxTokens:       profile.MaxTokens,
 		MaxIterations:   profile.MaxIterations,
 		AllowedChildren: redactAll(profile.AllowedChildren),
+		FileRoots:       redactAll(profile.Tools.FileRoots),
 	}
 }
 
@@ -464,6 +467,7 @@ type profileRequestBody struct {
 	MaxTokens       int      `json:"max_tokens"`
 	MaxIterations   int      `json:"max_iterations"`
 	AllowedChildren []string `json:"allowed_children"`
+	FileRoots       []string `json:"file_roots"`
 	PreviewToken    string   `json:"preview_token"`
 }
 
@@ -473,6 +477,7 @@ func (b profileRequestBody) request() providerconfig.ProfileRequest {
 		Allow: b.Allow, Deny: b.Deny, DenyPrefixes: b.DenyPrefixes,
 		Guidance: b.Guidance, MaxTokens: b.MaxTokens,
 		MaxIterations: b.MaxIterations, AllowedChildren: b.AllowedChildren,
+		FileRoots: b.FileRoots,
 	}
 }
 

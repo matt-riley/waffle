@@ -91,8 +91,8 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	return result, nil
 }
 
-// ReadFile reads a file from the filesystem.
-type ReadFile struct{}
+// ReadFile reads a file from the filesystem, confined to Roots (#269).
+type ReadFile struct{ Roots FileRoots }
 
 var readSchema = mustSchema(`{
 	"type": "object",
@@ -110,14 +110,18 @@ func (ReadFile) Def() llm.Tool {
 	}
 }
 
-func (ReadFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (r ReadFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
 	}
-	f, err := os.Open(in.Path)
+	path, err := r.Roots.Resolve(in.Path)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
@@ -131,8 +135,8 @@ func (ReadFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	return string(b), nil
 }
 
-// WriteFile writes a file, creating parent directories.
-type WriteFile struct{}
+// WriteFile writes a file, creating parent directories, confined to Roots (#269).
+type WriteFile struct{ Roots FileRoots }
 
 var writeSchema = mustSchema(`{
 	"type": "object",
@@ -151,7 +155,7 @@ func (WriteFile) Def() llm.Tool {
 	}
 }
 
-func (WriteFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (w WriteFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -159,13 +163,17 @@ func (WriteFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
+	path, err := w.Roots.Resolve(in.Path)
+	if err != nil {
 		return "", err
 	}
-	if err := writeFileAtomic(in.Path, []byte(in.Content)); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+	if err := writeFileAtomic(path, []byte(in.Content)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), path), nil
 }
 
 // writeFileAtomic replaces path's contents by writing a temporary file in the
@@ -213,8 +221,8 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// EditFile performs exact string replacement in a file.
-type EditFile struct{}
+// EditFile performs exact string replacement in a file, confined to Roots (#269).
+type EditFile struct{ Roots FileRoots }
 
 var editSchema = mustSchema(`{
 	"type": "object",
@@ -235,7 +243,7 @@ func (EditFile) Def() llm.Tool {
 	}
 }
 
-func (EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (e EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Path       string `json:"path"`
 		OldString  string `json:"old_string"`
@@ -245,7 +253,11 @@ func (EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
 	}
-	b, err := os.ReadFile(in.Path)
+	path, err := e.Roots.Resolve(in.Path)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -259,10 +271,10 @@ func (EditFile) Run(ctx context.Context, input json.RawMessage) (string, error) 
 	}
 	content = strings.ReplaceAll(content, in.OldString, in.NewString)
 
-	if err := writeFileAtomic(in.Path, []byte(content)); err != nil {
+	if err := writeFileAtomic(path, []byte(content)); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("replaced %d occurrence(s) in %s", count, in.Path), nil
+	return fmt.Sprintf("replaced %d occurrence(s) in %s", count, path), nil
 }
 
 // Fetch retrieves a URL as text.
@@ -437,8 +449,10 @@ const (
 
 var errSearchResultsCapped = errors.New("search results capped")
 
-// Search finds regular-expression matches in text files without shelling out.
-type Search struct{}
+// Search finds regular-expression matches in text files without shelling out,
+// confined to Roots (#269) — it returns file contents, so it belongs behind
+// the same boundary as read_file.
+type Search struct{ Roots FileRoots }
 
 var searchSchema = mustSchema(`{
 	"type": "object",
@@ -459,7 +473,7 @@ func (Search) Def() llm.Tool {
 	}
 }
 
-func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (s Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Pattern    string `json:"pattern"`
 		Path       string `json:"path"`
@@ -485,9 +499,13 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if maxResults <= 0 || maxResults > searchMaxResults {
 		maxResults = searchDefaultMaxResults
 	}
+	searchRoot, err := s.Roots.Resolve(in.Path)
+	if err != nil {
+		return "", err
+	}
 
 	var results []string
-	err = filepath.WalkDir(in.Path, func(path string, d fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(searchRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

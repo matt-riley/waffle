@@ -70,14 +70,36 @@ func (r *Registry) Run(ctx context.Context, name string, input json.RawMessage) 
 	return t.Run(ctx, input)
 }
 
+// BuiltinOptions configures the standard host toolset.
+type BuiltinOptions struct {
+	// FetchAllowPrivate lists CIDRs / host:port entries fetch may reach in
+	// otherwise-protected address ranges.
+	FetchAllowPrivate []string
+	// FileRoots confines the file tools to a set of directory trees (#269).
+	// The zero value imposes no boundary.
+	FileRoots FileRoots
+}
+
 // Builtins returns the standard host toolset.
 func Builtins() *Registry {
-	return BuiltinsWithFetch(nil)
+	return BuiltinsWith(BuiltinOptions{})
 }
 
 // BuiltinsWithFetch returns the standard toolset with fetch policy applied.
 func BuiltinsWithFetch(allowPrivate []string) *Registry {
-	return NewRegistry(Bash{}, ReadFile{}, WriteFile{}, EditFile{}, Fetch{AllowPrivate: allowPrivate}, Search{})
+	return BuiltinsWith(BuiltinOptions{FetchAllowPrivate: allowPrivate})
+}
+
+// BuiltinsWith returns the standard toolset under opts.
+func BuiltinsWith(opts BuiltinOptions) *Registry {
+	return NewRegistry(
+		Bash{},
+		ReadFile{Roots: opts.FileRoots},
+		WriteFile{Roots: opts.FileRoots},
+		EditFile{Roots: opts.FileRoots},
+		Fetch{AllowPrivate: opts.FetchAllowPrivate},
+		Search{Roots: opts.FileRoots},
+	)
 }
 
 // OutputLimit is the maximum size (bytes) for tool output presented to the

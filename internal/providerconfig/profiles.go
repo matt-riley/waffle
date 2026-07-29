@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,9 @@ type ProfileRequest struct {
 	MaxTokens       int
 	MaxIterations   int
 	AllowedChildren []string
+	// FileRoots confines the profile's file tools (#269). Empty inherits the
+	// group's boundary; it can never reach outside it.
+	FileRoots []string
 }
 
 // AgentProfile renders the request as the config type it will become, so
@@ -51,8 +55,9 @@ func (r ProfileRequest) AgentProfile() config.AgentProfile {
 		DenyPrefixes:    trimmedList(r.DenyPrefixes),
 		AllowedChildren: trimmedList(r.AllowedChildren),
 		Tools: config.ToolPolicy{
-			Allow: trimmedList(r.Allow),
-			Deny:  trimmedList(r.Deny),
+			Allow:     trimmedList(r.Allow),
+			Deny:      trimmedList(r.Deny),
+			FileRoots: trimmedList(r.FileRoots),
 		},
 	}
 }
@@ -237,6 +242,14 @@ func validateProfileFields(profile config.AgentProfile) error {
 			return fmt.Errorf("profile allowed_children contains invalid name %q", child)
 		}
 	}
+	// A relative root would resolve against whatever working directory the
+	// agent happens to run in, which is not a boundary anyone can reason
+	// about — an edited profile must name absolute trees (#269).
+	for _, root := range profile.Tools.FileRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("profile tools.file_roots must be absolute paths, got %q", root)
+		}
+	}
 	// Tool names are identifiers. Refusing anything else here keeps shell
 	// metacharacters and paths out of the policy tables entirely.
 	for field, values := range map[string][]string{
@@ -323,13 +336,14 @@ func writeProfileTable(doc *tomlDocument, name string, profile config.AgentProfi
 	doc.setOptionalStrings(table, "allowed_children", profile.AllowedChildren)
 
 	tools := table + ".tools"
-	if len(profile.Tools.Allow) == 0 && len(profile.Tools.Deny) == 0 {
+	if len(profile.Tools.Allow) == 0 && len(profile.Tools.Deny) == 0 && len(profile.Tools.FileRoots) == 0 {
 		doc.deleteTableTree(tools)
 		return
 	}
 	doc.ensureTable(tools)
 	doc.setOptionalStrings(tools, "allow", profile.Tools.Allow)
 	doc.setOptionalStrings(tools, "deny", profile.Tools.Deny)
+	doc.setOptionalStrings(tools, "file_roots", profile.Tools.FileRoots)
 }
 
 func renderStringArray(values []string) string {

@@ -156,7 +156,27 @@ func ApplyProfilePolicy(base ResolvedAgentPolicy, profile AgentProfile) Resolved
 	for _, prefix := range profile.Tools.DenyPrefixes {
 		out.DenyPrefixes = AppendUnique(out.DenyPrefixes, prefix)
 	}
+	// File roots replace, like Allow: a profile names the trees it wants.
+	// ValidateProfileNarrows keeps that replacement inside the group's roots
+	// (#269).
+	if len(profile.Tools.FileRoots) > 0 {
+		out.FileRoots = append([]string(nil), profile.Tools.FileRoots...)
+	}
 	return out
+}
+
+// pathWithin reports whether path lies at or under root, comparing cleaned
+// absolute paths. This is the lexical half of the file-tool boundary, used to
+// validate config; the runtime check in tool.FileRoots additionally resolves
+// symlinks, which config validation must not depend on (an editor validates
+// policy that may target another host's filesystem).
+func pathWithin(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	if path == root {
+		return true
+	}
+	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 // ProfileWideningError reports a profile edit that would widen its group's
@@ -225,6 +245,43 @@ func ValidateProfileNarrows(group ResolvedAgentPolicy, profile AgentProfile) err
 			return &ProfileWideningError{
 				Field:  "deny_prefixes",
 				Detail: "the group denies the prefix " + prefix + " and a profile cannot lift it",
+			}
+		}
+	}
+	return ValidateProfileFileRoots(group, profile)
+}
+
+// ValidateProfileFileRoots refuses a profile whose file-tool roots would reach
+// outside its group's (#269). An empty group root list means "no boundary", so
+// any profile list narrows it; otherwise a profile may subdivide the group's
+// trees but neither step outside them nor drop the boundary altogether.
+//
+// Split out from ValidateProfileNarrows so the chat runtime can enforce the
+// filesystem boundary without retroactively rejecting configs that predate the
+// other narrowing rules.
+func ValidateProfileFileRoots(group ResolvedAgentPolicy, profile AgentProfile) error {
+	if len(group.FileRoots) == 0 {
+		return nil
+	}
+	result := ApplyProfilePolicy(group, profile)
+	if len(result.FileRoots) == 0 {
+		return &ProfileWideningError{
+			Field:  "tools.file_roots",
+			Detail: "the group confines file tools to " + strings.Join(group.FileRoots, ", ") + " and a profile cannot lift it",
+		}
+	}
+	for _, root := range result.FileRoots {
+		within := false
+		for _, allowed := range group.FileRoots {
+			if pathWithin(root, allowed) {
+				within = true
+				break
+			}
+		}
+		if !within {
+			return &ProfileWideningError{
+				Field:  "tools.file_roots",
+				Detail: root + " is outside the group's roots (" + strings.Join(group.FileRoots, ", ") + ")",
 			}
 		}
 	}
@@ -326,7 +383,8 @@ func (c Config) LayeredAgentPolicyFor(group string, profile AgentProfile, repo *
 func samePolicy(a, b ResolvedAgentPolicy) bool {
 	return a.Mode == b.Mode && a.Guidance == b.Guidance &&
 		sameStringSet(a.Allow, b.Allow) && sameStringSet(a.Deny, b.Deny) &&
-		sameStringSet(a.DenyPrefixes, b.DenyPrefixes)
+		sameStringSet(a.DenyPrefixes, b.DenyPrefixes) &&
+		sameStringSet(a.FileRoots, b.FileRoots)
 }
 
 // sameStringSet compares tool and prefix lists as sets. These lists are

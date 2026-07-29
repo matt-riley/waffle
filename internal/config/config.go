@@ -324,6 +324,10 @@ type ToolPolicy struct {
 	DenyPrefixes []string `toml:"deny_prefixes"`
 	// Guidance is appended to action-level denial messages.
 	Guidance string `toml:"guidance"`
+	// FileRoots confines the builtin file tools (read_file, write_file,
+	// edit_file, search) to these directory trees (#269). Empty inherits the
+	// wider tier; a profile's roots must lie inside its group's.
+	FileRoots []string `toml:"file_roots"`
 }
 
 // GroupCron is the reserved group name for scheduled (cron) sessions, the
@@ -353,9 +357,10 @@ const (
 // host shell for unattended jobs.
 func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 	r := ResolvedAgentPolicy{
-		Mode:  c.Sandbox.Mode,
-		Allow: c.Sandbox.Allow,
-		Deny:  c.Sandbox.Deny,
+		Mode:      c.Sandbox.Mode,
+		Allow:     c.Sandbox.Allow,
+		Deny:      c.Sandbox.Deny,
+		FileRoots: c.Sandbox.FileRoots,
 	}
 	if r.Mode == "" {
 		r.Mode = "host"
@@ -376,6 +381,16 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 			r.DenyPrefixes = append([]string(nil), g.Tools.DenyPrefixes...)
 			r.Guidance = g.Tools.Guidance
 		}
+		if len(g.Tools.FileRoots) > 0 {
+			r.FileRoots = append([]string(nil), g.Tools.FileRoots...)
+		}
+	}
+	// The restricted tiers get a filesystem boundary by default when there is
+	// a work dir to point it at (#269): an unattended or multi-party session
+	// with file tools but no boundary can read anything the owner can. An
+	// explicit file_roots — global or per-group — is authoritative and opts out.
+	if len(r.FileRoots) == 0 && restrictedDefaultGroup(group) && c.Sandbox.WorkDir != "" {
+		r.FileRoots = []string{c.Sandbox.WorkDir}
 	}
 	// Unattended / multi-party tiers deny host bash and durable memory
 	// writes by default; only an explicit tool policy for that group opts out.
@@ -594,6 +609,9 @@ type ResolvedAgentPolicy struct {
 	Deny         []string
 	DenyPrefixes []string
 	Guidance     string
+	// FileRoots confines the builtin file tools in host mode (#269); empty
+	// means no boundary.
+	FileRoots []string
 }
 
 // UsesDocker reports whether any tier runs tools in docker: the global
@@ -663,6 +681,11 @@ type Sandbox struct {
 	// Allow/Deny filter tools by name (empty allow = everything).
 	Allow []string `toml:"allow"`
 	Deny  []string `toml:"deny"`
+	// FileRoots confines the builtin file tools to these directory trees in
+	// host mode (#269). Empty means no boundary, except for the restricted
+	// tiers, which fall back to WorkDir when it is set. Docker mode gets its
+	// boundary from the container.
+	FileRoots []string `toml:"file_roots"`
 	// Enforcer controls how action-level [[policy.rule]] denials are
 	// surfaced (#66): "none" (default) denies with a short message;
 	// "feedback" includes the rule's guidance for the model to adjust.
