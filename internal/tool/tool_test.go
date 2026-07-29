@@ -351,11 +351,11 @@ func TestHostBuiltinsReturnPastOutputLimit(t *testing.T) {
 }
 
 func TestCapHostReturn(t *testing.T) {
-	if capHostReturn("short") != "short" {
+	if CapHostReturn("short") != "short" {
 		t.Fatal("short modified")
 	}
 	huge := strings.Repeat("H", HostReturnCap+100)
-	got := capHostReturn(huge)
+	got := CapHostReturn(huge)
 	if len(got) != HostReturnCap {
 		t.Fatalf("cap len=%d want %d", len(got), HostReturnCap)
 	}

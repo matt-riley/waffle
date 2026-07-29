@@ -92,13 +92,16 @@ const OutputLimit = 48 * 1024
 // enough payload for mid-run expand_output / FTS (#69).
 const HostReturnCap = 512 * 1024
 
-// capHostReturn bounds host builtin output to HostReturnCap without applying
+// CapHostReturn bounds tool output to HostReturnCap without applying
 // OutputLimit head+tail truncation (that happens in Agent.runOne after spill).
-func capHostReturn(s string) string {
+// Exported for out-of-package transports that return tool output to the agent
+// (MCP, #286) so they hit the same boundary as the host builtins. The cut
+// lands on a UTF-8 rune boundary (#107).
+func CapHostReturn(s string) string {
 	if len(s) <= HostReturnCap {
 		return s
 	}
-	return s[:HostReturnCap]
+	return textcut.Cut(s, HostReturnCap)
 }
 
 // Truncate caps tool output so a chatty command can't blow out the context

@@ -78,7 +78,7 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	out, err := cmd.CombinedOutput()
 	// Return up to HostReturnCap so Agent.runOne can spill before OutputLimit
 	// truncation (#69). Do not Truncate to OutputLimit here.
-	result := capHostReturn(string(out))
+	result := CapHostReturn(string(out))
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("command timed out after %s\n%s", timeout, result)
 	}
@@ -305,7 +305,7 @@ func (f Fetch) Run(ctx context.Context, input json.RawMessage) (result string, e
 		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(string(body), 2048))
 	}
 	// HostReturnCap (not OutputLimit) so Agent can spill before model truncate (#69).
-	return capHostReturn(string(body)), nil
+	return CapHostReturn(string(body)), nil
 }
 
 type fetchPolicy struct {
@@ -496,7 +496,7 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	})
 	if errors.Is(err, errSearchResultsCapped) {
 		// HostReturnCap so oversized result sets can still spill (#69).
-		return capHostReturn(strings.Join(results, "\n") + fmt.Sprintf("\n... [results capped at %d]", maxResults)), nil
+		return CapHostReturn(strings.Join(results, "\n") + fmt.Sprintf("\n... [results capped at %d]", maxResults)), nil
 	}
 	if err != nil {
 		return "", err
@@ -504,7 +504,7 @@ func (Search) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(results) == 0 {
 		return "(no matches)", nil
 	}
-	return capHostReturn(strings.Join(results, "\n")), nil
+	return CapHostReturn(strings.Join(results, "\n")), nil
 }
 
 func searchFile(ctx context.Context, path string, re *regexp.Regexp) (matches []string, binary bool, err error) {
