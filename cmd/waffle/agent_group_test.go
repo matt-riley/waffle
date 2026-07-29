@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -688,5 +689,66 @@ func TestBuildCronRunnerUsesCronTier(t *testing.T) {
 		if d.Name == "bash" {
 			t.Error("cron runner exposes host bash; manual `cron run` must match the restricted scheduled tier")
 		}
+	}
+}
+
+// TestBuildAgentFileRootsConfineFileTools is the #269 wiring proof: a
+// configured boundary reaches the tools the agent actually runs, and a profile
+// that tries to widen it is refused at build time rather than silently
+// granted.
+func TestBuildAgentFileRootsConfineFileTools(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(root, "inner")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Sandbox.FileRoots = []string{root}
+	cfg.Agent.Profiles = map[string]config.AgentProfile{
+		"narrow": {Tools: config.ToolPolicy{FileRoots: []string{inner}}},
+		"escape": {Tools: config.ToolPolicy{FileRoots: []string{outside}}},
+	}
+
+	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := a.Tools.Run(ctx, "read_file", json.RawMessage(fmt.Sprintf(`{"path":%q}`, secret))); !errors.Is(err, tool.ErrOutsideRoots) {
+		t.Errorf("read outside roots = %v, want ErrOutsideRoots", err)
+	}
+
+	narrow, cleanupNarrow, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "narrow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupNarrow()
+	sibling := filepath.Join(root, "sibling.txt")
+	if err := os.WriteFile(sibling, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := narrow.Tools.Run(ctx, "read_file", json.RawMessage(fmt.Sprintf(`{"path":%q}`, sibling))); !errors.Is(err, tool.ErrOutsideRoots) {
+		t.Errorf("narrowed profile read outside its own root = %v, want ErrOutsideRoots", err)
+	}
+
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape"); !errors.Is(err, config.ErrProfileWidens) {
+		t.Errorf("widening profile built with err = %v, want ErrProfileWidens", err)
 	}
 }

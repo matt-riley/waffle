@@ -106,7 +106,7 @@ func TestProfileEditorListsStructuredFieldsOnly(t *testing.T) {
 		Name: "reviewer", System: "You review changes.", Model: "primary",
 		Sandbox: "docker", Allow: []string{"read_file"}, Deny: []string{},
 		DenyPrefixes: []string{"git push"}, MaxTokens: 4096,
-		AllowedChildren: []string{},
+		AllowedChildren: []string{}, FileRoots: []string{},
 	}
 	if !reflect.DeepEqual(view.Profiles[0], want) {
 		t.Fatalf("profile = %+v, want %+v", view.Profiles[0], want)

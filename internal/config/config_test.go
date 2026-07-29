@@ -870,6 +870,71 @@ deny = ["fetch"]
 	}
 }
 
+// TestAgentPolicyFileRoots covers the file-tool boundary (#269): global roots
+// apply everywhere, a group may narrow them, and the restricted tiers fall
+// back to the work dir rather than running unbounded.
+func TestAgentPolicyFileRoots(t *testing.T) {
+	tests := []struct {
+		name  string
+		toml  string
+		group string
+		want  []string
+	}{
+		{
+			name:  "unset stays unbounded",
+			toml:  "[sandbox]\nmode = \"host\"\n",
+			group: GroupMain,
+		},
+		{
+			name:  "global roots apply",
+			toml:  "[sandbox]\nmode = \"host\"\nfile_roots = [\"/srv/work\"]\n",
+			group: GroupMain,
+			want:  []string{"/srv/work"},
+		},
+		{
+			name:  "group narrows",
+			toml:  "[sandbox]\nmode = \"host\"\nfile_roots = [\"/srv/work\"]\n\n[agent.group.cron.tools]\nfile_roots = [\"/srv/work/cron\"]\n",
+			group: GroupCron,
+			want:  []string{"/srv/work/cron"},
+		},
+		{
+			name:  "restricted tier defaults to work dir",
+			toml:  "[sandbox]\nmode = \"host\"\nwork_dir = \"/srv/work\"\n",
+			group: GroupCron,
+			want:  []string{"/srv/work"},
+		},
+		{
+			name:  "owner tier keeps no default boundary",
+			toml:  "[sandbox]\nmode = \"host\"\nwork_dir = \"/srv/work\"\n",
+			group: GroupMain,
+		},
+		{
+			name:  "no work dir means no default boundary",
+			toml:  "[sandbox]\nmode = \"host\"\n",
+			group: GroupCron,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tc.toml)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := cfg.AgentPolicy(tc.group).FileRoots
+			if len(got) != len(tc.want) {
+				t.Fatalf("file roots = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("file roots = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestAgentPolicyCronSandboxOnlyKeepsBashDeny guards the regression where
 // configuring [agent.group.cron] just to set the sandbox mode (no tool policy)
 // silently dropped the default bash deny and re-enabled host shell.

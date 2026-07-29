@@ -329,6 +329,33 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 	if profileName != "" && profileName != "main" && !ok {
 		return nil, cleanup, fmt.Errorf("unknown agent profile %q", profileName)
 	}
+	// Effective profile name for denials/logs (empty → main).
+	effectiveProfile := strings.TrimSpace(profileName)
+	if effectiveProfile == "" {
+		effectiveProfile = "main"
+	}
+	// The file-tool boundary (#269), resolved from the group policy before the
+	// profile is merged in. Narrowing and the "may only tighten" rule live in
+	// config.ApplyProfilePolicy / ValidateProfileFileRoots — the same pair Desk
+	// and the profile editor validate through — so the runtime cannot drift
+	// from what the editor accepted.
+	groupRoots, err := tool.NewFileRoots(pol.FileRoots)
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("agent group %q file_roots: %w", group, err)
+	}
+	if err := config.ValidateProfileFileRoots(pol, profile); err != nil {
+		return nil, cleanup, fmt.Errorf("agent profile %q: %w", effectiveProfile, err)
+	}
+	fileRoots, err := tool.NewFileRoots(config.ApplyProfilePolicy(pol, profile).FileRoots)
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("agent profile %q file_roots: %w", effectiveProfile, err)
+	}
+	// Belt and braces: the lexical config check cannot see symlinks, so hold
+	// the resolved roots to the group's resolved roots too.
+	if !groupRoots.Confines(fileRoots) {
+		return nil, cleanup, fmt.Errorf("agent profile %q file_roots resolve outside the group's roots %v", effectiveProfile, groupRoots.Roots())
+	}
+
 	if profile.Sandbox != "" {
 		pol.Mode = profile.Sandbox
 	}
@@ -347,11 +374,6 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 	}
 	if profile.Tools.Guidance != "" {
 		guidance = profile.Tools.Guidance
-	}
-	// Effective profile name for denials/logs (empty → main).
-	effectiveProfile := strings.TrimSpace(profileName)
-	if effectiveProfile == "" {
-		effectiveProfile = "main"
 	}
 	toolPolicy := tool.Policy{
 		Allow:        pol.Allow,
@@ -484,7 +506,10 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 	var execTools tool.Toolbox
 	switch pol.Mode {
 	case "host", "":
-		execTools = tool.BuiltinsWithFetch(cfg.Tools.Fetch.AllowPrivate)
+		execTools = tool.BuiltinsWith(tool.BuiltinOptions{
+			FetchAllowPrivate: cfg.Tools.Fetch.AllowPrivate,
+			FileRoots:         fileRoots,
+		})
 	case "docker":
 		home, err := config.Home()
 		if err != nil {

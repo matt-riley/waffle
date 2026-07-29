@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -340,5 +341,71 @@ func TestLayeredAgentPolicyMarksInertProfileLayer(t *testing.T) {
 	if !samePolicy(layered.Layers[0].Result, layered.Effective) {
 		t.Fatalf("effective %+v drifted from the group layer %+v",
 			layered.Effective, layered.Layers[0].Result)
+	}
+}
+
+// TestValidateProfileFileRootsHoldsTheBoundary is the #269 narrowing rule: a
+// profile may subdivide its group's file roots, never reach outside them, and
+// never drop the boundary entirely.
+func TestValidateProfileFileRootsHoldsTheBoundary(t *testing.T) {
+	group := ResolvedAgentPolicy{Mode: "host", FileRoots: []string{"/srv/work"}}
+	tests := []struct {
+		name    string
+		group   ResolvedAgentPolicy
+		profile AgentProfile
+		wantErr bool
+	}{
+		{
+			name:    "subdivides",
+			group:   group,
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/srv/work/repo"}}},
+		},
+		{
+			name:    "restates the group root",
+			group:   group,
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/srv/work"}}},
+		},
+		{
+			name:    "inherits when unset",
+			group:   group,
+			profile: AgentProfile{},
+		},
+		{
+			name:    "escapes the group root",
+			group:   group,
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/etc"}}},
+			wantErr: true,
+		},
+		{
+			name:    "escapes via traversal",
+			group:   group,
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/srv/work/../../etc"}}},
+			wantErr: true,
+		},
+		{
+			name:    "sibling prefix is not a child",
+			group:   group,
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/srv/work-other"}}},
+			wantErr: true,
+		},
+		{
+			name:    "unbounded group accepts any profile roots",
+			group:   ResolvedAgentPolicy{Mode: "host"},
+			profile: AgentProfile{Tools: ToolPolicy{FileRoots: []string{"/etc"}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProfileFileRoots(tc.group, tc.profile)
+			if tc.wantErr {
+				if !errors.Is(err, ErrProfileWidens) {
+					t.Fatalf("err = %v, want ErrProfileWidens", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
 	}
 }
