@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/tool"
 )
 
 // A tiny MCP server written as a shell script: reads JSON-RPC lines,
@@ -35,17 +38,7 @@ done
 
 func writeFakeServer(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("bash fake server is unix-only")
-	}
-	path := filepath.Join(t.TempDir(), "server.sh")
-	if err := os.WriteFile(path, []byte(fakeServer), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return writeScriptServer(t, fakeServer)
 }
 
 // TestDockerSandboxMCPExecution is the gated #77 integration proof. Run with:
@@ -219,6 +212,142 @@ func TestConcurrentCalls(t *testing.T) {
 		if err := <-errs; err != nil {
 			t.Fatalf("concurrent call %d: %v", i, err)
 		}
+	}
+}
+
+// oversizeServer answers initialize/tools/list normally, then floods stdout
+// with a single line far larger than MaxFrameBytes when a tool is called —
+// the malicious/buggy server shape from #286.
+const oversizeServer = `#!/usr/bin/env bash
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id" ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"flood","description":"flood","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*)
+      head -c $((10 * 1024 * 1024)) /dev/zero | tr '\0' 'x' ;;
+    *'"notifications/initialized"'*) : ;;
+  esac
+done
+`
+
+// bigResultServer returns a single well-formed result larger than
+// tool.HostReturnCap but smaller than MaxFrameBytes.
+const bigResultServer = `#!/usr/bin/env bash
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id" ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"big","description":"big","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"' "$id"
+      head -c $((1024 * 1024)) /dev/zero | tr '\0' 'y'
+      printf '"}],"isError":false}}\n' ;;
+    *'"notifications/initialized"'*) : ;;
+  esac
+done
+`
+
+func writeScriptServer(t *testing.T, script string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake server is unix-only")
+	}
+	path := filepath.Join(t.TempDir(), "server.sh")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod, not a mode passed to WriteFile: WriteFile's mode is filtered by
+	// the process umask, so a umask with the owner-execute bit set would leave
+	// the fixture non-executable and fail every server test.
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestReadFrameRejectsOversizedLine covers the transport bound directly: a
+// line at the limit is returned, one byte past it is refused rather than
+// buffered (#286).
+func TestReadFrameRejectsOversizedLine(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    int
+		wantErr error
+	}{
+		{name: "at limit", size: MaxFrameBytes},
+		{name: "over limit", size: MaxFrameBytes + 1, wantErr: ErrFrameTooLarge},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{out: bufio.NewReader(strings.NewReader(strings.Repeat("x", tc.size) + "\n"))}
+			line, err := c.readFrame()
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("readFrame err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && len(line) != tc.size+1 {
+				t.Fatalf("line len = %d, want %d", len(line), tc.size+1)
+			}
+		})
+	}
+}
+
+// TestOversizedServerLineFailsInFlightCall proves the whole path: the in-flight
+// call fails instead of the host buffering multi-MB of child output forever.
+func TestOversizedServerLineFailsInFlightCall(t *testing.T) {
+	path := writeScriptServer(t, oversizeServer)
+	ctx := context.Background()
+	client, err := Connect(ctx, Server{Name: "flood", Command: "bash", Args: []string{path}})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	tb, err := client.Toolbox(ctx)
+	if err != nil {
+		t.Fatalf("Toolbox: %v", err)
+	}
+	if _, err := tb.Run(ctx, "flood__flood", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("Run succeeded, want connection failure")
+	}
+	// The client must be unusable afterwards, not silently half-alive.
+	if _, err := client.call(ctx, "tools/list", map[string]any{}); err == nil {
+		t.Fatal("call after overflow succeeded, want connection closed")
+	}
+}
+
+// TestToolResultCappedAtHostReturnCap asserts MCP output crosses the same
+// boundary as the host builtins before reaching the agent (#286).
+func TestToolResultCappedAtHostReturnCap(t *testing.T) {
+	path := writeScriptServer(t, bigResultServer)
+	ctx := context.Background()
+	client, err := Connect(ctx, Server{Name: "big", Command: "bash", Args: []string{path}})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
+	tb, err := client.Toolbox(ctx)
+	if err != nil {
+		t.Fatalf("Toolbox: %v", err)
+	}
+	out, err := tb.Run(ctx, "big__big", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The cap is the invariant, not an exact length: CapHostReturn snaps back
+	// to a rune boundary, so a multi-byte payload can land up to 3 bytes short.
+	// Both bounds are asserted so a cap that silently returned almost nothing
+	// would still fail.
+	if len(out) > tool.HostReturnCap || len(out) < tool.HostReturnCap-3 {
+		t.Fatalf("output len = %d, want at most %d (and no more than 3 short)", len(out), tool.HostReturnCap)
 	}
 }
 

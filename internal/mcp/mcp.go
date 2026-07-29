@@ -24,6 +24,19 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 )
 
+// MaxFrameBytes bounds one physical NDJSON line read from a server's stdout.
+// MCP servers are untrusted child processes, and bufio grows a single buffer
+// until it sees a newline, so an unbounded read is a process-level DoS against
+// the host (#286). Sized well above a legitimate tool result (which is capped
+// at tool.HostReturnCap before the agent ever sees it) so only a pathological
+// or hostile server trips it.
+const MaxFrameBytes = 8 << 20
+
+// ErrFrameTooLarge reports a server line exceeding MaxFrameBytes. It is fatal
+// to the connection: the stream cannot be resynchronised without reading (and
+// therefore buffering) the rest of the oversized line.
+var ErrFrameTooLarge = errors.New("mcp: server line exceeds max frame size")
+
 // Server is one configured MCP server (a command run over stdio).
 type Server struct {
 	Name    string
@@ -334,15 +347,14 @@ func runDockerCleanup(ctx context.Context, args ...string) error {
 // fails every in-flight call.
 func (c *Client) readLoop() {
 	for {
-		line, err := c.out.ReadBytes('\n')
+		line, err := c.readFrame()
 		if err != nil {
-			c.mu.Lock()
-			c.readErr = err
-			for id, ch := range c.pending {
-				close(ch)
-				delete(c.pending, id)
+			c.failPending(err)
+			if errors.Is(err, ErrFrameTooLarge) {
+				// The stream cannot be resynchronised, and the child is
+				// producing unbounded output: stop reading it entirely.
+				_ = c.Close()
 			}
-			c.mu.Unlock()
 			return
 		}
 		trimmed := bytes.TrimSpace(line)
@@ -361,6 +373,48 @@ func (c *Client) readLoop() {
 		c.mu.Unlock()
 		if ok {
 			ch <- resp
+		}
+	}
+}
+
+// failPending records the reader-loop's exit error and fails every in-flight
+// call so no caller waits on a stream nobody is reading any more.
+func (c *Client) failPending(err error) {
+	c.mu.Lock()
+	c.readErr = err
+	for id, ch := range c.pending {
+		close(ch)
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
+}
+
+// readFrame reads one newline-terminated line, refusing to buffer more than
+// MaxFrameBytes of payload (the terminator itself does not count). ReadSlice
+// keeps the reader's own buffer fixed, so the only growth is the accumulator
+// this function bounds itself; the returned slice is valid until the next
+// read, which is all readLoop needs.
+func (c *Client) readFrame() ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := c.out.ReadSlice('\n')
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			if len(buf)+len(chunk) > MaxFrameBytes {
+				return nil, ErrFrameTooLarge
+			}
+			buf = append(buf, chunk...)
+		case err != nil:
+			return nil, err
+		default:
+			// A complete line: the trailing newline is not payload.
+			if len(buf)+len(chunk)-1 > MaxFrameBytes {
+				return nil, ErrFrameTooLarge
+			}
+			if buf == nil {
+				return chunk, nil
+			}
+			return append(buf, chunk...), nil
 		}
 	}
 }
@@ -478,7 +532,10 @@ func (t *toolbox) Run(ctx context.Context, name string, input json.RawMessage) (
 	if err != nil {
 		return "", err
 	}
-	return renderToolResult(raw), nil
+	// Cap at the same boundary as the host builtins (#286): MCP servers are
+	// untrusted children, and Agent.runOne spills before truncating to
+	// OutputLimit, so a plain cap (not head+tail Truncate) is what belongs here.
+	return tool.CapHostReturn(renderToolResult(raw)), nil
 }
 
 // renderToolResult flattens MCP's content-block result into text.
