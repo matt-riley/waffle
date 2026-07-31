@@ -58,7 +58,7 @@ jobs:
         run: mise run dashboard-check
 
   ci:
-    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@be1549198ac2b0582dd19d0da8ef7872c2fb653b
+    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@5cb8c0d9ccc5e79c3ef18514ef958aa457de6e0c
     with:
       build: true
       vet: true
