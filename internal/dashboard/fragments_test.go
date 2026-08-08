@@ -224,3 +224,40 @@ func TestCapabilityProviderTestFailureRendersAnErrorFragment(t *testing.T) {
 		t.Fatalf("provider test failure = %s", rendered.String())
 	}
 }
+
+// TestSkillFragmentReportsInstallWithoutAuditRecord covers #297: the Desk UI
+// only ever renders this fragment for a skill operation, so a committed
+// install whose policy_audit row was lost must say so here.
+func TestSkillFragmentReportsInstallWithoutAuditRecord(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition string
+		want        string
+	}{
+		{name: "clean install", disposition: "committed", want: "Skill operation completed."},
+		{name: "lost audit row", disposition: "committed" + InstallDispositionUnaudited, want: "policy audit record was not written"},
+		{
+			name:        "lost audit row after provenance repair",
+			disposition: "committed_with_provenance_repair" + InstallDispositionUnaudited,
+			want:        "policy audit record was not written",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := negotiateFragments(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, CapabilitySkill{Name: "reviewed-skill", InstallDisposition: test.disposition})
+			}))
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/capabilities/skills/install", nil)
+			request.Header.Set("Accept", "text/html")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d", response.Code)
+			}
+			if !strings.Contains(response.Body.String(), test.want) {
+				t.Fatalf("fragment = %s, want it to contain %q", response.Body.String(), test.want)
+			}
+		})
+	}
+}

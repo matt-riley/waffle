@@ -162,7 +162,7 @@ func (s *WorkspaceCapabilitySkills) Install(ctx context.Context, stageID, digest
 	// whose policy_audit row was lost is not a clean success, and the client
 	// is the only place that can say so (#297).
 	if errors.Is(errors.Join(result.Warnings...), policy.ErrAuditNotRecorded) {
-		disposition += "_without_audit_record"
+		disposition += InstallDispositionUnaudited
 	}
 	return CapabilitySkill{
 		Name:               result.Skill.Name,

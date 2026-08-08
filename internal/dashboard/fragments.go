@@ -214,6 +214,14 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 			StageID: typed.StageID, ExpiresAt: typed.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
 		})
 	case CapabilitySkill:
+		// This fragment is all the Desk UI shows for the operation, so a
+		// committed install with no audit row has to say so here or the
+		// operator never learns of it (#297).
+		if strings.HasSuffix(typed.InstallDisposition, InstallDispositionUnaudited) {
+			return ui.FragmentStatus(ui.FragmentStatusView{
+				Message: "Skill installed, but its policy audit record was not written; check the host log.",
+			})
+		}
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: "Skill operation completed."})
 	case struct{}:
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: "Request completed."})

@@ -97,6 +97,11 @@ type CapabilityCatalogueResult struct {
 	PrivateValues []string
 }
 
+// InstallDispositionUnaudited is appended to a committed install's
+// disposition when its policy_audit row was lost (#297). A suffix, so it
+// composes with the base disposition rather than replacing it.
+const InstallDispositionUnaudited = "_without_audit_record"
+
 type CapabilitySkill struct {
 	Name               string `json:"name"`
 	Description        string `json:"description,omitempty"`
