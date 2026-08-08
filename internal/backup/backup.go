@@ -25,7 +25,7 @@ type manifest struct {
 }
 
 // Create writes a new, never-overwritten directory backup.
-func Create(ctx context.Context, dst string, withIdentity bool, identity string) error {
+func Create(ctx context.Context, dst string, withIdentity bool, identity string) (retErr error) {
 	if !filepath.IsAbs(dst) {
 		return errors.New("backup destination must be an absolute path")
 	}
@@ -43,6 +43,14 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 	}
 	cleanup := func() { _ = os.RemoveAll(dst) }
 	defer func() {
+		// Keyed on the outcome, not only on the marker: a failure after the
+		// manifest lands must not leave a destination that Restore accepts as
+		// complete and that a retry cannot overwrite. The marker check stays
+		// for the panic path, where retErr is never set.
+		if retErr != nil {
+			cleanup()
+			return
+		}
 		if _, err := os.Stat(filepath.Join(dst, "manifest.json")); err != nil {
 			cleanup()
 		}
@@ -68,9 +76,13 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 		}
 	}
 	for _, name := range []string{"workspace", "skills"} {
-		if err := copyDirIfExists(filepath.Join(home, name), filepath.Join(dst, name)); err != nil {
+		nested, err := copyDirIfExists(filepath.Join(home, name), filepath.Join(dst, name))
+		if err != nil {
 			return err
 		}
+		// Deepest first, ahead of the destination chain, so every entry is
+		// synced before the directory that holds it.
+		created = append(nested, created...)
 	}
 	if withIdentity {
 		if identity == "" {
@@ -80,16 +92,16 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 			return err
 		}
 	}
-	b, _ := json.MarshalIndent(manifest{Version: "dev", Identity: withIdentity}, "", "  ")
-	// manifest.json is this backup's completion marker — Create's own deferred
-	// cleanup treats its presence as success — so it is committed durably and
-	// last, after every file above has been synced (#263).
-	if err := filecommit.Write(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600); err != nil {
+	// Every directory this backup created is made durable before the marker is
+	// written, so a recovered filesystem never shows a complete backup whose
+	// content is missing.
+	if err := syncCreatedDirs(created); err != nil {
 		return err
 	}
-	// Last, so a recovered filesystem never shows the backup directory without
-	// the marker that says it is complete.
-	return syncCreatedDirs(created)
+	b, _ := json.MarshalIndent(manifest{Version: "dev", Identity: withIdentity}, "", "  ")
+	// manifest.json is this backup's completion marker, so it is committed
+	// durably (filecommit syncs the file and its directory) and last (#263).
+	return filecommit.Write(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600)
 }
 
 // missingDirs returns the directories MkdirAll would have to create for path,
@@ -199,7 +211,9 @@ func Restore(ctx context.Context, src string) error {
 		}
 	}
 	for _, name := range []string{"workspace", "skills"} {
-		if err := copyDirIfExists(filepath.Join(src, name), filepath.Join(stage, name)); err != nil {
+		// Restore stages into a temp dir under home and renames it into place,
+		// so the created entries here are not the durable ones.
+		if _, err := copyDirIfExists(filepath.Join(src, name), filepath.Join(stage, name)); err != nil {
 			return err
 		}
 	}
@@ -265,21 +279,34 @@ func copyFile(src, dst string, mode fs.FileMode) (err error) {
 	}
 	return filecommit.SyncDir(filepath.Dir(dst))
 }
-func copyDirIfExists(src, dst string) error {
+
+// copyDirIfExists mirrors src into dst and reports the directories it created,
+// deepest first. copyFile syncs the directory each file lands in, but a
+// directory holding only subdirectories is never a file's parent, so its own
+// entry needs syncing by the caller or the subtree can vanish under a backup
+// that reported success (#263).
+func copyDirIfExists(src, dst string) ([]string, error) {
 	if !exists(src) {
-		return nil
+		return nil, nil
 	}
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	var created []string
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(src, path)
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			// WalkDir is parent-first, so prepending yields deepest-first.
+			created = append(missingDirs(target), created...)
 			return os.MkdirAll(target, 0o700)
 		}
 		return copyFile(path, target, 0o600)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 func replaceFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {

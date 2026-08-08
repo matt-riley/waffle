@@ -277,3 +277,85 @@ func TestCreateSyncsEveryDirectoryItCreates(t *testing.T) {
 		t.Errorf("backup incomplete: %v", err)
 	}
 }
+
+// TestCreateSyncsNestedDirectoriesItCopies is the second review follow-up on
+// #263: copyFile syncs the directory each file lands in, but a directory that
+// holds only subdirectories is never a file's parent, so nothing made its own
+// entry durable and the subtree could vanish under a backup that reported
+// success.
+func TestCreateSyncsNestedDirectoriesItCopies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	// skills/ holds only a directory; the file lives one level down.
+	nested := filepath.Join(home, "skills", "recovery", "reference")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "NOTES.md"), []byte("# Notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(t.TempDir(), "backup")
+	if err := Create(context.Background(), destination, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "skills", "recovery", "reference", "NOTES.md")); err != nil {
+		t.Fatalf("nested file missing from backup: %v", err)
+	}
+
+	// The copy reports every directory it created, deepest first, so the
+	// caller can sync entries no file write covers.
+	source := filepath.Join(home, "skills")
+	target := filepath.Join(t.TempDir(), "copy", "skills")
+	created, err := copyDirIfExists(source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(target, "recovery", "reference"),
+		filepath.Join(target, "recovery"),
+		target,
+	}
+	if len(created) < len(want) {
+		t.Fatalf("created = %v, want at least the copied tree %v", created, want)
+	}
+	for i, dir := range want {
+		if created[i] != dir {
+			t.Errorf("created[%d] = %s, want %s (deepest first)", i, created[i], dir)
+		}
+	}
+	if missing, err := copyDirIfExists(filepath.Join(home, "absent"), target); err != nil || missing != nil {
+		t.Errorf("copying an absent tree = %v, %v; want no directories and no error", missing, err)
+	}
+}
+
+// TestCreateRemovesDestinationWhenItFails is the third review follow-up on
+// #263. Cleanup is now keyed on the outcome rather than only on the presence
+// of manifest.json, so a failure can never leave a destination that Restore
+// accepts as complete and that a retry cannot overwrite. The reordering above
+// also makes a post-marker failure unreachable — the marker is the last write
+// — and this covers the general failure path and the retry that follows.
+func TestCreateRemovesDestinationWhenItFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[provider]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(t.TempDir(), "backup")
+	// --with-identity with no identity fails after the state files are copied,
+	// standing in for any post-copy failure.
+	if err := Create(context.Background(), destination, true, ""); err == nil {
+		t.Fatal("Create reported success without an identity")
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed backup left its destination behind: %v", err)
+	}
+	// And the path is reusable, so the owner can simply retry.
+	if err := Create(context.Background(), destination, false, ""); err != nil {
+		t.Fatalf("retry after a failed backup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "manifest.json")); err != nil {
+		t.Errorf("retry did not complete: %v", err)
+	}
+}
