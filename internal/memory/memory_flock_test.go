@@ -140,3 +140,38 @@ func TestMemoryMutationReportsBusyLock(t *testing.T) {
 		t.Errorf("sidecar lock directory: %v", err)
 	}
 }
+
+// TestAppendRawLineHonorsTheMemoryLock proves the entry point used by callers
+// with their own line format (the learner) takes the same lock as the note
+// tools, rather than writing MEMORY.md behind their backs.
+func TestAppendRawLineHonorsTheMemoryLock(t *testing.T) {
+	workspace := Workspace{Dir: t.TempDir()}
+	previous := memoryLockTimeout
+	memoryLockTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { memoryLockTimeout = previous })
+
+	release, err := flock.Acquire(memoryLockPath(workspace.MemoryPath()), "MEMORY.md", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.AppendRawLine("- [learn:sig] blocked line"); err == nil {
+		t.Error("AppendRawLine wrote while another holder had the lock")
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := workspace.AppendRawLine("- [learn:sig] applied line"); err != nil {
+		t.Fatalf("AppendRawLine after release: %v", err)
+	}
+	body, err := os.ReadFile(workspace.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "blocked line") {
+		t.Error("a line whose lock was never acquired was written anyway")
+	}
+	if !strings.Contains(string(body), "- [learn:sig] applied line\n") {
+		t.Errorf("MEMORY.md = %q, want the appended line verbatim with one newline", body)
+	}
+}

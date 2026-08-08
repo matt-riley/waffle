@@ -586,15 +586,10 @@ func (l *Learner) applyAccepted(ctx context.Context, p *Proposal) error {
 		})
 	case SurfaceMemory:
 		// Append a config-stub style note candidate under pending via gate body.
-		line := fmt.Sprintf("- [learn:%s] %s", p.PatternSig, oneLine(p.Body))
-		path := l.WS.MemoryPath()
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = f.Close() }()
-		_, err = fmt.Fprintln(f, line)
-		return err
+		// Through the workspace so it takes the shared MEMORY.md lock (#267):
+		// opening the file directly here let a concurrent read-modify-write in
+		// another process erase a note already reported as applied.
+		return l.WS.AppendRawLine(fmt.Sprintf("- [learn:%s] %s", p.PatternSig, oneLine(p.Body)))
 	case SurfaceConfigStub:
 		// Write a non-live stub under workspace for operator review.
 		dir := filepath.Join(l.WS.Dir, "config-stubs")

@@ -739,3 +739,31 @@ func TestAcceptProposalGitCommit(t *testing.T) {
 		t.Fatalf("expected no-git audit note, got %q", out2.Audit)
 	}
 }
+
+// TestLearnerMemoryProposalAppendsUnderTheSharedLock is the review follow-up on
+// #267: the learner used to open MEMORY.md itself, so an accepted proposal
+// could be erased by a concurrent read-modify-write in another process and
+// still be reported as applied.
+func TestLearnerMemoryProposalAppendsUnderTheSharedLock(t *testing.T) {
+	workspace := memory.Workspace{Dir: t.TempDir()}
+	learner := &Learner{WS: workspace}
+	proposal := &Proposal{Surface: SurfaceMemory, PatternSig: "sig-1", Body: "prefer the smaller diff"}
+
+	if err := learner.applyAccepted(context.Background(), proposal); err != nil {
+		t.Fatalf("applyAccepted: %v", err)
+	}
+
+	body, err := os.ReadFile(workspace.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "- [learn:sig-1] prefer the smaller diff\n"
+	if string(body) != want {
+		t.Errorf("MEMORY.md = %q, want %q", body, want)
+	}
+	// The sidecar lock directory exists only if the write went through the
+	// workspace's locking append rather than opening the file directly.
+	if _, err := os.Stat(filepath.Join(workspace.Dir, ".memory-locks")); err != nil {
+		t.Errorf("learner bypassed the MEMORY.md lock: %v", err)
+	}
+}

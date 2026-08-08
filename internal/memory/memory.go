@@ -168,6 +168,21 @@ func (w Workspace) RemoveLines(lines []int) error {
 	return os.WriteFile(w.MemoryPath(), []byte(strings.Join(kept, "\n")), 0o600)
 }
 
+// AppendRawLine appends a pre-formatted line to MEMORY.md under the same
+// cross-process lock as every other mutation (#267). Callers outside this
+// package that write their own line format — the learner applying an accepted
+// memory proposal — must use this rather than opening the file themselves, or
+// a concurrent RemoveLines/ForgetNote/SupersedeNote erases the line after it
+// was reported as applied.
+func (w Workspace) AppendRawLine(line string) error {
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return appendFileLine(w.MemoryPath(), strings.TrimRight(line, "\n")+"\n")
+}
+
 // DefaultAgent is the single agent group until the entity model (phase 3).
 const DefaultAgent = "main"
 
