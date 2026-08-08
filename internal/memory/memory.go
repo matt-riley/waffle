@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/flock"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/session"
@@ -31,8 +32,30 @@ import (
 // from losing updates when tools share a Dir.
 var memoryFileMus sync.Map // abs path -> *sync.Mutex
 
-// lockMemoryFile locks MEMORY.md mutations for path and returns unlock.
-func lockMemoryFile(path string) func() {
+// memoryLockTimeout bounds the wait for the cross-process MEMORY.md lock.
+// A crashed holder releases its flock through the kernel, so only a live
+// contender waits this long. Variable for tests.
+var memoryLockTimeout = 5 * time.Second
+
+// memoryLockPath returns the sidecar lock for a MEMORY.md path. It lives
+// under <dir>/.memory-locks/ so the workspace the owner reads keeps only the
+// files they wrote.
+func memoryLockPath(path string) string {
+	return filepath.Join(filepath.Dir(path), ".memory-locks", filepath.Base(path)+".lock")
+}
+
+// lockMemoryFile serializes MEMORY.md mutations for path, in this process and
+// across processes, and returns unlock.
+//
+// The process mutex alone was not enough (#267): more than one waffle process
+// shares a $WAFFLE_HOME — a chat REPL beside serve running cron sessions, or a
+// Desk-triggered run beside a CLI one — and MEMORY.md mutation is
+// read-modify-write. RemoveLines reads the whole file, drops lines by index,
+// and writes it back, so an append landing between that read and write was
+// silently erased. O_APPEND stops writes interleaving; it does not make a
+// read-modify-write atomic. Order is always mutex then flock, matching the
+// secret store, so the two can never deadlock against each other.
+func lockMemoryFile(path string) (func(), error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
@@ -40,7 +63,15 @@ func lockMemoryFile(path string) func() {
 	v, _ := memoryFileMus.LoadOrStore(abs, &sync.Mutex{})
 	m := v.(*sync.Mutex)
 	m.Lock()
-	return m.Unlock
+	release, err := flock.Acquire(memoryLockPath(abs), "MEMORY.md", memoryLockTimeout)
+	if err != nil {
+		m.Unlock()
+		return nil, err
+	}
+	return func() {
+		_ = release()
+		m.Unlock()
+	}, nil
 }
 
 // DefaultInjectBudget is the default byte budget for MEMORY.md notes in
@@ -114,7 +145,10 @@ func (w Workspace) MatchingLines(query string) ([]string, error) {
 
 // RemoveLines removes exactly the supplied 1-based line numbers.
 func (w Workspace) RemoveLines(lines []int) error {
-	unlock := lockMemoryFile(w.MemoryPath())
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	body, err := os.ReadFile(w.MemoryPath())
 	if err != nil {
@@ -351,7 +385,10 @@ func (w Workspace) Append(note string) (string, error) {
 }
 
 func (w Workspace) appendCandidate(c Candidate) (string, error) {
-	unlock := lockMemoryFile(w.MemoryPath())
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return "", err
+	}
 	defer unlock()
 	noteID, err := newNoteID()
 	if err != nil {
@@ -505,7 +542,10 @@ func (w Workspace) archiveLine(line string) error {
 // ForgetNote moves the note with id to MEMORY.archive.md and removes it
 // from MEMORY.md. Localized line edit only.
 func (w Workspace) ForgetNote(noteID string) error {
-	unlock := lockMemoryFile(w.MemoryPath())
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	removed, err := w.removeNoteByID(noteID)
 	if err != nil {
@@ -524,7 +564,10 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 	if strings.TrimSpace(body) == "" {
 		return "", errors.New("note is required")
 	}
-	unlock := lockMemoryFile(w.MemoryPath())
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return "", err
+	}
 	defer unlock()
 	if _, err := w.findNoteByID(oldID); err != nil {
 		return "", err

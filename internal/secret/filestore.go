@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"filippo.io/age"
+
+	"github.com/matt-riley/waffle/internal/flock"
 )
 
 // storeLockTimeout is how long Set/Get/Delete/List wait for the exclusive
@@ -63,7 +65,7 @@ func (s *FileStore) withStoreLock(fn func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	release, err := acquireStoreLock(s.lockPath(), storeLockTimeout)
+	release, err := flock.Acquire(s.lockPath(), "secret store", storeLockTimeout)
 	if err != nil {
 		return err
 	}
