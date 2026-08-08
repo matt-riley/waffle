@@ -674,3 +674,72 @@ func TestRunToolSemaphoreBounds(t *testing.T) {
 		t.Errorf("did not find canceled-before-acquire result in history: %+v", history)
 	}
 }
+
+// panicTool panics with a value carrying its input, standing in for any tool
+// (MCP glue, policy hook, nil deref) that can fail catastrophically.
+type panicTool struct{}
+
+func (panicTool) Def() llm.Tool {
+	return llm.Tool{Name: "boom", Description: "boom", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (panicTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	panic("boom: SECRET_PANIC_DETAIL")
+}
+
+func TestRunToolPanicBecomesErrorResultWithoutCrashing(t *testing.T) {
+	var logs bytes.Buffer
+	echo := &echoTool{}
+	p := &fakeProvider{responses: []llm.Response{
+		{
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "boom", Input: json.RawMessage(`{}`)}},
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t2", Name: "echo", Input: json.RawMessage(`{"text":"a"}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+		},
+		{Message: assistantText("recovered"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(panicTool{}, echo), Model: "m", Profile: "main", Log: slog.New(slog.NewTextHandler(&logs, nil))}
+
+	var done []llm.ToolResult
+	history, err := a.Run(context.Background(), []llm.Message{llm.UserText("go")}, Hooks{
+		OnToolDone: func(_ llm.ToolUse, res llm.ToolResult) { done = append(done, res) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(history) != 4 {
+		t.Fatalf("history len = %d, want 4 (the run must continue past the panic)", len(history))
+	}
+
+	results := history[2]
+	if len(results.Blocks) != 2 {
+		t.Fatalf("tool results malformed: %+v", results)
+	}
+	panicked := results.Blocks[0].ToolResult
+	if !panicked.IsError || panicked.ToolUseID != "t1" {
+		t.Errorf("panicking tool result = %+v, want an error result for t1", panicked)
+	}
+	if !strings.Contains(panicked.Content, "panicked") {
+		t.Errorf("panicking tool content = %q, want it to say the tool panicked", panicked.Content)
+	}
+	if strings.Contains(panicked.Content, "SECRET_PANIC_DETAIL") {
+		t.Errorf("panic value leaked to the model: %q", panicked.Content)
+	}
+
+	// The sibling call in the same batch must still be dispatched and answered.
+	if survivor := results.Blocks[1].ToolResult; survivor.IsError || !strings.Contains(survivor.Content, `"a"`) {
+		t.Errorf("sibling tool result = %+v, want the echo result", survivor)
+	}
+	if len(done) != 2 {
+		t.Errorf("OnToolDone fired %d times, want 2", len(done))
+	}
+
+	body := logs.String()
+	for _, want := range []string{"msg=\"tool call panicked\"", "tool=boom", "SECRET_PANIC_DETAIL", "stack="} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
+	}
+}
