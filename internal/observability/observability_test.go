@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,4 +263,48 @@ func testService(t *testing.T) (context.Context, *Service, *time.Time) {
 	t.Cleanup(func() { _ = st.Close() })
 	now := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
 	return ctx, New(st, func() time.Time { return now }), &now
+}
+
+// TestFinishClearsActiveRunWhenMetricsPersistFails covers #261: a failed
+// run_metrics insert used to leave the run pinned active for the life of the
+// process, and no retry could clear it because run_metrics.id is the primary
+// key.
+func TestFinishClearsActiveRunWhenMetricsPersistFails(t *testing.T) {
+	ctx, svc, _ := testService(t)
+	// A row already holding this id makes the insert fail on the primary key —
+	// the same shape as the retry that could never succeed.
+	if _, err := svc.store.DB.ExecContext(ctx, `
+		INSERT INTO run_metrics
+			(id, session_id, source, phase, outcome, started_at_ms, ended_at_ms, input_tokens, output_tokens, profile)
+		VALUES ('run-1', 'session-1', 'gateway', 'agent', 'ok', 0, 1, 0, 0, 'main')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Start(ctx, "run-1", "session-1", "gateway", "agent", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	finishErr := svc.Finish(ctx, "run-1", "error")
+	if finishErr == nil {
+		t.Fatal("Finish reported success with no metrics row written")
+	}
+	// The caller only logs this error, so it has to carry what was lost.
+	for _, want := range []string{"run-1", "error"} {
+		if !strings.Contains(finishErr.Error(), want) {
+			t.Errorf("Finish error = %v, want it to name %q", finishErr, want)
+		}
+	}
+
+	snapshot, err := svc.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Active) != 0 {
+		t.Fatalf("active runs = %+v, want the finished run gone despite the lost metrics", snapshot.Active)
+	}
+	// The entry is gone for good, not merely hidden from this snapshot: a
+	// second Finish reports the run as unknown rather than re-attempting a
+	// doomed insert.
+	if err := svc.Finish(ctx, "run-1", "error"); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Errorf("second Finish = %v, want a not-active error", err)
+	}
 }
