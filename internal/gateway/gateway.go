@@ -246,6 +246,10 @@ func (g *Gateway) Run(ctx context.Context) error {
 			go func(msg channel.Message) {
 				defer handlers.Done()
 				defer func() { <-sem }()
+				// Confirm delivery only once handling has finished: an
+				// adapter that never sees the ack redelivers the message
+				// after a restart rather than losing it (#257).
+				defer g.ack(msg)
 				// Handle concurrently across conversations, serially within
 				// one (the per-group lock).
 				g.handle(drainCtx, msg)
@@ -261,6 +265,18 @@ func (g *Gateway) adapter(name string) channel.Adapter {
 		}
 	}
 	return nil
+}
+
+// ack confirms a handled message back to the adapter that delivered it, for
+// adapters that track delivery (#257). Messages the gateway drops without
+// handling are deliberately left unconfirmed.
+func (g *Gateway) ack(msg channel.Message) {
+	if msg.AckID == "" {
+		return
+	}
+	if acker, ok := g.adapter(msg.Channel).(channel.Acknowledger); ok {
+		acker.Ack(msg.AckID)
+	}
 }
 
 func (g *Gateway) ensureGroups() {

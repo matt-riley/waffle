@@ -36,12 +36,29 @@ const DefaultBaseURL = "https://api.telegram.org"
 // maxMessageLen is Telegram's hard limit; longer replies are split.
 const maxMessageLen = 4000
 
+// OffsetStore persists the getUpdates cursor across restarts (#257). Nil
+// leaves the cursor in process memory, which is only safe for tests and
+// one-shot runs.
+type OffsetStore interface {
+	Load(ctx context.Context) (int64, error)
+	Save(ctx context.Context, offset int64) error
+}
+
 // Adapter is a Telegram bot connection.
 type Adapter struct {
 	token   string
 	baseURL string
 	client  *http.Client
 	onPoll  func()
+
+	// Offsets, when set, makes the update cursor durable.
+	Offsets OffsetStore
+
+	// acks holds the release func for each delivered-but-unconfirmed update,
+	// keyed by AckID. Ack removes and calls it; Run waits for the map to
+	// drain before confirming the batch to Telegram.
+	ackMu sync.Mutex
+	acks  map[string]func()
 
 	// Bot identity from getMe, cached after the first successful call.
 	botMu        sync.Mutex
@@ -122,6 +139,15 @@ type apiResponse struct {
 }
 
 // Run long-polls getUpdates until ctx is done.
+//
+// Delivery is at-least-once (#257). Telegram confirms updates by the offset
+// sent on the *next* getUpdates call, and never resends a confirmed update, so
+// the offset may only advance past updates that have been handled: Run hands a
+// batch to the gateway, waits for every delivered message to be acked, and only
+// then advances and persists the cursor. A process that dies mid-handle leaves
+// those updates unconfirmed, and Telegram redelivers them (it retains
+// unconfirmed updates for ~24h). Duplicates are therefore possible where an
+// exactly-once protocol would need a durable inbox; silent loss is not.
 func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error {
 	// Resolve bot identity up front so group mention gating works on the
 	// first update. Transient failures are retried on demand later.
@@ -129,7 +155,8 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 		slog.Default().Warn("telegram getMe failed; will retry", "err", err)
 	}
 
-	var offset int64
+	offset := a.loadOffset(ctx)
+	defer a.releaseAcks()
 	consecutive := 0
 	for {
 		updates, err := a.getUpdates(ctx, offset)
@@ -155,20 +182,119 @@ func (a *Adapter) Run(ctx context.Context, inbound chan<- channel.Message) error
 			}
 		}
 		consecutive = 0
+		next := offset
+		var handled sync.WaitGroup
 		for _, u := range updates {
-			if u.UpdateID >= offset {
-				offset = u.UpdateID + 1
+			if u.UpdateID >= next {
+				next = u.UpdateID + 1
 			}
 			msg, ok := a.toInbound(ctx, u.Message)
 			if !ok {
+				// Nothing to hand over, so nothing to wait for: an update
+				// with no deliverable message is handled by dropping it.
 				continue
 			}
+			msg.AckID = strconv.FormatInt(u.UpdateID, 10)
+			handled.Add(1)
+			a.expectAck(msg.AckID, handled.Done)
 			select {
 			case inbound <- msg:
 			case <-ctx.Done():
 				return nil
 			}
 		}
+		// The next poll's offset is what confirms this batch, so it may not
+		// be sent until the batch has been handled.
+		if !waitFor(ctx, &handled) {
+			return nil
+		}
+		if next != offset {
+			offset = next
+			a.saveOffset(ctx, offset)
+		}
+	}
+}
+
+// expectAck registers a delivered update as awaiting confirmation. release is
+// called at most once however many times the gateway acks.
+func (a *Adapter) expectAck(ackID string, release func()) {
+	a.ackMu.Lock()
+	defer a.ackMu.Unlock()
+	if a.acks == nil {
+		a.acks = make(map[string]func())
+	}
+	a.acks[ackID] = sync.OnceFunc(release)
+}
+
+// Ack implements channel.Acknowledger: the gateway has finished handling the
+// update, so it may be confirmed to Telegram.
+func (a *Adapter) Ack(ackID string) {
+	a.ackMu.Lock()
+	release := a.acks[ackID]
+	delete(a.acks, ackID)
+	a.ackMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// releaseAcks unblocks anything still waiting when Run returns, so a shutdown
+// with messages in flight cannot leak the waiter goroutine.
+func (a *Adapter) releaseAcks() {
+	a.ackMu.Lock()
+	pending := a.acks
+	a.acks = nil
+	a.ackMu.Unlock()
+	for _, release := range pending {
+		release()
+	}
+}
+
+// waitFor reports whether every delivered message in the batch was handled.
+// False means ctx ended first and the batch must stay unconfirmed.
+func waitFor(ctx context.Context, handled *sync.WaitGroup) bool {
+	done := make(chan struct{})
+	go func() {
+		handled.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// loadOffset reads the durable cursor. A failure is loud but not fatal: the
+// cursor falls back to zero, which replays whatever Telegram still holds
+// unconfirmed rather than skipping past it.
+func (a *Adapter) loadOffset(ctx context.Context) int64 {
+	if a.Offsets == nil {
+		return 0
+	}
+	offset, err := a.Offsets.Load(ctx)
+	if err != nil {
+		slog.Default().Error("telegram offset load failed; replaying unconfirmed updates", "err", err)
+		return 0
+	}
+	return offset
+}
+
+// saveOffset persists the cursor after a batch is handled. On failure the
+// in-memory cursor still advances — re-polling handled updates would deliver
+// them twice — but a restart resumes from the last stored cursor, so the
+// failure is reported rather than dropped.
+func (a *Adapter) saveOffset(ctx context.Context, offset int64) {
+	if a.Offsets == nil {
+		return
+	}
+	// Detached: the batch is already handled, and a shutdown cancelling this
+	// write is exactly the case that would replay it on the next start.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := a.Offsets.Save(ctx, offset); err != nil {
+		slog.Default().Error("telegram offset save failed; a restart will replay from the last stored offset", "offset", offset, "err", err)
 	}
 }
 

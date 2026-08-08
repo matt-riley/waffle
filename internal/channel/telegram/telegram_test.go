@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,11 +94,12 @@ func TestRunDeliversMessagesAndAdvancesOffset(t *testing.T) {
 	case msg := <-inbound:
 		want := channel.Message{
 			Channel: "telegram", ChatID: "100", SenderID: "42", SenderName: "Matt",
-			Text: "hello", ChatType: "private",
+			Text: "hello", ChatType: "private", AckID: "7",
 		}
 		if msg != want {
 			t.Errorf("msg = %+v, want %+v", msg, want)
 		}
+		a.Ack(msg.AckID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no inbound message")
 	}
@@ -393,5 +395,217 @@ func TestAPIErrorSurfaced(t *testing.T) {
 	a := New("bad", srv.URL)
 	if err := a.Send(context.Background(), "1", "hi"); err == nil || !strings.Contains(err.Error(), "Unauthorized") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// memoryOffsets is an OffsetStore that records every save.
+type memoryOffsets struct {
+	mu      sync.Mutex
+	loaded  int64
+	loadErr error
+	saved   []int64
+}
+
+func (m *memoryOffsets) Load(context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.loaded, m.loadErr
+}
+
+func (m *memoryOffsets) Save(_ context.Context, offset int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saved = append(m.saved, offset)
+	return nil
+}
+
+func (m *memoryOffsets) savedOffsets() []int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int64(nil), m.saved...)
+}
+
+// updatesServer serves getMe plus one batch of updates, recording the offset
+// of every getUpdates call.
+func updatesServer(t *testing.T, batch string) (*httptest.Server, func() []int64) {
+	t.Helper()
+	var mu sync.Mutex
+	var offsets []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":"waffle_bot"}}`)
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			var req struct {
+				Offset int64 `json:"offset"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			offsets = append(offsets, req.Offset)
+			first := len(offsets) == 1
+			mu.Unlock()
+			if first {
+				fmt.Fprint(w, batch)
+				return
+			}
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+		default:
+			t.Errorf("path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []int64 {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]int64(nil), offsets...)
+	}
+}
+
+const oneUpdateBatch = `{"ok":true,"result":[
+	{"update_id":7,"message":{"text":"hello","chat":{"id":100,"type":"private"},"from":{"id":42,"first_name":"Matt"}}}
+]}`
+
+func TestRunHoldsOffsetUntilDeliveredMessageIsAcked(t *testing.T) {
+	srv, polls := updatesServer(t, oneUpdateBatch)
+	offsets := &memoryOffsets{}
+	a := New("test-token", srv.URL)
+	a.Offsets = offsets
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbound := make(chan channel.Message, 4)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, inbound) }()
+
+	var msg channel.Message
+	select {
+	case msg = <-inbound:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no inbound message")
+	}
+
+	// Confirming the batch is what tells Telegram to forget it, so an
+	// unhandled message must keep the cursor where it is (#257).
+	time.Sleep(200 * time.Millisecond)
+	if got := polls(); len(got) != 1 {
+		t.Fatalf("polls = %v, want the adapter to wait for the ack before polling again", got)
+	}
+	if saved := offsets.savedOffsets(); len(saved) != 0 {
+		t.Fatalf("saved = %v, want nothing saved before the message is handled", saved)
+	}
+
+	a.Ack(msg.AckID)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if saved := offsets.savedOffsets(); len(saved) > 0 {
+			if saved[len(saved)-1] != 8 {
+				t.Fatalf("saved = %v, want the cursor past update 7", saved)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("cursor never advanced after the ack")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	if got := polls(); len(got) < 2 || got[1] != 8 {
+		t.Errorf("polls = %v, want the second poll to confirm at 8", got)
+	}
+}
+
+func TestRunResumesFromStoredOffset(t *testing.T) {
+	srv, polls := updatesServer(t, `{"ok":true,"result":[]}`)
+	a := New("test-token", srv.URL)
+	a.Offsets = &memoryOffsets{loaded: 41}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inbound := make(chan channel.Message, 1)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, inbound) }()
+
+	deadline := time.After(5 * time.Second)
+	for len(polls()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no getUpdates call")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	if got := polls(); got[0] != 41 {
+		t.Errorf("first poll offset = %d, want the stored cursor 41", got[0])
+	}
+}
+
+func TestRunFallsBackToReplayWhenOffsetLoadFails(t *testing.T) {
+	srv, polls := updatesServer(t, `{"ok":true,"result":[]}`)
+	a := New("test-token", srv.URL)
+	a.Offsets = &memoryOffsets{loaded: 41, loadErr: errors.New("database is locked")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inbound := make(chan channel.Message, 1)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, inbound) }()
+
+	deadline := time.After(5 * time.Second)
+	for len(polls()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no getUpdates call")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	// Replaying what Telegram still holds is recoverable; skipping past it
+	// is not, so an unreadable cursor must not be treated as a valid one.
+	if got := polls(); got[0] != 0 {
+		t.Errorf("first poll offset = %d, want 0 after a failed load", got[0])
+	}
+}
+
+func TestAckIsIdempotentAndUnblocksOnShutdown(t *testing.T) {
+	srv, _ := updatesServer(t, oneUpdateBatch)
+	a := New("test-token", srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inbound := make(chan channel.Message, 4)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, inbound) }()
+
+	var msg channel.Message
+	select {
+	case msg = <-inbound:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no inbound message")
+	}
+	// A duplicate ack must not corrupt the batch's outstanding count.
+	a.Ack(msg.AckID)
+	a.Ack(msg.AckID)
+	a.Ack("nonexistent")
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation")
 	}
 }
