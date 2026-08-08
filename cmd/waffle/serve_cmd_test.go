@@ -260,7 +260,12 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	resp, err := client.Get("http://" + addr + "/desk/")
+	// Startup is not finished when the status listener first answers: provider
+	// readiness re-proofing can hold the provider-config lock that the
+	// capabilities endpoint waits on for up to a second, so content requests
+	// must not reuse the tight per-attempt timeout of the readiness poll.
+	contentClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := contentClient.Get("http://" + addr + "/desk/")
 	if err != nil {
 		cancel()
 		t.Fatalf("GET /desk/: %v", err)
@@ -287,7 +292,7 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		"/api/v1/desk/capabilities",
 		"/api/v1/desk/connections",
 	} {
-		response, requestErr := client.Get("http://" + addr + endpoint)
+		response, requestErr := contentClient.Get("http://" + addr + endpoint)
 		if requestErr != nil {
 			cancel()
 			t.Fatalf("GET %s: %v", endpoint, requestErr)
