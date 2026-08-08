@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.3](https://github.com/matt-riley/waffle/compare/v0.12.2...v0.12.3) (2026-08-08)
+
+
+### Bug Fixes
+
+* **#257:** make Telegram delivery durable and ack-gated ([#326](https://github.com/matt-riley/waffle/issues/326)) ([ec77a04](https://github.com/matt-riley/waffle/commit/ec77a041b86ce8d1f409ad551b95974a39bef6f1))
+* **#259:** retry the startup memory FTS reindex after a failure ([#327](https://github.com/matt-riley/waffle/issues/327)) ([601d22a](https://github.com/matt-riley/waffle/commit/601d22a7288739ebf7c676d4778e5eee28003d03))
+* **#260:** report workspace activity write failures and corroborate idleness ([#329](https://github.com/matt-riley/waffle/issues/329)) ([edc9aca](https://github.com/matt-riley/waffle/commit/edc9aca3d711ab7caf4ca7ec0b1fb22d85216fbb))
+* **#291:** isolate tool panics from the serve process ([#324](https://github.com/matt-riley/waffle/issues/324)) ([f3a7573](https://github.com/matt-riley/waffle/commit/f3a75734fc70fab0922774139a342c1ed6a200c4))
+* **#297:** report lost policy_audit writes instead of discarding them ([#325](https://github.com/matt-riley/waffle/issues/325)) ([166a5a4](https://github.com/matt-riley/waffle/commit/166a5a4f94262ee6e43ea4a08782911d6d1989d9))
+
 ## [0.12.2](https://github.com/matt-riley/waffle/compare/v0.12.1...v0.12.2) (2026-08-08)
 
 
