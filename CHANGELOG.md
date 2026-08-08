@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/matt-riley/waffle/compare/v0.12.1...v0.12.2) (2026-08-08)
+
+
+### Bug Fixes
+
+* **#239:** keep workspace git host reachable under allowlist ([#322](https://github.com/matt-riley/waffle/issues/322)) ([c5549b7](https://github.com/matt-riley/waffle/commit/c5549b742d16c69dca594f6d49e42eeb20f98394))
+
 ## [0.12.1](https://github.com/matt-riley/waffle/compare/v0.12.0...v0.12.1) (2026-08-08)
 
 
