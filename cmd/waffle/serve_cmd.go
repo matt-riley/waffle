@@ -256,6 +256,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		obs.RegisterAdapter(adapter.Name())
 		if telegramAdapter, ok := adapter.(*telegram.Adapter); ok {
 			telegramAdapter.SetPollObserver(func() { obs.MarkAdapter(telegramAdapter.Name()) })
+			// Durable update cursor: without it a restart replays every
+			// update this process accepted but never confirmed (#257).
+			telegramAdapter.Offsets = store.NewChannelOffset(st.DB, telegramAdapter.Name())
 		}
 	}
 	chatDone := make(chan error, 1)

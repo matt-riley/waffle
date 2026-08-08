@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,9 +30,10 @@ import (
 type fakeAdapter struct {
 	inbound chan channel.Message
 
-	mu   sync.Mutex
-	sent map[string][]string // chatID → replies
-	wake chan struct{}
+	mu    sync.Mutex
+	sent  map[string][]string // chatID → replies
+	acked []string
+	wake  chan struct{}
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -53,6 +55,23 @@ func (f *fakeAdapter) Run(ctx context.Context, inbound chan<- channel.Message) e
 			return nil
 		}
 	}
+}
+
+// Ack implements channel.Acknowledger so delivery confirmation is observable.
+func (f *fakeAdapter) Ack(ackID string) {
+	f.mu.Lock()
+	f.acked = append(f.acked, ackID)
+	f.mu.Unlock()
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (f *fakeAdapter) ackedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.acked...)
 }
 
 func (f *fakeAdapter) Send(ctx context.Context, chatID, text string) error {
@@ -1337,5 +1356,47 @@ func TestReflectSessionSkipsWhenGroupLocked(t *testing.T) {
 	}
 	if p.calls != 0 {
 		t.Fatalf("provider calls=%d, want 0 while locked", p.calls)
+	}
+}
+
+func TestGatewayAcksMessageAfterHandling(t *testing.T) {
+	_, adapter, _, _, cancel := newTestGateway(t)
+	defer cancel()
+
+	// A stranger exercises the shortest handled path: the gateway replies with
+	// a pairing code and never runs the agent, but the message is handled and
+	// so must be confirmed (#257).
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "c1", SenderID: "stranger", SenderName: "S", Text: "hi", AckID: "u-1",
+	}
+	adapter.waitForReply(t, "c1", 1)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if acked := adapter.ackedIDs(); len(acked) > 0 {
+			if !slices.Contains(acked, "u-1") {
+				t.Fatalf("acked = %v, want the delivered message", acked)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("handled message was never acked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestGatewayDoesNotAckMessagesWithoutAckID(t *testing.T) {
+	_, adapter, _, _, cancel := newTestGateway(t)
+	defer cancel()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "c1", SenderID: "stranger", SenderName: "S", Text: "hi",
+	}
+	adapter.waitForReply(t, "c1", 1)
+	time.Sleep(100 * time.Millisecond)
+	if acked := adapter.ackedIDs(); len(acked) != 0 {
+		t.Fatalf("acked = %v, want none for an adapter that does not track delivery", acked)
 	}
 }
