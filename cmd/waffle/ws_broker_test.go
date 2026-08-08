@@ -147,13 +147,14 @@ func TestRepoScopeResolverPrefersBrokerBinding(t *testing.T) {
 
 func TestWorkspaceManagerWiresGitHostForBrokeredEgress(t *testing.T) {
 	cases := []struct {
-		name   string
-		egress string
-		want   bool
+		name      string
+		egress    string
+		allowlist []string
+		want      bool
 	}{
 		{name: "default", egress: "", want: true},
 		{name: "none", egress: "none", want: true},
-		{name: "allowlist", egress: "allowlist", want: true},
+		{name: "allowlist", egress: "allowlist", allowlist: []string{"github.com"}, want: true},
 		{name: "full", egress: "full", want: false},
 	}
 
@@ -163,10 +164,15 @@ func TestWorkspaceManagerWiresGitHostForBrokeredEgress(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = st.Close() }()
+			defer func() {
+				if err := st.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			}()
 
 			cfg := config.Config{}
 			cfg.Workspace.Egress = tc.egress
+			cfg.Workspace.Allowlist = tc.allowlist
 			mgr := newWorkspaceManager(cfg, st, broker.New(st, nil))
 
 			if got := mgr.AllowGitHost != nil; got != tc.want {
