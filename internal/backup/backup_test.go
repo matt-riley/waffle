@@ -359,3 +359,58 @@ func TestCreateRemovesDestinationWhenItFails(t *testing.T) {
 		t.Errorf("retry did not complete: %v", err)
 	}
 }
+
+// TestRemoveFailedBackupRetractsTheMarkerAndReportsFailure is the fourth review
+// follow-up on #263: filecommit.Write renames manifest.json into place before
+// syncing its directory, so a failure in that sync leaves a marker on disk. The
+// teardown has to retract it durably, and must not fail silently.
+func TestRemoveFailedBackupRetractsTheMarkerAndReportsFailure(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(filepath.Join(destination, "workspace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"manifest.json", "secrets.age"} {
+		if err := os.WriteFile(filepath.Join(destination, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeFailedBackup(destination); err != nil {
+		t.Fatalf("removeFailedBackup: %v", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed backup survived teardown: %v", err)
+	}
+
+	// A destination with no marker (the common case) is still torn down.
+	bare := filepath.Join(t.TempDir(), "bare")
+	if err := os.MkdirAll(bare, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeFailedBackup(bare); err != nil {
+		t.Fatalf("removeFailedBackup without a marker: %v", err)
+	}
+
+	// A teardown that cannot complete is reported, not swallowed: the owner
+	// has to know a destination was left behind.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions")
+	}
+	parent := t.TempDir()
+	stuck := filepath.Join(parent, "stuck")
+	if err := os.MkdirAll(stuck, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "manifest.json"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	err := removeFailedBackup(stuck)
+	if chmodErr := os.Chmod(parent, 0o700); chmodErr != nil {
+		t.Fatal(chmodErr)
+	}
+	if err == nil {
+		t.Error("removeFailedBackup reported success when it could not remove the destination")
+	}
+}

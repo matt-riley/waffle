@@ -41,18 +41,18 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
-	cleanup := func() { _ = os.RemoveAll(dst) }
 	defer func() {
 		// Keyed on the outcome, not only on the marker: a failure after the
 		// manifest lands must not leave a destination that Restore accepts as
 		// complete and that a retry cannot overwrite. The marker check stays
 		// for the panic path, where retErr is never set.
-		if retErr != nil {
-			cleanup()
-			return
+		if retErr == nil {
+			if _, err := os.Stat(filepath.Join(dst, "manifest.json")); err == nil {
+				return
+			}
 		}
-		if _, err := os.Stat(filepath.Join(dst, "manifest.json")); err != nil {
-			cleanup()
+		if err := removeFailedBackup(dst); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove failed backup at %s (inspect it before retrying): %w", dst, err))
 		}
 	}()
 
@@ -102,6 +102,27 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 	// manifest.json is this backup's completion marker, so it is committed
 	// durably (filecommit syncs the file and its directory) and last (#263).
 	return filecommit.Write(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600)
+}
+
+// removeFailedBackup tears down a destination Create could not complete.
+//
+// The completion marker goes first and durably: filecommit.Write renames
+// manifest.json into place before syncing its directory, so a failure in that
+// sync leaves a marker on disk, and while it exists a recovered filesystem
+// shows this failed backup as complete (#263). The teardown is then made
+// durable in turn, and any failure is reported rather than discarded — a
+// destination that could not be removed is one the owner has to look at.
+func removeFailedBackup(dst string) error {
+	if err := os.Remove(filepath.Join(dst, "manifest.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := filecommit.SyncDir(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	return filecommit.SyncDir(filepath.Dir(dst))
 }
 
 // missingDirs returns the directories MkdirAll would have to create for path,
