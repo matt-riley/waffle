@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -238,5 +239,78 @@ func TestRedactorFor(t *testing.T) {
 	// nil cases
 	if r, err := RedactorFor(nil, "", ""); err != nil || r != nil {
 		t.Errorf("empty nil: got err=%v r=%T", err, r)
+	}
+}
+
+// TestFailedSaveLeavesPreviousStoreIntact covers #263: the store is a single
+// age blob, so a partial write does not lose the last secret — it fails to
+// decrypt and strands every secret in the file. A save that cannot complete
+// must leave the previous store untouched and leave no staging file behind.
+func TestFailedSaveLeavesPreviousStoreIntact(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions")
+	}
+	s := newTestStore(t)
+	if err := s.Set("anthropic/api-key", "sk-ant-test-123"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	before, err := os.ReadFile(s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Dir(s.path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	setErr := s.Set("telegram/bot-token", "12345:abcdef")
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if setErr == nil {
+		t.Fatal("Set reported success with an unwritable store directory")
+	}
+
+	after, err := os.ReadFile(s.path)
+	if err != nil {
+		t.Fatalf("previous store is unreadable after a failed save: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("failed save modified the live store")
+	}
+	value, err := s.Get("anthropic/api-key")
+	if err != nil || value != "sk-ant-test-123" {
+		t.Fatalf("Get after failed save = %q, %v", value, err)
+	}
+}
+
+// TestSaveLeavesNoStagingFilesBehind guards the crash-safe commit's cleanup:
+// every save stages a temp file in the store directory, and none may survive.
+func TestSaveLeavesNoStagingFilesBehind(t *testing.T) {
+	s := newTestStore(t)
+	for _, name := range []string{"a/one", "b/two", "c/three"} {
+		if err := s.Set(name, "value-"+name); err != nil {
+			t.Fatalf("Set %s: %v", name, err)
+		}
+	}
+	if err := s.Delete("b/two"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(s.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".secrets-") || strings.HasPrefix(entry.Name(), ".filecommit-") {
+			t.Errorf("staging file survived a save: %s", entry.Name())
+		}
+	}
+	info, err := os.Stat(s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("store mode = %o, want 0600", info.Mode().Perm())
 	}
 }
