@@ -133,7 +133,7 @@ func sourceLanguage(path string) (string, bool) {
 func observeSourceFile(ctx context.Context, path string) bool {
 	report := analysisFromContext(ctx)
 	if filepath.Ext(path) == ".go" {
-		if report != nil {
+		if report != nil && !containsString(report.AnalysedFiles, path) {
 			report.AnalysedFiles = append(report.AnalysedFiles, path)
 		}
 		return true
@@ -141,6 +141,11 @@ func observeSourceFile(ctx context.Context, path string) bool {
 	language, ok := sourceLanguage(path)
 	if !ok || report == nil {
 		return false
+	}
+	for _, skipped := range report.SkippedFiles {
+		if skipped.Path == path {
+			return false
+		}
 	}
 	report.SkippedFiles = append(report.SkippedFiles, skippedFile{Path: path, Language: language})
 	return false
