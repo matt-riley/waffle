@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/matt-riley/waffle/compare/v0.12.0...v0.12.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **codeintel:** report unsupported language limitations ([#317](https://github.com/matt-riley/waffle/issues/317)) ([192f506](https://github.com/matt-riley/waffle/commit/192f506b71771d7d086319058ed2f2f6937e3f7a))
+
 ## [0.12.0](https://github.com/matt-riley/waffle/compare/v0.11.0...v0.12.0) (2026-08-08)
 
 
