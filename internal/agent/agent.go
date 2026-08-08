@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -247,7 +248,33 @@ func (a *Agent) runTools(ctx context.Context, uses []llm.ToolUse, hooks Hooks) [
 	return results
 }
 
-func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
+// runOne executes one tool call and converts a panic anywhere beneath it into
+// an error result (#291). Tool implementations reach third-party code (MCP
+// glue, policy hooks, provider translators); an uncaught panic on a dispatch
+// goroutine would take down the whole process, and with it the gateway, cron,
+// and every other conversation this host serves.
+func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) (res llm.ToolResult) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if a.Log != nil {
+			a.Log.Error("tool call panicked",
+				"profile", effectiveProfile(a.Profile),
+				"tool", use.Name,
+				"panic", fmt.Sprint(rec),
+				"stack", string(debug.Stack()),
+			)
+		}
+		// The panic value can carry tool input, so it stays in the host log
+		// and never in the result handed back to the model.
+		res = llm.ToolResult{
+			ToolUseID: use.ID,
+			Content:   fmt.Sprintf("error: tool %q panicked", use.Name),
+			IsError:   true,
+		}
+	}()
 	if a.Log != nil {
 		a.Log.Info("tool call started", "profile", effectiveProfile(a.Profile), "tool", use.Name)
 	}
@@ -258,7 +285,7 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) llm.ToolResult {
 	} else {
 		out, err = a.Tools.Run(ctx, use.Name, use.Input)
 	}
-	res := llm.ToolResult{ToolUseID: use.ID, Content: out}
+	res = llm.ToolResult{ToolUseID: use.ID, Content: out}
 	if err != nil {
 		res.Content = fmt.Sprintf("error: %v", err)
 		res.IsError = true
