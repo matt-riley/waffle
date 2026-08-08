@@ -15,6 +15,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/matt-riley/waffle/internal/filecommit"
 	"github.com/matt-riley/waffle/internal/flock"
 )
 
@@ -113,28 +114,16 @@ func (s *FileStore) save(m map[string]string) error {
 		return err
 	}
 
-	// Write-then-rename so a crash never leaves a truncated store.
+	// Crash-safe commit: temp file, fsync, rename, fsync the parent directory
+	// (#263). Rename alone is not ordered against the page cache, so power
+	// loss could publish the new name over data blocks that never landed —
+	// and because the store is a single age blob, a partial file does not lose
+	// the last secret, it fails to decrypt and strands every secret in it.
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".secrets-*.age")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), s.path)
+	return filecommit.Write(s.path, buf.Bytes(), 0o600)
 }
 
 // Set stores value under name, overwriting any previous value.

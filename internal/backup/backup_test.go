@@ -179,3 +179,56 @@ func TestRestoreValidationFailureLeavesLiveStateUntouched(t *testing.T) {
 		t.Fatalf("live config was changed: %q", got)
 	}
 }
+
+// TestCreateLeavesNoStagingFilesInBackup covers #263: the manifest and identity
+// are committed through the crash-safe helper, which stages a temp file next to
+// its destination. None may survive into the backup directory, where a stray
+// file would be restored alongside real state.
+func TestCreateLeavesNoStagingFilesInBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	ctx := context.Background()
+	for name, body := range map[string]string{
+		"config.toml":         "[provider]\nname='openai'\n",
+		"secrets.age":         "encrypted-placeholder",
+		"workspace/MEMORY.md": "- durable memory\n",
+	} {
+		path := filepath.Join(home, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	destination := filepath.Join(t.TempDir(), "backup")
+	if err := Create(ctx, destination, true, "AGE-SECRET-KEY-TEST"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".filecommit-") {
+			t.Errorf("staging file survived into the backup: %s", entry.Name())
+		}
+	}
+	// The manifest is this backup's completion marker, so it must be present
+	// and parseable after every other file is written.
+	body, err := os.ReadFile(filepath.Join(destination, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got manifest
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("manifest is not valid JSON: %v", err)
+	}
+	if !got.Identity {
+		t.Errorf("manifest = %+v, want the identity opt-in recorded", got)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "identity")); err != nil {
+		t.Errorf("identity missing from an opted-in backup: %v", err)
+	}
+}

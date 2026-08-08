@@ -14,6 +14,7 @@ import (
 
 	"filippo.io/age"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/filecommit"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -71,12 +72,15 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 		if identity == "" {
 			return errors.New("identity is required with --with-identity")
 		}
-		if err := os.WriteFile(filepath.Join(dst, "identity"), []byte(identity+"\n"), 0o600); err != nil {
+		if err := filecommit.Write(filepath.Join(dst, "identity"), []byte(identity+"\n"), 0o600); err != nil {
 			return err
 		}
 	}
 	b, _ := json.MarshalIndent(manifest{Version: "dev", Identity: withIdentity}, "", "  ")
-	if err := os.WriteFile(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600); err != nil {
+	// manifest.json is this backup's completion marker — Create's own deferred
+	// cleanup treats its presence as success — so it is committed durably and
+	// last, after every file above has been synced (#263).
+	if err := filecommit.Write(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 	return nil
@@ -212,7 +216,18 @@ func copyFile(src, dst string, mode fs.FileMode) (err error) {
 		_ = out.Close()
 		return err
 	}
-	return out.Close()
+	// A backup that reported success used to be free to lose its non-database
+	// files on power loss: Close only hands the bytes to the page cache (#263).
+	// Streamed rather than staged because this also copies waffle.db, which is
+	// as large as the owner's history.
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return filecommit.SyncDir(filepath.Dir(dst))
 }
 func copyDirIfExists(src, dst string) error {
 	if !exists(src) {
