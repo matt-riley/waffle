@@ -90,6 +90,10 @@ var sourceLanguages = map[string]string{
 	".cpp":   "C++",
 	".cxx":   "C++",
 	".cs":    "C#",
+	".h":     "C/C++ header",
+	".hh":    "C++",
+	".hpp":   "C++",
+	".hxx":   "C++",
 	".java":  "Java",
 	".js":    "JavaScript",
 	".jsx":   "JavaScript",
@@ -739,7 +743,7 @@ func (t referencesTool) Run(ctx context.Context, input json.RawMessage) (string,
 		return "", err
 	}
 	ctx, analysis := beginAnalysis(ctx)
-	if requestedPathUnsupported(ctx, in.Path) {
+	if requestedPathUnsupported(ctx, in.Path) && in.Symbol == "" {
 		return marshalAnalysis(nil, analysis)
 	}
 	locs, err := t.s.References(ctx, in.Path, in.Line, in.Symbol)
@@ -815,9 +819,7 @@ func (t blastTool) Run(ctx context.Context, input json.RawMessage) (string, erro
 		return "", err
 	}
 	ctx, analysis := beginAnalysis(ctx)
-	if requestedPathUnsupported(ctx, in.Path) {
-		return marshalAnalysis(nil, analysis)
-	}
+	requestedPathUnsupported(ctx, in.Path)
 	locs, err := t.s.BlastRadius(ctx, in.Path, in.Symbol)
 	if err != nil {
 		return "", err
