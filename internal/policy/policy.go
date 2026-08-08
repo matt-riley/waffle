@@ -358,7 +358,7 @@ func ReportAuditFailure(log *slog.Logger, err error, session, tool, operation st
 		"session", session,
 		"tool", tool,
 		"operation", operation,
-		"error", err,
+		"err", err,
 	)
 }
 

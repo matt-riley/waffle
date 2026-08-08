@@ -412,7 +412,7 @@ func TestCheckAndAuditSessionReportsFailedAuditWrite(t *testing.T) {
 		t.Fatal("a denial must still deny when its audit row is lost")
 	}
 	body := logs.String()
-	for _, want := range []string{"msg=\"policy audit write failed\"", "session=sess-1", "tool=bash", "operation=deny"} {
+	for _, want := range []string{"msg=\"policy audit write failed\"", "session=sess-1", "tool=bash", "operation=deny", "err="} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("logs missing %q: %s", want, body)
 		}
