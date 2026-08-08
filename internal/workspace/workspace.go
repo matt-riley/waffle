@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	neturl "net/url"
 	"path/filepath"
 	"regexp"
@@ -173,6 +174,12 @@ type Manager struct {
 	// lastPolicy is the most recently applied repo policy for this manager
 	// (inspectable in tests; chat/intake also receive the Policy return value).
 	lastPolicy *repopolicy.Policy
+
+	// activityMu guards activity, the in-process fallback record of when a
+	// workspace was last used. Entries exist only while last_active is known
+	// to be stale, because its write failed (#260).
+	activityMu sync.Mutex
+	activity   map[string]time.Time
 
 	// ensureOnce ensures the active-repo index is created only once per
 	// Manager (process lifetime) to avoid repeated DDL in hot path.
@@ -762,6 +769,8 @@ func (m *Manager) idle(ctx context.Context, id string) error {
 		return err
 	}
 	m.revokeSession(ws.SessionID)
+	// The container is stopped, so in-process activity no longer protects it.
+	m.forgetActivity(id)
 	return m.setStatus(ctx, id, StatusIdle)
 }
 
@@ -836,8 +845,78 @@ func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.OnActivity = func() { _ = m.Touch(context.Background(), ws.ID) }
+	client.OnActivity = func() { m.noteActivity(context.Background(), ws.ID, ws.Repo) }
 	return client, nil
+}
+
+// noteActivity records a workspace command. A Touch that fails — SQLite busy,
+// a closed handle during a shutdown race — used to be discarded silently, and
+// the stored last_active then aged past the idle timeout until the next sweep
+// stopped the container in the middle of real work (#260). The failure is now
+// logged, and the activity is kept in memory so the sweep can tell "not used"
+// apart from "used, but the write failed".
+func (m *Manager) noteActivity(ctx context.Context, id, repo string) {
+	// Callbacks for one workspace can overlap, and they do not finish in the
+	// order they started. Both updates below are keyed on when this activity
+	// happened, so a slower older write can never overwrite a newer one.
+	at := time.Now().UTC()
+	if err := m.Touch(ctx, id); err != nil {
+		m.recordActivity(id, at)
+		slog.Default().WarnContext(ctx, "workspace activity write failed; idle sweeps fall back to in-process activity",
+			"workspace", id, "repo", repo, "err", err)
+		return
+	}
+	// last_active covers this activity, so the fallback for it is no longer
+	// needed — but a later activity whose write failed keeps its own.
+	m.clearActivityUpTo(id, at)
+}
+
+// recordActivity remembers activity whose last_active write failed, keeping
+// the newest of any overlapping callbacks.
+func (m *Manager) recordActivity(id string, at time.Time) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	if m.activity == nil {
+		m.activity = make(map[string]time.Time)
+	}
+	if existing, ok := m.activity[id]; ok && existing.After(at) {
+		return
+	}
+	m.activity[id] = at
+}
+
+// clearActivityUpTo drops the fallback only when a successful write covers it.
+// A record newer than at belongs to activity this write did not persist, so
+// erasing it would let the reaper idle a workspace that is still in use.
+func (m *Manager) clearActivityUpTo(id string, at time.Time) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	if existing, ok := m.activity[id]; ok && existing.After(at) {
+		return
+	}
+	delete(m.activity, id)
+}
+
+// ActiveSince reports whether this process used the workspace at or after
+// since despite failing to record it. It implements ActivityProbe so a sweep
+// can corroborate a stale last_active before stopping a container.
+func (m *Manager) ActiveSince(id string, since time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	last, ok := m.activity[id]
+	return ok && !last.Before(since)
+}
+
+// forgetActivity drops the in-process record for a workspace whose container
+// is gone (idled or closed): there is nothing left to protect from the reaper,
+// and the entry would otherwise outlive the workspace it describes.
+func (m *Manager) forgetActivity(id string) {
+	m.activityMu.Lock()
+	delete(m.activity, id)
+	m.activityMu.Unlock()
 }
 
 // newInspectionClient connects to a workspace without recording activity.
@@ -1225,6 +1304,9 @@ teardown:
 		return report, false, err
 	}
 	m.revokeSession(ws.SessionID)
+	// The container and volume are gone, so any fallback activity record for
+	// this workspace is now unreachable state.
+	m.forgetActivity(id)
 	if err := m.setStatus(ctx, id, StatusClosed); err != nil {
 		return report, false, err
 	}
