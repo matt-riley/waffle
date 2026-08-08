@@ -362,6 +362,83 @@ func TestUnsupportedPathIsReported(t *testing.T) {
 	}
 }
 
+func TestUnsupportedPathWithSymbolRetainsGoResults(t *testing.T) {
+	dir, _ := writeFixture(t)
+	tsPath := writeTypeScriptFixture(t, dir)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+	tests := []struct {
+		name  string
+		input map[string]any
+	}{
+		{name: "code_references", input: map[string]any{"path": tsPath, "symbol": "Hello"}},
+		{name: "code_blast_radius", input: map[string]any{"path": tsPath, "symbol": "Hello"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tt.name, marshalToolInput(t, tt.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output=%s: %v", out, err)
+			}
+			if len(got.Results) == 0 {
+				t.Fatal("symbol-based search discarded available Go results")
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != tsPath ||
+				got.Analysis.SkippedFiles[0].Language != "TypeScript" {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+		})
+	}
+}
+
+func TestHeaderFilesAreReported(t *testing.T) {
+	tests := []struct {
+		extension string
+		language  string
+	}{
+		{extension: ".h", language: "C/C++ header"},
+		{extension: ".hh", language: "C++"},
+		{extension: ".hpp", language: "C++"},
+		{extension: ".hxx", language: "C++"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.extension, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "header"+tt.extension)
+			if err := os.WriteFile(path, []byte("void Hello();\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tb := Toolbox(NewService(dir, "acme/demo", "main"))
+			out, err := tb.Run(
+				context.Background(),
+				"code_find_symbol",
+				marshalToolInput(t, map[string]any{"name": "Hello"}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output=%s: %v", out, err)
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != path ||
+				got.Analysis.SkippedFiles[0].Language != tt.language {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+			if !strings.Contains(got.Analysis.Limitation, tt.language) {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+		})
+	}
+}
+
 func TestToolDescriptionsStateSupportedLanguage(t *testing.T) {
 	for _, def := range Toolbox(NewService(t.TempDir(), "", "")).Defs() {
 		t.Run(def.Name, func(t *testing.T) {
