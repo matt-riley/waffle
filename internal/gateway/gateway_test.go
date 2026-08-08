@@ -1400,3 +1400,111 @@ func TestGatewayDoesNotAckMessagesWithoutAckID(t *testing.T) {
 		t.Fatalf("acked = %v, want none for an adapter that does not track delivery", acked)
 	}
 }
+
+// cancellingProvider cancels the handler's context from inside the provider
+// call, reproducing the shutdown drain timeout firing mid-run.
+type cancellingProvider struct{ cancel context.CancelFunc }
+
+func (p cancellingProvider) Complete(_ context.Context, _ llm.Request, _ llm.StreamFunc) (*llm.Response, error) {
+	p.cancel()
+	return &llm.Response{
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "answered"}}},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+func newPersistenceTestGateway(t *testing.T, provider llm.Provider, logs *bytes.Buffer) (*Gateway, *session.Store) {
+	t.Helper()
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	return &Gateway{
+		Agent:    &agent.Agent{Provider: provider, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entity.New(st, sessions),
+		Sessions: sessions,
+		Log:      slog.New(slog.NewTextHandler(logs, nil)),
+	}, sessions
+}
+
+// TestConversePersistsTurnsAfterDrainCancellation covers #270: handlers run on
+// drainCtx, the shutdown timeout cancels it, and the final persistence loop
+// used that same context — so a slow shutdown left the durable transcript
+// missing turns the owner had already been answered with.
+func TestConversePersistsTurnsAfterDrainCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs bytes.Buffer
+	// The cancellation lands inside the provider call: after the session and
+	// history reads, before the turns are persisted.
+	gw, sessions := newPersistenceTestGateway(t, cancellingProvider{cancel: cancel}, &logs)
+
+	reply, err := gw.converse(ctx, channel.Message{Channel: "fake", ChatID: "c1", Text: "hello"})
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if reply != "answered" {
+		t.Fatalf("reply = %q", reply)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test did not exercise a cancelled handler context")
+	}
+
+	group, err := gw.Entities.GroupFor(context.Background(), "fake", "c1", config.GroupMain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := sessions.Turns(context.Background(), group.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The owner's message and the reply they were given must both be durable.
+	if len(turns) != 2 {
+		t.Fatalf("persisted turns = %d, want the user turn and the answer: %+v", len(turns), turns)
+	}
+	if got := turns[0].Text(); got != "hello" {
+		t.Errorf("first turn = %q, want the owner's message", got)
+	}
+	if got := turns[1].Text(); got != "answered" {
+		t.Errorf("second turn = %q, want the reply already sent to the owner", got)
+	}
+	if strings.Contains(logs.String(), "persist turn") {
+		t.Errorf("persistence reported an error: %s", logs.String())
+	}
+}
+
+// TestConversePersistenceStaysBounded proves the detached context is bounded,
+// not background: a store that cannot complete the write inside the deadline
+// fails and returns rather than holding shutdown open.
+func TestConversePersistenceStaysBounded(t *testing.T) {
+	var logs bytes.Buffer
+	gw, sessions := newPersistenceTestGateway(t, &recordingProvider{}, &logs)
+	// An already-expired budget is the deterministic stand-in for a store that
+	// cannot commit within the grace window.
+	gw.PersistTurnsTimeout = time.Nanosecond
+
+	start := time.Now()
+	if _, err := gw.converse(context.Background(), channel.Message{Channel: "fake", ChatID: "c1", Text: "hello"}); err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("converse took %s, want it bounded by the persistence deadline", elapsed)
+	}
+	if !strings.Contains(logs.String(), "persist turn") {
+		t.Errorf("a dropped turn was not reported: %s", logs.String())
+	}
+
+	group, err := gw.Entities.GroupFor(context.Background(), "fake", "c1", config.GroupMain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := sessions.Turns(context.Background(), group.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 0 {
+		t.Fatalf("turns = %+v, want none written past the deadline", turns)
+	}
+}
