@@ -171,15 +171,22 @@ func (s *Service) Finish(ctx context.Context, id, outcome string) error {
 		return nil
 	}
 	endedAt := s.now()
+	// The run is over either way, so in-memory accounting is not held hostage
+	// to the durability of historical metrics (#261). Leaving the entry behind
+	// on a failed insert pinned the run active for the life of the process: a
+	// ghost in every snapshot with an elapsed time that grew without bound, an
+	// unbounded leak under sustained failures, and not even self-healing —
+	// run_metrics.id is the primary key, so a retry hit a conflict and failed
+	// again. The error still reaches the caller, which logs it.
+	delete(s.active, id)
 	if _, err := s.store.DB.ExecContext(ctx, `
 		INSERT INTO run_metrics
 			(id, session_id, source, phase, outcome, started_at_ms, ended_at_ms, input_tokens, output_tokens, profile)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.id, run.sessionID, run.source, run.phase, outcome,
 		run.startedAt.UnixMilli(), endedAt.UnixMilli(), run.inputTokens, run.outputTokens, run.profile); err != nil {
-		return fmt.Errorf("persist run %q: %w", id, err)
+		return fmt.Errorf("persist run %q (outcome %q, metrics dropped): %w", id, outcome, err)
 	}
-	delete(s.active, id)
 	return nil
 }
 
