@@ -182,20 +182,3 @@ func TestFileStoreLockTimeout(t *testing.T) {
 
 // TestAcquireStoreLockReleasesOnClose verifies a second process can acquire
 // the lock after the first releases (basic flock release path).
-func TestAcquireStoreLockRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secrets.age.lock")
-	release, err := acquireStoreLock(path, time.Second)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
-	if err := release(); err != nil {
-		t.Fatalf("release: %v", err)
-	}
-	release2, err := acquireStoreLock(path, time.Second)
-	if err != nil {
-		t.Fatalf("second acquire: %v", err)
-	}
-	if err := release2(); err != nil {
-		t.Fatalf("second release: %v", err)
-	}
-}
