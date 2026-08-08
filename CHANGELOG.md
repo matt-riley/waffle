@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.4](https://github.com/matt-riley/waffle/compare/v0.12.3...v0.12.4) (2026-08-08)
+
+
+### Bug Fixes
+
+* **#261:** never leave a run pinned active when its metrics are lost ([#330](https://github.com/matt-riley/waffle/issues/330)) ([de4499c](https://github.com/matt-riley/waffle/commit/de4499cd0a2c8d49298e7bafc5ca11b7fc5e8e95))
+* **#263:** fsync the secret store and backup writes before publishing them ([#331](https://github.com/matt-riley/waffle/issues/331)) ([48ab125](https://github.com/matt-riley/waffle/commit/48ab125128bd7c77ac1ec0153f733aca1e72143b))
+* **#267:** serialize MEMORY.md mutation across processes ([#333](https://github.com/matt-riley/waffle/issues/333)) ([e637271](https://github.com/matt-riley/waffle/commit/e6372716101175740bfbead2453ee256bc650b1e))
+* **#270:** persist final turns on a bounded detached context ([#334](https://github.com/matt-riley/waffle/issues/334)) ([cbc896c](https://github.com/matt-riley/waffle/commit/cbc896c0d2dbc3924c9f26eb1ff058ae587bbea1))
+
 ## [0.12.3](https://github.com/matt-riley/waffle/compare/v0.12.2...v0.12.3) (2026-08-08)
 
 
