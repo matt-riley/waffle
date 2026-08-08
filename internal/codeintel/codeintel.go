@@ -41,6 +41,8 @@ const (
 	SourceLiveLSP      = "live-lsp"
 	SourceCachedIndex  = "cached-index"
 	SourceTextFallback = "text-fallback"
+
+	goOnlyDescription = "Supports Go only; unsupported source files are reported explicitly."
 )
 
 // CodeLocation is the shared result shape (#79).
@@ -63,7 +65,137 @@ type CodeLocation struct {
 	Evidence  string `json:"evidence,omitempty"`
 }
 
-// Service is the Go-first reference implementation (text-fallback via go/parser).
+type skippedFile struct {
+	Path     string `json:"path"`
+	Language string `json:"language"`
+}
+
+type analysisReport struct {
+	SupportedLanguages []string      `json:"supported_languages"`
+	AnalysedFiles      []string      `json:"analysed_files"`
+	SkippedFiles       []skippedFile `json:"skipped_files"`
+	Limitation         string        `json:"limitation"`
+}
+
+type toolResponse struct {
+	Results  []CodeLocation `json:"results"`
+	Analysis analysisReport `json:"analysis"`
+}
+
+type analysisContextKey struct{}
+
+var sourceLanguages = map[string]string{
+	".c":     "C",
+	".cc":    "C++",
+	".cpp":   "C++",
+	".cxx":   "C++",
+	".cs":    "C#",
+	".java":  "Java",
+	".js":    "JavaScript",
+	".jsx":   "JavaScript",
+	".kt":    "Kotlin",
+	".kts":   "Kotlin",
+	".lua":   "Lua",
+	".php":   "PHP",
+	".py":    "Python",
+	".rb":    "Ruby",
+	".rs":    "Rust",
+	".scala": "Scala",
+	".sh":    "Shell",
+	".swift": "Swift",
+	".ts":    "TypeScript",
+	".tsx":   "TypeScript",
+}
+
+func beginAnalysis(ctx context.Context) (context.Context, *analysisReport) {
+	report := &analysisReport{
+		SupportedLanguages: []string{"Go"},
+		AnalysedFiles:      []string{},
+		SkippedFiles:       []skippedFile{},
+	}
+	return context.WithValue(ctx, analysisContextKey{}, report), report
+}
+
+func analysisFromContext(ctx context.Context) *analysisReport {
+	report, _ := ctx.Value(analysisContextKey{}).(*analysisReport)
+	return report
+}
+
+func sourceLanguage(path string) (string, bool) {
+	language, ok := sourceLanguages[strings.ToLower(filepath.Ext(path))]
+	return language, ok
+}
+
+func observeSourceFile(ctx context.Context, path string) bool {
+	report := analysisFromContext(ctx)
+	if filepath.Ext(path) == ".go" {
+		if report != nil {
+			report.AnalysedFiles = append(report.AnalysedFiles, path)
+		}
+		return true
+	}
+	language, ok := sourceLanguage(path)
+	if !ok || report == nil {
+		return false
+	}
+	report.SkippedFiles = append(report.SkippedFiles, skippedFile{Path: path, Language: language})
+	return false
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func requestedPathUnsupported(ctx context.Context, path string) bool {
+	if path == "" || filepath.Ext(path) == ".go" {
+		return false
+	}
+	if _, ok := sourceLanguage(path); !ok {
+		return false
+	}
+	observeSourceFile(ctx, path)
+	return true
+}
+
+func marshalAnalysis(locs []CodeLocation, report *analysisReport) (string, error) {
+	if report == nil || (len(report.AnalysedFiles) > 0 && len(report.SkippedFiles) == 0) {
+		return marshalLocs(locs)
+	}
+	sort.Strings(report.AnalysedFiles)
+	sort.Slice(report.SkippedFiles, func(i, j int) bool {
+		return report.SkippedFiles[i].Path < report.SkippedFiles[j].Path
+	})
+	languages := make([]string, 0, len(report.SkippedFiles))
+	for _, skipped := range report.SkippedFiles {
+		if !containsString(languages, skipped.Language) {
+			languages = append(languages, skipped.Language)
+		}
+	}
+	sort.Strings(languages)
+	switch {
+	case len(languages) == 0:
+		report.Limitation = "codeintel supports Go only; no Go files were found"
+	case len(report.AnalysedFiles) == 0:
+		report.Limitation = fmt.Sprintf(
+			"codeintel supports Go only; no Go files were analysed; skipped unsupported languages: %s",
+			strings.Join(languages, ", "),
+		)
+	default:
+		report.Limitation = fmt.Sprintf(
+			"codeintel supports Go only; results are partial; skipped unsupported languages: %s",
+			strings.Join(languages, ", "),
+		)
+	}
+	b, err := json.MarshalIndent(toolResponse{Results: locs, Analysis: *report}, "", "  ")
+	return string(b), err
+}
+
+// Service is the Go-only reference implementation (text-fallback via go/parser).
 // It supports an optional content-hash cache so staleness can be demonstrated.
 type Service struct {
 	Root string // workspace root (usually /work/repo or a test dir)
@@ -242,7 +374,7 @@ func (s *Service) Structure(ctx context.Context, path string) ([]CodeLocation, e
 			if d.IsDir() && p != path {
 				return filepath.SkipDir
 			}
-			if !d.IsDir() && strings.HasSuffix(p, ".go") {
+			if !d.IsDir() && observeSourceFile(ctx, p) {
 				files = append(files, p)
 			}
 			return nil
@@ -251,7 +383,9 @@ func (s *Service) Structure(ctx context.Context, path string) ([]CodeLocation, e
 			return nil, err
 		}
 	} else {
-		files = []string{path}
+		if observeSourceFile(ctx, path) {
+			files = []string{path}
+		}
 	}
 	var out []CodeLocation
 	for _, f := range files {
@@ -396,7 +530,7 @@ func (s *Service) walkGo(ctx context.Context, fn func(path string) error) error 
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if !observeSourceFile(ctx, path) {
 			return nil
 		}
 		select {
@@ -545,12 +679,13 @@ func ToolboxWithCaps(svc *Service, allowed []string) tool.Toolbox {
 // CapabilitiesJSON describes which tools are available (partial OK).
 func CapabilitiesJSON(svc *Service) string {
 	caps := map[string]any{
-		"tools":        ToolNames,
-		"backend":      "text-fallback",
-		"type_aware":   false,
-		"call_graph":   "name-based-uncertain",
-		"blast_radius": "package-file-conservative",
-		"source":       SourceTextFallback,
+		"tools":               ToolNames,
+		"supported_languages": []string{"Go"},
+		"backend":             "text-fallback",
+		"type_aware":          false,
+		"call_graph":          "name-based-uncertain",
+		"blast_radius":        "package-file-conservative",
+		"source":              SourceTextFallback,
 	}
 	if svc != nil && svc.Root != "" {
 		caps["root"] = svc.Root
@@ -565,7 +700,7 @@ type findSymbolTool struct{ s *Service }
 func (t findSymbolTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_find_symbol",
-		Description: "Find symbol definitions by name (optional kind: func|method|type|var|const). Results include path/line provenance and source classification. Live file content is always authoritative over cached index.",
+		Description: "Find symbol definitions by name (optional kind: func|method|type|var|const). Results include path/line provenance and source classification. Live file content is always authoritative over cached index. " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"kind":{"type":"string"}},"required":["name"]}`),
 	}
 }
@@ -577,11 +712,12 @@ func (t findSymbolTool) Run(ctx context.Context, input json.RawMessage) (string,
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
 	locs, err := t.s.FindSymbol(ctx, in.Name, in.Kind)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 type referencesTool struct{ s *Service }
@@ -589,7 +725,7 @@ type referencesTool struct{ s *Service }
 func (t referencesTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_references",
-		Description: "Find references to a symbol (by name, or path+line of an identifier). Name-based; not type-aware.",
+		Description: "Find references to a symbol (by name, or path+line of an identifier). Name-based; not type-aware. " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"symbol":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer"}}}`),
 	}
 }
@@ -602,11 +738,15 @@ func (t referencesTool) Run(ctx context.Context, input json.RawMessage) (string,
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
+	if requestedPathUnsupported(ctx, in.Path) {
+		return marshalAnalysis(nil, analysis)
+	}
 	locs, err := t.s.References(ctx, in.Path, in.Line, in.Symbol)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 type callersTool struct{ s *Service }
@@ -614,7 +754,7 @@ type callersTool struct{ s *Service }
 func (t callersTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_callers",
-		Description: "List likely callers of a symbol (conservative, uncertain: name occurrence in function bodies).",
+		Description: "List likely callers of a symbol (conservative, uncertain: name occurrence in function bodies). " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}`),
 	}
 }
@@ -625,11 +765,12 @@ func (t callersTool) Run(ctx context.Context, input json.RawMessage) (string, er
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
 	locs, err := t.s.Callers(ctx, in.Symbol)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 type structureTool struct{ s *Service }
@@ -637,7 +778,7 @@ type structureTool struct{ s *Service }
 func (t structureTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_structure",
-		Description: "List symbols in a file or package directory.",
+		Description: "List symbols in a file or package directory. " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
 	}
 }
@@ -648,11 +789,12 @@ func (t structureTool) Run(ctx context.Context, input json.RawMessage) (string, 
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
 	locs, err := t.s.Structure(ctx, in.Path)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 type blastTool struct{ s *Service }
@@ -660,7 +802,7 @@ type blastTool struct{ s *Service }
 func (t blastTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_blast_radius",
-		Description: "Conservative affected files/packages/tests for a symbol change. Always uncertain; verify against live source before acting.",
+		Description: "Conservative affected files/packages/tests for a symbol change. Always uncertain; verify against live source before acting. " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"symbol":{"type":"string"},"path":{"type":"string"}},"required":["symbol"]}`),
 	}
 }
@@ -672,11 +814,15 @@ func (t blastTool) Run(ctx context.Context, input json.RawMessage) (string, erro
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
+	if requestedPathUnsupported(ctx, in.Path) {
+		return marshalAnalysis(nil, analysis)
+	}
 	locs, err := t.s.BlastRadius(ctx, in.Path, in.Symbol)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 type suggestTestsTool struct{ s *Service }
@@ -684,7 +830,7 @@ type suggestTestsTool struct{ s *Service }
 func (t suggestTestsTool) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "code_suggest_tests",
-		Description: "Suggest focused test files that mention a symbol (evidence-based, uncertain).",
+		Description: "Suggest focused test files that mention a symbol (evidence-based, uncertain). " + goOnlyDescription,
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}`),
 	}
 }
@@ -695,11 +841,12 @@ func (t suggestTestsTool) Run(ctx context.Context, input json.RawMessage) (strin
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	ctx, analysis := beginAnalysis(ctx)
 	locs, err := t.s.SuggestTests(ctx, in.Symbol)
 	if err != nil {
 		return "", err
 	}
-	return marshalLocs(locs)
+	return marshalAnalysis(locs, analysis)
 }
 
 func marshalLocs(locs []CodeLocation) (string, error) {
