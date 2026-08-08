@@ -12,8 +12,6 @@ Use `mise` to install the pinned toolchain (Go 1.25.12) and run tasks:
 
 See `mise.toml` for the full task list (`mise tasks`); `mise install` installs the pinned toolchain.
 
-Focused test iteration: `go test ./internal/<package> -run '^TestName$' -count=1`.
-
 Run locally: `go run ./cmd/waffle setup` (first-run: secret identity, provider, and `[agent.profile.main]`), then `go run ./cmd/waffle chat`. Manual alternative: `./waffle secret init`, configure a provider (`waffle provider add` or `printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key`), then chat.
 
 Sandbox-specific tests are opt-in and documented in `docs/sandbox-queue.md`:
@@ -45,8 +43,6 @@ Live provider evals require `WAFFLE_EVAL_LIVE=1` and a configured provider; they
 
 ## Repository layout
 
-- `cmd/waffle/` — the executable and command handlers.
-- `internal/` — focused packages by responsibility (see directory listing).
 - `evals/` — zero-network evaluation scenarios (TOML), run by `waffle eval`.
 - `docs/` — `plan.md` (architecture and phased roadmap, incl. `#Deviations` from the original design), `research.md` (prior art: hermes-agent, nanoclaw, openclaw, workweave/router), `deploy.md`, `sandbox-queue.md`, `code-intelligence.md`.
 - `assets/brand/`, `tools/brand-assets/` — brand source assets and their validation/build scripts (pnpm).
@@ -54,7 +50,6 @@ Live provider evals require `WAFFLE_EVAL_LIVE=1` and a configured provider; they
 
 ## Coding style
 
-- Format every Go change with `gofmt`; accept its tab indentation.
 - Wrap errors with context using `%w`; document any `nolint` suppression (required by `nolintlint`).
 - Keep package boundaries aligned with responsibilities; keep command wiring in `cmd/waffle`, reusable behavior in `internal`.
 - Table-driven tests named `TestBehavior`, colocated as `*_test.go` beside the implementation. Add regression coverage for failure, cancellation, persistence, and concurrency paths.
