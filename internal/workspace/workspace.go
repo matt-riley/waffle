@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	neturl "net/url"
 	"path/filepath"
 	"regexp"
@@ -173,6 +174,12 @@ type Manager struct {
 	// lastPolicy is the most recently applied repo policy for this manager
 	// (inspectable in tests; chat/intake also receive the Policy return value).
 	lastPolicy *repopolicy.Policy
+
+	// activityMu guards activity, the in-process fallback record of when a
+	// workspace was last used. Entries exist only while last_active is known
+	// to be stale, because its write failed (#260).
+	activityMu sync.Mutex
+	activity   map[string]time.Time
 
 	// ensureOnce ensures the active-repo index is created only once per
 	// Manager (process lifetime) to avoid repeated DDL in hot path.
@@ -762,6 +769,8 @@ func (m *Manager) idle(ctx context.Context, id string) error {
 		return err
 	}
 	m.revokeSession(ws.SessionID)
+	// The container is stopped, so in-process activity no longer protects it.
+	m.forgetActivity(id)
 	return m.setStatus(ctx, id, StatusIdle)
 }
 
@@ -836,8 +845,51 @@ func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.OnActivity = func() { _ = m.Touch(context.Background(), ws.ID) }
+	client.OnActivity = func() { m.noteActivity(context.Background(), ws.ID, ws.Repo) }
 	return client, nil
+}
+
+// noteActivity records a workspace command. A Touch that fails — SQLite busy,
+// a closed handle during a shutdown race — used to be discarded silently, and
+// the stored last_active then aged past the idle timeout until the next sweep
+// stopped the container in the middle of real work (#260). The failure is now
+// logged, and the activity is kept in memory so the sweep can tell "not used"
+// apart from "used, but the write failed".
+func (m *Manager) noteActivity(ctx context.Context, id, repo string) {
+	if err := m.Touch(ctx, id); err != nil {
+		m.activityMu.Lock()
+		if m.activity == nil {
+			m.activity = make(map[string]time.Time)
+		}
+		m.activity[id] = time.Now().UTC()
+		m.activityMu.Unlock()
+		slog.Default().Warn("workspace activity write failed; idle sweeps fall back to in-process activity",
+			"workspace", id, "repo", repo, "err", err)
+		return
+	}
+	// last_active is current again, so the fallback is no longer needed.
+	m.forgetActivity(id)
+}
+
+// ActiveSince reports whether this process used the workspace at or after
+// since despite failing to record it. It implements ActivityProbe so a sweep
+// can corroborate a stale last_active before stopping a container.
+func (m *Manager) ActiveSince(id string, since time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	last, ok := m.activity[id]
+	return ok && !last.Before(since)
+}
+
+// forgetActivity drops the in-process record for a workspace that has been
+// stopped or closed, so a stale entry cannot keep protecting it forever.
+func (m *Manager) forgetActivity(id string) {
+	m.activityMu.Lock()
+	delete(m.activity, id)
+	m.activityMu.Unlock()
 }
 
 // newInspectionClient connects to a workspace without recording activity.

@@ -1,14 +1,17 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2116,5 +2119,95 @@ func TestNoHooksRegression(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("unexpected hook_logs with no hooks: %d", n)
+	}
+}
+
+// probeSweepManager is a fakeSweepManager that also reports in-process
+// activity, standing in for a *Manager whose last_active write failed (#260).
+type probeSweepManager struct {
+	fakeSweepManager
+	activeIDs map[string]time.Time
+}
+
+func (p *probeSweepManager) ActiveSince(id string, since time.Time) bool {
+	last, ok := p.activeIDs[id]
+	return ok && !last.Before(since)
+}
+
+func TestReaperSkipsIdleWhenProcessSawActivityAfterAFailedWrite(t *testing.T) {
+	stale := time.Now().Add(-2 * time.Hour).UTC()
+	fake := &probeSweepManager{
+		fakeSweepManager: fakeSweepManager{
+			items: []Workspace{
+				{ID: "ws-busy", Repo: "o/busy", Status: StatusOpen, LastActive: stale, UpdatedAt: stale},
+				{ID: "ws-idle", Repo: "o/idle", Status: StatusOpen, LastActive: stale, UpdatedAt: stale},
+			},
+		},
+		// ws-busy was used a moment ago; only its last_active write was lost.
+		activeIDs: map[string]time.Time{"ws-busy": time.Now().UTC()},
+	}
+	r := &Reaper{Manager: fake, IdleTimeout: time.Hour, Now: time.Now}
+	if err := r.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(fake.idleCalls, "ws-busy") {
+		t.Errorf("idled a workspace this process was actively using: %v", fake.idleCalls)
+	}
+	if !slices.Contains(fake.idleCalls, "ws-idle") {
+		t.Errorf("idle calls = %v, want the genuinely idle workspace stopped", fake.idleCalls)
+	}
+}
+
+func TestNoteActivityWarnsAndFallsBackWhenTouchFails(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	// A closed handle stands in for a busy database or a shutdown race.
+	if err := mgr.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(previous)
+
+	before := time.Now().UTC()
+	mgr.noteActivity(context.Background(), "ws-1", "o/r")
+
+	body := logs.String()
+	for _, want := range []string{"workspace activity write failed", "workspace=ws-1", "repo=o/r"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
+	}
+	if !mgr.ActiveSince("ws-1", before) {
+		t.Error("a failed activity write left no fallback record, so the reaper can still idle an active workspace")
+	}
+	if mgr.ActiveSince("ws-1", time.Now().UTC().Add(time.Minute)) {
+		t.Error("ActiveSince reported activity newer than it saw")
+	}
+	if mgr.ActiveSince("ws-other", before) {
+		t.Error("ActiveSince reported activity for an untouched workspace")
+	}
+}
+
+func TestNoteActivityClearsFallbackAfterASuccessfulWrite(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/activity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+
+	mgr.activityMu.Lock()
+	mgr.activity = map[string]time.Time{ws.ID: time.Now().UTC()}
+	mgr.activityMu.Unlock()
+
+	mgr.noteActivity(context.Background(), ws.ID, ws.Repo)
+	// last_active is authoritative again, so the fallback must not keep
+	// protecting the workspace from future sweeps.
+	if mgr.ActiveSince(ws.ID, time.Now().UTC().Add(-time.Hour)) {
+		t.Error("a successful activity write left a stale fallback record behind")
 	}
 }

@@ -15,6 +15,14 @@ type SweepManager interface {
 	Close(ctx context.Context, id string, force bool) (*CloseReport, error)
 }
 
+// ActivityProbe reports activity this process has seen that a workspace's
+// stored last_active may not have recorded (#260). A failed Touch leaves
+// last_active stale, and stale is indistinguishable from idle, so a sweep
+// corroborates before stopping a container. *Manager implements it.
+type ActivityProbe interface {
+	ActiveSince(id string, since time.Time) bool
+}
+
 // Reaper sweeps workspaces from the single serve owner. A zero timeout
 // disables that part of the sweep.
 type Reaper struct {
@@ -39,6 +47,14 @@ func (r *Reaper) managerIdleTimeout() time.Duration {
 		return m.IdleTimeout
 	}
 	return 0
+}
+
+// activeSince reports in-process activity newer than the idle cutoff, for
+// managers that track it. A workspace this process has just run a command in
+// is not idle, whatever last_active says (#260).
+func (r *Reaper) activeSince(id string, since time.Time) bool {
+	probe, ok := r.Manager.(ActivityProbe)
+	return ok && probe.ActiveSince(id, since)
 }
 
 // Sweep performs one deterministic lifecycle pass. Per-workspace Idle/Close
@@ -67,7 +83,7 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 			last = ws.UpdatedAt
 		}
 		age := now.Sub(last)
-		if ws.Status == StatusOpen && idleTimeout > 0 && age >= idleTimeout {
+		if ws.Status == StatusOpen && idleTimeout > 0 && age >= idleTimeout && !r.activeSince(ws.ID, now.Add(-idleTimeout)) {
 			if err := r.Manager.Idle(ctx, ws.ID); err != nil {
 				errs = append(errs, fmt.Errorf("idle workspace %s: %w", ws.ID, err))
 			} else {
