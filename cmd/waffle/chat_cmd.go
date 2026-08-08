@@ -304,16 +304,26 @@ var (
 // from the same workspace at startup), and the notes on disk don't change
 // between those calls, so repeating the full resync would just redo the same
 // delete-and-reinsert pass for no benefit.
+// A failed sync is not recorded as done: the index is rebuilt on the next
+// agent build instead of leaving memory search silently empty for the life of
+// the process (#259). The lock is held across the sync so a concurrent builder
+// waits for the outcome rather than racing a second delete-and-reinsert.
 func syncWorkspaceOnce(notesIdx *memory.NotesIndex, agentName string, ws memory.Workspace) {
 	key := ws.Dir + "\x00" + agentName
 	syncedWorkspacesMu.Lock()
-	done := syncedWorkspaces[key]
-	syncedWorkspaces[key] = true
-	syncedWorkspacesMu.Unlock()
-	if done {
+	defer syncedWorkspacesMu.Unlock()
+	if syncedWorkspaces[key] {
 		return
 	}
-	_ = notesIdx.SyncWorkspace(context.Background(), agentName, ws)
+	if err := notesIdx.SyncWorkspace(context.Background(), agentName, ws); err != nil {
+		// Ordinary causes: the database is locked at startup while another
+		// process holds the writer, or MEMORY.md is unreadable. Recall would
+		// otherwise return no hits with nothing logged to explain it.
+		slog.Default().Warn("memory note index sync failed; will retry on the next agent build",
+			"agent", agentName, "workspace", ws.Dir, "err", err)
+		return
+	}
+	syncedWorkspaces[key] = true
 }
 
 func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver) (*agent.Agent, func(), error) {
