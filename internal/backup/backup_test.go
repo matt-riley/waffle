@@ -232,3 +232,48 @@ func TestCreateLeavesNoStagingFilesInBackup(t *testing.T) {
 		t.Errorf("identity missing from an opted-in backup: %v", err)
 	}
 }
+
+// TestCreateSyncsEveryDirectoryItCreates covers the review follow-up on #263:
+// fsyncing the files inside a backup is pointless if the directory entry that
+// holds them never reaches stable storage, so every level Create makes must be
+// made durable — not only the innermost one.
+func TestCreateSyncsEveryDirectoryItCreates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[provider]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	// Two levels below an existing directory, so MkdirAll creates both.
+	destination := filepath.Join(root, "nested", "backup")
+	if err := Create(context.Background(), destination, false, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	created := missingDirs(filepath.Join(root, "fresh", "deeper", "leaf"))
+	want := []string{
+		filepath.Join(root, "fresh", "deeper", "leaf"),
+		filepath.Join(root, "fresh", "deeper"),
+		filepath.Join(root, "fresh"),
+	}
+	if len(created) != len(want) {
+		t.Fatalf("missingDirs = %v, want the whole missing chain %v", created, want)
+	}
+	for i, dir := range want {
+		if created[i] != dir {
+			t.Errorf("missingDirs[%d] = %s, want %s (deepest first)", i, created[i], dir)
+		}
+	}
+	// An existing directory contributes nothing to sync.
+	if got := missingDirs(root); len(got) != 0 {
+		t.Errorf("missingDirs on an existing path = %v, want none", got)
+	}
+	if err := syncCreatedDirs(created[:0]); err != nil {
+		t.Errorf("syncCreatedDirs on an empty chain: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(destination, "manifest.json")); err != nil {
+		t.Errorf("backup incomplete: %v", err)
+	}
+}

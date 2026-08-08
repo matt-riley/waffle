@@ -34,6 +34,10 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// Recorded before the tree exists so the entries MkdirAll creates can be
+	// made durable at the end: fsyncing the files inside a directory whose own
+	// entry never reached stable storage loses the whole backup (#263).
+	created := missingDirs(dst)
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
@@ -82,6 +86,38 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 	// last, after every file above has been synced (#263).
 	if err := filecommit.Write(filepath.Join(dst, "manifest.json"), append(b, '\n'), 0o600); err != nil {
 		return err
+	}
+	// Last, so a recovered filesystem never shows the backup directory without
+	// the marker that says it is complete.
+	return syncCreatedDirs(created)
+}
+
+// missingDirs returns the directories MkdirAll would have to create for path,
+// deepest first. Everything above the first existing ancestor is already
+// durable.
+func missingDirs(path string) []string {
+	var missing []string
+	for current := path; ; {
+		if _, err := os.Stat(current); err == nil {
+			break
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return missing
+}
+
+// syncCreatedDirs makes each newly created directory entry durable by syncing
+// the directory that holds it.
+func syncCreatedDirs(created []string) error {
+	for _, dir := range created {
+		if err := filecommit.SyncDir(filepath.Dir(dir)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
