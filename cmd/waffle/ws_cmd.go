@@ -269,9 +269,10 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 		}
 		mgr.RevokeSession = b.RevokeSession
 		mgr.BindGitScope = b.BindGitRepo
-		// none: allow the repo's git host through broker egress so clone works
-		// via HTTP_PROXY while other hosts stay denied (#95).
-		if cfg.Workspace.Egress == "none" || cfg.Workspace.Egress == "" {
+		// allowlist and none: allow the repo's git host through broker egress
+		// so clone works via HTTP_PROXY while other hosts stay denied (#95).
+		switch cfg.Workspace.Egress {
+		case "allowlist", "none", "":
 			mgr.AllowGitHost = func(host string) {
 				if host == "" {
 					return
