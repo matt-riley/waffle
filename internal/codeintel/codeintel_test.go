@@ -207,3 +207,277 @@ func TestToolboxWithCapsFilters(t *testing.T) {
 		t.Fatalf("want 2 tools, got %v", names)
 	}
 }
+
+type honestyResponse struct {
+	Results  []CodeLocation `json:"results"`
+	Analysis struct {
+		SupportedLanguages []string `json:"supported_languages"`
+		AnalysedFiles      []string `json:"analysed_files"`
+		SkippedFiles       []struct {
+			Path     string `json:"path"`
+			Language string `json:"language"`
+		} `json:"skipped_files"`
+		Limitation string `json:"limitation"`
+	} `json:"analysis"`
+}
+
+func marshalToolInput(t *testing.T, input map[string]any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func codeToolCases(t *testing.T, root string) []struct {
+	name  string
+	input json.RawMessage
+} {
+	t.Helper()
+	return []struct {
+		name  string
+		input json.RawMessage
+	}{
+		{name: "code_find_symbol", input: marshalToolInput(t, map[string]any{"name": "Hello"})},
+		{name: "code_references", input: marshalToolInput(t, map[string]any{"symbol": "Hello"})},
+		{name: "code_callers", input: marshalToolInput(t, map[string]any{"symbol": "Hello"})},
+		{name: "code_structure", input: marshalToolInput(t, map[string]any{"path": root})},
+		{name: "code_blast_radius", input: marshalToolInput(t, map[string]any{"symbol": "Hello"})},
+		{name: "code_suggest_tests", input: marshalToolInput(t, map[string]any{"symbol": "Hello"})},
+	}
+}
+
+func writeTypeScriptFixture(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "app.ts")
+	if err := os.WriteFile(path, []byte("export function Hello(): string { return 'hi' }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestUnsupportedLanguagesAreReportedAcrossCodeTools(t *testing.T) {
+	dir := t.TempDir()
+	tsPath := writeTypeScriptFixture(t, dir)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+
+	for _, tc := range codeToolCases(t, dir) {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tc.name, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output must be an honesty response, got %s: %v", out, err)
+			}
+			if len(got.Results) != 0 {
+				t.Fatalf("results=%v want none", got.Results)
+			}
+			if len(got.Analysis.SupportedLanguages) != 1 || got.Analysis.SupportedLanguages[0] != "Go" {
+				t.Fatalf("supported_languages=%v", got.Analysis.SupportedLanguages)
+			}
+			if !strings.Contains(got.Analysis.Limitation, "Go only") ||
+				!strings.Contains(got.Analysis.Limitation, "TypeScript") {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+			if len(got.Analysis.AnalysedFiles) != 0 {
+				t.Fatalf("analysed_files=%v want none", got.Analysis.AnalysedFiles)
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != tsPath ||
+				got.Analysis.SkippedFiles[0].Language != "TypeScript" {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+		})
+	}
+}
+
+func TestMixedLanguageAnalysisIsReportedAcrossCodeTools(t *testing.T) {
+	dir, mainPath := writeFixture(t)
+	testPath := filepath.Join(dir, "hello_test.go")
+	tsPath := writeTypeScriptFixture(t, dir)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+
+	for _, tc := range codeToolCases(t, dir) {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tc.name, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output must report partial analysis, got %s: %v", out, err)
+			}
+			if len(got.Results) == 0 {
+				t.Fatal("mixed repository must retain Go results")
+			}
+			analysed := make(map[string]bool, len(got.Analysis.AnalysedFiles))
+			for _, path := range got.Analysis.AnalysedFiles {
+				analysed[path] = true
+			}
+			if len(analysed) != 2 || !analysed[mainPath] || !analysed[testPath] {
+				t.Fatalf("analysed_files=%v", got.Analysis.AnalysedFiles)
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != tsPath ||
+				got.Analysis.SkippedFiles[0].Language != "TypeScript" {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+			if !strings.Contains(got.Analysis.Limitation, "TypeScript") {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+		})
+	}
+}
+
+func TestUnsupportedPathIsReported(t *testing.T) {
+	dir := t.TempDir()
+	tsPath := writeTypeScriptFixture(t, dir)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+	tests := []struct {
+		name  string
+		input map[string]any
+	}{
+		{name: "code_references", input: map[string]any{"path": tsPath, "line": 1}},
+		{name: "code_structure", input: map[string]any{"path": tsPath}},
+		{name: "code_blast_radius", input: map[string]any{"path": tsPath, "symbol": "Hello"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tt.name, marshalToolInput(t, tt.input))
+			if err != nil {
+				t.Fatalf("unsupported path returned an error instead of a limitation: %v", err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output=%s: %v", out, err)
+			}
+			if !strings.Contains(got.Analysis.Limitation, "TypeScript") {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+		})
+	}
+}
+
+func TestUnsupportedPathWithSymbolRetainsGoResults(t *testing.T) {
+	dir, _ := writeFixture(t)
+	tsPath := writeTypeScriptFixture(t, dir)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+	tests := []struct {
+		name  string
+		input map[string]any
+	}{
+		{name: "code_references", input: map[string]any{"path": tsPath, "symbol": "Hello"}},
+		{name: "code_blast_radius", input: map[string]any{"path": tsPath, "symbol": "Hello"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tt.name, marshalToolInput(t, tt.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output=%s: %v", out, err)
+			}
+			if len(got.Results) == 0 {
+				t.Fatal("symbol-based search discarded available Go results")
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != tsPath ||
+				got.Analysis.SkippedFiles[0].Language != "TypeScript" {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+		})
+	}
+}
+
+func TestHeaderFilesAreReported(t *testing.T) {
+	tests := []struct {
+		extension string
+		language  string
+	}{
+		{extension: ".h", language: "C/C++ header"},
+		{extension: ".hh", language: "C++"},
+		{extension: ".hpp", language: "C++"},
+		{extension: ".hxx", language: "C++"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.extension, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "header"+tt.extension)
+			if err := os.WriteFile(path, []byte("void Hello();\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tb := Toolbox(NewService(dir, "acme/demo", "main"))
+			out, err := tb.Run(
+				context.Background(),
+				"code_find_symbol",
+				marshalToolInput(t, map[string]any{"name": "Hello"}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output=%s: %v", out, err)
+			}
+			if len(got.Analysis.SkippedFiles) != 1 ||
+				got.Analysis.SkippedFiles[0].Path != path ||
+				got.Analysis.SkippedFiles[0].Language != tt.language {
+				t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+			}
+			if !strings.Contains(got.Analysis.Limitation, tt.language) {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+		})
+	}
+}
+
+func TestToolDescriptionsStateSupportedLanguage(t *testing.T) {
+	for _, def := range Toolbox(NewService(t.TempDir(), "", "")).Defs() {
+		t.Run(def.Name, func(t *testing.T) {
+			if !strings.Contains(def.Description, "Supports Go only") {
+				t.Fatalf("description=%q", def.Description)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesStateSupportedLanguage(t *testing.T) {
+	var got struct {
+		SupportedLanguages []string `json:"supported_languages"`
+	}
+	if err := json.Unmarshal([]byte(CapabilitiesJSON(nil)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.SupportedLanguages) != 1 || got.SupportedLanguages[0] != "Go" {
+		t.Fatalf("supported_languages=%v", got.SupportedLanguages)
+	}
+}
+
+func TestGoOnlyToolOutputRemainsArray(t *testing.T) {
+	dir, _ := writeFixture(t)
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+
+	for _, tc := range codeToolCases(t, dir) {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tc.name, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []CodeLocation
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("Go-only output changed from the existing array: %s: %v", out, err)
+			}
+			if len(got) == 0 {
+				t.Fatal("expected existing Go result")
+			}
+		})
+	}
+}
