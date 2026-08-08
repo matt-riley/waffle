@@ -113,16 +113,24 @@ func Create(ctx context.Context, dst string, withIdentity bool, identity string)
 // durable in turn, and any failure is reported rather than discarded — a
 // destination that could not be removed is one the owner has to look at.
 func removeFailedBackup(dst string) error {
+	// Every step is attempted and every failure reported. No step may return
+	// early: leaving the destination in place is worse than any single
+	// durability failure along the way, so a failed marker removal or fsync
+	// must not skip the teardown that follows it.
+	var errs []error
 	if err := os.Remove(filepath.Join(dst, "manifest.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		errs = append(errs, err)
 	}
 	if err := filecommit.SyncDir(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		errs = append(errs, err)
 	}
 	if err := os.RemoveAll(dst); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-	return filecommit.SyncDir(filepath.Dir(dst))
+	if err := filecommit.SyncDir(filepath.Dir(dst)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // missingDirs returns the directories MkdirAll would have to create for path,

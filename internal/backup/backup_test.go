@@ -411,6 +411,11 @@ func TestRemoveFailedBackupRetractsTheMarkerAndReportsFailure(t *testing.T) {
 		t.Fatal(chmodErr)
 	}
 	if err == nil {
-		t.Error("removeFailedBackup reported success when it could not remove the destination")
+		t.Fatal("removeFailedBackup reported success when it could not remove the destination")
+	}
+	// The marker is retracted even when the teardown that follows cannot
+	// complete: no step gives up on the ones after it.
+	if _, statErr := os.Stat(filepath.Join(stuck, "manifest.json")); !os.IsNotExist(statErr) {
+		t.Errorf("a destination that could not be removed kept looking complete: %v", statErr)
 	}
 }
