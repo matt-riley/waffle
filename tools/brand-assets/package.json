@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@resvg/resvg-js": "2.6.2",
-    "fast-xml-parser": "5.9.3",
+    "fast-xml-parser": "5.10.1",
     "pngjs": "7.0.0"
   }
 }

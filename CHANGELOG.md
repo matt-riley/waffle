@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.0](https://github.com/matt-riley/waffle/compare/v0.11.0...v0.12.0) (2026-08-08)
+
+
+### Features
+
+* **tool:** confine the builtin file tools to configured roots ([#302](https://github.com/matt-riley/waffle/issues/302)) ([fce8556](https://github.com/matt-riley/waffle/commit/fce85568ad7003f2f6a15f6578ba3ff8772baf01)), closes [#269](https://github.com/matt-riley/waffle/issues/269)
+
+
+### Bug Fixes
+
+* **ci:** resolve grpc vulnerability and desk serve test flake ([#318](https://github.com/matt-riley/waffle/issues/318)) ([a3b3ac5](https://github.com/matt-riley/waffle/commit/a3b3ac5916f0dacf511a8a2fc02a8a2ed7c2b8bd))
+* **mcp:** cap the stdio transport and tool results ([#300](https://github.com/matt-riley/waffle/issues/300)) ([35ff807](https://github.com/matt-riley/waffle/commit/35ff8077efeb6e634a3c89a7a983dbb85b608e6a)), closes [#286](https://github.com/matt-riley/waffle/issues/286) [#265](https://github.com/matt-riley/waffle/issues/265)
+* **tool:** write files atomically instead of truncating in place ([#301](https://github.com/matt-riley/waffle/issues/301)) ([816e7b8](https://github.com/matt-riley/waffle/commit/816e7b8478c9ce84ef60a5320d40e422ee36e929))
+
 ## [0.11.0](https://github.com/matt-riley/waffle/compare/v0.10.0...v0.11.0) (2026-07-26)
 
 
