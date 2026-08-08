@@ -63,9 +63,19 @@ type Gateway struct {
 	// DrainTimeout cancels accepted work. A truly non-cooperative handler is
 	// then awaited to keep shared resources alive rather than closing under it.
 	PostCancelGrace time.Duration
+	// PersistTurnsTimeout bounds the detached final turn-persistence write.
+	// Zero uses DefaultPersistTurnsTimeout.
+	PersistTurnsTimeout time.Duration
 
 	mu     sync.Mutex
 	groups map[string]*groupLock // active per-conversation serialization
+}
+
+func (g *Gateway) persistTurnsTimeout() time.Duration {
+	if g.PersistTurnsTimeout > 0 {
+		return g.PersistTurnsTimeout
+	}
+	return DefaultPersistTurnsTimeout
 }
 
 func (g *Gateway) agentFor(group string) (*agent.Agent, error) {
@@ -135,6 +145,12 @@ const defaultMaxConcurrent = 8
 // DefaultDrainTimeout gives accepted work a useful grace period while
 // ensuring a wedged provider or tool cannot retain gateway ownership forever.
 const DefaultDrainTimeout = 30 * time.Second
+
+// DefaultPersistTurnsTimeout bounds the final turn-persistence write once a
+// handler's own context may already be cancelled by the drain timeout (#270).
+// Long enough for a contended single-writer SQLite commit, short enough that a
+// wedged store cannot extend shutdown.
+const DefaultPersistTurnsTimeout = 5 * time.Second
 const DefaultPostCancelGrace = 5 * time.Second
 
 // Run starts every adapter and processes inbound messages until ctx ends.
@@ -607,9 +623,16 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		}
 	}
 
+	// Final persistence gets its own bounded context (#270). These turns were
+	// produced by work the gateway already accepted, and the shutdown drain
+	// timeout cancels the handler's context — persisting on it left the
+	// durable transcript missing turns the owner had already been answered
+	// with. Bounded rather than background, so shutdown stays bounded too.
+	persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), g.persistTurnsTimeout())
+	defer cancelPersist()
 	for ; persisted < len(newHistory); persisted++ {
-		if err := g.Sessions.AppendTurn(ctx, group.SessionID, newHistory[persisted]); err != nil {
-			g.Log.Error("persist turn", "err", err)
+		if err := g.Sessions.AppendTurn(persistCtx, group.SessionID, newHistory[persisted]); err != nil {
+			log.Error("persist turn", "err", err)
 			break
 		}
 	}
