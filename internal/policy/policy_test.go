@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -373,5 +376,56 @@ func TestLogMutationAlwaysWritesAuditRow(t *testing.T) {
 	}
 	if detail != "status=200" {
 		t.Fatalf("detail = %q", detail)
+	}
+}
+
+// closedAuditDB returns a policy_audit database handle that is already closed,
+// standing in for the busy/closed/cancelled cases that lose an audit write.
+func closedAuditDB(t *testing.T) *sql.DB {
+	t.Helper()
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "closed-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return st.DB
+}
+
+func TestCheckAndAuditSessionReportsFailedAuditWrite(t *testing.T) {
+	var logs bytes.Buffer
+	e, err := NewEngine([]Rule{{
+		Name:   "no-rm",
+		Tool:   "bash",
+		Match:  "rm -rf",
+		Action: ActionDeny,
+	}}, EnforcerFeedback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AuditDB = closedAuditDB(t)
+	e.Log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	d := e.CheckAndAuditSession(context.Background(), "sess-1", "bash", json.RawMessage(`{"command":"rm -rf /tmp/SECRET_PATH"}`))
+	if d.Allowed {
+		t.Fatal("a denial must still deny when its audit row is lost")
+	}
+	body := logs.String()
+	for _, want := range []string{"msg=\"policy audit write failed\"", "session=sess-1", "tool=bash", "operation=deny"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "SECRET_PATH") {
+		t.Fatalf("audited command leaked into the failure log: %s", body)
+	}
+}
+
+func TestReportAuditFailureIgnoresSuccess(t *testing.T) {
+	var logs bytes.Buffer
+	ReportAuditFailure(slog.New(slog.NewTextHandler(&logs, nil)), nil, "sess", "bash", "allow")
+	if logs.Len() != 0 {
+		t.Fatalf("successful audit write logged: %s", logs.String())
 	}
 }

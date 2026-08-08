@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,6 +40,9 @@ type Installer struct {
 	// AuditDB, when set, records Stage/InstallReviewed mutations in policy_audit
 	// so skillinstall shares the host policy audit trail with agent tools.
 	AuditDB *sql.DB
+	// Log reports failed policy_audit writes. Nil falls back to slog.Default():
+	// an unaudited skill installation must never be silent (#297).
+	Log *slog.Logger
 
 	mu            sync.Mutex
 	rename        func(string, string) error
@@ -174,7 +178,7 @@ func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest M
 		return Manifest{}, err
 	}
 	persisted = true
-	i.auditMutation(ctx, "skillinstall.stage", manifest.Name, "stage_id="+manifest.StageID)
+	i.noteAuditMutation(ctx, "skillinstall.stage", manifest.Name, "stage_id="+manifest.StageID)
 	return manifest, nil
 }
 
@@ -310,19 +314,37 @@ func (i *Installer) InstallReviewed(ctx context.Context, stageID, digest string)
 			fmt.Errorf("sync installed skill directory: %w", syncErr),
 			fmt.Errorf("roll back installed skill after sync failure: %w", rollbackErr),
 		)
-		i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true,sync_warning=1")
+		if auditErr := i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true,sync_warning=1"); auditErr != nil {
+			result.Warnings = append(result.Warnings, auditErr)
+		}
 		return result, nil
 	}
-	i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true")
+	if auditErr := i.auditMutation(ctx, "skillinstall.install", installed.Name, "stage_id="+stageID+",committed=true"); auditErr != nil {
+		result.Warnings = append(result.Warnings, auditErr)
+	}
 	return result, nil
 }
 
-// auditMutation records a skillinstall mutation into policy_audit when AuditDB is set.
-func (i *Installer) auditMutation(ctx context.Context, tool, command, detail string) {
+// auditMutation records a skillinstall mutation into policy_audit when AuditDB
+// is set. The write failure is always logged and is returned so a committed
+// install can report that its audit row is missing rather than drop it (#297).
+func (i *Installer) auditMutation(ctx context.Context, tool, command, detail string) error {
 	if i == nil || i.AuditDB == nil {
-		return
+		return nil
 	}
-	_ = policy.LogMutation(ctx, i.AuditDB, "", tool, command, detail)
+	err := policy.LogMutation(ctx, i.AuditDB, "", tool, command, detail)
+	policy.ReportAuditFailure(i.Log, err, "", tool, command)
+	if err != nil {
+		return fmt.Errorf("record %s in policy audit: %w", tool, err)
+	}
+	return nil
+}
+
+// noteAuditMutation records a mutation whose audit failure is reported but not
+// returned: a stage installs nothing into SkillsRoot, is retryable, and the
+// install that may follow is audited in its own right.
+func (i *Installer) noteAuditMutation(ctx context.Context, tool, command, detail string) {
+	_ = i.auditMutation(ctx, tool, command, detail)
 }
 
 func (i *Installer) clock() time.Time {

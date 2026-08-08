@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -167,6 +168,9 @@ type Engine struct {
 	// Events is the per-session cross-event log for require rules.
 	// Created automatically by NewEngine / NewEngineFromStore when nil.
 	Events *SessionEvents
+	// Log receives audit write failures. Nil falls back to slog.Default():
+	// a lost audit row must never be silent (#297).
+	Log *slog.Logger
 }
 
 // Decision is the outcome of evaluating a tool call.
@@ -321,9 +325,33 @@ func (e *Engine) CheckAndAudit(ctx context.Context, name string, input json.RawM
 func (e *Engine) CheckAndAuditSession(ctx context.Context, sessionID, name string, input json.RawMessage) Decision {
 	d, cmd := e.checkSessionCmd(sessionID, name, input)
 	if e.AuditDB != nil && (d.Rule != "" || !d.Allowed) {
-		_ = LogAudit(ctx, e.AuditDB, sessionID, name, cmd, d)
+		err := LogAudit(ctx, e.AuditDB, sessionID, name, cmd, d)
+		ReportAuditFailure(e.Log, err, sessionID, name, d.Verdict)
 	}
 	return d
+}
+
+// ReportAuditFailure logs a lost policy_audit write (#297). The repository
+// documents every matching policy decision and admitted mutation as audited,
+// so a dropped audit row is itself a security-relevant event and must never be
+// silent — callers without a logger fall back to slog.Default().
+//
+// operation carries a non-sensitive label (a verdict, or a mutation name).
+// The audited command is deliberately omitted: bash commands and skill
+// sources can carry secrets that do not belong in the host log.
+func ReportAuditFailure(log *slog.Logger, err error, session, tool, operation string) {
+	if err == nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Error("policy audit write failed",
+		"session", session,
+		"tool", tool,
+		"operation", operation,
+		"error", err,
+	)
 }
 
 // LogAudit inserts a policy_audit row.
