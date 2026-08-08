@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -1629,13 +1630,17 @@ func TestInstallReportsFailedPolicyAuditWrite(t *testing.T) {
 	if len(result.Warnings) == 0 {
 		t.Fatal("committed install with no audit row reported no warning")
 	}
-	if !strings.Contains(errors.Join(result.Warnings...).Error(), "policy audit") {
-		t.Fatalf("warnings = %v, want the lost audit write", result.Warnings)
+	if !errors.Is(errors.Join(result.Warnings...), policy.ErrAuditNotRecorded) {
+		t.Fatalf("warnings = %v, want the lost audit write to be identifiable", result.Warnings)
 	}
 	body := logs.String()
-	for _, want := range []string{"msg=\"policy audit write failed\"", "tool=skillinstall.stage", "tool=skillinstall.install"} {
+	for _, want := range []string{"msg=\"policy audit write failed\"", "tool=skillinstall.stage", "tool=skillinstall.install", "stage_id="} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("logs missing %q: %s", want, body)
 		}
+	}
+	// The skill name is caller-supplied audited content, not a safe label.
+	if strings.Contains(body, manifest.Name) {
+		t.Fatalf("audited skill name leaked into the failure log: %s", body)
 	}
 }

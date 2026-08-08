@@ -10,6 +10,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/lifecycle"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/skillinstall"
 )
@@ -156,6 +157,12 @@ func (s *WorkspaceCapabilitySkills) Install(ctx context.Context, stageID, digest
 	disposition := "committed"
 	if recovered {
 		disposition = "committed_with_provenance_repair"
+	}
+	// The skill is on disk, so the install stands — but a committed mutation
+	// whose policy_audit row was lost is not a clean success, and the client
+	// is the only place that can say so (#297).
+	if errors.Is(errors.Join(result.Warnings...), policy.ErrAuditNotRecorded) {
+		disposition += "_without_audit_record"
 	}
 	return CapabilitySkill{
 		Name:               result.Skill.Name,

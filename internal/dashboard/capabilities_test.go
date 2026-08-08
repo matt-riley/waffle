@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1854,3 +1856,65 @@ var (
 	_                     = fmt.Sprintf
 	_                     = config.Config{}
 )
+
+// TestWorkspaceCapabilitySkillsReportsInstallWithoutAuditRecord covers #297:
+// a committed install whose policy_audit row was lost must not be reported to
+// the Desk client as a clean success.
+func TestWorkspaceCapabilitySkillsReportsInstallWithoutAuditRecord(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(root, "state", "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// A separate, already-closed handle stands in for a busy or closed audit
+	// database while the skill store itself stays usable.
+	auditStore, err := store.Open(t.Context(), filepath.Join(root, "state", "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auditStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := memory.Workspace{Dir: filepath.Join(root, "workspace"), Agent: "main"}
+	imports := filepath.Join(root, "imports")
+	source := filepath.Join(imports, "unaudited-skill")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceBody := "---\nname: unaudited-skill\ndescription: Installs without an audit row.\n---\n\n# Unaudited skill\n\nInstall me.\n"
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte(sourceBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installer := skillinstall.New(
+		workspace.SkillsDir(),
+		filepath.Join(root, "private-stages"),
+		[]string{imports},
+		[]string{"github.com"},
+	)
+	installer.AuditDB = auditStore.DB
+	installer.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	skills := &WorkspaceCapabilitySkills{
+		DB:          st.DB,
+		Workspace:   workspace,
+		Attachments: &skill.Attachments{DB: st.DB},
+		Installer:   installer,
+	}
+
+	manifest, err := skills.Stage(t.Context(), skillinstall.StageRequest{LocalPath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := skills.Install(t.Context(), manifest.StageID, manifest.ContentDigest)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if installed.Name != "unaudited-skill" {
+		t.Fatalf("installed = %#v", installed)
+	}
+	if installed.InstallDisposition != "committed_without_audit_record" {
+		t.Fatalf("disposition = %q, want the lost audit row reported to the client", installed.InstallDisposition)
+	}
+}

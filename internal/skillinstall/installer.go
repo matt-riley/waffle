@@ -182,6 +182,9 @@ func (i *Installer) Stage(ctx context.Context, request StageRequest) (manifest M
 	return manifest, nil
 }
 
+// Install is the narrow wrapper kept for callers that only need the installed
+// skill. It discards InstallResult.Warnings, including a lost audit row (#297);
+// callers that report install outcomes must use InstallReviewed.
 func (i *Installer) Install(ctx context.Context, stageID, digest string) (skill.Skill, error) {
 	result, err := i.InstallReviewed(ctx, stageID, digest)
 	if result.Committed {
@@ -333,9 +336,12 @@ func (i *Installer) auditMutation(ctx context.Context, tool, command, detail str
 		return nil
 	}
 	err := policy.LogMutation(ctx, i.AuditDB, "", tool, command, detail)
-	policy.ReportAuditFailure(i.Log, err, "", tool, command)
+	// detail is built here from the stage id and commit state; the command is
+	// the skill name, which is caller-supplied audited content and stays out
+	// of the failure log.
+	policy.ReportAuditFailure(i.Log, err, "", tool, detail)
 	if err != nil {
-		return fmt.Errorf("record %s in policy audit: %w", tool, err)
+		return fmt.Errorf("%w: %s: %w", policy.ErrAuditNotRecorded, tool, err)
 	}
 	return nil
 }

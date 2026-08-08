@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -331,14 +332,21 @@ func (e *Engine) CheckAndAuditSession(ctx context.Context, sessionID, name strin
 	return d
 }
 
+// ErrAuditNotRecorded marks an admitted, durable mutation whose policy_audit
+// row was lost (#297). Callers that already committed wrap their write failure
+// with it so the result can be reported as unaudited rather than as a clean
+// success.
+var ErrAuditNotRecorded = errors.New("policy audit record not written")
+
 // ReportAuditFailure logs a lost policy_audit write (#297). The repository
 // documents every matching policy decision and admitted mutation as audited,
 // so a dropped audit row is itself a security-relevant event and must never be
 // silent — callers without a logger fall back to slog.Default().
 //
-// operation carries a non-sensitive label (a verdict, or a mutation name).
-// The audited command is deliberately omitted: bash commands and skill
-// sources can carry secrets that do not belong in the host log.
+// operation carries a caller-constructed label that is known not to contain
+// audited content — a verdict, a route, a stage id. Never pass the audited
+// command or any other caller-supplied value through it: bash commands, skill
+// names, and source refs can carry secrets that do not belong in the host log.
 func ReportAuditFailure(log *slog.Logger, err error, session, tool, operation string) {
 	if err == nil {
 		return
