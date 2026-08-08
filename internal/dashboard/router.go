@@ -442,7 +442,10 @@ func auditDeskMutation(ctx context.Context, security *Security, operation string
 		return
 	}
 	detail := "status=" + strconv.Itoa(status)
-	_ = policy.LogMutation(context.WithoutCancel(ctx), db, "", "desk.mutation", operation, detail)
+	err := policy.LogMutation(context.WithoutCancel(ctx), db, "", "desk.mutation", operation, detail)
+	// The mutation is already durable by the time it is audited, so the write
+	// cannot fail closed; the loss is reported instead of discarded (#297).
+	policy.ReportAuditFailure(security.AuditLogger(), err, "", "desk.mutation", operation)
 }
 
 func copyResponseHeader(destination, source http.Header) {

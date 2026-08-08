@@ -157,6 +157,8 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		}
 		// Desk mutations write to the shared policy_audit table (#152).
 		security.SetPolicyAuditDB(st.DB)
+		// A mutation that lands with no audit row is reported, not dropped (#297).
+		security.SetAuditLogger(log)
 		if cfg.Dashboard.Tailnet.Enabled {
 			// Log the login, never the allowlist: a mismatch is otherwise an
 			// unexplained 403 on a surface with no other diagnostic.

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -57,6 +58,9 @@ type Security struct {
 	tailnet *tailnetAdmission
 	// policyAuditDB, when set, receives policy_audit rows for admitted Desk mutations.
 	policyAuditDB *sql.DB
+	// auditLog reports failed policy_audit writes so an admitted mutation with
+	// no audit row is diagnosable (#297). Nil falls back to slog.Default().
+	auditLog *slog.Logger
 	// onRejectedLogin, when set, reports a rejected tailnet login so an
 	// allowlist mismatch is diagnosable instead of a silent 403.
 	onRejectedLogin func(login string)
@@ -163,6 +167,23 @@ func (s *Security) PolicyAuditDB() *sql.DB {
 		return nil
 	}
 	return s.policyAuditDB
+}
+
+// SetAuditLogger attaches the logger used to report failed policy_audit writes
+// for Desk mutations (#297). Nil leaves the slog.Default() fallback in place.
+func (s *Security) SetAuditLogger(log *slog.Logger) {
+	if s == nil {
+		return
+	}
+	s.auditLog = log
+}
+
+// AuditLogger returns the logger for failed Desk mutation audit writes.
+func (s *Security) AuditLogger() *slog.Logger {
+	if s == nil {
+		return nil
+	}
+	return s.auditLog
 }
 
 // Wrap validates request metadata and applies response hardening headers.

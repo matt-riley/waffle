@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -576,5 +577,45 @@ func TestMutationHandlerWritesPolicyAuditOnFirstExecution(t *testing.T) {
 	}
 	if !strings.Contains(command, "/api/v1/desk/test-audit") || verdict != "allow" {
 		t.Fatalf("command=%q verdict=%q", command, verdict)
+	}
+}
+
+func TestMutationHandlerReportsFailedPolicyAuditWrite(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "desk-audit-closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	security := mustSecurity(t, "127.0.0.1:8422")
+	security.SetPolicyAuditDB(st.DB)
+	security.SetAuditLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	idem := NewIdempotencyStore(nil, 512, time.Minute)
+	handler := NewMutationHandler(security, idem, 1024, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/test-audit-failure", strings.NewReader(`{"x":1}`))
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", "audit-failure")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// The mutation already ran, so it keeps its response; the lost audit row
+	// must still be reported instead of discarded (#297).
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want the executed mutation's own status", rec.Code)
+	}
+	body := logs.String()
+	for _, want := range []string{"msg=\"policy audit write failed\"", "tool=desk.mutation", "/api/v1/desk/test-audit-failure"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
 	}
 }

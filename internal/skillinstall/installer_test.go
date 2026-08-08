@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
 )
@@ -1597,5 +1599,48 @@ func TestStageAndInstallWritePolicyAudit(t *testing.T) {
 	}
 	if !slices.Equal(tools, []string{"skillinstall.stage", "skillinstall.install"}) {
 		t.Fatalf("audit tools = %v", tools)
+	}
+}
+
+func TestInstallReportsFailedPolicyAuditWrite(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "skill-audit-closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	f := newInstallerFixture(t)
+	f.installer.AuditDB = st.DB
+	f.installer.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	manifest := stageLocal(t, f)
+
+	result, err := f.installer.InstallReviewed(ctx, manifest.StageID, manifest.ContentDigest)
+	if err != nil {
+		t.Fatalf("InstallReviewed: %v", err)
+	}
+	// The skill is on disk by the time it is audited, so the install stands —
+	// but it may not be reported as a clean success (#297).
+	if !result.Committed {
+		t.Fatal("install should still commit when its audit row is lost")
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("committed install with no audit row reported no warning")
+	}
+	if !errors.Is(errors.Join(result.Warnings...), policy.ErrAuditNotRecorded) {
+		t.Fatalf("warnings = %v, want the lost audit write to be identifiable", result.Warnings)
+	}
+	body := logs.String()
+	for _, want := range []string{"msg=\"policy audit write failed\"", "tool=skillinstall.stage", "tool=skillinstall.install", "stage_id="} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs missing %q: %s", want, body)
+		}
+	}
+	// The skill name is caller-supplied audited content, not a safe label.
+	if strings.Contains(body, manifest.Name) {
+		t.Fatalf("audited skill name leaked into the failure log: %s", body)
 	}
 }

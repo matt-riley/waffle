@@ -139,6 +139,8 @@ func newDashboardCapabilities(
 	)
 	// Share the host policy_audit trail with skillinstall mutations (#152).
 	installer.AuditDB = st.DB
+	// A skill installed without its audit row is reported, not dropped (#297).
+	installer.Log = slog.Default()
 	return &dashboard.Capabilities{
 		Providers:    providers,
 		Sessions:     sessions,

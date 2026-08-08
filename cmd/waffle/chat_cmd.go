@@ -407,6 +407,9 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("policy engine: %w", err)
 		}
+		// Every matching decision is documented as audited; a lost audit
+		// write is reported rather than discarded (#297).
+		engine.Log = slog.Default()
 		toolPolicy.CheckAction = func(ctx context.Context, name string, input json.RawMessage) error {
 			d := engine.CheckAndAuditSession(ctx, session.IDFromContext(ctx), name, input)
 			if !d.Allowed {
