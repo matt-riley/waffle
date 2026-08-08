@@ -2211,3 +2211,54 @@ func TestNoteActivityClearsFallbackAfterASuccessfulWrite(t *testing.T) {
 		t.Error("a successful activity write left a stale fallback record behind")
 	}
 }
+
+// TestActivityFallbackKeepsNewestOverlappingWrite covers the ordering hazard in
+// #260: activity callbacks for one workspace overlap and do not finish in the
+// order they started, so a slower older successful write must not erase the
+// record of newer activity whose write failed.
+func TestActivityFallbackKeepsNewestOverlappingWrite(t *testing.T) {
+	mgr := &Manager{}
+	older := time.Now().UTC().Add(-time.Second)
+	newer := older.Add(500 * time.Millisecond)
+
+	// The newer callback's Touch failed; the older one's then succeeds.
+	mgr.recordActivity("ws-1", newer)
+	mgr.clearActivityUpTo("ws-1", older)
+	if !mgr.ActiveSince("ws-1", newer) {
+		t.Error("an older successful write erased newer activity, so the reaper can idle a workspace still in use")
+	}
+
+	// A successful write that does cover the record clears it.
+	mgr.clearActivityUpTo("ws-1", newer.Add(time.Millisecond))
+	if mgr.ActiveSince("ws-1", older) {
+		t.Error("a covering successful write left the fallback behind")
+	}
+
+	// An older failed write never backdates a newer record.
+	mgr.recordActivity("ws-2", newer)
+	mgr.recordActivity("ws-2", older)
+	if !mgr.ActiveSince("ws-2", newer) {
+		t.Error("an older failed write backdated newer activity")
+	}
+}
+
+func TestCloseForgetsFallbackActivity(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{})
+	ws, client, err := mgr.Open(context.Background(), "matt-riley/closing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	// A workspace closed without first being idled or successfully touched
+	// must not leave its fallback record behind.
+	mgr.recordActivity(ws.ID, time.Now().UTC())
+
+	if _, err := mgr.Close(context.Background(), ws.ID, true); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if mgr.ActiveSince(ws.ID, time.Now().UTC().Add(-time.Hour)) {
+		t.Error("closed workspace kept an unreachable activity record")
+	}
+}

@@ -856,19 +856,45 @@ func (m *Manager) newClient(ws *Workspace) (*sandbox.Client, error) {
 // logged, and the activity is kept in memory so the sweep can tell "not used"
 // apart from "used, but the write failed".
 func (m *Manager) noteActivity(ctx context.Context, id, repo string) {
+	// Callbacks for one workspace can overlap, and they do not finish in the
+	// order they started. Both updates below are keyed on when this activity
+	// happened, so a slower older write can never overwrite a newer one.
+	at := time.Now().UTC()
 	if err := m.Touch(ctx, id); err != nil {
-		m.activityMu.Lock()
-		if m.activity == nil {
-			m.activity = make(map[string]time.Time)
-		}
-		m.activity[id] = time.Now().UTC()
-		m.activityMu.Unlock()
-		slog.Default().Warn("workspace activity write failed; idle sweeps fall back to in-process activity",
+		m.recordActivity(id, at)
+		slog.Default().WarnContext(ctx, "workspace activity write failed; idle sweeps fall back to in-process activity",
 			"workspace", id, "repo", repo, "err", err)
 		return
 	}
-	// last_active is current again, so the fallback is no longer needed.
-	m.forgetActivity(id)
+	// last_active covers this activity, so the fallback for it is no longer
+	// needed — but a later activity whose write failed keeps its own.
+	m.clearActivityUpTo(id, at)
+}
+
+// recordActivity remembers activity whose last_active write failed, keeping
+// the newest of any overlapping callbacks.
+func (m *Manager) recordActivity(id string, at time.Time) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	if m.activity == nil {
+		m.activity = make(map[string]time.Time)
+	}
+	if existing, ok := m.activity[id]; ok && existing.After(at) {
+		return
+	}
+	m.activity[id] = at
+}
+
+// clearActivityUpTo drops the fallback only when a successful write covers it.
+// A record newer than at belongs to activity this write did not persist, so
+// erasing it would let the reaper idle a workspace that is still in use.
+func (m *Manager) clearActivityUpTo(id string, at time.Time) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+	if existing, ok := m.activity[id]; ok && existing.After(at) {
+		return
+	}
+	delete(m.activity, id)
 }
 
 // ActiveSince reports whether this process used the workspace at or after
@@ -884,8 +910,9 @@ func (m *Manager) ActiveSince(id string, since time.Time) bool {
 	return ok && !last.Before(since)
 }
 
-// forgetActivity drops the in-process record for a workspace that has been
-// stopped or closed, so a stale entry cannot keep protecting it forever.
+// forgetActivity drops the in-process record for a workspace whose container
+// is gone (idled or closed): there is nothing left to protect from the reaper,
+// and the entry would otherwise outlive the workspace it describes.
 func (m *Manager) forgetActivity(id string) {
 	m.activityMu.Lock()
 	delete(m.activity, id)
@@ -1277,6 +1304,9 @@ teardown:
 		return report, false, err
 	}
 	m.revokeSession(ws.SessionID)
+	// The container and volume are gone, so any fallback activity record for
+	// this workspace is now unreachable state.
+	m.forgetActivity(id)
 	if err := m.setStatus(ctx, id, StatusClosed); err != nil {
 		return report, false, err
 	}
