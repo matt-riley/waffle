@@ -295,9 +295,20 @@ func (d *DockerExecutor) Defs() []llm.Tool { return d.defs }
 
 // Run implements tool.Toolbox by proxying over the queue.
 func (d *DockerExecutor) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	return d.run(ctx, "", name, input)
+}
+
+// RunWithID dispatches using the model's durable tool-call identity so a
+// host crash or drain mid-tool can reclaim completed container work via
+// RepairWithReclaim, mirroring QueueToolbox (#285).
+func (d *DockerExecutor) RunWithID(ctx context.Context, useID, name string, input json.RawMessage) (string, error) {
+	return d.run(ctx, useID, name, input)
+}
+
+func (d *DockerExecutor) run(ctx context.Context, useID, name string, input json.RawMessage) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.Timeout)
 	defer cancel()
-	content, isError, err := d.client.Exec(ctx, name, input)
+	content, isError, err := d.client.Exec(ctx, useID, name, input)
 	if err != nil {
 		return "", err
 	}
@@ -333,3 +344,4 @@ func (d *DockerExecutor) CloseContext(ctx context.Context) error {
 }
 
 var _ tool.Toolbox = (*DockerExecutor)(nil)
+var _ tool.CallerToolbox = (*DockerExecutor)(nil)
