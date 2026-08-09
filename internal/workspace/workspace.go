@@ -167,6 +167,11 @@ type Manager struct {
 	Hooks hooks.Config
 	// IdleTimeout is the host idle duration; repo policy may only shorten it (#53).
 	IdleTimeout time.Duration
+	// InspectionProbeInterval is how often an idle-workspace inspection polls
+	// for a fresh runner heartbeat. Zero uses inspectionRunnerProbeInterval;
+	// tests shorten it to drive the state machine without wall-clock waits
+	// (same pattern as Reaper's Now and Client's detection-window fields).
+	InspectionProbeInterval time.Duration
 	// PolicyCache reloads host-side WAFFLE.md by mtime when Root is set (#53).
 	// Container workspaces load policy via cat /work/repo; this is for tests
 	// and host-path binds.
@@ -947,7 +952,11 @@ func (m *Manager) waitForInspectionRunner(ctx context.Context, ws *Workspace, st
 	}
 	defer func() { _ = db.Close() }()
 
-	ticker := time.NewTicker(inspectionRunnerProbeInterval)
+	tickerInterval := m.InspectionProbeInterval
+	if tickerInterval <= 0 {
+		tickerInterval = inspectionRunnerProbeInterval
+	}
+	ticker := time.NewTicker(tickerInterval)
 	defer ticker.Stop()
 	return waitForInspectionHeartbeat(ctx, startedAt, inspectionRunnerReadyTimeout,
 		func(ctx context.Context) (time.Time, error) {
