@@ -107,6 +107,15 @@ type Workspace struct {
 	// Profile is an optional named agent profile for runs in this workspace (#71).
 	// Empty uses the caller's default (main / chat --profile).
 	Profile string
+	// Egress is the effective egress posture for this workspace's container,
+	// tightened from the repo policy at open (#282). Stored per-workspace so
+	// resume/close restart the container with the same posture instead of
+	// mutating the shared Manager.
+	Egress string
+	// IdleTimeout is the effective idle duration (a duration string) when the
+	// repo policy tightened it below the host default, else empty (#282).
+	// The reaper uses each workspace's own value; empty means host applies.
+	IdleTimeout string
 	// HookLog accumulates hook stdout/stderr for session debuggability (#54).
 	HookLog []hooks.Result
 }
@@ -343,7 +352,7 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 			m.AllowGitHost(host)
 		}
 	}
-	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+	if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, m.Egress)); err != nil {
 		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
@@ -366,7 +375,7 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	if img := m.devcontainerImage(ctx, client, ws); img != "" && img != ws.Image {
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err == nil {
 			ws.Image = img
-			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, m.Egress)); err != nil {
 				// The original container is already gone; mirror the
 				// setup-failure cleanup so a failed adoption does not leak
 				// the volume, queue state, or broker session token (#283).
@@ -378,26 +387,30 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 		}
 	}
 
-	// Repo policy: present-but-unparsable is fatal at open (#53). Applies
-	// tighten-only egress/idle/hooks before after_create runs.
+	// Repo policy: present-but-unparsable is fatal at open (#53). Computed
+	// per-open into repoPolicyState; the shared Manager is never mutated
+	// (#282).
 	prevEgress := m.Egress
-	if _, err := m.loadAndApplyRepoPolicy(ctx, client); err != nil {
+	p, err := m.loadRepoPolicy(ctx, client)
+	if err != nil {
 		_ = client.Close()
 		_ = m.Runtime.RemoveContainer(ctx, ws.Container)
 		_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
 		m.revokeSession(sess.ID)
 		return nil, nil, err
 	}
+	m.lastPolicy = p
+	state := m.policyState(p)
 	// If policy tightened egress after the clone, restart the container so
 	// the running network posture matches (clone may have needed bridge).
-	if egressNetwork(prevEgress) != egressNetwork(m.Egress) {
+	if egressNetwork(prevEgress) != egressNetwork(state.egress) {
 		_ = client.Close()
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
 			_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
 			m.revokeSession(sess.ID)
 			return nil, nil, fmt.Errorf("restart for policy egress: %w", err)
 		}
-		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, state.egress)); err != nil {
 			_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
 			m.revokeSession(sess.ID)
 			return nil, nil, fmt.Errorf("restart for policy egress: %w", err)
@@ -410,6 +423,12 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 			return nil, nil, err
 		}
 	}
+
+	// The workspace keeps its own effective egress and (when the repo
+	// actually tightened it) idle timeout so resume and the reaper use
+	// per-workspace policy instead of mutating the shared Manager (#282).
+	ws.Egress = state.egress
+	ws.IdleTimeout = m.persistedIdle(p, state)
 
 	// after_create hooks run inside the container; failure marks the
 	// workspace failed and refuses to hand it out as usable (#54).
@@ -426,9 +445,9 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	}
 
 	if _, err := m.DB.ExecContext(ctx, `
-		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano), ws.Profile); err != nil {
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano), ws.Profile, state.egress, ws.IdleTimeout); err != nil {
 		// Concurrent Open raced us (or other insert error); clean up our
 		// side effects.
 		_ = client.Close()
@@ -466,8 +485,7 @@ func egressNetwork(egress string) string {
 	}
 }
 
-func (m *Manager) containerOpts(ws *Workspace, token string) ContainerOpts {
-	egress := m.Egress
+func (m *Manager) containerOpts(ws *Workspace, token, egress string) ContainerOpts {
 	if egress == "" {
 		egress = "none"
 	}
@@ -542,17 +560,25 @@ func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) 
 	return nil
 }
 
-// loadAndApplyRepoPolicy reads WAFFLE.md/AGENT.md from the container (or
-// PolicyCache when set), fails on unparsable content, and tightens manager
-// egress/idle/hooks (#53). Absent policy leaves manager settings unchanged.
-func (m *Manager) loadAndApplyRepoPolicy(ctx context.Context, client *sandbox.Client) (*repopolicy.Policy, error) {
+// repoPolicyState is the per-open effect of repo policy: the egress posture,
+// idle timeout, and merged hooks a single workspace's container runs under.
+// It is computed from host defaults without mutating the shared Manager, so
+// one restrictive WAFFLE.md can never idle or reconfigure unrelated
+// workspaces (#282).
+type repoPolicyState struct {
+	egress string
+	idle   time.Duration
+	hooks  hooks.Config
+}
+
+// loadRepoPolicy reads WAFFLE.md/AGENT.md from the container (or PolicyCache
+// when set), fails on unparsable content, and returns the policy. Absent
+// policy returns nil. It never mutates the Manager.
+func (m *Manager) loadRepoPolicy(ctx context.Context, client *sandbox.Client) (*repopolicy.Policy, error) {
 	if m.PolicyCache != nil {
 		p, err := m.PolicyCache.Get()
 		if err != nil {
 			return nil, fmt.Errorf("repo policy: %w", err)
-		}
-		if p != nil {
-			m.applyPolicy(p)
 		}
 		return p, nil
 	}
@@ -570,23 +596,28 @@ func (m *Manager) loadAndApplyRepoPolicy(ctx context.Context, client *sandbox.Cl
 	if err != nil {
 		return nil, fmt.Errorf("repo policy: %w", err)
 	}
-	m.applyPolicy(p)
 	return p, nil
 }
 
-// applyPolicy tightens host egress/idle and merges hooks from repo policy.
+// policyState computes the per-open repo-policy effect from host defaults.
 // Tool allow/deny is applied by chat/intake callers (they own the tool policy).
-func (m *Manager) applyPolicy(p *repopolicy.Policy) {
+func (m *Manager) policyState(p *repopolicy.Policy) repoPolicyState {
+	state := repoPolicyState{egress: m.Egress, idle: m.IdleTimeout, hooks: m.Hooks}
+	return m.tighten(state, p)
+}
+
+// tighten narrows one workspace's state with repo policy. Pure: the shared
+// Manager fields are treated as immutable defaults and are never written.
+func (m *Manager) tighten(state repoPolicyState, p *repopolicy.Policy) repoPolicyState {
 	if p == nil {
-		return
+		return state
 	}
-	m.lastPolicy = p
 	if p.Egress != "" {
-		m.Egress = repopolicy.TightenEgress(m.Egress, p.Egress)
+		state.egress = repopolicy.TightenEgress(state.egress, p.Egress)
 	}
 	if p.IdleTimeout != "" {
 		if d, err := time.ParseDuration(p.IdleTimeout); err == nil {
-			m.IdleTimeout = repopolicy.TightenIdle(m.IdleTimeout, d)
+			state.idle = repopolicy.TightenIdle(state.idle, d)
 		}
 	}
 	repo := hooks.Config{
@@ -600,21 +631,44 @@ func (m *Manager) applyPolicy(p *repopolicy.Policy) {
 			repo.Timeout = d
 		}
 	}
-	m.Hooks = hooks.Merge(m.Hooks, repo)
+	state.hooks = hooks.Merge(state.hooks, repo)
+	return state
 }
 
-// LastPolicy returns the most recently applied repo policy, if any.
+// persistedIdle returns the duration string to store on a workspace row, or
+// "" when the host default applies: no declaration, an unparsable value, or
+// a value that does not actually tighten the effective idle (>= host, or host
+// disabled). Storing only real tightenings keeps the documented meaning that
+// empty idle_timeout means host applies (Copilot review).
+func (m *Manager) persistedIdle(p *repopolicy.Policy, state repoPolicyState) string {
+	if p == nil || p.IdleTimeout == "" {
+		return ""
+	}
+	if _, err := time.ParseDuration(p.IdleTimeout); err != nil {
+		return ""
+	}
+	if state.idle == m.IdleTimeout {
+		return "" // not actually tighter than host
+	}
+	return state.idle.String()
+}
+
+// LastPolicy returns the most recently loaded repo policy, if any. It is
+// informational only (chat/intake receive the Policy return value); it never
+// affects container starts, hooks, or the reaper (#282).
 func (m *Manager) LastPolicy() *repopolicy.Policy { return m.lastPolicy }
 
 // LoadRepoPolicy is the public entry for chat /repo and intake to load policy
-// from an open workspace client (or PolicyCache).
+// from an open workspace client (or PolicyCache). It returns the policy but
+// does not mutate the Manager.
 func (m *Manager) LoadRepoPolicy(ctx context.Context, client *sandbox.Client) (*repopolicy.Policy, error) {
-	return m.loadAndApplyRepoPolicy(ctx, client)
+	return m.loadRepoPolicy(ctx, client)
 }
 
 // hookConfig merges host hooks with a repo-declared WAFFLE.md/AGENT.md, if readable
-// from the container at /work/repo. After loadAndApplyRepoPolicy, m.Hooks already
-// includes repo hooks; still re-read so Resume/Close paths stay current.
+// from the container at /work/repo. m.Hooks is the host default (never mutated
+// by repo policy, #282); repo hooks are re-read per call so each workspace's
+// hooks follow its own policy.
 func (m *Manager) hookConfig(ctx context.Context, client *sandbox.Client) hooks.Config {
 	cfg := m.Hooks
 	if client == nil {
@@ -802,15 +856,30 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		return nil, nil, fmt.Errorf("workspace %s is closed", id)
 	}
 
+	// startedEgress is the posture the container actually starts with; if the
+	// policy re-read below changes its network, the container is recreated so
+	// the running posture matches the durable policy (#282 / Greptile review).
+	// Pre-migration rows (egress '') fall back to the host config rather than
+	// tightening to the netlocked default.
+	startedEgress := ws.Egress
+	if startedEgress == "" {
+		startedEgress = m.Egress
+	}
+	token := ""
+
 	if m.MintToken != nil {
-		token, err := m.MintToken(ctx, ws.SessionID)
+		token, err = m.MintToken(ctx, ws.SessionID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("mint token for resume: %w", err)
 		}
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
 			return nil, nil, fmt.Errorf("replace workspace container: %w", err)
 		}
-		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token)); err != nil {
+		// Restart with the workspace's own effective egress (repo policy is
+		// re-loaded below, but the container must start with the same posture
+		// it had before — never the host default widened by another repo's
+		// open (#282)).
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, startedEgress)); err != nil {
 			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace with refreshed credentials: %w", err)
 		}
@@ -820,7 +889,20 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		ws.Status = StatusOpen
 	} else if ws.Status == StatusIdle {
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
-			return nil, nil, err
+			// No token to refresh here, so start the existing container. If
+			// it is absent (e.g. a failed egress-restart removed it), recreate
+			// it from the surviving volume instead of failing forever on
+			// "No such container" (Greptile review).
+			if !strings.Contains(err.Error(), "No such container") {
+				return nil, nil, err
+			}
+			if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+				return nil, nil, err
+			}
+			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, startedEgress)); err != nil {
+				_ = m.setStatus(ctx, id, StatusIdle)
+				return nil, nil, err
+			}
 		}
 		if err := m.setStatus(ctx, id, StatusOpen); err != nil {
 			return nil, nil, err
@@ -832,10 +914,62 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		return nil, nil, err
 	}
 	// Re-load repo policy on resume so mtime changes apply without serve
-	// restart (#53). Unparsable remains fatal.
-	if _, err := m.loadAndApplyRepoPolicy(ctx, client); err != nil {
+	// restart (#53). Unparsable remains fatal. Never mutates the Manager;
+	// the durable per-workspace egress/idle are refreshed (and cleared when
+	// the repo removed them or deleted its policy file) so the next resume
+	// keeps the tightened posture or falls back to host defaults.
+	p, perr := m.loadRepoPolicy(ctx, client)
+	if perr != nil {
 		_ = client.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("load repo policy on resume: %w", perr)
+	}
+	if p != nil {
+		m.lastPolicy = p
+	}
+	state := m.policyState(p)
+	newIdle := m.persistedIdle(p, state)
+	prevEgress := ws.Egress
+	prevIdle := ws.IdleTimeout
+	// Enforce the container's network BEFORE persisting egress: if the repo
+	// changed the network while idle, recreate the container first and only
+	// then record the new posture. If the replacement fails, the row keeps
+	// the old value, so the next resume retries — never a stored tightening
+	// with a container still running wider (Greptile review).
+	if egressNetwork(state.egress) != egressNetwork(startedEgress) {
+		_ = client.Close()
+		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+			_ = m.setStatus(ctx, id, StatusIdle)
+			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
+		}
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, state.egress)); err != nil {
+			_ = m.setStatus(ctx, id, StatusIdle)
+			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
+		}
+		client, err = m.newClient(ws)
+		if err != nil {
+			// The replacement container is running, so "open" is truthful:
+			// leave the status as-is (the caller sees the error and the next
+			// resume retries) rather than marking a running workspace idle
+			// (Greptile review). The row still holds the old egress, so the
+			// next resume re-enforces and persists the new posture.
+			return nil, nil, err
+		}
+		// The running container now enforces the new posture; persist it.
+		ws.Egress = state.egress
+	} else {
+		// No network change: the stored string may still differ (e.g.
+		// allowlist → none share the same network); record the effective
+		// value so future resumes compare against the real posture.
+		ws.Egress = state.egress
+	}
+	ws.IdleTimeout = newIdle
+	if ws.Egress != prevEgress || ws.IdleTimeout != prevIdle {
+		if _, err := m.DB.ExecContext(ctx,
+			`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
+			ws.Egress, ws.IdleTimeout, now(), id); err != nil {
+			_ = client.Close()
+			return nil, nil, err
+		}
 	}
 	if err := m.Touch(ctx, id); err != nil {
 		_ = client.Close()
@@ -1347,14 +1481,14 @@ func (m *Manager) setStatus(ctx context.Context, id, status string) error {
 // Get loads one workspace.
 func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE id = ?`, id))
 }
 
 // ForRepo finds the non-closed, non-failed workspace for a repo.
 func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE repo = ? AND status NOT IN ('closed', 'failed')`, repo))
 }
 
@@ -1364,14 +1498,14 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 // compromised session "cannot read another repo").
 func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
 }
 
 // List returns all workspaces, newest first.
 func (m *Manager) List(ctx context.Context) (out []Workspace, err error) {
 	rows, err := m.DB.QueryContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1398,7 +1532,7 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	var created, updated string
 	var active string
 	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
-		&ws.SessionID, &ws.Status, &created, &updated, &active, &ws.Profile)
+		&ws.SessionID, &ws.Status, &created, &updated, &active, &ws.Profile, &ws.Egress, &ws.IdleTimeout)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkspaceNotFound
 	}

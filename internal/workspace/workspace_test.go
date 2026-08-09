@@ -126,6 +126,12 @@ type fakeRuntime struct {
 	// failStartOn, when > 0, fails the Nth StartWorkspace call (1-indexed)
 	// so tests can let the initial start succeed and a later restart fail.
 	failStartOn int
+	// removeFail makes RemoveContainer fail (docker rm error), so tests can
+	// exercise the egress-restart retry path.
+	removeFail bool
+	// absent tracks containers removed since their last start, so
+	// StartContainer can simulate Docker's "No such container" error.
+	absent map[string]bool
 }
 
 type revocationTracker struct {
@@ -151,7 +157,7 @@ func (r *revocationTracker) seen(sessionID string) bool {
 }
 
 func newFakeRuntime(tools *scriptedBash) *fakeRuntime {
-	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}}
+	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}, absent: map[string]bool{}}
 }
 
 func (f *fakeRuntime) log(e string) {
@@ -240,6 +246,11 @@ func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
 		f.mu.Unlock()
 		return err
 	}
+	if f.absent[name] {
+		delete(f.absent, name)
+		f.mu.Unlock()
+		return fmt.Errorf("docker start: exit status 1\nError response from daemon: No such container: %s", name)
+	}
 	var queueDir string
 	for _, o := range f.opts {
 		if o.Name == name {
@@ -260,6 +271,15 @@ func TestDefaultImageIncludesGit(t *testing.T) {
 
 func (f *fakeRuntime) RemoveContainer(ctx context.Context, name string) error {
 	f.log("rm " + name)
+	f.mu.Lock()
+	removeFail := f.removeFail
+	f.mu.Unlock()
+	if removeFail {
+		return fmt.Errorf("docker rm: exit status 1\nError response from daemon: could not remove container")
+	}
+	f.mu.Lock()
+	f.absent[name] = true
+	f.mu.Unlock()
 	f.halt(name)
 	return nil
 }
@@ -1878,7 +1898,7 @@ hooks.before_run: true
 Follow repo rules.
 `,
 	}}
-	mgr, _ := newTestManager(t, tools)
+	mgr, rt := newTestManager(t, tools)
 	mgr.Egress = "full"
 	mgr.IdleTimeout = 30 * time.Minute
 	mgr.Hooks = hooks.Config{Timeout: time.Minute}
@@ -1890,18 +1910,92 @@ Follow repo rules.
 	if ws.Status != StatusOpen {
 		t.Fatalf("status = %s", ws.Status)
 	}
-	if mgr.Egress != "none" {
-		t.Fatalf("egress not tightened: %q", mgr.Egress)
+	// The shared Manager is never mutated: host settings stay the immutable
+	// default for other workspaces (#282).
+	if mgr.Egress != "full" {
+		t.Fatalf("manager egress mutated: %q, want host default", mgr.Egress)
 	}
-	if mgr.IdleTimeout != 5*time.Minute {
-		t.Fatalf("idle not tightened: %v", mgr.IdleTimeout)
+	if mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager idle mutated: %v, want host default", mgr.IdleTimeout)
 	}
-	if mgr.Hooks.AfterCreate != "echo setup" {
-		t.Fatalf("hooks not merged: %+v", mgr.Hooks)
+	if mgr.Hooks.AfterCreate != "" {
+		t.Fatalf("manager hooks mutated: %+v", mgr.Hooks)
+	}
+	// The tightening is per-open: this workspace's container restarted on
+	// the tightened network and the effective egress is durable on the row.
+	if len(rt.opts) < 2 || rt.opts[1].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("container starts = %+v, want restart on the tightened network", rt.opts)
+	}
+	if ws.Egress != "none" {
+		t.Fatalf("workspace egress = %q, want tightened 'none'", ws.Egress)
 	}
 	p := mgr.LastPolicy()
 	if p == nil || !strings.Contains(p.PromptBlock(), "untrusted") {
 		t.Fatalf("last policy = %#v", p)
+	}
+}
+
+// TestRepoPolicyIsolationAcrossRepos is the #282 regression: opening a
+// restrictive repo must not tighten egress/idle/hooks for a second,
+// unrelated workspace opened later.
+func TestRepoPolicyIsolationAcrossRepos(t *testing.T) {
+	// One shared Manager, exactly like `waffle serve`: opening a restrictive
+	// repo must not tighten egress/idle for a second, unrelated repo opened
+	// later on the same Manager (#282). The fake answers are cleared between
+	// opens so the loose repo reads an absent WAFFLE.md.
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+egress: none
+idle_timeout: 5m
+---
+Follow repo rules.
+`,
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.IdleTimeout = 30 * time.Minute
+	ws1, client1, err := mgr.Open(context.Background(), "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client1.Close() }()
+	if ws1.Egress != "none" {
+		t.Fatalf("tight repo egress = %q", ws1.Egress)
+	}
+	if ws1.IdleTimeout != "5m0s" {
+		t.Fatalf("tight repo idle = %q, want 5m0s", ws1.IdleTimeout)
+	}
+	// The Manager must still hold host defaults: nothing leaked.
+	if mgr.Egress != "full" || mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager mutated by tight open: %q %v", mgr.Egress, mgr.IdleTimeout)
+	}
+
+	tools.mu.Lock()
+	tools.outputs = map[string]string{}
+	tools.mu.Unlock()
+	ws2, client2, err := mgr.Open(context.Background(), "acme/loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	if ws2.Egress != "full" {
+		t.Fatalf("loose repo egress = %q, want host 'full'", ws2.Egress)
+	}
+	if ws2.IdleTimeout != "" {
+		t.Fatalf("loose repo idle = %q, want empty (host applies)", ws2.IdleTimeout)
+	}
+	// tight open = 2 starts (initial bridge + egress-restart on waffle-ws),
+	// loose open = 1 start on the host bridge.
+	if len(rt.opts) != 3 || rt.opts[2].Network != "bridge" {
+		t.Fatalf("loose repo container starts = %+v, want single bridge start", rt.opts)
+	}
+	if mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager idle mutated: %v", mgr.IdleTimeout)
+	}
+	for _, e := range rt.events {
+		if e == "rm "+ws2.Container {
+			t.Fatalf("loose repo container %q was restarted despite no policy; events=%v", ws2.Container, rt.events)
+		}
 	}
 }
 
@@ -1939,13 +2033,16 @@ func TestPolicyCacheReloadBetweenSessions(t *testing.T) {
 	mgr.Egress = "full"
 	mgr.PolicyCache = repopolicy.NewCache(dir)
 	// Open without container policy (empty cat); cache supplies policy.
-	_, client, err := mgr.Open(context.Background(), "acme/widgets")
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = client.Close()
-	if mgr.Egress != "none" {
-		t.Fatalf("cache policy not applied: %q", mgr.Egress)
+	if ws.Egress != "none" {
+		t.Fatalf("workspace egress = %q, want cache-tightened 'none'", ws.Egress)
+	}
+	if mgr.Egress != "full" {
+		t.Fatalf("manager egress mutated: %q, want host default", mgr.Egress)
 	}
 	// Simulate next session: rewrite policy, Cache.Get reloads by mtime.
 	time.Sleep(15 * time.Millisecond)
@@ -1957,8 +2054,8 @@ func TestPolicyCacheReloadBetweenSessions(t *testing.T) {
 	if err != nil || p == nil || p.Body != "v2" {
 		t.Fatalf("reload = %#v err=%v", p, err)
 	}
-	if mgr.IdleTimeout != time.Minute {
-		t.Fatalf("idle after reload = %v", mgr.IdleTimeout)
+	if mgr.IdleTimeout != 10*time.Minute {
+		t.Fatalf("manager idle mutated by load: %v", mgr.IdleTimeout)
 	}
 }
 
@@ -2279,6 +2376,65 @@ func TestCloseForgetsFallbackActivity(t *testing.T) {
 	}
 }
 
+// TestReaperHonorsPerWorkspaceIdleTimeout is the #282 reaper regression: a
+// repo that tightens idle below the host default idles only its own
+// workspace, while a sibling workspace keeps the host idle.
+func TestReaperHonorsPerWorkspaceIdleTimeout(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+idle_timeout: 1m
+---
+tight repo
+`,
+	}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.IdleTimeout = time.Hour
+	tight, c1, err := mgr.Open(context.Background(), "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c1.Close()
+	// The loose repo declares no policy: clear the fake's answers so the
+	// second open reads an absent WAFFLE.md.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{}
+	tools.mu.Unlock()
+	loose, c2, err := mgr.Open(context.Background(), "acme/loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c2.Close()
+
+	if tight.IdleTimeout != "1m0s" {
+		t.Fatalf("tight workspace idle = %q, want repo-tightened 1m0s", tight.IdleTimeout)
+	}
+	if loose.IdleTimeout != "" {
+		t.Fatalf("loose workspace idle = %q, want empty (host applies)", loose.IdleTimeout)
+	}
+	// Age both workspaces beyond the repo's 1m but well under the host hour.
+	cut := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, cut); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Reaper{Manager: mgr, IdleTimeout: time.Hour, Now: time.Now}).Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gotTight, err := mgr.Get(context.Background(), tight.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTight.Status != StatusIdle {
+		t.Fatalf("tight workspace status = %q, want idle on its own 1m policy", gotTight.Status)
+	}
+	gotLoose, err := mgr.Get(context.Background(), loose.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLoose.Status != StatusOpen {
+		t.Fatalf("loose workspace status = %q, want open (host hour not reached)", gotLoose.Status)
+	}
+}
+
 func TestOpenDevcontainerAdoptionFailureCleansUp(t *testing.T) {
 	ctx := context.Background()
 	tools := &scriptedBash{outputs: map[string]string{
@@ -2309,5 +2465,239 @@ func TestOpenDevcontainerAdoptionFailureCleansUp(t *testing.T) {
 	tracker.mu.Unlock()
 	if revoked == 0 {
 		t.Fatal("broker session not revoked after failed adoption")
+	}
+}
+
+// TestResumeClearsRemovedRepoIdleTimeout is the Greptile follow-up: when a
+// repo drops its idle_timeout between open and resume, the stale per-workspace
+// timeout must be cleared so the reaper falls back to the host default.
+func TestResumeClearsRemovedRepoIdleTimeout(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+idle_timeout: 1m
+---
+v1
+`,
+	}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.IdleTimeout = time.Hour
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if ws.IdleTimeout != "1m0s" {
+		t.Fatalf("idle after open = %q, want repo-tightened", ws.IdleTimeout)
+	}
+	// The repo now declares no idle_timeout.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "v2\n"}
+	tools.mu.Unlock()
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.IdleTimeout != "" {
+		t.Fatalf("idle after resume = %q, want cleared (host default applies)", resumed.IdleTimeout)
+	}
+	row, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IdleTimeout != "" {
+		t.Fatalf("stored idle after resume = %q, want cleared", row.IdleTimeout)
+	}
+}
+
+// TestResumeRestartsContainerWhenRepoTightensEgress is the Greptile follow-up:
+// if the repo tightens egress while the workspace is idle, resume must
+// recreate the container on the tightened network — storing the value alone
+// would leave the running container with wider access.
+func TestResumeRestartsContainerWhenRepoTightensEgress(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if ws.Egress != "full" {
+		t.Fatalf("egress after open = %q, want host 'full' (no repo tightening)", ws.Egress)
+	}
+	startsBefore := len(rt.opts)
+
+	// The repo now tightens egress while the workspace is idle.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.Egress != "none" {
+		t.Fatalf("egress after resume = %q, want tightened 'none'", resumed.Egress)
+	}
+	// The container must have been recreated on the tightened network.
+	if len(rt.opts) != startsBefore+2 {
+		t.Fatalf("container starts = %d (was %d), want resume start + egress restart", len(rt.opts), startsBefore)
+	}
+	last := rt.opts[len(rt.opts)-1]
+	if last.Network != WorkspaceBrokerNetwork {
+		t.Fatalf("final container network = %q, want the netlocked waffle-ws bridge", last.Network)
+	}
+}
+
+// TestResumeEgressRestartFailureRevertsToIdle is the Greptile follow-up: when
+// the egress-tightening restart fails after the old container was removed,
+// the workspace row must not claim "open" — it reverts to idle so the next
+// resume recreates the container from the surviving volume.
+func TestResumeEgressRestartFailureRevertsToIdle(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	// The repo tightens egress while idle; the resume's egress-restart (the
+	// 3rd container start: open, resume, egress restart) fails.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	rt.failStartOn = 3
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status after failed egress restart = %q, want idle (container is gone)", got.Status)
+	}
+}
+
+// TestResumeWithoutTokenRecreatesAbsentContainer is the Greptile follow-up:
+// with MintToken unset, a failed egress-restart leaves the container absent
+// and the workspace idle; the next resume must recreate it (not fail forever
+// on "No such container").
+func TestResumeWithoutTokenRecreatesAbsentContainer(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.MintToken = nil
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	// The repo tightens egress while idle; the egress-restart (2nd
+	// StartWorkspace: open + restart) fails after removing the container.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	rt.failStartOn = 2
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("first Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status after failed restart = %q, want idle", got.Status)
+	}
+	// The next resume (no MintToken) must recreate the absent container.
+	rt.failStartOn = 0
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("second Resume = %v, want container recreated", err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.Status != StatusOpen {
+		t.Fatalf("status after recovery resume = %q, want open", resumed.Status)
+	}
+	// open (bridge), failed egress-restart (waffle-ws), recovery recreate
+	// (stored bridge), enforced egress-restart (waffle-ws).
+	if len(rt.opts) != 4 || rt.opts[3].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("container starts = %+v, want the tightened-network recreate", rt.opts)
+	}
+}
+
+// TestResumeDoesNotPersistUnenforcedEgress is the Greptile follow-up: if the
+// egress-tightening restart fails at container removal, the row must keep the
+// old posture (the container still runs it) so the next resume retries the
+// enforcement instead of comparing against a stored tightening the container
+// never got.
+func TestResumeDoesNotPersistUnenforcedEgress(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.MintToken = nil
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The replacement fails at docker rm: the old container (still on "full")
+	// survives, so the row must NOT claim "none".
+	rt.removeFail = true
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Egress != "full" {
+		t.Fatalf("row egress after failed replacement = %q, want old 'full' (container never switched)", got.Egress)
+	}
+	// The next resume retries and enforces the tightening.
+	rt.removeFail = false
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("second Resume = %v, want enforced tightening", err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.Egress != "none" {
+		t.Fatalf("egress after retry = %q, want 'none'", resumed.Egress)
+	}
+	if len(rt.opts) == 0 || rt.opts[len(rt.opts)-1].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("final container network = %+v, want the netlocked bridge", rt.opts)
 	}
 }

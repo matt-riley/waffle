@@ -55,7 +55,7 @@ func TestWorkspaceRunArgsUseAbsoluteBinaryPath(t *testing.T) {
 func TestContainerOptsCarriesRunnerBinary(t *testing.T) {
 	m := &Manager{RunnerBinary: "/opt/waffle-linux"}
 	ws := &Workspace{ID: "ws-1", Container: "waffle-ws-1", Volume: "waffle-ws-1", Image: "img"}
-	opts := m.containerOpts(ws, "wk_tok")
+	opts := m.containerOpts(ws, "wk_tok", m.Egress)
 	if opts.SelfPath != "/opt/waffle-linux" {
 		t.Fatalf("containerOpts SelfPath = %q, want /opt/waffle-linux", opts.SelfPath)
 	}
@@ -126,7 +126,7 @@ func TestEgressNetworkArgs(t *testing.T) {
 				BrokerURL: tc.broker,
 				ProxyURL:  tc.proxy,
 			}
-			opts := m.containerOpts(ws, "wk_tok")
+			opts := m.containerOpts(ws, "wk_tok", m.Egress)
 			if opts.Network != tc.wantNet {
 				t.Fatalf("Network = %q, want %q", opts.Network, tc.wantNet)
 			}
@@ -250,7 +250,7 @@ func TestDockerEgressNoneUsesShippedNetlock(t *testing.T) {
 
 	m := &Manager{Egress: "none", BrokerURL: brokerURL, ProxyURL: brokerURL}
 	ws := &Workspace{ID: "ws-none", Container: "waffle-ws-none-probe", Volume: "v", Image: "img"}
-	opts := m.containerOpts(ws, "wk_test")
+	opts := m.containerOpts(ws, "wk_test", m.Egress)
 	if opts.Network != WorkspaceBrokerNetwork || !opts.NetLockdown {
 		t.Fatalf("opts Network=%q NetLockdown=%v", opts.Network, opts.NetLockdown)
 	}
@@ -310,7 +310,7 @@ func TestDockerEgressAllowlistProxyPolicy(t *testing.T) {
 
 	m := &Manager{Egress: "allowlist", BrokerURL: brokerURL, ProxyURL: brokerURL}
 	ws := &Workspace{ID: "ws-al", Container: "waffle-ws-al-probe", Volume: "v", Image: "img"}
-	opts := m.containerOpts(ws, "wk_test")
+	opts := m.containerOpts(ws, "wk_test", m.Egress)
 	if opts.Network != WorkspaceBrokerNetwork || !opts.NetLockdown {
 		t.Fatalf("opts Network=%q NetLockdown=%v", opts.Network, opts.NetLockdown)
 	}
@@ -414,7 +414,7 @@ func buildLinuxNetlockProbe(t *testing.T) string {
 func TestContainerOptsNetLockdown(t *testing.T) {
 	ws := &Workspace{ID: "ws-1", Container: "c", Volume: "v", Image: "img"}
 	m := &Manager{Egress: "none", BrokerURL: "http://waffle-host:1"}
-	opts := m.containerOpts(ws, "tok")
+	opts := m.containerOpts(ws, "tok", m.Egress)
 	if !opts.NetLockdown {
 		t.Fatal("none should set NetLockdown")
 	}
@@ -427,7 +427,7 @@ func TestContainerOptsNetLockdown(t *testing.T) {
 		t.Fatalf("want lockdown env: %s", joined)
 	}
 	m.Egress = "full"
-	opts = m.containerOpts(ws, "tok")
+	opts = m.containerOpts(ws, "tok", m.Egress)
 	if opts.NetLockdown {
 		t.Fatal("full must not set NetLockdown")
 	}
@@ -455,7 +455,7 @@ func TestWorkspaceProxyURLCarriesAnExplicitEmptyPassword(t *testing.T) {
 		ProxyURL:  "http://waffle-host:8423/egress",
 	}
 	ws := &Workspace{ID: "ws-1", Repo: "owner/repo", Container: "c", Volume: "v", Image: "img"}
-	args := workspaceRunArgs(m.containerOpts(ws, "wk_tok"))
+	args := workspaceRunArgs(m.containerOpts(ws, "wk_tok", m.Egress))
 	joined := strings.Join(args, " ")
 
 	want := "http://wk_tok:@waffle-host:8423/egress"
@@ -467,5 +467,22 @@ func TestWorkspaceProxyURLCarriesAnExplicitEmptyPassword(t *testing.T) {
 	// The password-less form is what breaks the clone; it must not appear.
 	if strings.Contains(joined, "wk_tok@waffle-host") {
 		t.Fatalf("proxy URL still has userinfo without a password:\n%s", joined)
+	}
+}
+
+// TestRemoveContainerToleratesAbsentContainer is the Greptile follow-up: a
+// resume after a failed egress-restart removes a container that is already
+// gone; "No such container" must be treated as success so the next resume can
+// recreate it instead of aborting.
+func TestRemoveContainerToleratesAbsentContainer(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\necho 'Error response from daemon: No such container: waffle-ws-gone' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	rt := DockerRuntime{}
+	if err := rt.RemoveContainer(context.Background(), "waffle-ws-gone"); err != nil {
+		t.Fatalf("RemoveContainer on absent container = %v, want nil", err)
 	}
 }
