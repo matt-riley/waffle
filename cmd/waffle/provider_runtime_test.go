@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/agentbuild"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
@@ -523,7 +524,7 @@ func TestChatModelAliasChildProfileUsesResolvedTokenDefault(t *testing.T) {
 	}
 
 	cfg.Agent.Profiles["research"] = config.AgentProfile{Model: "researcher", MaxTokens: 444}
-	profiles := childProfilesFromConfig(cfg, nil)
+	profiles := agentbuild.ChildProfilesFromConfig(cfg, nil)
 	if got := profiles["research"].MaxTokens; got != 444 {
 		t.Fatalf("explicit child profile max_tokens = %d, want 444", got)
 	}

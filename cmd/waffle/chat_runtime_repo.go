@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/agentbuild"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
-	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
@@ -143,24 +143,15 @@ func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit
 	}()
 
 	hostPolicy := r.cfg.AgentPolicy(config.GroupMain)
-	if profileName != "" {
-		if profile, ok := r.cfg.Profile(profileName); ok {
-			if len(profile.Tools.Allow) > 0 {
-				hostPolicy.Allow = profile.Tools.Allow
-			}
-			if len(profile.Tools.Deny) > 0 {
-				hostPolicy.Deny = appendUniqueStrings(hostPolicy.Deny, profile.Tools.Deny...)
-			}
-		}
-	}
-	toolPolicy := tool.Policy{Allow: hostPolicy.Allow, Deny: hostPolicy.Deny, Profile: currentAgent.Profile}
+	profile, _ := r.cfg.Profile(profileName)
+	toolPolicy, _ := agentbuild.ApplyProfile(hostPolicy, profile)
+	toolPolicy.Profile = currentAgent.Profile
 	if toolPolicy.Profile == "" {
 		toolPolicy.Profile = "main"
 	}
 	systemExtra := fmt.Sprintf("\n\nYou are working in a container workspace on the repository %s, cloned at /work/repo. Your shell and file tools execute inside that container. Git pushes authenticate automatically.", install.workspace.Repo)
 	if install.policy != nil {
-		toolPolicy = repopolicy.TightenTools(toolPolicy, install.policy.Tools)
-		toolPolicy = applyCodeIntelCaps(toolPolicy, install.policy.CodeIntelCaps)
+		toolPolicy = agentbuild.ApplyRepo(toolPolicy, install.policy)
 		if block := install.policy.PromptBlock(); block != "" {
 			systemExtra += "\n\n" + block
 		}

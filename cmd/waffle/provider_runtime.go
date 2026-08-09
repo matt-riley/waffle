@@ -105,6 +105,14 @@ func (r *modelRuntimeResolver) resolveTarget(alias string) (config.ResolvedModel
 	return resolveRuntimeModelTarget(r.cfg, alias)
 }
 
+// Resolve exposes resolveTarget for internal/agentbuild's Runtime interface.
+func (r *modelRuntimeResolver) Resolve(alias string) (config.ResolvedModel, error) {
+	return r.resolveTarget(alias)
+}
+
+// Redact exposes redact for internal/agentbuild's Runtime interface.
+func (r *modelRuntimeResolver) Redact(s string) string { return r.redact(s) }
+
 func resolveRuntimeModelTarget(cfg config.Config, alias string) (config.ResolvedModel, error) {
 	source := cfg.ProviderRegistrySource()
 	if source != config.ProviderRegistryNone {
