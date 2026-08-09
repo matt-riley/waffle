@@ -40,8 +40,10 @@ func (r *Reaper) now() time.Time {
 	return time.Now().UTC()
 }
 
-// managerIdleTimeout returns the Manager's IdleTimeout when the concrete
-// type is *Manager (may be tightened by repo policy #53); otherwise zero.
+// managerIdleTimeout returns the Manager's host idle timeout when the
+// concrete type is *Manager. Repo policy may only shorten idle for its own
+// workspace at open; the shared Manager field is never mutated (#282), so
+// this is host config only.
 func (r *Reaper) managerIdleTimeout() time.Duration {
 	if m, ok := r.Manager.(*Manager); ok && m != nil {
 		return m.IdleTimeout
@@ -70,7 +72,7 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 	}
 	now := r.now()
 	idleTimeout := r.IdleTimeout
-	// Prefer manager idle when set (may be tightened by repo policy #53).
+	// Prefer manager idle when set (host config; never mutated by repo policy, #282).
 	if mt := r.managerIdleTimeout(); mt > 0 {
 		if idleTimeout <= 0 || mt < idleTimeout {
 			idleTimeout = mt

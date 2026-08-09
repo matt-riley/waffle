@@ -1874,7 +1874,7 @@ hooks.before_run: true
 Follow repo rules.
 `,
 	}}
-	mgr, _ := newTestManager(t, tools)
+	mgr, rt := newTestManager(t, tools)
 	mgr.Egress = "full"
 	mgr.IdleTimeout = 30 * time.Minute
 	mgr.Hooks = hooks.Config{Timeout: time.Minute}
@@ -1886,18 +1886,74 @@ Follow repo rules.
 	if ws.Status != StatusOpen {
 		t.Fatalf("status = %s", ws.Status)
 	}
-	if mgr.Egress != "none" {
-		t.Fatalf("egress not tightened: %q", mgr.Egress)
+	// The shared Manager is never mutated: host settings stay the immutable
+	// default for other workspaces (#282).
+	if mgr.Egress != "full" {
+		t.Fatalf("manager egress mutated: %q, want host default", mgr.Egress)
 	}
-	if mgr.IdleTimeout != 5*time.Minute {
-		t.Fatalf("idle not tightened: %v", mgr.IdleTimeout)
+	if mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager idle mutated: %v, want host default", mgr.IdleTimeout)
 	}
-	if mgr.Hooks.AfterCreate != "echo setup" {
-		t.Fatalf("hooks not merged: %+v", mgr.Hooks)
+	if mgr.Hooks.AfterCreate != "" {
+		t.Fatalf("manager hooks mutated: %+v", mgr.Hooks)
+	}
+	// The tightening is per-open: this workspace's container restarted on
+	// the tightened network and the effective egress is durable on the row.
+	if len(rt.opts) < 2 || rt.opts[1].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("container starts = %+v, want restart on the tightened network", rt.opts)
+	}
+	if ws.Egress != "none" {
+		t.Fatalf("workspace egress = %q, want tightened 'none'", ws.Egress)
 	}
 	p := mgr.LastPolicy()
 	if p == nil || !strings.Contains(p.PromptBlock(), "untrusted") {
 		t.Fatalf("last policy = %#v", p)
+	}
+}
+
+// TestRepoPolicyIsolationAcrossRepos is the #282 regression: opening a
+// restrictive repo must not tighten egress/idle/hooks for a second,
+// unrelated workspace opened later.
+func TestRepoPolicyIsolationAcrossRepos(t *testing.T) {
+	mgr, _ := newTestManager(t, &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+egress: none
+idle_timeout: 5m
+---
+Follow repo rules.
+`,
+	}})
+	mgr.Egress = "full"
+	mgr.IdleTimeout = 30 * time.Minute
+	ws1, client1, err := mgr.Open(context.Background(), "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client1.Close() }()
+	if ws1.Egress != "none" {
+		t.Fatalf("tight repo egress = %q", ws1.Egress)
+	}
+	// A second repo with no policy must get host settings, not the first
+	// repo's tightenings.
+	mgr2, rt2 := newTestManager(t, &scriptedBash{outputs: map[string]string{}})
+	mgr2.Egress = "full"
+	mgr2.IdleTimeout = 30 * time.Minute
+	ws2, client2, err := mgr2.Open(context.Background(), "acme/loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	if ws2.Egress != "full" {
+		t.Fatalf("loose repo egress = %q, want host 'full'", ws2.Egress)
+	}
+	if len(rt2.opts) != 1 || rt2.opts[0].Network != "bridge" {
+		t.Fatalf("loose repo container starts = %+v, want single bridge start", rt2.opts)
+	}
+	if mgr2.IdleTimeout != 30*time.Minute {
+		t.Fatalf("loose manager idle mutated: %v", mgr2.IdleTimeout)
+	}
+	if rt2.hasEventPrefix("rm ") {
+		t.Fatal("loose repo container was restarted despite no policy")
 	}
 }
 
@@ -1935,13 +1991,16 @@ func TestPolicyCacheReloadBetweenSessions(t *testing.T) {
 	mgr.Egress = "full"
 	mgr.PolicyCache = repopolicy.NewCache(dir)
 	// Open without container policy (empty cat); cache supplies policy.
-	_, client, err := mgr.Open(context.Background(), "acme/widgets")
+	ws, client, err := mgr.Open(context.Background(), "acme/widgets")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = client.Close()
-	if mgr.Egress != "none" {
-		t.Fatalf("cache policy not applied: %q", mgr.Egress)
+	if ws.Egress != "none" {
+		t.Fatalf("workspace egress = %q, want cache-tightened 'none'", ws.Egress)
+	}
+	if mgr.Egress != "full" {
+		t.Fatalf("manager egress mutated: %q, want host default", mgr.Egress)
 	}
 	// Simulate next session: rewrite policy, Cache.Get reloads by mtime.
 	time.Sleep(15 * time.Millisecond)
@@ -1953,8 +2012,8 @@ func TestPolicyCacheReloadBetweenSessions(t *testing.T) {
 	if err != nil || p == nil || p.Body != "v2" {
 		t.Fatalf("reload = %#v err=%v", p, err)
 	}
-	if mgr.IdleTimeout != time.Minute {
-		t.Fatalf("idle after reload = %v", mgr.IdleTimeout)
+	if mgr.IdleTimeout != 10*time.Minute {
+		t.Fatalf("manager idle mutated by load: %v", mgr.IdleTimeout)
 	}
 }
 
