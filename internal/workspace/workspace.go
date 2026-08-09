@@ -931,20 +931,22 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 	// A repo that tightened egress while the workspace was idle must not
 	// leave the running container on the wider network: recreate it on the
-	// tightened posture, mirroring Open's egress-restart.
+	// tightened posture, mirroring Open's egress-restart. On failure the
+	// container may already be gone, so the row must not claim "open":
+	// revert to idle so the next resume recreates it from the volume.
 	if egressNetwork(state.egress) != egressNetwork(startedEgress) {
 		_ = client.Close()
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
-			_ = m.setStatus(ctx, id, StatusOpen)
+			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
 		}
 		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, state.egress)); err != nil {
-			_ = m.setStatus(ctx, id, StatusOpen)
+			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
 		}
 		client, err = m.newClient(ws)
 		if err != nil {
-			_ = m.setStatus(ctx, id, StatusOpen)
+			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, err
 		}
 	}

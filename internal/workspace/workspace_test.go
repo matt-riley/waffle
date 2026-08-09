@@ -2539,3 +2539,40 @@ func TestResumeRestartsContainerWhenRepoTightensEgress(t *testing.T) {
 		t.Fatalf("final container network = %q, want the netlocked waffle-ws bridge", last.Network)
 	}
 }
+
+// TestResumeEgressRestartFailureRevertsToIdle is the Greptile follow-up: when
+// the egress-tightening restart fails after the old container was removed,
+// the workspace row must not claim "open" — it reverts to idle so the next
+// resume recreates the container from the surviving volume.
+func TestResumeEgressRestartFailureRevertsToIdle(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	// The repo tightens egress while idle; the resume's egress-restart (the
+	// 3rd container start: open, resume, egress restart) fails.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	rt.failStartOn = 3
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status after failed egress restart = %q, want idle (container is gone)", got.Status)
+	}
+}
