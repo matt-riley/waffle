@@ -859,7 +859,12 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	// startedEgress is the posture the container actually starts with; if the
 	// policy re-read below changes its network, the container is recreated so
 	// the running posture matches the durable policy (#282 / Greptile review).
-	startedEgress := ""
+	// Pre-migration rows (egress '') fall back to the host config rather than
+	// tightening to the netlocked default.
+	startedEgress := ws.Egress
+	if startedEgress == "" {
+		startedEgress = m.Egress
+	}
 	token := ""
 
 	if m.MintToken != nil {
@@ -873,12 +878,7 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		// Restart with the workspace's own effective egress (repo policy is
 		// re-loaded below, but the container must start with the same posture
 		// it had before — never the host default widened by another repo's
-		// open (#282)). Pre-migration rows (egress '') fall back to the host
-		// config rather than tightening to the netlocked default.
-		startedEgress = ws.Egress
-		if startedEgress == "" {
-			startedEgress = m.Egress
-		}
+		// open (#282)).
 		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, startedEgress)); err != nil {
 			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace with refreshed credentials: %w", err)
@@ -888,10 +888,6 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		}
 		ws.Status = StatusOpen
 	} else if ws.Status == StatusIdle {
-		startedEgress = ws.Egress
-		if startedEgress == "" {
-			startedEgress = m.Egress
-		}
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			// No token to refresh here, so start the existing container. If
 			// it is absent (e.g. a failed egress-restart removed it), recreate
