@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.5](https://github.com/matt-riley/waffle/compare/v0.12.4...v0.12.5) (2026-08-09)
+
+
+### Performance Improvements
+
+* **ci:** parallelize artifact build and make inspection probe injectable ([#335](https://github.com/matt-riley/waffle/issues/335)) ([#336](https://github.com/matt-riley/waffle/issues/336)) ([a61614b](https://github.com/matt-riley/waffle/commit/a61614b525fab7985b3bb86b8a854f3ffb035d66))
+
 ## [0.12.4](https://github.com/matt-riley/waffle/compare/v0.12.3...v0.12.4) (2026-08-08)
 
 
