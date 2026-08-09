@@ -77,6 +77,10 @@ type SubagentTool struct {
 	AllowedProfiles []string
 	// Persist records packet+handoff against a child session when set (#78).
 	Persist func(ctx context.Context, parentSession, childSession string, packet WorkPacket, handoff Handoff) error
+	// PersistTimeout bounds the detached persistence write so a blocked or
+	// busy store cannot hang the parent run after cancellation (#298).
+	// Zero uses the 30s default.
+	PersistTimeout time.Duration
 	// NewChildSession creates a session for the child when Persist is set.
 	NewChildSession func(ctx context.Context, title string) (sessionID string, err error)
 	// Usage and Limits mirror the parent Agent so child runs share budget checks
@@ -263,7 +267,22 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	}
 
 	if t.Persist != nil && childSession != "" {
-		_ = t.Persist(context.WithoutCancel(ctx), SessionID(ctx), childSession, p, h)
+		// Persist on a bounded detached context: the parent run may already
+		// be canceled, and an unbounded write must not hold the tool forever.
+		// A failed write means the handoff will not survive a restart, so the
+		// parent must not see a plain success (#298).
+		timeout := t.PersistTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		if err := t.Persist(persistCtx, SessionID(ctx), childSession, p, h); err != nil {
+			if t.Log != nil {
+				t.Log.Error("persist subagent handoff", "err", err, "parent_session", SessionID(ctx), "child_session", childSession)
+			}
+			return "", fmt.Errorf("persist subagent handoff: %w", err)
+		}
 	}
 	return FormatHandoffResult(h), nil
 }
