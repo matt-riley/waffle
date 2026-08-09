@@ -21,11 +21,11 @@ func (r *chatRuntime) Command(ctx context.Context, command chatpkg.ParsedCommand
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {
-			emit(redactChatEvent(event, redact))
+			emit(chatpkg.RedactEvent(event, redact))
 		}
 	}
 	result, err := r.command(ctx, command, redactedEmit)
-	return redactChatResult(result, redact), redactChatError(err, redact)
+	return chatpkg.RedactResult(result, redact), redactChatError(err, redact)
 }
 
 func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {

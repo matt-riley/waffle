@@ -347,7 +347,7 @@ func selectFavouriteModels(r io.Reader, w io.Writer, models []modelcatalog.Model
 }
 
 func safeCatalogueText(value string, private ...string) string {
-	return modelcatalog.SafeText(redactCatalogueText(value, private...))
+	return modelcatalog.SafeText(modelcatalog.RedactText(value, private...))
 }
 
 func resolveProviderPreset(kind, override string) (providerPreset, error) {

@@ -160,3 +160,32 @@ func validateField(name, value string) error {
 	}
 	return nil
 }
+
+// RedactText replaces every occurrence of the private values with
+// "[REDACTED]". Empty private values are ignored.
+func RedactText(value string, private ...string) string {
+	for _, privateValue := range private {
+		if privateValue != "" {
+			value = strings.ReplaceAll(value, privateValue, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+// RedactModels returns a copy of models with the private values scrubbed from
+// every text field. CLI and Desk used to each own a byte-identical copy of
+// this walker; keep it here so both surfaces share one (#289).
+func RedactModels(models []Model, private ...string) []Model {
+	redacted := make([]Model, len(models))
+	for i, model := range models {
+		model.ID = RedactText(model.ID, private...)
+		model.DisplayName = RedactText(model.DisplayName, private...)
+		model.Owner = RedactText(model.Owner, private...)
+		model.Capabilities = append([]string(nil), model.Capabilities...)
+		for j := range model.Capabilities {
+			model.Capabilities[j] = RedactText(model.Capabilities[j], private...)
+		}
+		redacted[i] = model
+	}
+	return redacted
+}
