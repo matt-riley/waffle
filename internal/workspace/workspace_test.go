@@ -123,6 +123,9 @@ type fakeRuntime struct {
 	startErr     error
 	stopErr      error
 	restartDelay time.Duration
+	// failStartOn, when > 0, fails the Nth StartWorkspace call (1-indexed)
+	// so tests can let the initial start succeed and a later restart fail.
+	failStartOn int
 }
 
 type revocationTracker struct {
@@ -172,10 +175,11 @@ func (f *fakeRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) er
 	f.mu.Lock()
 	f.opts = append(f.opts, opts)
 	startErr := f.startErr
+	fail := f.failStartOn > 0 && len(f.opts) == f.failStartOn
 	f.mu.Unlock()
 	f.log("start-workspace " + opts.Name + " image=" + opts.Image)
-	if startErr != nil {
-		return startErr
+	if startErr != nil || fail {
+		return errors.New("docker unavailable")
 	}
 	f.launch(opts.Name, opts.QueueDir)
 	return nil
@@ -2272,5 +2276,38 @@ func TestCloseForgetsFallbackActivity(t *testing.T) {
 	}
 	if mgr.ActiveSince(ws.ID, time.Now().UTC().Add(-time.Hour)) {
 		t.Error("closed workspace kept an unreachable activity record")
+	}
+}
+
+func TestOpenDevcontainerAdoptionFailureCleansUp(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"devcontainer.json": `{"image": "golang:1.25"}`,
+	}}
+	mgr, rt := newTestManager(t, tools)
+	var tracker revocationTracker
+	mgr.RevokeSession = tracker.revoke
+
+	// The initial container start succeeds; the adoption restart (second
+	// StartWorkspace) fails.
+	rt.failStartOn = 2
+
+	ws, _, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err == nil {
+		t.Fatalf("Open = %+v, want adoption failure", ws)
+	}
+	if !strings.Contains(err.Error(), "adopt devcontainer image") {
+		t.Fatalf("Open error = %v, want devcontainer adoption failure", err)
+	}
+	// The original container was removed before the failed restart, so the
+	// volume and broker token must be cleaned up like the setup path (#283).
+	if !rt.hasEventPrefix("rmvol ") {
+		t.Fatalf("volume not removed after failed adoption; events = %v", rt.events)
+	}
+	tracker.mu.Lock()
+	revoked := len(tracker.sessions)
+	tracker.mu.Unlock()
+	if revoked == 0 {
+		t.Fatal("broker session not revoked after failed adoption")
 	}
 }
