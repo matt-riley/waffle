@@ -378,17 +378,17 @@ func (s *Store) SetProfileByChat(ctx context.Context, chatRef, profile string) e
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT channel, chat_id FROM channel_groups WHERE chat_id = ?`, chatRef)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve chat %q: %w", chatRef, err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		matches++
 		if err := rows.Scan(&ch, &id); err != nil {
-			return err
+			return fmt.Errorf("resolve chat %q: %w", chatRef, err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("resolve chat %q: %w", chatRef, err)
 	}
 	if matches == 0 {
 		return fmt.Errorf("no channel group for chat %q", chatRef)
