@@ -1230,7 +1230,8 @@ func TestProfileDocumentationAcceptance(t *testing.T) {
 		return string(body)
 	}
 	plan := read("../../docs/plan.md")
-	readme := read("../../README.md")
+	// README.md is intentionally a pointer now; profile documentation is
+	// required from docs/plan.md and the example config instead.
 	example := read("../../config.example.toml")
 
 	for _, want := range []string{
@@ -1245,11 +1246,6 @@ func TestProfileDocumentationAcceptance(t *testing.T) {
 	} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("docs/plan.md missing %q", want)
-		}
-	}
-	for _, want := range []string{"trust boundary", "effective `main` profile", "no migration required", "#33", "#53", "#66", "#68"} {
-		if !strings.Contains(readme, want) {
-			t.Errorf("README.md missing %q", want)
 		}
 	}
 	for _, want := range []string{"[agent.profile.main]", "[agent.profile.researcher]", "[agent.profile.reviewer]", "No change required"} {

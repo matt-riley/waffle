@@ -72,8 +72,10 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		"--utility",
 		"ALIAS=UPSTREAM",
 	}
+	// README.md is intentionally a pointer now (it no longer documents every
+	// capability); the durable documentation lives in docs/ and the example
+	// config, which are checked here.
 	for _, path := range []string{
-		filepath.Join("..", "..", "README.md"),
 		filepath.Join("..", "..", "docs", "deploy.md"),
 		filepath.Join("..", "..", "config.example.toml"),
 	} {
