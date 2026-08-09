@@ -639,7 +639,11 @@ func (l *Learner) commitAccepted(p Proposal) (string, error) {
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	msg := fmt.Sprintf("learn: accept %s proposal for pattern %q", p.Surface, p.PatternSig)
-	out, err := exec.Command("git", "-C", dir, "commit", "-m", msg).CombinedOutput()
+	// Commit only the proposal paths: a plain `git commit` would also sweep
+	// in unrelated changes that were already staged in the index (#295).
+	// `git commit -- <paths>` commits just those paths' contents.
+	commitArgs := append([]string{"-C", dir, "commit", "-m", msg, "--"}, paths...)
+	out, err := exec.Command("git", commitArgs...).CombinedOutput()
 	if err != nil {
 		// Nothing to commit is fine.
 		if strings.Contains(string(out), "nothing to commit") {

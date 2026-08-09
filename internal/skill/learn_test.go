@@ -828,6 +828,85 @@ func TestAcceptProposalCommitStagesOnlyProposalPaths(t *testing.T) {
 	}
 }
 
+// TestAcceptProposalCommitIgnoresPreStagedChanges asserts an accepted learn
+// proposal does not commit unrelated changes that were already staged in the
+// index before the proposal ran (#295 review).
+func TestAcceptProposalCommitIgnoresPreStagedChanges(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "git-learn.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	repo := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=waffle-test",
+			"GIT_AUTHOR_EMAIL=waffle-test@example.com",
+			"GIT_COMMITTER_NAME=waffle-test",
+			"GIT_COMMITTER_EMAIL=waffle-test@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return string(out)
+	}
+	runGit("init")
+	runGit("config", "user.email", "waffle-test@example.com")
+	runGit("config", "user.name", "waffle-test")
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("learn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README")
+	runGit("commit", "-m", "init")
+
+	// Unrelated change already staged in the index before the proposal.
+	if err := os.WriteFile(filepath.Join(repo, "staged.txt"), []byte("unrelated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "staged.txt")
+
+	ws := memory.Workspace{Dir: repo}
+	l := NewLearnerFromStore(st, session.New(st), ws)
+	l.GitDir = repo
+	before := map[string]int{"s1": 4, "s2": 4}
+	after := map[string]int{"s1": 0, "s2": 0}
+	l.Baseline = func(_ context.Context, id, _ string) (int, error) { return before[id], nil }
+	l.Score = func(_ context.Context, id, _ string) (int, error) { return after[id], nil }
+	prop := Proposal{
+		ID:          "prop-staged",
+		RunID:       "run-staged",
+		Surface:     SurfaceSkill,
+		PatternSig:  "no such file",
+		Name:        "recover-staged",
+		Description: "recover missing path",
+		Body:        "1. create the missing path",
+		Status:      "proposed",
+	}
+	pat := FailurePattern{Class: "no such file", SessionIDs: []string{"s1", "s2"}}
+	out, err := l.PromoteProposal(ctx, prop, pat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "accepted" {
+		t.Fatalf("status = %q audit=%q", out.Status, out.Audit)
+	}
+
+	files := strings.Fields(runGit("show", "--name-only", "--pretty=format:", "HEAD"))
+	if len(files) != 1 || !strings.Contains(files[0], "skills/recover-staged/SKILL.md") {
+		t.Fatalf("HEAD files = %v, want only skills/recover-staged/SKILL.md", files)
+	}
+	// The pre-staged unrelated file is still staged but not committed.
+	status := runGit("status", "--porcelain")
+	if !strings.Contains(status, "A  staged.txt") {
+		t.Fatalf("pre-staged change leaked into the learning commit:\n%s", status)
+	}
+}
+
 // TestLearnerMemoryProposalAppendsUnderTheSharedLock is the review follow-up on
 // #267: the learner used to open MEMORY.md itself, so an accepted proposal
 // could be erased by a concurrent read-modify-write in another process and
