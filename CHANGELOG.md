@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.6](https://github.com/matt-riley/waffle/compare/v0.12.5...v0.12.6) (2026-08-09)
+
+
+### Bug Fixes
+
+* **#290:** make GroupFor session+group creation atomic ([#343](https://github.com/matt-riley/waffle/issues/343)) ([08047ec](https://github.com/matt-riley/waffle/commit/08047ecc0d96371e322dcb8c5c7bed5395598f5f))
+* **#292:** fail closed on usage accounting write failures ([#342](https://github.com/matt-riley/waffle/issues/342)) ([2a15617](https://github.com/matt-riley/waffle/commit/2a15617a09f46974f0675e200e336c1c72649861))
+* **#295:** stage only proposal paths in accepted learning commits ([#341](https://github.com/matt-riley/waffle/issues/341)) ([8035948](https://github.com/matt-riley/waffle/commit/8035948247766959d879e5414e85ed4dfeb02f57))
+* **#296:** record workspace/session on running intake claims ([#340](https://github.com/matt-riley/waffle/issues/340)) ([9a9e4d0](https://github.com/matt-riley/waffle/commit/9a9e4d087ab666a8ee64d1afc4b906ab60b35387))
+* **#298:** propagate subagent handoff persistence failures ([#339](https://github.com/matt-riley/waffle/issues/339)) ([2fe3875](https://github.com/matt-riley/waffle/commit/2fe3875f13eeba06a9c4749a21332381839b8a7d))
+* **#299:** treat cron attempt/outcome/retry persistence as part of firing ([#338](https://github.com/matt-riley/waffle/issues/338)) ([060ed57](https://github.com/matt-riley/waffle/commit/060ed574ddb6370ca62b55faa5e220bfce1288b9))
+
 ## [0.12.5](https://github.com/matt-riley/waffle/compare/v0.12.4...v0.12.5) (2026-08-09)
 
 
