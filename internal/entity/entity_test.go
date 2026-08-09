@@ -228,3 +228,63 @@ func TestPairIsIdempotentUnderConcurrentFirstContact(t *testing.T) {
 		}
 	}
 }
+
+// TestGroupForIsAtomicUnderConcurrentFirstTouch asserts concurrent first
+// contact for the same conversation never orphans a session row: the session
+// and channel group are created in one transaction, and the loser of the
+// UNIQUE(channel, chat_id) race returns the winner's group (#290).
+func TestGroupForIsAtomicUnderConcurrentFirstTouch(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	s.db.SetMaxOpenConns(2)
+
+	for attempt := 0; attempt < 100; attempt++ {
+		chat := fmt.Sprintf("race-%d", attempt)
+		start := make(chan struct{})
+		results := make(chan *Group, 2)
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				g, err := s.GroupFor(ctx, "telegram", chat, "")
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- g
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		close(errs)
+
+		for err := range errs {
+			t.Fatalf("GroupFor error under concurrent first contact: %v", err)
+		}
+		var groups []*Group
+		for g := range results {
+			groups = append(groups, g)
+		}
+		if len(groups) != 2 {
+			t.Fatalf("got %d groups, want 2", len(groups))
+		}
+		if groups[0].ID != groups[1].ID || groups[0].SessionID != groups[1].SessionID {
+			t.Fatalf("concurrent GroupFor returned different groups: %+v vs %+v", groups[0], groups[1])
+		}
+
+		// Exactly one session row exists for this conversation — the loser's
+		// session must not survive as an orphan.
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sessions WHERE title = ?`, "telegram "+chat).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("sessions with title %q = %d, want 1 (no orphan)", "telegram "+chat, n)
+		}
+	}
+}
