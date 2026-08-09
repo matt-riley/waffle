@@ -126,6 +126,9 @@ type fakeRuntime struct {
 	// failStartOn, when > 0, fails the Nth StartWorkspace call (1-indexed)
 	// so tests can let the initial start succeed and a later restart fail.
 	failStartOn int
+	// removeFail makes RemoveContainer fail (docker rm error), so tests can
+	// exercise the egress-restart retry path.
+	removeFail bool
 	// absent tracks containers removed since their last start, so
 	// StartContainer can simulate Docker's "No such container" error.
 	absent map[string]bool
@@ -268,6 +271,12 @@ func TestDefaultImageIncludesGit(t *testing.T) {
 
 func (f *fakeRuntime) RemoveContainer(ctx context.Context, name string) error {
 	f.log("rm " + name)
+	f.mu.Lock()
+	removeFail := f.removeFail
+	f.mu.Unlock()
+	if removeFail {
+		return fmt.Errorf("docker rm: exit status 1\nError response from daemon: could not remove container")
+	}
 	f.mu.Lock()
 	f.absent[name] = true
 	f.mu.Unlock()
@@ -2634,7 +2643,61 @@ func TestResumeWithoutTokenRecreatesAbsentContainer(t *testing.T) {
 	if resumed.Status != StatusOpen {
 		t.Fatalf("status after recovery resume = %q, want open", resumed.Status)
 	}
-	if len(rt.opts) != 3 || rt.opts[2].Network != WorkspaceBrokerNetwork {
+	// open (bridge), failed egress-restart (waffle-ws), recovery recreate
+	// (stored bridge), enforced egress-restart (waffle-ws).
+	if len(rt.opts) != 4 || rt.opts[3].Network != WorkspaceBrokerNetwork {
 		t.Fatalf("container starts = %+v, want the tightened-network recreate", rt.opts)
+	}
+}
+
+// TestResumeDoesNotPersistUnenforcedEgress is the Greptile follow-up: if the
+// egress-tightening restart fails at container removal, the row must keep the
+// old posture (the container still runs it) so the next resume retries the
+// enforcement instead of comparing against a stored tightening the container
+// never got.
+func TestResumeDoesNotPersistUnenforcedEgress(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.MintToken = nil
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The replacement fails at docker rm: the old container (still on "full")
+	// survives, so the row must NOT claim "none".
+	rt.removeFail = true
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Egress != "full" {
+		t.Fatalf("row egress after failed replacement = %q, want old 'full' (container never switched)", got.Egress)
+	}
+	// The next resume retries and enforces the tightening.
+	rt.removeFail = false
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("second Resume = %v, want enforced tightening", err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.Egress != "none" {
+		t.Fatalf("egress after retry = %q, want 'none'", resumed.Egress)
+	}
+	if len(rt.opts) == 0 || rt.opts[len(rt.opts)-1].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("final container network = %+v, want the netlocked bridge", rt.opts)
 	}
 }

@@ -928,21 +928,13 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 	state := m.policyState(p)
 	newIdle := m.persistedIdle(p, state)
-	if state.egress != ws.Egress || newIdle != ws.IdleTimeout {
-		ws.Egress = state.egress
-		ws.IdleTimeout = newIdle
-		if _, err := m.DB.ExecContext(ctx,
-			`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
-			ws.Egress, ws.IdleTimeout, now(), id); err != nil {
-			_ = client.Close()
-			return nil, nil, err
-		}
-	}
-	// A repo that tightened egress while the workspace was idle must not
-	// leave the running container on the wider network: recreate it on the
-	// tightened posture, mirroring Open's egress-restart. On failure the
-	// container may already be gone, so the row must not claim "open":
-	// revert to idle so the next resume recreates it from the volume.
+	prevEgress := ws.Egress
+	prevIdle := ws.IdleTimeout
+	// Enforce the container's network BEFORE persisting egress: if the repo
+	// changed the network while idle, recreate the container first and only
+	// then record the new posture. If the replacement fails, the row keeps
+	// the old value, so the next resume retries — never a stored tightening
+	// with a container still running wider (Greptile review).
 	if egressNetwork(state.egress) != egressNetwork(startedEgress) {
 		_ = client.Close()
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
@@ -956,6 +948,22 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		client, err = m.newClient(ws)
 		if err != nil {
 			_ = m.setStatus(ctx, id, StatusIdle)
+			return nil, nil, err
+		}
+		// The running container now enforces the new posture; persist it.
+		ws.Egress = state.egress
+	} else {
+		// No network change: the stored string may still differ (e.g.
+		// allowlist → none share the same network); record the effective
+		// value so future resumes compare against the real posture.
+		ws.Egress = state.egress
+	}
+	ws.IdleTimeout = newIdle
+	if ws.Egress != prevEgress || ws.IdleTimeout != prevIdle {
+		if _, err := m.DB.ExecContext(ctx,
+			`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
+			ws.Egress, ws.IdleTimeout, now(), id); err != nil {
+			_ = client.Close()
 			return nil, nil, err
 		}
 	}
