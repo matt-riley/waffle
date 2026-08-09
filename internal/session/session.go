@@ -15,7 +15,6 @@ import (
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
-	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // ErrNotFound is returned when a session doesn't exist.
@@ -632,7 +631,11 @@ func (s *Store) Retain(ctx context.Context, cutoff time.Time) (int64, error) {
 }
 
 // SearchSummaries finds sessions whose summary or title matches all query
-// terms (simple LIKE AND; no FTS table for summaries).
+// terms via the sessions_fts index (FTS5 relevance blended with recency).
+// There is intentionally no LIKE fallback: store.Open always runs migrations
+// before any session store is reachable, so a missing-table error here means
+// a real schema, corruption, or query failure that must surface rather than
+// degrade to incomplete recency-ordered results (#277).
 func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (hits []Hit, err error) {
 	terms := strings.Fields(strings.TrimSpace(query))
 	if len(terms) == 0 {
@@ -641,7 +644,6 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 	if limit <= 0 {
 		limit = 4
 	}
-	// Prefer FTS index when present (#60); fall back to LIKE scan.
 	ftsTerms := make([]string, len(terms))
 	for i, t := range terms {
 		ftsTerms[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"`
@@ -655,65 +657,27 @@ func (s *Store) SearchSummaries(ctx context.Context, query string, limit int) (h
 		WHERE sessions_fts MATCH ?
 		ORDER BY (rank + (strftime('%s', ?) - strftime('%s', s.updated_at)) / 86400.0 * 0.1)
 		LIMIT ?`, strings.Join(ftsTerms, " "), now, limit)
-	if err == nil {
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var h Hit
-			var updated string
-			if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &updated, &h.Snippet); err != nil {
-				return nil, err
-			}
-			if updated != "" {
-				parsed, parseErr := time.Parse(time.RFC3339Nano, updated)
-				if parseErr != nil {
-					return nil, fmt.Errorf("parse summary updated_at: %w", parseErr)
-				}
-				h.CreatedAt = parsed
-			}
-			if h.Snippet == "" {
-				h.Snippet = h.Summary
-			}
-			hits = append(hits, h)
-		}
-		return hits, rows.Err()
-	}
-	// Fallback when FTS table is missing (pre-migration).
-	rows, err = s.db.QueryContext(ctx, `
-		SELECT id, title, summary, updated_at FROM sessions
-		WHERE summary IS NOT NULL AND summary != ''
-		ORDER BY updated_at DESC LIMIT 200`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("search summaries via FTS: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var h Hit
-		var created string
-		if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &created); err != nil {
+		var updated string
+		if err := rows.Scan(&h.SessionID, &h.Title, &h.Summary, &updated, &h.Snippet); err != nil {
 			return nil, err
 		}
-		hay := strings.ToLower(h.Title + " " + h.Summary)
-		ok := true
-		for _, term := range terms {
-			if !strings.Contains(hay, strings.ToLower(term)) {
-				ok = false
-				break
+		if updated != "" {
+			parsed, parseErr := time.Parse(time.RFC3339Nano, updated)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse summary updated_at: %w", parseErr)
 			}
+			h.CreatedAt = parsed
 		}
-		if !ok {
-			continue
-		}
-		h.Snippet = h.Summary
-		if len(h.Snippet) > 240 {
-			h.Snippet = textcut.Cut(h.Snippet, 240) + "…"
-		}
-		if h.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil && created != "" {
-			return nil, err
+		if h.Snippet == "" {
+			h.Snippet = h.Summary
 		}
 		hits = append(hits, h)
-		if len(hits) >= limit {
-			break
-		}
 	}
 	return hits, rows.Err()
 }

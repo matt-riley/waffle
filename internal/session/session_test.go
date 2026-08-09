@@ -655,3 +655,33 @@ func TestExistIDsReportsPresentAndAbsent(t *testing.T) {
 		t.Fatalf("empty ExistIDs = %#v, %v", empty, err)
 	}
 }
+
+func TestSearchSummariesSurfacesFTSErrors(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	sess, err := sessions.Create(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetSummary(ctx, sess.ID, "security summary"); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: healthy FTS path works.
+	if hits, err := sessions.SearchSummaries(ctx, "security", 10); err != nil || len(hits) == 0 {
+		t.Fatalf("healthy search: hits=%d err=%v", len(hits), err)
+	}
+	// Simulate a real schema failure by dropping the FTS index. store.Open
+	// always migrates before this method is reachable, so a missing table
+	// here is a genuine defect — the error must surface, not degrade to the
+	// old LIKE fallback (#277).
+	if _, execErr := sessions.db.ExecContext(ctx, `DROP TABLE sessions_fts`); execErr != nil {
+		t.Fatal(execErr)
+	}
+	_, err = sessions.SearchSummaries(ctx, "security", 10)
+	if err == nil {
+		t.Fatal("expected FTS error to surface after dropping sessions_fts")
+	}
+	if !strings.Contains(err.Error(), "sessions_fts") {
+		t.Fatalf("error should identify the missing FTS table, got: %v", err)
+	}
+}
