@@ -192,7 +192,16 @@ func (d DockerRuntime) StartContainer(ctx context.Context, name string) error {
 }
 
 func (d DockerRuntime) RemoveContainer(ctx context.Context, name string) error {
-	return d.docker(ctx, "rm", "-f", name)
+	if err := d.docker(ctx, "rm", "-f", name); err != nil {
+		// An absent container is a successful removal: resumes after a
+		// failed egress-restart (or any partial teardown) must not abort
+		// on "No such container" (Greptile review).
+		if strings.Contains(err.Error(), "No such container") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (d DockerRuntime) RemoveVolume(ctx context.Context, name string) error {

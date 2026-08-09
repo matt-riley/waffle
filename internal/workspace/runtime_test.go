@@ -469,3 +469,20 @@ func TestWorkspaceProxyURLCarriesAnExplicitEmptyPassword(t *testing.T) {
 		t.Fatalf("proxy URL still has userinfo without a password:\n%s", joined)
 	}
 }
+
+// TestRemoveContainerToleratesAbsentContainer is the Greptile follow-up: a
+// resume after a failed egress-restart removes a container that is already
+// gone; "No such container" must be treated as success so the next resume can
+// recreate it instead of aborting.
+func TestRemoveContainerToleratesAbsentContainer(t *testing.T) {
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\necho 'Error response from daemon: No such container: waffle-ws-gone' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	rt := DockerRuntime{}
+	if err := rt.RemoveContainer(context.Background(), "waffle-ws-gone"); err != nil {
+		t.Fatalf("RemoveContainer on absent container = %v, want nil", err)
+	}
+}
