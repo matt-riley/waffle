@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -18,6 +17,7 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
+	redactpkg "github.com/matt-riley/waffle/internal/redact"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/session"
@@ -160,7 +160,7 @@ func newChatRuntime(_ context.Context, cfg config.Config, st *store.Store) (*cha
 func (r *chatRuntime) Open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
 	state, err := r.open(ctx, options)
 	redact := r.runtimeRedactor()
-	return redactChatState(state, redact), redactChatError(err, redact)
+	return chatpkg.RedactState(state, redact), redactChatError(err, redact)
 }
 
 func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (chatpkg.State, error) {
@@ -300,11 +300,11 @@ func (r *chatRuntime) Command(ctx context.Context, command chatpkg.ParsedCommand
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {
-			emit(redactChatEvent(event, redact))
+			emit(chatpkg.RedactEvent(event, redact))
 		}
 	}
 	result, err := r.command(ctx, command, redactedEmit)
-	return redactChatResult(result, redact), redactChatError(err, redact)
+	return chatpkg.RedactResult(result, redact), redactChatError(err, redact)
 }
 
 func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
@@ -1327,7 +1327,7 @@ func (r *chatRuntime) Turn(ctx context.Context, input string, emit func(chatpkg.
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {
-			emit(redactChatEvent(event, redact))
+			emit(chatpkg.RedactEvent(event, redact))
 		}
 	}
 	return redactChatError(r.turn(ctx, input, redactedEmit), redact)
@@ -1799,14 +1799,9 @@ func cleanupCompleted(err error) bool {
 	return errors.As(err, &completed) && completed.CleanupCompleted()
 }
 
-type redactedChatRuntimeError struct {
-	cause   error
-	message string
+func redactChatError(err error, redact func(string) string) error {
+	return redactpkg.RedactError(err, redact)
 }
-
-func (e *redactedChatRuntimeError) Error() string       { return e.message }
-func (e *redactedChatRuntimeError) Unwrap() error       { return e.cause }
-func (e *redactedChatRuntimeError) SafeMessage() string { return e.message }
 
 func (r *chatRuntime) runtimeRedactor() func(string) string {
 	r.mu.Lock()
@@ -1815,126 +1810,4 @@ func (r *chatRuntime) runtimeRedactor() func(string) string {
 		return r.agent.Redact
 	}
 	return func(value string) string { return value }
-}
-
-func redactChatError(err error, redact func(string) string) error {
-	if err == nil {
-		return nil
-	}
-	message := redact(err.Error())
-	if message == err.Error() {
-		return err
-	}
-	return &redactedChatRuntimeError{cause: err, message: message}
-}
-
-func redactChatEvent(event chatpkg.Event, redact func(string) string) chatpkg.Event {
-	event.Text = redact(event.Text)
-	event.ToolName = redact(event.ToolName)
-	if event.State != nil {
-		state := redactChatState(*event.State, redact)
-		event.State = &state
-	}
-	return event
-}
-
-func redactChatResult(result chatpkg.Result, redact func(string) string) chatpkg.Result {
-	result.Title = redact(result.Title)
-	result.Text = redact(result.Text)
-	for i := range result.Models {
-		result.Models[i].Alias = redact(result.Models[i].Alias)
-		result.Models[i].Provider = redact(result.Models[i].Provider)
-		result.Models[i].Upstream = redact(result.Models[i].Upstream)
-	}
-	for i := range result.Sessions {
-		result.Sessions[i].Title = redact(result.Sessions[i].Title)
-		result.Sessions[i].Summary = redact(result.Sessions[i].Summary)
-		result.Sessions[i].ModelAlias = redact(result.Sessions[i].ModelAlias)
-	}
-	for i := range result.Workset {
-		result.Workset[i].Text = redact(result.Workset[i].Text)
-	}
-	if result.State != nil {
-		state := redactChatState(*result.State, redact)
-		result.State = &state
-	}
-	return result
-}
-
-func redactChatState(state chatpkg.State, redact func(string) string) chatpkg.State {
-	state.Title = redact(state.Title)
-	state.ModelAlias = redact(state.ModelAlias)
-	state.ModelError = redact(state.ModelError)
-	state.ProviderLabel = redact(state.ProviderLabel)
-	state.Profile = redact(state.Profile)
-	state.Workspace = redact(state.Workspace)
-	for i := range state.History {
-		state.History[i] = redactChatMessage(state.History[i], redact)
-	}
-	for i := range state.Models {
-		state.Models[i].Alias = redact(state.Models[i].Alias)
-		state.Models[i].Provider = redact(state.Models[i].Provider)
-		state.Models[i].Upstream = redact(state.Models[i].Upstream)
-	}
-	state.Skills = append([]chatpkg.SkillRef(nil), state.Skills...)
-	for i := range state.Skills {
-		state.Skills[i].Name = redact(state.Skills[i].Name)
-		state.Skills[i].Description = redact(state.Skills[i].Description)
-	}
-	return state
-}
-
-func redactChatMessage(message llm.Message, redact func(string) string) llm.Message {
-	message.Blocks = append([]llm.Block(nil), message.Blocks...)
-	for i := range message.Blocks {
-		block := &message.Blocks[i]
-		block.Text = redact(block.Text)
-		block.Signature = redact(block.Signature)
-		block.Data = redact(block.Data)
-		if block.ToolUse != nil {
-			toolUse := *block.ToolUse
-			block.ToolUse = &toolUse
-			block.ToolUse.ID = redact(block.ToolUse.ID)
-			block.ToolUse.Name = redact(block.ToolUse.Name)
-			block.ToolUse.Input = redactChatJSON(block.ToolUse.Input, redact)
-		}
-		if block.ToolResult != nil {
-			toolResult := *block.ToolResult
-			block.ToolResult = &toolResult
-			block.ToolResult.ToolUseID = redact(block.ToolResult.ToolUseID)
-			block.ToolResult.Content = redact(block.ToolResult.Content)
-		}
-	}
-	return message
-}
-
-func redactChatJSON(raw json.RawMessage, redact func(string) string) json.RawMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return append(json.RawMessage(nil), raw...)
-	}
-	var walk func(any) any
-	walk = func(current any) any {
-		switch typed := current.(type) {
-		case string:
-			return redact(typed)
-		case []any:
-			for i := range typed {
-				typed[i] = walk(typed[i])
-			}
-		case map[string]any:
-			for key, item := range typed {
-				typed[key] = walk(item)
-			}
-		}
-		return current
-	}
-	encoded, err := json.Marshal(walk(value))
-	if err != nil {
-		return append(json.RawMessage(nil), raw...)
-	}
-	return encoded
 }

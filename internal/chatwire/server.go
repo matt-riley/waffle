@@ -8,15 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	redactpkg "github.com/matt-riley/waffle/internal/redact"
 )
 
 const (
@@ -642,10 +641,8 @@ func eventFrameType(kind chat.EventKind) (string, bool) {
 	}
 }
 
-var sensitivePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AGE-SECRET-KEY-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`/var/lib/waffle(?:/[A-Za-z0-9._/-]+)?`),
+func sanitizeString(value string) string {
+	return redactpkg.Residual(value)
 }
 
 func sanitizePayload(payload json.RawMessage) (json.RawMessage, error) {
@@ -709,12 +706,4 @@ func validRequestID(id string) bool {
 		}
 	}
 	return true
-}
-
-func sanitizeString(value string) string {
-	clean := strings.ReplaceAll(value, "WAFFLE_AGE_IDENTITY", "[redacted]")
-	for _, pattern := range sensitivePatterns {
-		clean = pattern.ReplaceAllString(clean, "[redacted]")
-	}
-	return clean
 }

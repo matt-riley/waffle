@@ -1,24 +1,15 @@
 package dashboard
 
 import (
-	"regexp"
-	"strings"
+	"github.com/matt-riley/waffle/internal/redact"
 )
 
-// Residual format scrubbing for non-chat Desk projections (tasks, memory,
-// workspaces). Chat events and chat HTTP results must not rely on these
-// patterns as their secret boundary — they use ChatClients exact-value
-// redaction and structural allowlisting instead (#153).
-var dashboardSensitivePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AGE-SECRET-KEY-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]+`),
-	regexp.MustCompile(`/var/lib/waffle(?:/[A-Za-z0-9._/-]+)?`),
-}
-
+// sanitizeDashboardString is the residual format scrubber for non-chat Desk
+// projections (tasks, memory, workspaces). Chat events and chat HTTP results
+// must not rely on these patterns as their secret boundary — they use
+// ChatClients exact-value redaction and structural allowlisting instead
+// (#153). The implementation is the shared residual scrubber from
+// internal/redact, used by chatwire too (#289).
 func sanitizeDashboardString(value string) string {
-	clean := strings.ReplaceAll(value, "WAFFLE_AGE_IDENTITY", "[redacted]")
-	for _, pattern := range dashboardSensitivePatterns {
-		clean = pattern.ReplaceAllString(clean, "[redacted]")
-	}
-	return clean
+	return redact.Residual(value)
 }

@@ -1629,7 +1629,7 @@ func TestRedactChatStateDoesNotMutateHistoryAndCoversToolPayloads(t *testing.T) 
 	toolResult := &llm.ToolResult{ToolUseID: secret, Content: secret}
 	history := []llm.Message{{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockToolUse, Text: secret, ToolUse: toolUse}, {Type: llm.BlockToolResult, ToolResult: toolResult}}}}
 	state := chatpkg.State{History: append([]llm.Message(nil), history...)}
-	redacted := redactChatState(state, func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") })
+	redacted := chatpkg.RedactState(state, func(value string) string { return strings.ReplaceAll(value, secret, "[redacted:test]") })
 	if strings.Contains(fmt.Sprintf("%+v", redacted.History), secret) || strings.Contains(string(redacted.History[0].Blocks[0].ToolUse.Input), secret) {
 		t.Fatalf("redacted history leaked secret: %+v", redacted.History)
 	}
@@ -1641,7 +1641,7 @@ func TestRedactChatStateDoesNotMutateHistoryAndCoversToolPayloads(t *testing.T) 
 func TestAttachedSkillStateRedactionDoesNotMutateRuntimeRefs(t *testing.T) {
 	const secret = "opaque-skill-description-canary-8264"
 	state := chatpkg.State{Skills: []chatpkg.SkillRef{{Name: "reviewer", Description: secret, Attached: true}}}
-	redacted := redactChatState(state, func(value string) string {
+	redacted := chatpkg.RedactState(state, func(value string) string {
 		return strings.ReplaceAll(value, secret, "[redacted:test]")
 	})
 	if redacted.Skills[0].Description != "[redacted:test]" {

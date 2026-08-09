@@ -514,7 +514,7 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 	if err != nil {
 		return CapabilityCatalogueView{}, err
 	}
-	models := redactCapabilityCatalogueModels(result.Result.Models, result.PrivateValues...)
+	models := modelcatalog.RedactModels(result.Result.Models, result.PrivateValues...)
 	if models == nil {
 		models = make([]modelcatalog.Model, 0)
 	}
@@ -540,10 +540,10 @@ func (c *Capabilities) RefreshCatalogue(ctx context.Context, connection string) 
 		viewModels = append(viewModels, viewModel)
 	}
 	return CapabilityCatalogueView{
-		Connection: redactCapabilityCatalogueText(result.Result.Connection.Name, result.PrivateValues...),
+		Connection: modelcatalog.RedactText(result.Result.Connection.Name, result.PrivateValues...),
 		FetchedAt:  result.Result.FetchedAt,
 		Stale:      result.Result.Stale,
-		Warning:    redactCapabilityCatalogueText(result.Result.Warning, result.PrivateValues...),
+		Warning:    modelcatalog.RedactText(result.Result.Warning, result.PrivateValues...),
 		Models:     viewModels,
 	}, nil
 }
@@ -564,30 +564,6 @@ func enrolledAliasesByUpstreamModel(listing providerconfig.Listing, connection s
 		aliases[enrolled.Model] = alias
 	}
 	return aliases
-}
-
-func redactCapabilityCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {
-	redacted := make([]modelcatalog.Model, len(models))
-	for index, model := range models {
-		model.ID = redactCapabilityCatalogueText(model.ID, private...)
-		model.DisplayName = redactCapabilityCatalogueText(model.DisplayName, private...)
-		model.Owner = redactCapabilityCatalogueText(model.Owner, private...)
-		model.Capabilities = append([]string(nil), model.Capabilities...)
-		for capabilityIndex := range model.Capabilities {
-			model.Capabilities[capabilityIndex] = redactCapabilityCatalogueText(model.Capabilities[capabilityIndex], private...)
-		}
-		redacted[index] = model
-	}
-	return redacted
-}
-
-func redactCapabilityCatalogueText(value string, private ...string) string {
-	for _, privateValue := range private {
-		if privateValue != "" {
-			value = strings.ReplaceAll(value, privateValue, "[REDACTED]")
-		}
-	}
-	return value
 }
 
 func (c *Capabilities) AttachSkill(ctx context.Context, sessionID, name string) error {

@@ -20,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/providerconfig"
+	redactpkg "github.com/matt-riley/waffle/internal/redact"
 	"github.com/matt-riley/waffle/internal/secret"
 )
 
@@ -310,7 +311,7 @@ func providerAddGuided(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 	var models map[string]config.ModelTarget
 	var defaultModel, utilityModel string
 	if discoveryErr != nil {
-		fmt.Fprintf(stderr, "warning: model discovery failed: %s\n", modelcatalog.SafeText(redactCatalogueText(discoveryErr.Error(), apiKey)))
+		fmt.Fprintf(stderr, "warning: model discovery failed: %s\n", modelcatalog.SafeText(modelcatalog.RedactText(discoveryErr.Error(), apiKey)))
 		manual, promptErr := promptYesNo(stdin, stderr, "Enter models manually? [Y/n]", true)
 		if promptErr != nil {
 			return promptErr
@@ -634,8 +635,8 @@ func providerModels(ctx context.Context, args []string, stdout, stderr io.Writer
 	if options.search != "" {
 		models = modelcatalog.Search(models, options.search)
 	}
-	models = redactCatalogueModels(models, snapshot.APIKey, snapshot.ScopeID)
-	warning := redactCatalogueText(result.Warning, snapshot.APIKey, snapshot.ScopeID)
+	models = modelcatalog.RedactModels(models, snapshot.APIKey, snapshot.ScopeID)
+	warning := modelcatalog.RedactText(result.Warning, snapshot.APIKey, snapshot.ScopeID)
 	if options.json {
 		return json.NewEncoder(stdout).Encode(catalogueOutput{
 			Connection: options.connection,
@@ -663,35 +664,10 @@ func providerModels(ctx context.Context, args []string, stdout, stderr io.Writer
 	return nil
 }
 
-func redactCatalogueModels(models []modelcatalog.Model, private ...string) []modelcatalog.Model {
-	redacted := make([]modelcatalog.Model, len(models))
-	for i, model := range models {
-		model.ID = redactCatalogueText(model.ID, private...)
-		model.DisplayName = redactCatalogueText(model.DisplayName, private...)
-		model.Owner = redactCatalogueText(model.Owner, private...)
-		model.Capabilities = append([]string(nil), model.Capabilities...)
-		for j := range model.Capabilities {
-			model.Capabilities[j] = redactCatalogueText(model.Capabilities[j], private...)
-		}
-		redacted[i] = model
-	}
-	return redacted
-}
-
-func redactCatalogueText(value string, private ...string) string {
-	for _, privateValue := range private {
-		if privateValue != "" {
-			value = strings.ReplaceAll(value, privateValue, "[REDACTED]")
-		}
-	}
-	return value
-}
-
 func redactCatalogueError(err error, private ...string) error {
-	if err == nil {
-		return nil
-	}
-	return errors.New(redactCatalogueText(err.Error(), private...))
+	return redactpkg.RedactError(err, func(value string) string {
+		return modelcatalog.RedactText(value, private...)
+	})
 }
 
 func providerList(ctx context.Context, args []string, stdout io.Writer) error {
@@ -901,19 +877,9 @@ func sanitizeFlagError(err error) error {
 }
 
 func redactProviderError(err error, key string) error {
-	if err == nil {
-		return err
-	}
-	switch {
-	case errors.Is(err, context.Canceled):
-		return context.Canceled
-	case errors.Is(err, context.DeadlineExceeded):
-		return context.DeadlineExceeded
-	}
-	if key == "" {
-		return err
-	}
-	return errors.New(strings.ReplaceAll(err.Error(), key, "[REDACTED]"))
+	return redactpkg.RedactError(err, func(value string) string {
+		return redactpkg.Exact(value, key)
+	})
 }
 
 func sortedProviderNames(providers map[string]providerconfig.ProviderSummary) []string {

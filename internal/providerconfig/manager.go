@@ -26,6 +26,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/instance"
+	redactpkg "github.com/matt-riley/waffle/internal/redact"
 	"github.com/matt-riley/waffle/internal/secret"
 )
 
@@ -1953,10 +1954,9 @@ func (m *Manager) newCatalogScope() (string, error) {
 }
 
 func redactError(err error, key string) error {
-	if err == nil || key == "" {
-		return err
-	}
-	return errors.New(strings.ReplaceAll(err.Error(), key, "[REDACTED]"))
+	return redactpkg.RedactError(err, func(value string) string {
+		return redactpkg.Exact(value, key)
+	})
 }
 
 func readSnapshot(path string) ([]byte, fs.FileMode, bool, error) {

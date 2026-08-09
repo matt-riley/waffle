@@ -839,17 +839,10 @@ func dashboardEventKind(kind chat.EventKind) bool {
 }
 
 func (c *ChatClients) safeChatState(state chat.State) chat.State {
-	state.Title = c.redactExact(state.Title)
-	state.ModelAlias = c.redactExact(state.ModelAlias)
-	state.ModelError = c.redactExact(state.ModelError)
-	state.ProviderLabel = c.redactExact(state.ProviderLabel)
-	state.Profile = c.redactExact(state.Profile)
-	state.Workspace = projectChatWorkspaceLabel(c.redactExact(state.Workspace))
-	for i := range state.Models {
-		state.Models[i].Alias = c.redactExact(state.Models[i].Alias)
-		state.Models[i].Provider = c.redactExact(state.Models[i].Provider)
-		state.Models[i].Upstream = c.redactExact(state.Models[i].Upstream)
-	}
+	// Shared exact-value walker (internal/chat) with the Desk's browser-
+	// specific projection layered on top (#289).
+	state = chat.RedactState(state, c.redactExact)
+	state.Workspace = projectChatWorkspaceLabel(state.Workspace)
 	return state
 }
 
@@ -871,30 +864,14 @@ func (c *ChatClients) safeDashboardChatState(state chat.State) dashboardChatStat
 }
 
 func (c *ChatClients) safeChatResult(result chat.Result) chat.Result {
-	result.Title = c.redactExact(result.Title)
-	result.Text = c.redactExact(result.Text)
-	for i := range result.Models {
-		result.Models[i].Alias = c.redactExact(result.Models[i].Alias)
-		result.Models[i].Provider = c.redactExact(result.Models[i].Provider)
-		result.Models[i].Upstream = c.redactExact(result.Models[i].Upstream)
-	}
-	for i := range result.Sessions {
-		result.Sessions[i].Title = c.redactExact(result.Sessions[i].Title)
-		result.Sessions[i].Summary = c.redactExact(result.Sessions[i].Summary)
-		result.Sessions[i].ModelAlias = c.redactExact(result.Sessions[i].ModelAlias)
-	}
-	for i := range result.Workset {
-		result.Workset[i].Text = c.redactExact(result.Workset[i].Text)
-	}
+	// Shared exact-value walker (internal/chat) with the Desk's browser-
+	// specific permission projection layered on top (#289).
+	result = chat.RedactResult(result, c.redactExact)
 	if result.Permissions != nil {
 		result.Permissions.SandboxMode = c.redactExact(result.Permissions.SandboxMode)
 		result.Permissions.Allow = c.projectChatPermissions(result.Permissions.Allow)
 		result.Permissions.Deny = c.projectChatPermissions(result.Permissions.Deny)
 		result.Permissions.DenyPrefixes = c.projectChatPermissions(result.Permissions.DenyPrefixes)
-	}
-	if result.State != nil {
-		state := c.safeChatState(*result.State)
-		result.State = &state
 	}
 	return result
 }
