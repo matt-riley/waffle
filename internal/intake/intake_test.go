@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ type stubDispatcher struct {
 	mu           sync.Mutex
 	started      []int
 	cancelled    []int
+	cancelledWS  []string
 	block        chan struct{} // if non-nil, Dispatch waits until closed
 	sleep        time.Duration // if > 0, sleep after start (see ignoreCancel)
 	ignoreCancel bool          // when true, sleep ignores ctx cancel
@@ -59,7 +61,7 @@ type stubDispatcher struct {
 	err          error
 }
 
-func (d *stubDispatcher) Dispatch(ctx context.Context, cfg WatchConfig, iss Issue) (string, error) {
+func (d *stubDispatcher) Dispatch(ctx context.Context, cfg WatchConfig, iss Issue, onClaim ClaimUpdate) (string, error) {
 	d.mu.Lock()
 	d.started = append(d.started, iss.Number)
 	onStart := d.onStart
@@ -67,6 +69,13 @@ func (d *stubDispatcher) Dispatch(ctx context.Context, cfg WatchConfig, iss Issu
 	d.mu.Unlock()
 	if onStart != nil {
 		close(onStart)
+	}
+	if onClaim != nil {
+		// Simulate the production dispatcher opening a workspace: the running
+		// claim must record the identity reconciliation needs (#296).
+		if err := onClaim("ws-"+fmt.Sprint(iss.Number), "sess-"+fmt.Sprint(iss.Number)); err != nil {
+			return "", err
+		}
 	}
 	if d.block != nil {
 		select {
@@ -100,6 +109,7 @@ func (d *stubDispatcher) Dispatch(ctx context.Context, cfg WatchConfig, iss Issu
 func (d *stubDispatcher) Cancel(ctx context.Context, claim Claim) error {
 	d.mu.Lock()
 	d.cancelled = append(d.cancelled, claim.IssueNumber)
+	d.cancelledWS = append(d.cancelledWS, claim.WorkspaceID)
 	d.mu.Unlock()
 	return nil
 }
@@ -264,6 +274,65 @@ func TestReconcileCancelsOnClose(t *testing.T) {
 	}
 	if c == nil || c.Status != StatusReleased {
 		t.Fatalf("claim = %+v", c)
+	}
+}
+
+// TestReconcileCancelUsesRecordedWorkspaceID asserts the running claim records
+// the workspace/session identity dispatch opens, so reconciliation can
+// force-close the workspace instead of no-oping on an empty ID (#296).
+func TestReconcileCancelUsesRecordedWorkspaceID(t *testing.T) {
+	ctx := context.Background()
+	claims := testStore(t)
+	tr := &stubTracker{issues: map[int]Issue{
+		1: {Number: 1, Title: "a", State: "open", Labels: []string{"agent-ok"}, CreatedAt: time.Now(), Priority: 1},
+	}}
+	block := make(chan struct{})
+	disp := &stubDispatcher{block: block}
+	w := &Watcher{
+		Config:     WatchConfig{Repo: "o/r", Label: "agent-ok", MaxConcurrency: 1},
+		Tracker:    tr,
+		Claims:     claims,
+		Dispatcher: disp,
+	}
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// The running claim must carry the workspace/session ids, not empty strings.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := claims.Get(ctx, "o/r", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c != nil && c.Status == StatusRunning && c.WorkspaceID == "ws-1" && c.SessionID == "sess-1" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	c, err := claims.Get(ctx, "o/r", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c == nil || c.Status != StatusRunning || c.WorkspaceID != "ws-1" || c.SessionID != "sess-1" {
+		t.Fatalf("running claim = %+v, want ws-1/sess-1 recorded", c)
+	}
+
+	// Close the issue: reconcile must cancel with the recorded workspace id.
+	tr.mu.Lock()
+	iss := tr.issues[1]
+	iss.State = "closed"
+	tr.issues[1] = iss
+	tr.mu.Unlock()
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	close(block)
+	time.Sleep(30 * time.Millisecond)
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	if !slices.Contains(disp.cancelledWS, "ws-1") {
+		t.Fatalf("cancel called with workspaces %v, want ws-1", disp.cancelledWS)
 	}
 }
 

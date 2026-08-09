@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -154,7 +155,12 @@ func TestIssueDispatcherDispatchE2E(t *testing.T) {
 	}
 	watch := intake.WatchConfig{Repo: "acme/widgets", Label: "agent-ok", MaxConcurrency: 1}
 
-	summary, err := disp.Dispatch(ctx, watch, iss)
+	summary, err := disp.Dispatch(ctx, watch, iss, func(workspaceID, sessionID string) error {
+		if workspaceID != "ws-e2e" || sessionID != sess.ID {
+			t.Fatalf("claim update got workspace=%q session=%q, want ws-e2e/%q", workspaceID, sessionID, sess.ID)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -314,6 +320,69 @@ func TestIssueDispatcherDispatchE2E(t *testing.T) {
 			t.Fatalf("watcher session turns = %d", len(turns2))
 		}
 	})
+}
+
+// TestIssueDispatcherClaimUpdateFailureAbortsDispatch asserts a failed claim
+// update (MarkRunning) is treated as a dispatch failure, not silently
+// discarded, and the run never reaches the agent (#296).
+func TestIssueDispatcherClaimUpdateFailureAbortsDispatch(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "issue e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := &llmtest.Script{Responses: []llm.Response{llmtest.Text("unexpected")}}
+	baseTools := tool.NewRegistry()
+	cfg := config.Default()
+	hostPol := cfg.AgentPolicy(config.GroupIssue)
+	fakeRun := &fakeIssueRun{
+		ws: &workspace.Workspace{
+			ID:        "ws-abort",
+			Repo:      "acme/widgets",
+			SessionID: sess.ID,
+			Status:    workspace.StatusOpen,
+		},
+	}
+	opener := &fakeIssueOpener{run: fakeRun}
+	disp := &issueDispatcher{
+		cfg:      cfg,
+		st:       st,
+		sessions: sessions,
+		agent: &agent.Agent{
+			Provider:  script,
+			Tools:     tool.Restrict(baseTools, tool.Policy{Deny: hostPol.Deny}),
+			System:    "issue-tier",
+			Model:     "test-model",
+			MaxTokens: 128,
+		},
+		log:    slog.Default(),
+		opener: opener,
+	}
+	iss := intake.Issue{Number: 9, Title: "t", State: "open", Labels: []string{"agent-ok"}, CreatedAt: time.Now(), Priority: 1}
+	watch := intake.WatchConfig{Repo: "acme/widgets", Label: "agent-ok", MaxConcurrency: 1}
+
+	_, err = disp.Dispatch(ctx, watch, iss, func(workspaceID, sessionID string) error {
+		return errors.New("sqlite busy")
+	})
+	if err == nil || !strings.Contains(err.Error(), "record running claim") {
+		t.Fatalf("Dispatch error = %v, want claim update failure propagated", err)
+	}
+	if script.Calls != 0 {
+		t.Fatalf("agent ran despite claim update failure: %d calls", script.Calls)
+	}
+	if !fakeRun.closed {
+		t.Fatal("run session was not closed after the abort")
+	}
 }
 
 // rememberStub is a no-op tool named "remember" used only to assert deny lists.
