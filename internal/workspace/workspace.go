@@ -425,12 +425,10 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	}
 
 	// The workspace keeps its own effective egress and (when the repo
-	// tightened it) idle timeout so resume and the reaper use per-workspace
-	// policy instead of mutating the shared Manager (#282).
+	// actually tightened it) idle timeout so resume and the reaper use
+	// per-workspace policy instead of mutating the shared Manager (#282).
 	ws.Egress = state.egress
-	if p != nil && p.IdleTimeout != "" {
-		ws.IdleTimeout = state.idle.String()
-	}
+	ws.IdleTimeout = m.persistedIdle(p, state)
 
 	// after_create hooks run inside the container; failure marks the
 	// workspace failed and refuses to hand it out as usable (#54).
@@ -635,6 +633,24 @@ func (m *Manager) tighten(state repoPolicyState, p *repopolicy.Policy) repoPolic
 	}
 	state.hooks = hooks.Merge(state.hooks, repo)
 	return state
+}
+
+// persistedIdle returns the duration string to store on a workspace row, or
+// "" when the host default applies: no declaration, an unparsable value, or
+// a value that does not actually tighten the effective idle (>= host, or host
+// disabled). Storing only real tightenings keeps the documented meaning that
+// empty idle_timeout means host applies (Copilot review).
+func (m *Manager) persistedIdle(p *repopolicy.Policy, state repoPolicyState) string {
+	if p == nil || p.IdleTimeout == "" {
+		return ""
+	}
+	if _, err := time.ParseDuration(p.IdleTimeout); err != nil {
+		return ""
+	}
+	if state.idle == m.IdleTimeout {
+		return "" // not actually tighter than host
+	}
+	return state.idle.String()
 }
 
 // LastPolicy returns the most recently loaded repo policy, if any. It is
@@ -851,8 +867,13 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		// Restart with the workspace's own effective egress (repo policy is
 		// re-loaded below, but the container must start with the same posture
 		// it had before — never the host default widened by another repo's
-		// open (#282)).
-		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, ws.Egress)); err != nil {
+		// open (#282)). Pre-migration rows (egress '') fall back to the host
+		// config rather than tightening to the netlocked default.
+		resumeEgress := ws.Egress
+		if resumeEgress == "" {
+			resumeEgress = m.Egress
+		}
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, resumeEgress)); err != nil {
 			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace with refreshed credentials: %w", err)
 		}
@@ -875,8 +896,9 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 	// Re-load repo policy on resume so mtime changes apply without serve
 	// restart (#53). Unparsable remains fatal. Never mutates the Manager;
-	// the durable per-workspace egress is refreshed so the next resume keeps
-	// the tightened posture.
+	// the durable per-workspace egress/idle are refreshed (and cleared when
+	// the repo removed them or deleted its policy file) so the next resume
+	// keeps the tightened posture or falls back to host defaults.
 	p, perr := m.loadRepoPolicy(ctx, client)
 	if perr != nil {
 		_ = client.Close()
@@ -884,23 +906,17 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	}
 	if p != nil {
 		m.lastPolicy = p
-		state := m.policyState(p)
-		// A repo that removes its idle_timeout (or egress) clears the persisted
-		// value so the host default applies again on the next sweep/resume
-		// (Greptile review).
-		newIdle := ""
-		if p.IdleTimeout != "" {
-			newIdle = state.idle.String()
-		}
-		if state.egress != ws.Egress || newIdle != ws.IdleTimeout {
-			ws.Egress = state.egress
-			ws.IdleTimeout = newIdle
-			if _, err := m.DB.ExecContext(ctx,
-				`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
-				ws.Egress, ws.IdleTimeout, now(), id); err != nil {
-				_ = client.Close()
-				return nil, nil, err
-			}
+	}
+	state := m.policyState(p)
+	newIdle := m.persistedIdle(p, state)
+	if state.egress != ws.Egress || newIdle != ws.IdleTimeout {
+		ws.Egress = state.egress
+		ws.IdleTimeout = newIdle
+		if _, err := m.DB.ExecContext(ctx,
+			`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
+			ws.Egress, ws.IdleTimeout, now(), id); err != nil {
+			_ = client.Close()
+			return nil, nil, err
 		}
 	}
 	if err := m.Touch(ctx, id); err != nil {

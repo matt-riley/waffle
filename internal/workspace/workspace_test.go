@@ -1919,14 +1919,19 @@ Follow repo rules.
 // restrictive repo must not tighten egress/idle/hooks for a second,
 // unrelated workspace opened later.
 func TestRepoPolicyIsolationAcrossRepos(t *testing.T) {
-	mgr, _ := newTestManager(t, &scriptedBash{outputs: map[string]string{
+	// One shared Manager, exactly like `waffle serve`: opening a restrictive
+	// repo must not tighten egress/idle for a second, unrelated repo opened
+	// later on the same Manager (#282). The fake answers are cleared between
+	// opens so the loose repo reads an absent WAFFLE.md.
+	tools := &scriptedBash{outputs: map[string]string{
 		"cat /work/repo/WAFFLE.md": `---
 egress: none
 idle_timeout: 5m
 ---
 Follow repo rules.
 `,
-	}})
+	}}
+	mgr, rt := newTestManager(t, tools)
 	mgr.Egress = "full"
 	mgr.IdleTimeout = 30 * time.Minute
 	ws1, client1, err := mgr.Open(context.Background(), "acme/tight")
@@ -1937,12 +1942,18 @@ Follow repo rules.
 	if ws1.Egress != "none" {
 		t.Fatalf("tight repo egress = %q", ws1.Egress)
 	}
-	// A second repo with no policy must get host settings, not the first
-	// repo's tightenings.
-	mgr2, rt2 := newTestManager(t, &scriptedBash{outputs: map[string]string{}})
-	mgr2.Egress = "full"
-	mgr2.IdleTimeout = 30 * time.Minute
-	ws2, client2, err := mgr2.Open(context.Background(), "acme/loose")
+	if ws1.IdleTimeout != "5m0s" {
+		t.Fatalf("tight repo idle = %q, want 5m0s", ws1.IdleTimeout)
+	}
+	// The Manager must still hold host defaults: nothing leaked.
+	if mgr.Egress != "full" || mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager mutated by tight open: %q %v", mgr.Egress, mgr.IdleTimeout)
+	}
+
+	tools.mu.Lock()
+	tools.outputs = map[string]string{}
+	tools.mu.Unlock()
+	ws2, client2, err := mgr.Open(context.Background(), "acme/loose")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1950,14 +1961,21 @@ Follow repo rules.
 	if ws2.Egress != "full" {
 		t.Fatalf("loose repo egress = %q, want host 'full'", ws2.Egress)
 	}
-	if len(rt2.opts) != 1 || rt2.opts[0].Network != "bridge" {
-		t.Fatalf("loose repo container starts = %+v, want single bridge start", rt2.opts)
+	if ws2.IdleTimeout != "" {
+		t.Fatalf("loose repo idle = %q, want empty (host applies)", ws2.IdleTimeout)
 	}
-	if mgr2.IdleTimeout != 30*time.Minute {
-		t.Fatalf("loose manager idle mutated: %v", mgr2.IdleTimeout)
+	// tight open = 2 starts (initial bridge + egress-restart on waffle-ws),
+	// loose open = 1 start on the host bridge.
+	if len(rt.opts) != 3 || rt.opts[2].Network != "bridge" {
+		t.Fatalf("loose repo container starts = %+v, want single bridge start", rt.opts)
 	}
-	if rt2.hasEventPrefix("rm ") {
-		t.Fatal("loose repo container was restarted despite no policy")
+	if mgr.IdleTimeout != 30*time.Minute {
+		t.Fatalf("manager idle mutated: %v", mgr.IdleTimeout)
+	}
+	for _, e := range rt.events {
+		if e == "rm "+ws2.Container {
+			t.Fatalf("loose repo container %q was restarted despite no policy; events=%v", ws2.Container, rt.events)
+		}
 	}
 }
 
