@@ -126,6 +126,9 @@ type fakeRuntime struct {
 	// failStartOn, when > 0, fails the Nth StartWorkspace call (1-indexed)
 	// so tests can let the initial start succeed and a later restart fail.
 	failStartOn int
+	// absent tracks containers removed since their last start, so
+	// StartContainer can simulate Docker's "No such container" error.
+	absent map[string]bool
 }
 
 type revocationTracker struct {
@@ -151,7 +154,7 @@ func (r *revocationTracker) seen(sessionID string) bool {
 }
 
 func newFakeRuntime(tools *scriptedBash) *fakeRuntime {
-	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}}
+	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}, absent: map[string]bool{}}
 }
 
 func (f *fakeRuntime) log(e string) {
@@ -240,6 +243,11 @@ func (f *fakeRuntime) StartContainer(ctx context.Context, name string) error {
 		f.mu.Unlock()
 		return err
 	}
+	if f.absent[name] {
+		delete(f.absent, name)
+		f.mu.Unlock()
+		return fmt.Errorf("docker start: exit status 1\nError response from daemon: No such container: %s", name)
+	}
 	var queueDir string
 	for _, o := range f.opts {
 		if o.Name == name {
@@ -260,6 +268,9 @@ func TestDefaultImageIncludesGit(t *testing.T) {
 
 func (f *fakeRuntime) RemoveContainer(ctx context.Context, name string) error {
 	f.log("rm " + name)
+	f.mu.Lock()
+	f.absent[name] = true
+	f.mu.Unlock()
 	f.halt(name)
 	return nil
 }
@@ -2574,5 +2585,56 @@ func TestResumeEgressRestartFailureRevertsToIdle(t *testing.T) {
 	}
 	if got.Status != StatusIdle {
 		t.Fatalf("status after failed egress restart = %q, want idle (container is gone)", got.Status)
+	}
+}
+
+// TestResumeWithoutTokenRecreatesAbsentContainer is the Greptile follow-up:
+// with MintToken unset, a failed egress-restart leaves the container absent
+// and the workspace idle; the next resume must recreate it (not fail forever
+// on "No such container").
+func TestResumeWithoutTokenRecreatesAbsentContainer(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": "v1 (no egress)\n",
+	}}
+	mgr, rt := newTestManager(t, tools)
+	mgr.Egress = "full"
+	mgr.MintToken = nil
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	// The repo tightens egress while idle; the egress-restart (2nd
+	// StartWorkspace: open + restart) fails after removing the container.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "---\negress: none\n---\nv2\n"}
+	tools.mu.Unlock()
+	rt.failStartOn = 2
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.Resume(ctx, ws.ID); err == nil || !strings.Contains(err.Error(), "policy egress") {
+		t.Fatalf("first Resume = %v, want egress-restart failure", err)
+	}
+	got, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status after failed restart = %q, want idle", got.Status)
+	}
+	// The next resume (no MintToken) must recreate the absent container.
+	rt.failStartOn = 0
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("second Resume = %v, want container recreated", err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.Status != StatusOpen {
+		t.Fatalf("status after recovery resume = %q, want open", resumed.Status)
+	}
+	if len(rt.opts) != 3 || rt.opts[2].Network != WorkspaceBrokerNetwork {
+		t.Fatalf("container starts = %+v, want the tightened-network recreate", rt.opts)
 	}
 }

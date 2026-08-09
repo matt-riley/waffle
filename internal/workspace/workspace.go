@@ -893,7 +893,20 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 			startedEgress = m.Egress
 		}
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
-			return nil, nil, err
+			// No token to refresh here, so start the existing container. If
+			// it is absent (e.g. a failed egress-restart removed it), recreate
+			// it from the surviving volume instead of failing forever on
+			// "No such container" (Greptile review).
+			if !strings.Contains(err.Error(), "No such container") {
+				return nil, nil, err
+			}
+			if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+				return nil, nil, err
+			}
+			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, startedEgress)); err != nil {
+				_ = m.setStatus(ctx, id, StatusIdle)
+				return nil, nil, err
+			}
 		}
 		if err := m.setStatus(ctx, id, StatusOpen); err != nil {
 			return nil, nil, err
