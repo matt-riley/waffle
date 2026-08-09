@@ -206,7 +206,7 @@ func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string
 func (s *Store) groupForOnce(ctx context.Context, channel, chatID, agentGroup string) (*Group, error) {
 	g, err := s.readGroup(ctx, channel, chatID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read channel group %s:%s: %w", channel, chatID, err)
 	}
 	if g != nil {
 		return g, nil
@@ -218,12 +218,12 @@ func (s *Store) groupForOnce(ctx context.Context, channel, chatID, agentGroup st
 	// (#290).
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("begin channel group transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	sess, err := s.sessions.CreateWith(ctx, tx, fmt.Sprintf("%s %s", channel, chatID))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create session for channel group: %w", err)
 	}
 	if agentGroup == "" {
 		agentGroup = config.GroupMain
@@ -245,7 +245,7 @@ func (s *Store) groupForOnce(ctx context.Context, channel, chatID, agentGroup st
 	}
 	g.ID, _ = res.LastInsertId()
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("commit channel group: %w", err)
 	}
 	return g, nil
 }
