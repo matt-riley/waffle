@@ -633,6 +633,11 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	for ; persisted < len(newHistory); persisted++ {
 		if err := g.Sessions.AppendTurn(persistCtx, group.SessionID, newHistory[persisted]); err != nil {
 			log.Error("persist turn", "err", err)
+			// A transcript gap must not be delivered as a successful reply:
+			// fail the run so the adapter reports an error instead (#284).
+			if runErr == nil {
+				runErr = fmt.Errorf("persist turn: %w", err)
+			}
 			break
 		}
 	}

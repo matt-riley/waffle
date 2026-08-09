@@ -13,6 +13,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/matt-riley/waffle/internal/agentbuild"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/llm"
@@ -470,10 +471,10 @@ func TestDockerCronGroupRestrictedMCP(t *testing.T) {
 	allowed := config.MCPServer{Name: "cronmcp", Execution: "sandbox", Groups: []string{config.GroupCron}, Tools: []string{"echo"}, Env: []string{"SAFE_CRON_VALUE"}}
 	denied := config.MCPServer{Name: "denied", Execution: "sandbox", Groups: []string{config.GroupCron}, Tools: []string{"secret"}}
 	toolPolicy := tool.Policy{Allow: pol.Allow, Deny: pol.Deny}
-	if !mcpServerInGroup(allowed, config.GroupCron) || !mcpServerPermitted(allowed, toolPolicy) {
+	if !agentbuild.ServerInGroup(allowed, config.GroupCron) || !agentbuild.ServerPermitted(allowed, toolPolicy) {
 		t.Fatal("approved cron MCP was not eligible")
 	}
-	if mcpServerPermitted(denied, toolPolicy) {
+	if agentbuild.ServerPermitted(denied, toolPolicy) {
 		t.Fatal("fully denied cron MCP would be launched")
 	}
 	server := mcp.Server{Name: allowed.Name, Command: "sh", Args: []string{"-c", `while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); case "$line" in *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id";; *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id";; esac; done`}, Env: allowed.Env}
@@ -669,102 +670,5 @@ func TestResolveAPIKeyRedactsEnvFallbackWithStore(t *testing.T) {
 	want := "Authorization: Bearer [redacted:openai/api-key]"
 	if got != want {
 		t.Fatalf("redact = %q, want %q", got, want)
-	}
-}
-
-func TestApplyCodeIntelCapsFiltersUnapproved(t *testing.T) {
-	// Empty requested → no extra denies.
-	pol := applyCodeIntelCaps(tool.Policy{}, nil)
-	if len(pol.Deny) != 0 {
-		t.Fatalf("empty caps should not deny: %v", pol.Deny)
-	}
-	// Repo selects two approved IDs + an executable-looking unknown → deny the rest.
-	pol = applyCodeIntelCaps(tool.Policy{}, []string{"code_find_symbol", "/bin/evil", "code_blast_radius"})
-	denied := map[string]bool{}
-	for _, d := range pol.Deny {
-		denied[d] = true
-	}
-	if denied["code_find_symbol"] || denied["code_blast_radius"] {
-		t.Fatalf("approved caps must not be denied: %v", pol.Deny)
-	}
-	if !denied["code_references"] || !denied["code_callers"] {
-		t.Fatalf("non-selected codeintel tools must be denied: %v", pol.Deny)
-	}
-	if denied["/bin/evil"] {
-		// Unapproved IDs are dropped by FilterCodeIntelCaps, not added as tool denies.
-		t.Fatalf("executable path must not become a tool name deny: %v", pol.Deny)
-	}
-}
-
-// TestRepoPolicyCannotSelectUnapprovedCodeIntelCaps ensures applyCodeIntelCaps
-// rejects evil/unknown tool names from repo policy (#79 / #53).
-func TestRepoPolicyCannotSelectUnapprovedCodeIntelCaps(t *testing.T) {
-	evil := []string{
-		"/bin/evil",
-		"bash",
-		"rm -rf /",
-		"code_find_symbol; curl evil",
-		"not_a_real_cap",
-		"code_find_symbol", // only approved one
-	}
-	pol := applyCodeIntelCaps(tool.Policy{}, evil)
-	denied := map[string]bool{}
-	for _, d := range pol.Deny {
-		denied[d] = true
-	}
-	// Only the approved selected cap stays available; all other codeintel tools denied.
-	if denied["code_find_symbol"] {
-		t.Fatalf("approved selected cap denied: %v", pol.Deny)
-	}
-	for _, name := range []string{"code_references", "code_callers", "code_structure", "code_blast_radius", "code_suggest_tests"} {
-		if !denied[name] {
-			t.Fatalf("expected deny of unselected %q; deny=%v", name, pol.Deny)
-		}
-	}
-	for _, bad := range []string{"/bin/evil", "bash", "rm -rf /", "code_find_symbol; curl evil", "not_a_real_cap"} {
-		if denied[bad] {
-			t.Fatalf("unapproved name %q must not enter tool deny list as a capability: %v", bad, pol.Deny)
-		}
-	}
-}
-
-// TestDeniedMCPServerNotLaunched asserts that when every declared tool is
-// denied by policy, the server is filtered before Connect (no process start).
-func TestDeniedMCPServerNotLaunched(t *testing.T) {
-	s := config.MCPServer{
-		Name:  "evil",
-		Tools: []string{"hack", "pwn"},
-	}
-	// Full deny of declared tools → not permitted → buildAgent skips launch.
-	denyAll := tool.Policy{Deny: []string{"evil__hack", "evil__pwn"}}
-	if mcpServerPermitted(s, denyAll) {
-		t.Fatal("server with all tools denied must not be permitted for launch")
-	}
-
-	// Allow-list that omits server tools → not permitted.
-	allowOnlyBash := tool.Policy{Allow: []string{"bash"}}
-	if mcpServerPermitted(s, allowOnlyBash) {
-		t.Fatal("allow-list without MCP tools must not permit launch")
-	}
-
-	// One allowed tool → permitted (would launch).
-	allowOne := tool.Policy{Allow: []string{"evil__hack"}}
-	if !mcpServerPermitted(s, allowOne) {
-		t.Fatal("server with at least one permitted tool must be eligible")
-	}
-
-	// Undeclared tools remain eligible (back-compat; process may still start).
-	legacy := config.MCPServer{Name: "legacy"}
-	if !mcpServerPermitted(legacy, denyAll) {
-		t.Fatal("undeclared-tools server remains eligible for back-compat")
-	}
-
-	// Group filter: wrong group is excluded before launch.
-	scoped := config.MCPServer{Name: "scoped", Groups: []string{"cron"}, Tools: []string{"echo"}}
-	if mcpServerInGroup(scoped, "main") {
-		t.Fatal("server limited to cron must not be in main")
-	}
-	if !mcpServerInGroup(scoped, "cron") {
-		t.Fatal("server limited to cron must be in cron")
 	}
 }

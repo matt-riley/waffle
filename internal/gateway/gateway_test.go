@@ -1486,8 +1486,9 @@ func TestConversePersistenceStaysBounded(t *testing.T) {
 	gw.PersistTurnsTimeout = time.Nanosecond
 
 	start := time.Now()
-	if _, err := gw.converse(context.Background(), channel.Message{Channel: "fake", ChatID: "c1", Text: "hello"}); err != nil {
-		t.Fatalf("converse: %v", err)
+	_, err := gw.converse(context.Background(), channel.Message{Channel: "fake", ChatID: "c1", Text: "hello"})
+	if err == nil || !strings.Contains(err.Error(), "persist turn") {
+		t.Fatalf("converse = %v, want persist failure surfaced (#284)", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("converse took %s, want it bounded by the persistence deadline", elapsed)

@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -934,5 +936,77 @@ func TestNewClientReclaimsCompletedOutputAfterHostRestart(t *testing.T) {
 	result, ok := reclaimed["restart-use"]
 	if !ok || result.Content != "DURABLE" || result.IsError {
 		t.Fatalf("reclaimed=%#v", reclaimed)
+	}
+}
+
+// countingTool records side-effect invocations so tests can prove a durable
+// tool-call identity is reclaimed rather than re-executed after a runner
+// restart (#285).
+type countingTool struct {
+	mu   sync.Mutex
+	call int
+}
+
+func (c *countingTool) Def() llm.Tool {
+	return llm.Tool{Name: "count", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (c *countingTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	c.mu.Lock()
+	c.call++
+	n := c.call
+	c.mu.Unlock()
+	return fmt.Sprintf("side-effect-%d", n), nil
+}
+
+func (c *countingTool) calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.call
+}
+
+// TestDockerExecutorRunWithIDReclaimsAcrossRunnerRestart proves the durable
+// tool-call identity reaches the queue from the DockerExecutor path: after a
+// runner restart, the same useID returns the stored result without re-running
+// the side effect.
+func TestDockerExecutorRunWithIDReclaimsAcrossRunnerRestart(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := NewClient(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	}()
+	executor := &DockerExecutor{client: client, Timeout: 10 * time.Second}
+
+	counter := &countingTool{}
+	rctx, rcancel := context.WithCancel(ctx)
+	r1done := make(chan error, 1)
+	go func() {
+		r := &Runner{Tools: tool.NewRegistry(counter)}
+		r1done <- r.Serve(rctx, dir)
+	}()
+
+	out, err := executor.RunWithID(ctx, "use-1", "count", json.RawMessage(`{}`))
+	if err != nil || out != "side-effect-1" {
+		t.Fatalf("first RunWithID = %q, %v", out, err)
+	}
+	rcancel()
+	<-r1done
+
+	// Host restart: a fresh runner serves the same queue.
+	startRunner(t, dir)
+	out, err = executor.RunWithID(ctx, "use-1", "count", json.RawMessage(`{}`))
+	if err != nil || out != "side-effect-1" {
+		t.Fatalf("reclaimed RunWithID = %q, %v", out, err)
+	}
+	if counter.calls() != 1 {
+		t.Fatalf("side effect ran %d times, want 1 (reclaimed, not re-executed)", counter.calls())
 	}
 }

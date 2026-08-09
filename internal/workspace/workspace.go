@@ -376,6 +376,12 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err == nil {
 			ws.Image = img
 			if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, m.Egress)); err != nil {
+				// The original container is already gone; mirror the
+				// setup-failure cleanup so a failed adoption does not leak
+				// the volume, queue state, or broker session token (#283).
+				_ = client.Close()
+				_ = m.Runtime.RemoveVolume(ctx, ws.Volume)
+				m.revokeSession(sess.ID)
 				return nil, nil, fmt.Errorf("adopt devcontainer image %q: %w", img, err)
 			}
 		}
