@@ -372,16 +372,29 @@ func (s *Store) SetProfileByChat(ctx context.Context, chatRef, profile string) e
 	if channel, chatID, ok := schedule.ParseTarget(chatRef); ok {
 		return s.SetProfile(ctx, channel, chatID, profile)
 	}
-	// chat-only: must be unique
+	// chat-only: must be unique across all channels (#281).
 	var ch, id string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT channel, chat_id FROM channel_groups WHERE chat_id = ?`, chatRef).
-		Scan(&ch, &id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("no channel group for chat %q", chatRef)
-	}
+	var matches int
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT channel, chat_id FROM channel_groups WHERE chat_id = ?`, chatRef)
 	if err != nil {
 		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		matches++
+		if err := rows.Scan(&ch, &id); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if matches == 0 {
+		return fmt.Errorf("no channel group for chat %q", chatRef)
+	}
+	if matches > 1 {
+		return fmt.Errorf("chat %q is ambiguous: %d channel groups share this chat_id; use channel:chat_id", chatRef, matches)
 	}
 	return s.SetProfile(ctx, ch, id, profile)
 }

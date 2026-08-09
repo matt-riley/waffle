@@ -288,3 +288,31 @@ func TestGroupForIsAtomicUnderConcurrentFirstTouch(t *testing.T) {
 		}
 	}
 }
+
+func TestSetProfileByChatRejectsAmbiguousChatID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	// Two channel groups on different channels sharing one chat_id.
+	g1, err := s.GroupFor(ctx, "telegram", "shared-77", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, err := s.GroupFor(ctx, "slack", "shared-77", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g1.SessionID == g2.SessionID {
+		t.Fatal("setup: channels must get distinct groups")
+	}
+	if err := s.SetProfileByChat(ctx, "shared-77", "reviewer"); err == nil {
+		t.Fatal("chat-only reference must be rejected as ambiguous")
+	}
+	// Fully-qualified targets still work.
+	if err := s.SetProfileByChat(ctx, "slack:shared-77", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GroupFor(ctx, "slack", "shared-77", "")
+	if err != nil || got.Profile != "reviewer" {
+		t.Fatalf("slack profile = %+v %v", got, err)
+	}
+}
