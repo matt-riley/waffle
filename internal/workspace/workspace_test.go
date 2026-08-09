@@ -2333,3 +2333,62 @@ func TestCloseForgetsFallbackActivity(t *testing.T) {
 		t.Error("closed workspace kept an unreachable activity record")
 	}
 }
+
+// TestReaperHonorsPerWorkspaceIdleTimeout is the #282 reaper regression: a
+// repo that tightens idle below the host default idles only its own
+// workspace, while a sibling workspace keeps the host idle.
+func TestReaperHonorsPerWorkspaceIdleTimeout(t *testing.T) {
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+idle_timeout: 1m
+---
+tight repo
+`,
+	}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.IdleTimeout = time.Hour
+	tight, c1, err := mgr.Open(context.Background(), "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c1.Close()
+	// The loose repo declares no policy: clear the fake's answers so the
+	// second open reads an absent WAFFLE.md.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{}
+	tools.mu.Unlock()
+	loose, c2, err := mgr.Open(context.Background(), "acme/loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c2.Close()
+
+	if tight.IdleTimeout != "1m0s" {
+		t.Fatalf("tight workspace idle = %q, want repo-tightened 1m0s", tight.IdleTimeout)
+	}
+	if loose.IdleTimeout != "" {
+		t.Fatalf("loose workspace idle = %q, want empty (host applies)", loose.IdleTimeout)
+	}
+	// Age both workspaces beyond the repo's 1m but well under the host hour.
+	cut := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	if _, err := mgr.DB.Exec(`UPDATE workspaces SET last_active = ?`, cut); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Reaper{Manager: mgr, IdleTimeout: time.Hour, Now: time.Now}).Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gotTight, err := mgr.Get(context.Background(), tight.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTight.Status != StatusIdle {
+		t.Fatalf("tight workspace status = %q, want idle on its own 1m policy", gotTight.Status)
+	}
+	gotLoose, err := mgr.Get(context.Background(), loose.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLoose.Status != StatusOpen {
+		t.Fatalf("loose workspace status = %q, want open (host hour not reached)", gotLoose.Status)
+	}
+}

@@ -85,7 +85,13 @@ func (r *Reaper) Sweep(ctx context.Context) error {
 			last = ws.UpdatedAt
 		}
 		age := now.Sub(last)
-		if ws.Status == StatusOpen && idleTimeout > 0 && age >= idleTimeout && !r.activeSince(ws.ID, now.Add(-idleTimeout)) {
+		// A workspace whose repo tightened idle below the host value is idled
+		// on its own policy; the shared Manager field is never touched (#282).
+		wsIdle := idleTimeout
+		if d, perr := time.ParseDuration(ws.IdleTimeout); perr == nil && d > 0 && (wsIdle <= 0 || d < wsIdle) {
+			wsIdle = d
+		}
+		if ws.Status == StatusOpen && wsIdle > 0 && age >= wsIdle && !r.activeSince(ws.ID, now.Add(-wsIdle)) {
 			if err := r.Manager.Idle(ctx, ws.ID); err != nil {
 				errs = append(errs, fmt.Errorf("idle workspace %s: %w", ws.ID, err))
 			} else {

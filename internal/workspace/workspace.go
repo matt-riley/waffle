@@ -112,6 +112,10 @@ type Workspace struct {
 	// resume/close restart the container with the same posture instead of
 	// mutating the shared Manager.
 	Egress string
+	// IdleTimeout is the effective idle duration (a duration string) when the
+	// repo policy tightened it below the host default, else empty (#282).
+	// The reaper uses each workspace's own value; empty means host applies.
+	IdleTimeout string
 	// HookLog accumulates hook stdout/stderr for session debuggability (#54).
 	HookLog []hooks.Result
 }
@@ -414,9 +418,13 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 		}
 	}
 
-	// The workspace keeps its own effective egress so resume restarts the
-	// container with the same posture (#282).
+	// The workspace keeps its own effective egress and (when the repo
+	// tightened it) idle timeout so resume and the reaper use per-workspace
+	// policy instead of mutating the shared Manager (#282).
 	ws.Egress = state.egress
+	if p != nil && p.IdleTimeout != "" {
+		ws.IdleTimeout = state.idle.String()
+	}
 
 	// after_create hooks run inside the container; failure marks the
 	// workspace failed and refuses to hand it out as usable (#54).
@@ -433,9 +441,9 @@ func (m *Manager) OpenWithProfile(ctx context.Context, repoArg, profile string) 
 	}
 
 	if _, err := m.DB.ExecContext(ctx, `
-		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano), ws.Profile, state.egress); err != nil {
+		INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Repo, ws.URL, ws.Image, ws.Container, ws.Volume, ws.SessionID, ws.Status, now(), now(), ws.LastActive.UTC().Format(time.RFC3339Nano), ws.Profile, state.egress, ws.IdleTimeout); err != nil {
 		// Concurrent Open raced us (or other insert error); clean up our
 		// side effects.
 		_ = client.Close()
@@ -866,16 +874,19 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	p, perr := m.loadRepoPolicy(ctx, client)
 	if perr != nil {
 		_ = client.Close()
-		return nil, nil, perr
+		return nil, nil, fmt.Errorf("load repo policy on resume: %w", perr)
 	}
 	if p != nil {
 		m.lastPolicy = p
 		state := m.policyState(p)
-		if state.egress != ws.Egress {
+		if state.egress != ws.Egress || (p.IdleTimeout != "" && state.idle.String() != ws.IdleTimeout) {
 			ws.Egress = state.egress
+			if p.IdleTimeout != "" {
+				ws.IdleTimeout = state.idle.String()
+			}
 			if _, err := m.DB.ExecContext(ctx,
-				`UPDATE workspaces SET egress = ?, updated_at = ? WHERE id = ?`,
-				ws.Egress, now(), id); err != nil {
+				`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
+				ws.Egress, ws.IdleTimeout, now(), id); err != nil {
 				_ = client.Close()
 				return nil, nil, err
 			}
@@ -1391,14 +1402,14 @@ func (m *Manager) setStatus(ctx context.Context, id, status string) error {
 // Get loads one workspace.
 func (m *Manager) Get(ctx context.Context, id string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE id = ?`, id))
 }
 
 // ForRepo finds the non-closed, non-failed workspace for a repo.
 func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE repo = ? AND status NOT IN ('closed', 'failed')`, repo))
 }
 
@@ -1408,14 +1419,14 @@ func (m *Manager) ForRepo(ctx context.Context, repo string) (*Workspace, error) 
 // compromised session "cannot read another repo").
 func (m *Manager) ForSession(ctx context.Context, sessionID string) (*Workspace, error) {
 	return m.scanOne(m.DB.QueryRowContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces WHERE session_id = ? AND status != 'closed'`, sessionID))
 }
 
 // List returns all workspaces, newest first.
 func (m *Manager) List(ctx context.Context) (out []Workspace, err error) {
 	rows, err := m.DB.QueryContext(ctx, `
-		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress
+		SELECT id, repo, url, image, container, volume, session_id, status, created_at, updated_at, last_active, profile, egress, idle_timeout
 		FROM workspaces ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1442,7 +1453,7 @@ func (m *Manager) scanOne(row scanner) (*Workspace, error) {
 	var created, updated string
 	var active string
 	err := row.Scan(&ws.ID, &ws.Repo, &ws.URL, &ws.Image, &ws.Container, &ws.Volume,
-		&ws.SessionID, &ws.Status, &created, &updated, &active, &ws.Profile, &ws.Egress)
+		&ws.SessionID, &ws.Status, &created, &updated, &active, &ws.Profile, &ws.Egress, &ws.IdleTimeout)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkspaceNotFound
 	}
