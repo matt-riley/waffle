@@ -97,7 +97,7 @@ func BuiltinsWith(opts BuiltinOptions) *Registry {
 		ReadFile{Roots: opts.FileRoots},
 		WriteFile{Roots: opts.FileRoots},
 		EditFile{Roots: opts.FileRoots},
-		Fetch{AllowPrivate: opts.FetchAllowPrivate},
+		&Fetch{AllowPrivate: opts.FetchAllowPrivate},
 		Search{Roots: opts.FileRoots},
 	)
 }
