@@ -1248,6 +1248,19 @@ func TestProfileDocumentationAcceptance(t *testing.T) {
 			t.Errorf("docs/plan.md missing %q", want)
 		}
 	}
+	// The effective-`main` and migration guarantees the README used to carry
+	// are still required — from the durable docs, so removing them from docs
+	// (or the code) trips CI rather than silently losing the guidance.
+	for _, want := range []string{
+		"trust boundary",
+		"effective `main`",
+		"migration required",
+		"#33", "#53", "#66", "#68",
+	} {
+		if !strings.Contains(plan, want) && !strings.Contains(example, want) {
+			t.Errorf("neither docs/plan.md nor config.example.toml documents %q", want)
+		}
+	}
 	for _, want := range []string{"[agent.profile.main]", "[agent.profile.researcher]", "[agent.profile.reviewer]", "No change required"} {
 		if !strings.Contains(example, want) {
 			t.Errorf("config.example.toml missing %q", want)
