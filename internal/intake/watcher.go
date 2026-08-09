@@ -40,10 +40,16 @@ func (c WatchConfig) Validate() error {
 // Implementations must enforce the restricted issue tier (no host bash,
 // no memory writes) and label the issue body as untrusted.
 type Dispatcher interface {
-	Dispatch(ctx context.Context, cfg WatchConfig, iss Issue) (summary string, err error)
+	Dispatch(ctx context.Context, cfg WatchConfig, iss Issue, onClaim ClaimUpdate) (summary string, err error)
 	// Cancel stops an in-flight run for the claim (workspace cleanup).
 	Cancel(ctx context.Context, claim Claim) error
 }
+
+// ClaimUpdate is called by Dispatch as soon as the workspace and session for
+// a run are opened. The watcher persists them on the running claim so
+// reconciliation can force-close the workspace when the issue closes mid-run
+// (#296). A non-nil error must abort the dispatch.
+type ClaimUpdate func(workspaceID, sessionID string) error
 
 // Watcher polls a tracker and dispatches issue work under concurrency limits.
 type Watcher struct {
@@ -186,8 +192,10 @@ func (w *Watcher) start(ctx context.Context, iss Issue) error {
 			w.mu.Unlock()
 			_ = w.Claims.Release(context.WithoutCancel(ctx), w.Config.Repo, iss.Number)
 		}()
-		_ = w.Claims.MarkRunning(runCtx, w.Config.Repo, iss.Number, "", "")
-		summary, err := w.Dispatcher.Dispatch(runCtx, w.Config, iss)
+		_ = w.Claims.MarkRunning(context.WithoutCancel(runCtx), w.Config.Repo, iss.Number, "", "")
+		summary, err := w.Dispatcher.Dispatch(runCtx, w.Config, iss, func(workspaceID, sessionID string) error {
+			return w.Claims.MarkRunning(context.WithoutCancel(runCtx), w.Config.Repo, iss.Number, workspaceID, sessionID)
+		})
 		if err != nil {
 			w.log().Error("issue run failed", "issue", iss.Number, "err", err)
 			summary = fmt.Sprintf("issue #%d failed: %v", iss.Number, err)

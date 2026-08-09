@@ -67,7 +67,7 @@ func (d *issueDispatcher) workspaceOpener() issueWorkspaceOpener {
 	}
 }
 
-func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig, iss intake.Issue) (string, error) {
+func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig, iss intake.Issue, onClaim intake.ClaimUpdate) (string, error) {
 	run, err := d.workspaceOpener().Open(ctx, watch.Repo)
 	if err != nil {
 		return "", fmt.Errorf("open workspace: %w", err)
@@ -75,6 +75,14 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	defer func() { _ = run.Close() }()
 
 	ws := run.Workspace()
+	// Report the opened workspace/session immediately so the claim carries
+	// the identity reconciliation needs to force-close the workspace when
+	// the issue closes mid-run (#296).
+	if onClaim != nil {
+		if err := onClaim(ws.ID, ws.SessionID); err != nil {
+			return "", fmt.Errorf("record running claim: %w", err)
+		}
+	}
 
 	// before_run: fatal on failure.
 	if res, err := run.RunHook(ctx, hooks.BeforeRun); err != nil {
