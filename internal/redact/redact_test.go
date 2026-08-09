@@ -67,6 +67,31 @@ func TestRedactErrorPreservesCancelClassificationWithoutLeaking(t *testing.T) {
 	}
 }
 
+// cleanupMarker is a marker interface that must survive redaction so chat
+// cleanup-completion detection keeps working (errors.As path).
+type cleanupMarker interface{ CleanupCompleted() bool }
+
+type markedError struct{ error }
+
+func (m markedError) CleanupCompleted() bool { return true }
+
+func TestRedactErrorPreservesAsThroughRedaction(t *testing.T) {
+	err := RedactError(fmt.Errorf("cleanup: sk-secret-key: %w", markedError{errors.New("cause")}), func(value string) string {
+		return strings.ReplaceAll(value, "sk-secret-key", "[REDACTED]")
+	})
+	var marker cleanupMarker
+	if !errors.As(err, &marker) || !marker.CleanupCompleted() {
+		t.Fatalf("errors.As lost the wrapped marker through redaction: %v", err)
+	}
+	if strings.Contains(err.Error(), "sk-secret-key") {
+		t.Fatalf("message leaked secret: %v", err)
+	}
+	// The raw cause is still not reachable by tree walking.
+	if _, ok := err.(interface{ Unwrap() error }); ok {
+		t.Fatal("redacted error exposes Unwrap")
+	}
+}
+
 func TestRedactErrorReturnsOriginalWhenUnchanged(t *testing.T) {
 	original := errors.New("nothing to scrub")
 	got := RedactError(original, func(value string) string { return value })

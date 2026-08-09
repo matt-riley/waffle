@@ -74,6 +74,10 @@ func (e *redactedError) Error() string { return e.message }
 // context.DeadlineExceeded, and any sentinel the caller classifies).
 func (e *redactedError) Is(target error) bool { return errors.Is(e.cause, target) }
 
+// As lets callers find wrapped interfaces (e.g. chat cleanup's
+// CleanupCompleted) through redaction, which Is cannot express.
+func (e *redactedError) As(target any) bool { return errors.As(e.cause, target) }
+
 // SafeMessage returns the scrubbed message; redacted errors are safe to show
 // to operators, so chat wire can surface them without re-checking the cause.
 func (e *redactedError) SafeMessage() string { return e.message }
