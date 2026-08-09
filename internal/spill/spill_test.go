@@ -132,3 +132,46 @@ func TestMarker(t *testing.T) {
 		t.Fatal(mp)
 	}
 }
+
+func TestSpillUtf8BoundariesStayValid(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := &Store{DB: st.DB}
+
+	// Multi-byte runes: "é" (2 bytes), "日本語" (3 bytes each). Exceed
+	// SpillCap with a mix so the cap cut and window slices must land mid-rune.
+	content := strings.Repeat("é日本語x", 300000) // ~6 bytes × 300k = 1.8MB > SpillCap
+	id, partial, err := s.Save(ctx, "sess-utf8", "bash", content)
+	if err != nil || id == "" {
+		t.Fatalf("save: id=%q partial=%v err=%v", id, partial, err)
+	}
+	if !partial {
+		t.Fatal("expected partial spill for oversized content")
+	}
+	got, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("stored spill content is invalid UTF-8")
+	}
+	if len(got) > SpillCap {
+		t.Fatalf("stored spill len=%d exceeds SpillCap", len(got))
+	}
+
+	// Single-line grep window: offsets land mid-rune.
+	hits, err := s.Expand(ctx, id, 0, 0, "日本語x")
+	if err != nil || !utf8.ValidString(hits) {
+		t.Fatalf("grep hits invalid UTF-8: %v %q", err, hits)
+	}
+
+	// Raw byte-range expansion with mid-rune offset/end.
+	out, err := s.Expand(ctx, id, 7, 3, "") // byte 7 is a continuation byte
+	if err != nil || !utf8.ValidString(out) {
+		t.Fatalf("range expand invalid UTF-8: %v %q", err, out)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/id"
+	"github.com/matt-riley/waffle/internal/textcut"
 	"github.com/matt-riley/waffle/internal/tool"
 )
 
@@ -30,7 +31,7 @@ func (s *Store) Save(ctx context.Context, sessionID, toolName, content string) (
 	}
 	stored := content
 	if len(stored) > SpillCap {
-		stored = stored[:SpillCap]
+		stored = textcut.Cut(stored, SpillCap)
 		partial = true
 	}
 	sid, err := id.New("spill-")
@@ -101,6 +102,7 @@ func (s *Store) Expand(ctx context.Context, spillID string, offset, limit int, p
 				if end > len(content) {
 					end = len(content)
 				}
+				start, end = snapToRunes(content, start, end)
 				hits = append(hits, fmt.Sprintf("@%d: %s", abs, content[start:end]))
 				from = abs + len(pattern)
 			}
@@ -123,7 +125,25 @@ func (s *Store) Expand(ctx context.Context, spillID string, offset, limit int, p
 	if end > len(content) {
 		end = len(content)
 	}
-	return tool.Truncate(content[offset:end], tool.OutputLimit), nil
+	start, end := snapToRunes(content, offset, end)
+	return tool.Truncate(content[start:end], tool.OutputLimit), nil
+}
+
+// snapToRunes moves start forward and end backward until both land on UTF-8
+// rune boundaries, so a byte-window slice never splits a multi-byte rune
+// (#280). start/end may already be boundary-aligned; end never moves below
+// start.
+func snapToRunes(s string, start, end int) (int, int) {
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	for end > start && end < len(s) && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	if end < start {
+		end = start
+	}
+	return start, end
 }
 
 // DeleteSession removes all spills for a session (retention/forget).
