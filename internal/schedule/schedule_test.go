@@ -323,7 +323,7 @@ func (c *captureDeliverer) Deliver(ctx context.Context, target, text string) err
 	return nil
 }
 
-func TestRunnerExecutesAndDelivers(t *testing.T) {
+func TestRunnerExecutesAndPersistsSession(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	sessions := session.New(st)
@@ -334,15 +334,17 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 		Deliverer: cap,
 	}
 
-	reply, err := runner.Run(ctx, Job{Name: "test", Prompt: "check the thing", Deliver: "telegram:900"})
+	reply, err := runner.Run(ctx, Job{Name: "test", Prompt: "check the thing"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if reply != "done: check the thing" {
 		t.Errorf("reply = %q", reply)
 	}
-	if cap.target != "telegram:900" || cap.text != reply {
-		t.Errorf("delivered %q to %q", cap.text, cap.target)
+	// Delivery is the scheduler's job (after the outcome is durable); the
+	// runner itself never delivers (see fire and TestFirePersistsSuccessBeforeDelivering).
+	if cap.target != "" || cap.text != "" {
+		t.Errorf("runner delivered %q to %q; delivery belongs to the scheduler", cap.text, cap.target)
 	}
 
 	// The job's turns were persisted to a fresh session.
@@ -359,7 +361,7 @@ func TestRunnerExecutesAndDelivers(t *testing.T) {
 	}
 }
 
-func TestRunnerReservedLearnJobDeliversDigestWithoutAgentDispatch(t *testing.T) {
+func TestRunnerReservedLearnJobReturnsDigestWithoutAgentDispatch(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	cap := &captureDeliverer{}
@@ -378,8 +380,12 @@ func TestRunnerReservedLearnJobDeliversDigestWithoutAgentDispatch(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != cap.text || cap.target != "telegram:900" || !strings.Contains(reply, "PRIVATE_LEARN_DIGEST") {
-		t.Fatalf("reply=%q delivered=%q target=%q", reply, cap.text, cap.target)
+	if !strings.Contains(reply, "PRIVATE_LEARN_DIGEST") {
+		t.Fatalf("reply=%q", reply)
+	}
+	// Delivery is the scheduler's job; the runner returns the digest.
+	if cap.target != "" || cap.text != "" {
+		t.Fatalf("runner delivered %q to %q; delivery belongs to the scheduler", cap.text, cap.target)
 	}
 	if len(p.reqs) != 0 {
 		t.Fatalf("reserved learn job reached agent provider: %d calls", len(p.reqs))
