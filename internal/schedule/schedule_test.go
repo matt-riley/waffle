@@ -667,3 +667,65 @@ func TestParseTarget(t *testing.T) {
 		t.Error("empty parsed as target")
 	}
 }
+
+// failingSessions wraps a session store and fails AppendTurn after the first
+// turn (the user prompt), simulating a mid-batch persistence failure (#284).
+type failingSessions struct {
+	sessionStore
+	failFrom int // fail the Nth AppendTurn (1-indexed); 0 = never
+	calls    int
+}
+
+func (f *failingSessions) AppendTurn(ctx context.Context, id string, msg llm.Message) error {
+	f.calls++
+	if f.calls >= f.failFrom {
+		return errors.New("simulated append turn failure")
+	}
+	return f.sessionStore.AppendTurn(ctx, id, msg)
+}
+
+func TestRunnerPersistFailureFailsJobOutcome(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	var logs bytes.Buffer
+	runner := &Runner{
+		Agent:    &agent.Agent{Provider: echoProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Sessions: &failingSessions{sessionStore: session.New(st), failFrom: 2},
+		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	_, err := runner.Run(ctx, Job{Name: "test", Prompt: "check the thing"})
+	if err == nil || !strings.Contains(err.Error(), "persist turn") {
+		t.Fatalf("Run = %v, want persist failure surfaced", err)
+	}
+	if !strings.Contains(logs.String(), "persist cron turn") {
+		t.Fatalf("persist failure not logged: %s", logs.String())
+	}
+}
+
+func TestFireDoesNotMarkOkWhenTranscriptPersistFails(t *testing.T) {
+	c := newManualClock()
+	p := &sequenceProvider{failFor: 0}
+	jobs, s, j := retryFixture(t, p, c)
+	// Terminal-fail on the first attempt so fire returns synchronously.
+	_, _ = jobs.db.Exec(`UPDATE jobs SET max_attempts=1 WHERE id=?`, j.ID)
+	j.MaxAttempts = 1
+	// The first AppendTurn (user prompt) succeeds; the second (assistant
+	// reply) fails mid-batch (#284).
+	s.Runner.Sessions = &failingSessions{sessionStore: s.Runner.Sessions, failFrom: 2}
+
+	s.fire(context.Background(), j)
+
+	if p.count() != 1 {
+		t.Fatalf("agent calls = %d, want 1", p.count())
+	}
+	got, err := jobs.Get(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(got.LastStatus, "ok") {
+		t.Fatalf("job marked ok despite transcript persist failure: %q", got.LastStatus)
+	}
+	if !strings.HasPrefix(got.LastStatus, "failed") {
+		t.Fatalf("job status = %q, want failed outcome", got.LastStatus)
+	}
+}

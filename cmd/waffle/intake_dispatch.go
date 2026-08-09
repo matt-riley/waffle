@@ -38,12 +38,18 @@ type issueWorkspaceOpener interface {
 	CloseWorkspace(ctx context.Context, workspaceID string, force bool) error
 }
 
+// turnAppender is the transcript persistence surface the issue dispatcher
+// needs. An interface lets tests inject AppendTurn failures (#284).
+type turnAppender interface {
+	AppendTurn(ctx context.Context, sessionID string, msg llm.Message) error
+}
+
 // issueDispatcher opens a repo workspace and runs one issue on the restricted
 // issue agent tier (#51). Workspace tools execute inside the container.
 type issueDispatcher struct {
 	cfg       config.Config
 	st        *store.Store
-	sessions  *session.Store
+	sessions  turnAppender
 	skills    []skill.Skill
 	memWS     memory.Workspace
 	broker    *broker.Broker
@@ -135,7 +141,15 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	runCtx := agent.WithSession(ctx, ws.SessionID)
 	out, runErr := runAgent.Run(runCtx, history, agent.Hooks{})
 	for _, m := range out[1:] {
-		_ = d.sessions.AppendTurn(ctx, ws.SessionID, m)
+		if err := d.sessions.AppendTurn(ctx, ws.SessionID, m); err != nil {
+			// A missing transcript must not be reported as a completed issue:
+			// fail the run so the watcher retries it (#284).
+			d.log.Warn("persist intake turn", "err", err)
+			if runErr == nil {
+				runErr = fmt.Errorf("persist turn: %w", err)
+			}
+			break
+		}
 	}
 
 	// after_run is best-effort.
