@@ -832,7 +832,11 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 				dcancel()
 				if derr != nil {
 					s.Log.Error("final delivery failed", "job", j.ID, "err", derr)
-					_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok; delivery failed: "+derr.Error())
+					if merr := s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok; delivery failed: "+derr.Error()); merr != nil {
+						// The corrective write failed too; the "ok" outcome is
+						// durable but the delivery failure is not — log it.
+						s.Log.Error("record delivery failure in job status", "job", j.ID, "err", merr)
+					}
 				}
 			}
 			return
