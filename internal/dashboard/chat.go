@@ -865,8 +865,14 @@ func (c *ChatClients) safeDashboardChatState(state chat.State) dashboardChatStat
 
 func (c *ChatClients) safeChatResult(result chat.Result) chat.Result {
 	// Shared exact-value walker (internal/chat) with the Desk's browser-
-	// specific permission projection layered on top (#289).
+	// specific projections layered on top (#289).
 	result = chat.RedactResult(result, c.redactExact)
+	if result.State != nil {
+		// safeChatState's workspace-label projection must apply to an
+		// embedded result state too, or absolute host paths would serialize
+		// to the browser.
+		result.State.Workspace = projectChatWorkspaceLabel(result.State.Workspace)
+	}
 	if result.Permissions != nil {
 		result.Permissions.SandboxMode = c.redactExact(result.Permissions.SandboxMode)
 		result.Permissions.Allow = c.projectChatPermissions(result.Permissions.Allow)

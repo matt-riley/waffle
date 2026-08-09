@@ -481,6 +481,18 @@ func TestSafeChatResultProjectsPermissionValuesBeforeBrowserRendering(t *testing
 	}
 }
 
+func TestSafeChatResultProjectsEmbeddedStateWorkspace(t *testing.T) {
+	// An embedded result state must get the same workspace-label projection
+	// as a state event, or absolute host paths reach the browser (#289 review).
+	clients := NewChatClients(nil, nil)
+	result := clients.safeChatResult(chat.Result{
+		State: &chat.State{Workspace: "/var/lib/waffle/workspace/main"},
+	})
+	if result.State == nil || result.State.Workspace != "" {
+		t.Fatalf("embedded state workspace = %q, want projected empty", result.State.Workspace)
+	}
+}
+
 func TestChatClientsShutdownWaitsForActiveTurn(t *testing.T) {
 	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{}), closeCalled: make(chan struct{})}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{6}, 32)))
