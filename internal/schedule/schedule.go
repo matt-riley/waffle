@@ -359,9 +359,17 @@ func scanJob(row rowScanner) (*Job, error) {
 
 // Runner executes a job's prompt through a fresh session and delivers the
 // result. It is provided by the caller (serve wires the real agent).
+// sessionStore is the session persistence surface the Runner needs. It is
+// an interface so tests can inject AppendTurn failures (#284).
+type sessionStore interface {
+	Create(ctx context.Context, title string) (*session.Session, error)
+	AppendTurn(ctx context.Context, sessionID string, turn llm.Message) error
+	SetSummary(ctx context.Context, id, summary string) error
+}
+
 type Runner struct {
 	Agent     *agent.Agent
-	Sessions  *session.Store
+	Sessions  sessionStore
 	Deliverer Deliverer
 	Log       *slog.Logger
 
@@ -512,7 +520,16 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		},
 	})
 	for _, m := range out[1:] {
-		_ = r.Sessions.AppendTurn(ctx, sess.ID, m)
+		if err := r.Sessions.AppendTurn(ctx, sess.ID, m); err != nil {
+			// A missing transcript must not be reported as a successful job
+			// outcome: fail the run so the job is marked error and can retry
+			// (#284).
+			log.Error("persist cron turn", "err", err)
+			if runErr == nil {
+				runErr = fmt.Errorf("persist turn: %w", err)
+			}
+			break
+		}
 	}
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {

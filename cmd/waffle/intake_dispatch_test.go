@@ -452,3 +452,67 @@ func containsStr(ss []string, want string) bool {
 	}
 	return false
 }
+
+// failingTurns fails every AppendTurn after the first, simulating a
+// mid-batch transcript persistence failure (#284).
+type failingTurns struct {
+	turnAppender
+	from  int
+	calls int
+}
+
+func (f *failingTurns) AppendTurn(ctx context.Context, sessionID string, msg llm.Message) error {
+	f.calls++
+	if f.calls >= f.from {
+		return errors.New("simulated append turn failure")
+	}
+	return f.turnAppender.AppendTurn(ctx, sessionID, msg)
+}
+
+func TestDispatchFailsWhenTranscriptPersistFails(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	sess, err := sessions.Create(ctx, "issue persist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := &llmtest.Script{Responses: []llm.Response{llmtest.Text("done")}}
+	cfg := config.Default()
+	hostPol := cfg.AgentPolicy(config.GroupIssue)
+	baseTools := tool.NewRegistry()
+	fakeRun := &fakeIssueRun{
+		ws: &workspace.Workspace{ID: "ws-persist", Repo: "acme/widgets", SessionID: sess.ID, Status: workspace.StatusOpen},
+	}
+	disp := &issueDispatcher{
+		cfg: cfg,
+		st:  st,
+		sessions: &failingTurns{
+			turnAppender: sessions,
+			from:         2,
+		},
+		agent: &agent.Agent{
+			Provider:  script,
+			Tools:     tool.Restrict(baseTools, tool.Policy{Deny: hostPol.Deny}),
+			System:    "issue-tier",
+			Model:     "test-model",
+			MaxTokens: 128,
+		},
+		log:    slog.Default(),
+		opener: &fakeIssueOpener{run: fakeRun},
+	}
+	iss := intake.Issue{Number: 10, Title: "t", State: "open", Labels: []string{"agent-ok"}, CreatedAt: time.Now(), Priority: 1}
+	watch := intake.WatchConfig{Repo: "acme/widgets", Label: "agent-ok", MaxConcurrency: 1}
+
+	_, err = disp.Dispatch(ctx, watch, iss, nil)
+	if err == nil || !strings.Contains(err.Error(), "persist turn") {
+		t.Fatalf("Dispatch = %v, want persist failure propagated", err)
+	}
+	if script.Calls != 1 {
+		t.Fatalf("agent calls = %d, want 1", script.Calls)
+	}
+}
