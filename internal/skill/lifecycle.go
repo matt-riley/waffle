@@ -54,11 +54,11 @@ func DeactivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name 
 		return err
 	}
 	updated := setFrontmatterStatus(string(raw), StatusInactive)
-	if err := os.WriteFile(target.Path, []byte(updated), info.Mode().Perm()); err != nil {
+	if err := filecommit.Write(target.Path, []byte(updated), info.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := SetSkillStatusRecord(ctx, db, StatusRecord{Name: target.Name, Status: StatusInactive}); err != nil {
-		restoreErr := os.WriteFile(target.Path, raw, info.Mode().Perm())
+		restoreErr := filecommit.Write(target.Path, raw, info.Mode().Perm())
 		if restoreErr != nil {
 			restoreErr = fmt.Errorf("restore active skill after status failure: %w", restoreErr)
 		}
