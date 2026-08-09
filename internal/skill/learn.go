@@ -626,9 +626,19 @@ func (l *Learner) commitAccepted(p Proposal) (string, error) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		return "", nil
 	}
+	// Stage only the paths the accepted proposal wrote (skill file, memory
+	// file, or config stub), never the whole workspace: `git add -A` swept
+	// every unrelated tracked edit, deletion, and untracked file into the
+	// learning commit (#295).
+	paths, err := l.proposalPaths(dir, p)
+	if err != nil {
+		return "", err
+	}
+	addArgs := append([]string{"-C", dir, "--literal-pathspecs", "add", "--"}, paths...)
+	if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
 	msg := fmt.Sprintf("learn: accept %s proposal for pattern %q", p.Surface, p.PatternSig)
-	// Stage skill/memory paths if they exist under dir.
-	_ = exec.Command("git", "-C", dir, "add", "-A").Run()
 	out, err := exec.Command("git", "-C", dir, "commit", "-m", msg).CombinedOutput()
 	if err != nil {
 		// Nothing to commit is fine.
@@ -638,6 +648,42 @@ func (l *Learner) commitAccepted(p Proposal) (string, error) {
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return msg, nil
+}
+
+// proposalPaths returns the exact paths (relative to dir) an accepted
+// proposal writes, so the learning commit stays limited to the accepted
+// edit (#295). The paths are relative to the git working tree dir because
+// `git add` resolves pathspecs from its -C directory.
+func (l *Learner) proposalPaths(dir string, p Proposal) ([]string, error) {
+	var abs string
+	switch p.Surface {
+	case SurfaceSkill:
+		if l.WS.Dir == "" {
+			return nil, errors.New("no workspace")
+		}
+		abs = filepath.Join(l.WS.SkillsDir(), p.Name, "SKILL.md")
+	case SurfaceMemory:
+		if l.WS.Dir == "" {
+			return nil, errors.New("no workspace")
+		}
+		abs = l.WS.MemoryPath()
+	case SurfaceConfigStub:
+		if l.WS.Dir == "" {
+			return nil, errors.New("no workspace")
+		}
+		name := p.Name
+		if name == "" {
+			name = "stub"
+		}
+		abs = filepath.Join(l.WS.Dir, "config-stubs", name+".toml.stub")
+	default:
+		return nil, ValidateSurface(p.Surface)
+	}
+	rel, err := filepath.Rel(dir, abs)
+	if err != nil {
+		return nil, fmt.Errorf("proposal path %q outside git dir %q: %w", abs, dir, err)
+	}
+	return []string{rel}, nil
 }
 
 func (l *Learner) storeProposal(ctx context.Context, p Proposal) error {
