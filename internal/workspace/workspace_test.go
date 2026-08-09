@@ -102,6 +102,17 @@ func (s *scriptedBash) count(substr string) int {
 	return count
 }
 
+// Test timing seams (#335): the manager's inspection probe and the runner's
+// heartbeat/poll cadences are shortened from their production values (100ms
+// probe, 2s heartbeat, 100ms poll) so idle-restore inspection tests drive the
+// same state-machine transitions without paying seconds of wall clock per
+// restart.
+const (
+	testRunnerHeartbeatInterval = 20 * time.Millisecond
+	testRunnerPollInterval      = 5 * time.Millisecond
+	testInspectionProbeInterval = 5 * time.Millisecond
+)
+
 // fakeRuntime runs an in-process Runner per "container" instead of docker.
 type fakeRuntime struct {
 	mu           sync.Mutex
@@ -184,7 +195,7 @@ func (f *fakeRuntime) launch(name, queueDir string) {
 				return
 			}
 		}
-		r := &sandbox.Runner{Tools: tool.NewRegistry(f.tools)}
+		r := &sandbox.Runner{Tools: tool.NewRegistry(f.tools), HeartbeatInterval: testRunnerHeartbeatInterval, PollInterval: testRunnerPollInterval}
 		_ = r.Serve(rctx, queueDir)
 	}()
 }
@@ -277,6 +288,7 @@ func newTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) 
 	})
 	rt := newFakeRuntime(tools)
 	mgr := NewManager(st, session.New(st), rt, t.TempDir())
+	mgr.InspectionProbeInterval = testInspectionProbeInterval
 	mgr.ExecTimeout = 10 * time.Second
 	mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) { return "wk_test", nil }
 	mgr.BrokerURL = "http://waffle-host:8421"

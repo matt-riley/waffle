@@ -10,12 +10,29 @@ import (
 	"github.com/matt-riley/waffle/internal/tool"
 )
 
+// defaultRunnerHeartbeatInterval is how often a runner refreshes its liveness
+// heartbeat row. It bounds how quickly a host-side inspection can notice a
+// restarted runner (and how quickly dead-runner detection fires).
+const defaultRunnerHeartbeatInterval = 2 * time.Second
+
+// defaultRunnerPollInterval is how often the runner checks inbound.db for a
+// pending request. It bounds one queue round trip (request → result).
+const defaultRunnerPollInterval = 100 * time.Millisecond
+
 // Runner is the container side of the queue pair: it polls inbound.db for
 // requests, executes them against its toolbox, and writes results to
 // outbound.db. It is the process behind `waffle runner` — the same static
 // waffle binary, bind-mounted into any image.
 type Runner struct {
 	Tools tool.Toolbox
+	// HeartbeatInterval is how often the liveness heartbeat row is refreshed.
+	// Zero uses defaultRunnerHeartbeatInterval; tests shrink it to avoid
+	// wall-clock waits (same pattern as Client's detection-window fields).
+	HeartbeatInterval time.Duration
+	// PollInterval is how often inbound.db is checked for a pending request.
+	// Zero uses defaultRunnerPollInterval; tests shrink it alongside
+	// HeartbeatInterval so queue round trips stay fast.
+	PollInterval time.Duration
 }
 
 // Serve processes requests from the queue in dir until a shutdown request
@@ -56,7 +73,11 @@ func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 	defer serveCancel()
 
 	go func() {
-		hb := time.NewTicker(2 * time.Second)
+		interval := r.HeartbeatInterval
+		if interval <= 0 {
+			interval = defaultRunnerHeartbeatInterval
+		}
+		hb := time.NewTicker(interval)
 		defer hb.Stop()
 		for {
 			select {
@@ -71,7 +92,7 @@ func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 		}
 	}()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(r.pollInterval())
 	defer ticker.Stop()
 	for {
 		next, stop, err := r.step(ctx, in, out, last)
@@ -90,6 +111,14 @@ func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 		}
 		last = next
 	}
+}
+
+// pollInterval returns the inbound.poll cadence, defaulted when unset.
+func (r *Runner) pollInterval() time.Duration {
+	if r.PollInterval > 0 {
+		return r.PollInterval
+	}
+	return defaultRunnerPollInterval
 }
 
 // step handles at most one pending request; returns the new high-water
