@@ -322,7 +322,14 @@ func (t SubagentTool) repairHandoff(ctx context.Context, sub *Agent, broken stri
 		return Handoff{}, err
 	}
 	if sub.Usage != nil {
-		_ = sub.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), resp.Usage)
+		if err := sub.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), resp.Usage); err != nil {
+			if sub.Limits.TokensPerDay > 0 || sub.Limits.RequestsPerHour > 0 {
+				return Handoff{}, fmt.Errorf("record usage: %w", err)
+			}
+			if t.Log != nil {
+				t.Log.Error("usage write failed", "err", err, "session", SessionID(ctx), "budget", usage.BudgetKey(ctx, SessionID(ctx)))
+			}
+		}
 	}
 	return ParseHandoff(resp.Message.Text())
 }
