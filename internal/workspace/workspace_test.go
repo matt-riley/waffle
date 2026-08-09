@@ -2429,3 +2429,49 @@ func TestOpenDevcontainerAdoptionFailureCleansUp(t *testing.T) {
 		t.Fatal("broker session not revoked after failed adoption")
 	}
 }
+
+// TestResumeClearsRemovedRepoIdleTimeout is the Greptile follow-up: when a
+// repo drops its idle_timeout between open and resume, the stale per-workspace
+// timeout must be cleared so the reaper falls back to the host default.
+func TestResumeClearsRemovedRepoIdleTimeout(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"cat /work/repo/WAFFLE.md": `---
+idle_timeout: 1m
+---
+v1
+`,
+	}}
+	mgr, _ := newTestManager(t, tools)
+	mgr.IdleTimeout = time.Hour
+	ws, client, err := mgr.Open(ctx, "acme/tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if ws.IdleTimeout != "1m0s" {
+		t.Fatalf("idle after open = %q, want repo-tightened", ws.IdleTimeout)
+	}
+	// The repo now declares no idle_timeout.
+	tools.mu.Lock()
+	tools.outputs = map[string]string{"cat /work/repo/WAFFLE.md": "v2\n"}
+	tools.mu.Unlock()
+	if err := mgr.Idle(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, resumedClient, err := mgr.Resume(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resumedClient.Close() }()
+	if resumed.IdleTimeout != "" {
+		t.Fatalf("idle after resume = %q, want cleared (host default applies)", resumed.IdleTimeout)
+	}
+	row, err := mgr.Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IdleTimeout != "" {
+		t.Fatalf("stored idle after resume = %q, want cleared", row.IdleTimeout)
+	}
+}

@@ -885,11 +885,16 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 	if p != nil {
 		m.lastPolicy = p
 		state := m.policyState(p)
-		if state.egress != ws.Egress || (p.IdleTimeout != "" && state.idle.String() != ws.IdleTimeout) {
+		// A repo that removes its idle_timeout (or egress) clears the persisted
+		// value so the host default applies again on the next sweep/resume
+		// (Greptile review).
+		newIdle := ""
+		if p.IdleTimeout != "" {
+			newIdle = state.idle.String()
+		}
+		if state.egress != ws.Egress || newIdle != ws.IdleTimeout {
 			ws.Egress = state.egress
-			if p.IdleTimeout != "" {
-				ws.IdleTimeout = state.idle.String()
-			}
+			ws.IdleTimeout = newIdle
 			if _, err := m.DB.ExecContext(ctx,
 				`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
 				ws.Egress, ws.IdleTimeout, now(), id); err != nil {
