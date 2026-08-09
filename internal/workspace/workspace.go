@@ -947,7 +947,11 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		}
 		client, err = m.newClient(ws)
 		if err != nil {
-			_ = m.setStatus(ctx, id, StatusIdle)
+			// The replacement container is running, so "open" is truthful:
+			// leave the status as-is (the caller sees the error and the next
+			// resume retries) rather than marking a running workspace idle
+			// (Greptile review). The row still holds the old egress, so the
+			// next resume re-enforces and persists the new posture.
 			return nil, nil, err
 		}
 		// The running container now enforces the new posture; persist it.
