@@ -115,15 +115,27 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		maxIter = 50
 	}
 	var cumulativeUsage llm.Usage
-	observeUsage := func(callUsage llm.Usage) {
+	observeUsage := func(callUsage llm.Usage) error {
 		cumulativeUsage.InputTokens += callUsage.InputTokens
 		cumulativeUsage.OutputTokens += callUsage.OutputTokens
 		if a.Usage != nil {
-			_ = a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), callUsage)
+			if err := a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), callUsage); err != nil {
+				// Losing spend lets Check pass forever once a limit is
+				// configured, so fail the run closed; without configured
+				// limits there is nothing to bypass, but never discard
+				// silently (#292).
+				if a.Limits.TokensPerDay > 0 || a.Limits.RequestsPerHour > 0 {
+					return fmt.Errorf("record usage: %w", err)
+				}
+				if a.Log != nil {
+					a.Log.Error("usage write failed", "err", err, "session", SessionID(ctx), "budget", usage.BudgetKey(ctx, SessionID(ctx)))
+				}
+			}
 		}
 		if hooks.OnUsage != nil {
 			hooks.OnUsage(cumulativeUsage)
 		}
+		return nil
 	}
 
 	for i := 0; i < maxIter; i++ {
@@ -140,7 +152,10 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		// Pre-Complete step: summarize old turns + recent window. This
 		// bounds prompt size independent of total session length (only
 		// MaxIterations + provider MaxTokens were bounds before).
-		messages, extraSystem := a.prepareContext(ctx, history, observeUsage)
+		messages, extraSystem, err := a.prepareContext(ctx, history, observeUsage)
+		if err != nil {
+			return history, err
+		}
 		system := a.System
 		if extraSystem != "" {
 			if system != "" {
@@ -166,7 +181,9 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		if err != nil {
 			return history, err
 		}
-		observeUsage(resp.Usage)
+		if err := observeUsage(resp.Usage); err != nil {
+			return history, err
+		}
 		history = append(history, resp.Message)
 
 		if resp.StopReason == llm.StopRefusal {
@@ -350,10 +367,10 @@ const recentWindow = 20
 // RoleAssistant message) satisfies provider invariants that require the first
 // message to be user role and messages to alternate. The returned slice is a
 // copy; the caller's history remains the full transcript.
-func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, onUsage func(llm.Usage)) ([]llm.Message, string) {
+func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, onUsage func(llm.Usage) error) ([]llm.Message, string, error) {
 	n := len(fullHistory)
 	if n <= recentWindow {
-		return append([]llm.Message(nil), fullHistory...), ""
+		return append([]llm.Message(nil), fullHistory...), "", nil
 	}
 	prefix := fullHistory[:n-recentWindow]
 	// Cache by session + prefix length so successive iterations of one Run
@@ -372,7 +389,11 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 		}
 		a.summaryMu.Unlock()
 		if summaryText == "" {
-			summaryText = a.summarize(ctx, prefix, onUsage)
+			var err error
+			summaryText, err = a.summarize(ctx, prefix, onUsage)
+			if err != nil {
+				return nil, "", err
+			}
 			a.summaryMu.Lock()
 			if a.summaryCache == nil {
 				a.summaryCache = map[string]summaryEntry{}
@@ -381,7 +402,11 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 			a.summaryMu.Unlock()
 		}
 	} else {
-		summaryText = a.summarize(ctx, prefix, onUsage)
+		var err error
+		summaryText, err = a.summarize(ctx, prefix, onUsage)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	// Carry as extra system text so it never lands at messages[0]. System
@@ -398,7 +423,7 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	recentStart = ensureWindowStartsOnUser(fullHistory, recentStart)
 	recent := make([]llm.Message, n-recentStart)
 	copy(recent, fullHistory[recentStart:])
-	return recent, extraSystem
+	return recent, extraSystem, nil
 }
 
 // ensureWindowStartsOnUser adjusts start backwards until history[start] is a
@@ -454,9 +479,9 @@ func ensureCompleteToolExchange(history []llm.Message, start int) int {
 //
 // The flattened input is capped to avoid blowing out the summarizer's own
 // prompt (addresses risk of huge tool results etc.).
-func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage func(llm.Usage)) string {
+func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage func(llm.Usage) error) (string, error) {
 	if len(prefix) == 0 || a.Provider == nil {
-		return "(no prior context)"
+		return "(no prior context)", nil
 	}
 	// Flatten to text: avoids sending hundreds of Message structs for the
 	// summary request.
@@ -497,14 +522,16 @@ func (a *Agent) summarize(ctx context.Context, prefix []llm.Message, onUsage fun
 		MaxTokens: 256,
 	}, nil)
 	if err != nil {
-		return fmt.Sprintf("(summarization error: %v)", err)
+		return fmt.Sprintf("(summarization error: %v)", err), nil
 	}
 	if onUsage != nil {
-		onUsage(resp.Usage)
+		if err := onUsage(resp.Usage); err != nil {
+			return "", err
+		}
 	}
 	s := strings.TrimSpace(resp.Message.Text())
 	if s == "" {
-		return "(no summary produced)"
+		return "(no summary produced)", nil
 	}
-	return s
+	return s, nil
 }
