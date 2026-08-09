@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 )
@@ -238,11 +239,11 @@ func TestFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := run(t, Fetch{AllowPrivate: []string{"127.0.0.0/8"}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
+	out, err := run(t, &Fetch{AllowPrivate: []string{"127.0.0.0/8"}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
 	if err != nil || out != "fetched body" {
 		t.Fatalf("fetch = %q, %v", out, err)
 	}
-	if _, err := run(t, Fetch{}, `{"url":"file:///etc/passwd"}`); err == nil {
+	if _, err := run(t, &Fetch{}, `{"url":"file:///etc/passwd"}`); err == nil {
 		t.Error("non-http URL accepted")
 	}
 }
@@ -252,12 +253,12 @@ func TestFetchBlocksPrivateAndAllowsHostPort(t *testing.T) {
 		fmt.Fprint(w, "ok")
 	}))
 	defer srv.Close()
-	if _, err := run(t, Fetch{}, fmt.Sprintf(`{"url":%q}`, srv.URL)); err == nil ||
+	if _, err := run(t, &Fetch{}, fmt.Sprintf(`{"url":%q}`, srv.URL)); err == nil ||
 		!strings.Contains(err.Error(), "private/link-local range") {
 		t.Fatalf("private fetch error = %v", err)
 	}
 	hostport := strings.TrimPrefix(srv.URL, "http://")
-	out, err := run(t, Fetch{AllowPrivate: []string{hostport}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
+	out, err := run(t, &Fetch{AllowPrivate: []string{hostport}}, fmt.Sprintf(`{"url":%q}`, srv.URL))
 	if err != nil || out != "ok" {
 		t.Fatalf("host:port allowlist fetch = %q, %v", out, err)
 	}
@@ -285,7 +286,7 @@ func TestFetchRedirectToPrivateIsRefused(t *testing.T) {
 	source := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
 	defer source.Close()
 	allowSource := strings.TrimPrefix(source.URL, "http://")
-	_, err := run(t, Fetch{AllowPrivate: []string{allowSource}}, fmt.Sprintf(`{"url":%q}`, source.URL))
+	_, err := run(t, &Fetch{AllowPrivate: []string{allowSource}}, fmt.Sprintf(`{"url":%q}`, source.URL))
 	if err == nil || !strings.Contains(err.Error(), "private/link-local range") {
 		t.Fatalf("redirect error = %v", err)
 	}
@@ -306,7 +307,7 @@ func TestFetchRejectsDNSRebindAtDialTime(t *testing.T) {
 	if first, err := resolver.LookupNetIP(context.Background(), "ip", "rebind.test"); err != nil || first[0].IsLoopback() {
 		t.Fatalf("preflight answer = %v, %v; want public", first, err)
 	}
-	_, err := run(t, Fetch{Resolver: resolver}, fmt.Sprintf(`{"url":"http://rebind.test:%s/secret"}`, port))
+	_, err := run(t, &Fetch{Resolver: resolver}, fmt.Sprintf(`{"url":"http://rebind.test:%s/secret"}`, port))
 	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "allow_private") {
 		t.Fatalf("dial-time rebind error = %v", err)
 	}
@@ -473,5 +474,34 @@ func TestCapHostReturn(t *testing.T) {
 	got := CapHostReturn(huge)
 	if len(got) != HostReturnCap {
 		t.Fatalf("cap len=%d want %d", len(got), HostReturnCap)
+	}
+}
+
+func TestFetchReusesTransportAcrossRuns(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+	f := &Fetch{AllowPrivate: []string{"127.0.0.0/8"}}
+	for i := 0; i < 3; i++ {
+		if out, err := run(t, f, fmt.Sprintf(`{"url":%q}`, srv.URL)); err != nil || !strings.Contains(out, "ok") {
+			t.Fatalf("run %d: %q %v", i, out, err)
+		}
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("server hits = %d, want 3", got)
+	}
+	// The transport must be built once and cached, not recreated per Run.
+	if f.cachedTransport == nil {
+		t.Fatal("cached transport was not initialized")
+	}
+	first := f.cachedTransport
+	if _, err := run(t, f, fmt.Sprintf(`{"url":%q}`, srv.URL)); err != nil {
+		t.Fatal(err)
+	}
+	if f.cachedTransport != first {
+		t.Fatal("transport was rebuilt on a later Run")
 	}
 }
