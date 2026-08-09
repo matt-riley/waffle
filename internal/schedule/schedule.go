@@ -408,11 +408,6 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 		if err != nil {
 			return "", fmt.Errorf("cron learn: %w", err)
 		}
-		if j.Deliver != "" && digest != "" && r.Deliverer != nil {
-			if err := r.Deliverer.Deliver(ctx, j.Deliver, digest); err != nil {
-				return digest, fmt.Errorf("deliver learn digest: %w", err)
-			}
-		}
 		return digest, nil
 	}
 	a := r.Agent
@@ -544,11 +539,6 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 			break
 		}
 	}
-	if j.Deliver != "" && reply != "" && r.Deliverer != nil {
-		if err := r.Deliverer.Deliver(ctx, j.Deliver, reply); err != nil {
-			return reply, fmt.Errorf("deliver: %w", err)
-		}
-	}
 	outcome = "ok"
 	return reply, nil
 }
@@ -557,9 +547,23 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 // store when Scheduler.Reconcile is unset.
 const DefaultReconcile = 30 * time.Second
 
+// deliveryTimeout bounds the success delivery so a stalled channel cannot
+// hold the fire loop after the run context is gone (#299).
+const deliveryTimeout = 5 * time.Minute
+
+// jobStore is the persistence surface Scheduler needs. It is an interface so
+// tests can inject failure into attempt/outcome/retry writes (#299).
+type jobStore interface {
+	List(ctx context.Context) ([]Job, error)
+	Get(ctx context.Context, id string) (*Job, error)
+	startAttempt(ctx context.Context, id string, attempt int) error
+	markRun(ctx context.Context, id, status string) error
+	scheduleRetry(ctx context.Context, id, status string, next time.Time) error
+}
+
 // Scheduler runs enabled jobs on their cron schedules until ctx ends.
 type Scheduler struct {
-	Store  *Store
+	Store  jobStore
 	Runner *Runner
 	Log    *slog.Logger
 	Policy RetryPolicy
@@ -804,20 +808,45 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 	}
 	for {
 		if err := s.Store.startAttempt(context.WithoutCancel(ctx), j.ID, attempt); err != nil {
-			s.Log.Error("record job attempt failed", "job", j.ID, "err", err)
+			// An attempt that is not durable must not run: the stale
+			// next_retry would misclassify this firing as a later retry.
+			s.Log.Error("record job attempt failed; aborting fire", "job", j.ID, "attempt", attempt, "err", err)
+			return
 		}
 		j.MaxAttempts, j.BaseBackoff, j.MaxBackoff, j.StallTimeout = policy.MaxAttempts, policy.BaseBackoff, policy.MaxBackoff, policy.StallTimeout
 		runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-		_, err := s.Runner.RunAttempt(runCtx, j, attempt)
+		out, err := s.Runner.RunAttempt(runCtx, j, attempt)
 		cancel()
 		if err == nil {
-			_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok")
+			if merr := s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok"); merr != nil {
+				s.Log.Error("record job outcome failed; not delivering success", "job", j.ID, "err", merr)
+				return
+			}
+			if j.Deliver != "" && out != "" && s.Runner.Deliverer != nil {
+				// Delivery runs on a bounded detached context so a stalled
+				// channel cannot hold the fire loop forever after the parent
+				// context is gone, and a failure is recorded in the durable
+				// status rather than reported as a clean "ok" (#299).
+				deliverCtx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), deliveryTimeout)
+				derr := s.Runner.Deliverer.Deliver(deliverCtx, j.Deliver, out)
+				dcancel()
+				if derr != nil {
+					s.Log.Error("final delivery failed", "job", j.ID, "err", derr)
+					if merr := s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok; delivery failed: "+derr.Error()); merr != nil {
+						// The corrective write failed too; the "ok" outcome is
+						// durable but the delivery failure is not — log it.
+						s.Log.Error("record delivery failure in job status", "job", j.ID, "err", merr)
+					}
+				}
+			}
 			return
 		}
 		s.Log.Error("job attempt failed", "job", j.ID, "attempt", attempt, "err", err)
 		if attempt >= policy.MaxAttempts {
 			status := "failed: " + err.Error()
-			_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, status)
+			if merr := s.Store.markRun(context.WithoutCancel(ctx), j.ID, status); merr != nil {
+				s.Log.Error("record job outcome failed", "job", j.ID, "err", merr)
+			}
 			if j.Deliver != "" && s.Runner.Deliverer != nil {
 				notice := fmt.Sprintf("Job %q failed after %d attempt(s): %v", j.Name, attempt, err)
 				if derr := s.Runner.Deliverer.Deliver(context.WithoutCancel(ctx), j.Deliver, notice); derr != nil {
@@ -839,7 +868,12 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 		if errors.Is(err, ErrStalled) {
 			status = "Stalled"
 		}
-		_ = s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, status, next)
+		if rerr := s.Store.scheduleRetry(context.WithoutCancel(ctx), j.ID, status, next); rerr != nil {
+			// A retry that is not durable would be lost on restart; do not
+			// pretend an in-process wait can stand in for it.
+			s.Log.Error("record job retry failed; aborting in-process retry", "job", j.ID, "attempt", attempt, "err", rerr)
+			return
+		}
 		timer := clock.NewTimer(delay)
 		select {
 		case <-ctx.Done():
