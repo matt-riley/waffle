@@ -71,13 +71,27 @@ type ModelAliasChange struct {
 
 // Create starts a new session.
 func (s *Store) Create(ctx context.Context, title string) (*Session, error) {
+	return s.CreateWith(ctx, s.db, title)
+}
+
+// execer is the query surface shared by *sql.DB and *sql.Tx so a session can
+// be created inside a caller's transaction (entity.GroupFor creates the
+// session and channel group atomically, #290).
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// CreateWith inserts a session using an explicit execer (a *sql.DB or an
+// in-flight *sql.Tx). Committing/rolling back the transaction stays the
+// caller's responsibility.
+func (s *Store) CreateWith(ctx context.Context, ex execer, title string) (*Session, error) {
 	idstr, err := id.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("new session id: %w", err)
 	}
 	sess := &Session{ID: idstr, Title: title}
 	ts := s.nowStr()
-	_, err = s.db.ExecContext(ctx,
+	_, err = ex.ExecContext(ctx,
 		`INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)`,
 		sess.ID, sess.Title, ts, ts)
 	if err != nil {

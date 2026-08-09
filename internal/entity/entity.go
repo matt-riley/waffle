@@ -17,6 +17,9 @@ import (
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrUnknownSender means the sender is not one of the owner's identities.
@@ -183,34 +186,91 @@ func (s *Store) Approve(ctx context.Context, code, name string) (*Identity, erro
 // "group" so sessions inherit the restricted group-chat policy (#34).
 // Existing rows keep their stored agent_group.
 func (s *Store) GroupFor(ctx context.Context, channel, chatID, agentGroup string) (*Group, error) {
+	// A concurrent first-touch can transiently surface SQLITE_BUSY while the
+	// winner's transaction is mid-write (busy_timeout does not cover that
+	// window), so retry briefly rather than failing the first message (#290).
+	for attempt := 0; ; attempt++ {
+		g, err := s.groupForOnce(ctx, channel, chatID, agentGroup)
+		if err == nil || !isBusyErr(err) || attempt >= 9 {
+			return g, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// groupForOnce performs one read-or-create pass for a channel group.
+func (s *Store) groupForOnce(ctx context.Context, channel, chatID, agentGroup string) (*Group, error) {
+	g, err := s.readGroup(ctx, channel, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("read channel group %s:%s: %w", channel, chatID, err)
+	}
+	if g != nil {
+		return g, nil
+	}
+
+	// Create the session and the channel group in one transaction: the old
+	// two-step path could orphan the session row when a concurrent first-touch
+	// won the UNIQUE(channel, chat_id) race and this caller's INSERT failed
+	// (#290).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin channel group transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	sess, err := s.sessions.CreateWith(ctx, tx, fmt.Sprintf("%s %s", channel, chatID))
+	if err != nil {
+		return nil, fmt.Errorf("create session for channel group: %w", err)
+	}
+	if agentGroup == "" {
+		agentGroup = config.GroupMain
+	}
+	g = &Group{Channel: channel, ChatID: chatID, AgentGroup: agentGroup, SessionID: sess.ID}
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO channel_groups (channel, chat_id, agent_group, session_id, created_at, profile)
+		VALUES (?, ?, ?, ?, ?, '')`, channel, chatID, g.AgentGroup, g.SessionID, now())
+	if err != nil {
+		// Concurrent first-touch: another caller won the race. Drop the
+		// loser's session with this transaction (it must never commit) and
+		// return the winner, the same recovery pattern as Pair (#290).
+		_ = tx.Rollback()
+		winner, rerr := s.readGroup(ctx, channel, chatID)
+		if rerr != nil || winner == nil {
+			return nil, fmt.Errorf("create channel group: %w", err)
+		}
+		return winner, nil
+	}
+	g.ID, _ = res.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit channel group: %w", err)
+	}
+	return g, nil
+}
+
+// isBusyErr reports whether err is SQLite's transient SQLITE_BUSY
+// ("database is locked"), which concurrent first-touch can surface while the
+// winner's create transaction is mid-write (#290).
+func isBusyErr(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
+// readGroup loads the channel group for a conversation, or nil when absent.
+func (s *Store) readGroup(ctx context.Context, channel, chatID string) (*Group, error) {
 	g := &Group{Channel: channel, ChatID: chatID}
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, agent_group, session_id, profile FROM channel_groups
 		WHERE channel = ? AND chat_id = ?`, channel, chatID).
 		Scan(&g.ID, &g.AgentGroup, &g.SessionID, &g.Profile)
-	if err == nil {
-		return g, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-
-	sess, err := s.sessions.Create(ctx, fmt.Sprintf("%s %s", channel, chatID))
 	if err != nil {
 		return nil, err
 	}
-	if agentGroup == "" {
-		agentGroup = config.GroupMain
-	}
-	g.AgentGroup = agentGroup
-	g.SessionID = sess.ID
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO channel_groups (channel, chat_id, agent_group, session_id, created_at, profile)
-		VALUES (?, ?, ?, ?, ?, '')`, channel, chatID, g.AgentGroup, g.SessionID, now())
-	if err != nil {
-		return nil, fmt.Errorf("create channel group: %w", err)
-	}
-	g.ID, _ = res.LastInsertId()
 	return g, nil
 }
 
