@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.7](https://github.com/matt-riley/waffle/compare/v0.12.6...v0.12.7) (2026-08-09)
+
+
+### Bug Fixes
+
+* **#278:** reuse one http.Transport across fetch calls ([#353](https://github.com/matt-riley/waffle/issues/353)) ([660631d](https://github.com/matt-riley/waffle/commit/660631d2db9bc08bd2c1c3dd4052edc7eed5bbb2))
+* **#279:** truncate on UTF-8 rune boundaries in gitcred ([#349](https://github.com/matt-riley/waffle/issues/349)) ([b20f58e](https://github.com/matt-riley/waffle/commit/b20f58efcf802ff9d1d9716e9d5e985fa9b7920d))
+* **#280:** never slice tool-output spills mid-rune ([#350](https://github.com/matt-riley/waffle/issues/350)) ([77d6bd3](https://github.com/matt-riley/waffle/commit/77d6bd36d58bcba416de6579b0ec267cb50ea504))
+* **#281:** reject ambiguous chat-only profile references ([#352](https://github.com/matt-riley/waffle/issues/352)) ([09d6f31](https://github.com/matt-riley/waffle/commit/09d6f31662dffff98eeb33ea7584ff729095153b))
+* **#282:** scope repo policy to each open, never the shared Manager ([#357](https://github.com/matt-riley/waffle/issues/357)) ([01b5a67](https://github.com/matt-riley/waffle/commit/01b5a675c9fde7a19059f4a5aa631097f315e49d))
+* **#283:** clean up volume/session when devcontainer adoption fails ([#354](https://github.com/matt-riley/waffle/issues/354)) ([147ff22](https://github.com/matt-riley/waffle/commit/147ff22d156fad30febc0d36409406dbc9ff1be4))
+* **#284:** fail runs when AppendTurn persistence fails ([#355](https://github.com/matt-riley/waffle/issues/355)) ([488bf8a](https://github.com/matt-riley/waffle/commit/488bf8ac07a5fbc52615b99074d664beb2b35b33))
+* **#285:** implement RunWithID on DockerExecutor ([#356](https://github.com/matt-riley/waffle/issues/356)) ([e029837](https://github.com/matt-riley/waffle/commit/e0298379affdabae485589bcd60285ad02e2bcce))
+
 ## [0.12.6](https://github.com/matt-riley/waffle/compare/v0.12.5...v0.12.6) (2026-08-09)
 
 
