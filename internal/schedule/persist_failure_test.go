@@ -94,7 +94,9 @@ func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true
 func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.records = append(h.records, r)
+	// slog.Handler must not retain the Record: it may reference transient
+	// backing storage, so clone before storing.
+	h.records = append(h.records, r.Clone())
 	return nil
 }
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
