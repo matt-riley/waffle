@@ -547,6 +547,10 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 // store when Scheduler.Reconcile is unset.
 const DefaultReconcile = 30 * time.Second
 
+// deliveryTimeout bounds the success delivery so a stalled channel cannot
+// hold the fire loop after the run context is gone (#299).
+const deliveryTimeout = 5 * time.Minute
+
 // jobStore is the persistence surface Scheduler needs. It is an interface so
 // tests can inject failure into attempt/outcome/retry writes (#299).
 type jobStore interface {
@@ -819,8 +823,16 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 				return
 			}
 			if j.Deliver != "" && out != "" && s.Runner.Deliverer != nil {
-				if derr := s.Runner.Deliverer.Deliver(context.WithoutCancel(ctx), j.Deliver, out); derr != nil {
+				// Delivery runs on a bounded detached context so a stalled
+				// channel cannot hold the fire loop forever after the parent
+				// context is gone, and a failure is recorded in the durable
+				// status rather than reported as a clean "ok" (#299).
+				deliverCtx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), deliveryTimeout)
+				derr := s.Runner.Deliverer.Deliver(deliverCtx, j.Deliver, out)
+				dcancel()
+				if derr != nil {
 					s.Log.Error("final delivery failed", "job", j.ID, "err", derr)
+					_ = s.Store.markRun(context.WithoutCancel(ctx), j.ID, "ok; delivery failed: "+derr.Error())
 				}
 			}
 			return

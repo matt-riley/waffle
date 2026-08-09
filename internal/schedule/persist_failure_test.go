@@ -227,3 +227,26 @@ func TestFireAbortsInProcessRetryWhenScheduleRetryFails(t *testing.T) {
 		t.Fatalf("job = %+v, want attempt 1 with no durable retry", got)
 	}
 }
+
+// failingDeliverer fails the success delivery so tests can assert the durable
+// status reflects it (#299 review).
+type failingDeliverer struct{ err error }
+
+func (d *failingDeliverer) Deliver(_ context.Context, _, _ string) error { return d.err }
+
+func TestFireRecordsDeliveryFailureInDurableStatus(t *testing.T) {
+	c := newManualClock()
+	p := &sequenceProvider{failFor: 0}
+	jobs, s, j := retryFixture(t, p, c)
+	s.Runner.Deliverer = &failingDeliverer{err: errors.New("channel timeout")}
+
+	s.fire(context.Background(), j)
+
+	got, err := jobs.Get(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.LastStatus, "ok") || !strings.Contains(got.LastStatus, "delivery failed: channel timeout") {
+		t.Fatalf("last_status = %q, want the delivery failure recorded", got.LastStatus)
+	}
+}
