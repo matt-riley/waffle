@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/agentbuild"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/hooks"
@@ -100,7 +101,7 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 		return "", perr
 	} else if p != nil {
 		toolPol = repopolicy.TightenTools(toolPol, p.Tools)
-		toolPol = applyCodeIntelCaps(toolPol, p.CodeIntelCaps)
+		toolPol = agentbuild.ApplyCodeIntelCaps(toolPol, p.CodeIntelCaps)
 		repoPrompt = p.PromptBlock()
 	}
 
