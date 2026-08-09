@@ -12,6 +12,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // RepoForSession resolves the repo a session's workspace is bound to. It is the
@@ -173,5 +174,5 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return textcut.Cut(s, n) + "…"
 }
