@@ -41,6 +41,10 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 		"bash scripts/check-linux-artifact-repro.sh",
 		"build-linux-artifact:",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+		// #335: the artifact build runs in parallel with the repro check (the
+		// repro gate moves to the deploy dispatch, asserted by
+		// TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly).
+		"needs: [deterministic-eval, dashboard-browser, ci, lint, security]",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("workflow missing %q:\n%s", want, workflow)
@@ -82,7 +86,10 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 	job := workflow[jobStart:]
 
 	for _, want := range []string{
-		"needs: build-linux-artifact",
+		// #335: the dispatch waits for both the artifact build and the repro
+		// check, so no deploy request leaves a run whose artifact is not
+		// proven reproducible.
+		"needs: [build-linux-artifact, linux-artifact-repro]",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.APP_ID != ''",
 		"uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v3",
 		"artifact-run-id: ${{ github.run_id }}",

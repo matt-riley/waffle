@@ -82,7 +82,12 @@ jobs:
   build-linux-artifact:
     name: build linux artifact
     runs-on: ubuntu-latest
-    needs: [deterministic-eval, dashboard-browser, ci, lint, security, linux-artifact-repro]
+    # linux-artifact-repro deliberately does not gate this job: running the
+    # build in parallel with the repro check removes ~140s of serial time from
+    # every main run. The repro gate moves to request-infra-deploy instead, so
+    # no deploy is dispatched for a run whose artifact is not reproducible
+    # (#335).
+    needs: [deterministic-eval, dashboard-browser, ci, lint, security]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
@@ -126,7 +131,12 @@ jobs:
         run: bash scripts/check-linux-artifact-repro.sh
 
   request-infra-deploy:
-    needs: build-linux-artifact
+    # linux-artifact-repro gates the dispatch (not the artifact build): a
+    # deploy request must not leave the run while reproducibility is still
+    # being checked. Any other late failure (e.g. ci) is still caught by the
+    # run-level gate — deploy-waffle.yml requires the source run's
+    # .status == "completed" and .conclusion == "success" per #240.
+    needs: [build-linux-artifact, linux-artifact-repro]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.APP_ID != ''
     uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@v3
     with:
