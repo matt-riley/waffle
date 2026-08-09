@@ -856,8 +856,14 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		return nil, nil, fmt.Errorf("workspace %s is closed", id)
 	}
 
+	// startedEgress is the posture the container actually starts with; if the
+	// policy re-read below changes its network, the container is recreated so
+	// the running posture matches the durable policy (#282 / Greptile review).
+	startedEgress := ""
+	token := ""
+
 	if m.MintToken != nil {
-		token, err := m.MintToken(ctx, ws.SessionID)
+		token, err = m.MintToken(ctx, ws.SessionID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("mint token for resume: %w", err)
 		}
@@ -869,11 +875,11 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		// it had before — never the host default widened by another repo's
 		// open (#282)). Pre-migration rows (egress '') fall back to the host
 		// config rather than tightening to the netlocked default.
-		resumeEgress := ws.Egress
-		if resumeEgress == "" {
-			resumeEgress = m.Egress
+		startedEgress = ws.Egress
+		if startedEgress == "" {
+			startedEgress = m.Egress
 		}
-		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, resumeEgress)); err != nil {
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, startedEgress)); err != nil {
 			_ = m.setStatus(ctx, id, StatusIdle)
 			return nil, nil, fmt.Errorf("restart workspace with refreshed credentials: %w", err)
 		}
@@ -882,6 +888,10 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 		}
 		ws.Status = StatusOpen
 	} else if ws.Status == StatusIdle {
+		startedEgress = ws.Egress
+		if startedEgress == "" {
+			startedEgress = m.Egress
+		}
 		if err := m.Runtime.StartContainer(ctx, ws.Container); err != nil {
 			return nil, nil, err
 		}
@@ -916,6 +926,25 @@ func (m *Manager) resume(ctx context.Context, id string) (*Workspace, *sandbox.C
 			`UPDATE workspaces SET egress = ?, idle_timeout = ?, updated_at = ? WHERE id = ?`,
 			ws.Egress, ws.IdleTimeout, now(), id); err != nil {
 			_ = client.Close()
+			return nil, nil, err
+		}
+	}
+	// A repo that tightened egress while the workspace was idle must not
+	// leave the running container on the wider network: recreate it on the
+	// tightened posture, mirroring Open's egress-restart.
+	if egressNetwork(state.egress) != egressNetwork(startedEgress) {
+		_ = client.Close()
+		if err := m.Runtime.RemoveContainer(ctx, ws.Container); err != nil {
+			_ = m.setStatus(ctx, id, StatusOpen)
+			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
+		}
+		if err := m.Runtime.StartWorkspace(ctx, m.containerOpts(ws, token, state.egress)); err != nil {
+			_ = m.setStatus(ctx, id, StatusOpen)
+			return nil, nil, fmt.Errorf("restart workspace for policy egress: %w", err)
+		}
+		client, err = m.newClient(ws)
+		if err != nil {
+			_ = m.setStatus(ctx, id, StatusOpen)
 			return nil, nil, err
 		}
 	}
