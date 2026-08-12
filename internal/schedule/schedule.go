@@ -787,6 +787,14 @@ func (s *Scheduler) awaitRetryReady(ctx context.Context, current *Job) (*Job, bo
 	return current, true
 }
 
+// retryTimer returns a timer due at the absolute retry deadline rather than
+// delay from the current instant. The persisted next_retry is absolute, so a
+// clock advance between scheduling and timer creation (a slow caller) must not
+// push the in-process wait a full delay later than the deadline it records.
+func retryTimer(clock Clock, next time.Time) Timer {
+	return clock.NewTimer(next.Sub(clock.Now()))
+}
+
 func (s *Scheduler) fire(ctx context.Context, j Job) {
 	if s.Usage != nil {
 		paused, err := s.Usage.Paused(ctx)
@@ -891,7 +899,7 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 			s.Log.Error("record job retry failed; aborting in-process retry", "job", j.ID, "attempt", attempt, "err", rerr)
 			return
 		}
-		timer := clock.NewTimer(delay)
+		timer := retryTimer(clock, next)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
