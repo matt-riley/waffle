@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/matt-riley/waffle/compare/v0.13.0...v0.14.0) (2026-08-12)
+
+
+### Features
+
+* **#247:** prompt caching breakpoints and cached-token accounting ([#375](https://github.com/matt-riley/waffle/issues/375)) ([6f806df](https://github.com/matt-riley/waffle/commit/6f806df63a3ef6d5a19dafdd82ea8442f03ad8e9))
+
 ## [0.13.0](https://github.com/matt-riley/waffle/compare/v0.12.8...v0.13.0) (2026-08-12)
 
 
