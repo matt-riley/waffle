@@ -41,14 +41,14 @@ func (s *Store) addAt(ctx context.Context, session string, u llm.Usage, now time
 	provider := providerOrLegacyDefault(u.Provider)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,provider)
 		VALUES (?, 'day', ?, 1, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens,provider=excluded.provider`,
+		ON CONFLICT(session_id,period,period_start,provider) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens`,
 		session, period(now, 24*time.Hour), u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, provider)
 	if err != nil || !hour {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,provider)
 		VALUES (?, 'hour', ?, 1, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens,provider=excluded.provider`,
+		ON CONFLICT(session_id,period,period_start,provider) DO UPDATE SET requests=requests+1,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens`,
 		session, period(now, time.Hour), u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, provider)
 	return err
 }
@@ -160,7 +160,7 @@ func (s *Store) ReserveRequestAt(ctx context.Context, session, provider string, 
 	for _, p := range usagePeriods {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,reserved_tokens,provider)
 			VALUES (?, ?, ?, 1, 0, 0, 0, 0, ?, ?)
-			ON CONFLICT(session_id,period,period_start) DO UPDATE SET requests=requests+1,reserved_tokens=reserved_tokens+excluded.reserved_tokens,provider=excluded.provider`,
+			ON CONFLICT(session_id,period,period_start,provider) DO UPDATE SET requests=requests+1,reserved_tokens=reserved_tokens+excluded.reserved_tokens`,
 			session, p.name, period(now, p.d), reserved, providerOrLegacyDefault(provider)); err != nil {
 			return 0, err
 		}
@@ -206,12 +206,11 @@ func (s *Store) ReconcileReservationAt(ctx context.Context, session string, now 
 			output_tokens=CASE WHEN output_tokens > ? THEN ? ELSE output_tokens+? END,
 			cache_creation_input_tokens=CASE WHEN cache_creation_input_tokens > ? THEN ? ELSE cache_creation_input_tokens+? END,
 			cache_read_input_tokens=CASE WHEN cache_read_input_tokens > ? THEN ? ELSE cache_read_input_tokens+? END,
-			reserved_tokens=MAX(0,reserved_tokens-?),
-			provider=?
-			WHERE session_id=? AND period=? AND period_start=?`,
+			reserved_tokens=MAX(0,reserved_tokens-?)
+			WHERE session_id=? AND period=? AND period_start=? AND provider=?`,
 			maxInt-input, maxInt, input, maxInt-output, maxInt, output,
 			maxInt-cacheWrite, maxInt, cacheWrite, maxInt-cacheRead, maxInt, cacheRead,
-			reserved, providerOrLegacyDefault(actual.Provider), session, p.name, period(now, p.d))
+			reserved, session, p.name, period(now, p.d), providerOrLegacyDefault(actual.Provider))
 		if err != nil {
 			return err
 		}
@@ -231,13 +230,12 @@ type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// dayTokenSumQuery aggregates one day's counters per provider type. Rows
-// carry their own provider attribution (migration 0029), so the billed
-// total must be computed per provider with that provider's cost model and
-// summed. Today the (session_id, period, period_start) primary key merges
-// a budget key's day into one row, so the grouping normally yields a single
-// group; it keeps pricing correct if rows ever become finer-grained than
-// one per budget key per period.
+// dayTokenSumQuery aggregates one day's counters per provider type. Usage
+// rows are keyed by (session_id, period, period_start, provider) (migration
+// 0030), so a budget key that routed requests to more than one upstream
+// keeps one row per provider; the billed total must be computed per provider
+// with that provider's cost model and summed. Legacy rows default to
+// 'anthropic' (migration 0029), preserving their original pricing.
 const dayTokenSumQuery = `SELECT provider,COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(cache_creation_input_tokens),0),COALESCE(SUM(cache_read_input_tokens),0),COALESCE(SUM(reserved_tokens),0)
 	FROM usage WHERE session_id=? AND period='day' AND period_start=? GROUP BY provider`
 
@@ -322,7 +320,7 @@ func (s *Store) AddTokensAt(ctx context.Context, session string, u llm.Usage, no
 	for _, p := range usagePeriods {
 		_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,provider)
 			VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
-			ON CONFLICT(session_id,period,period_start) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens,provider=excluded.provider`,
+			ON CONFLICT(session_id,period,period_start,provider) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_creation_input_tokens=cache_creation_input_tokens+excluded.cache_creation_input_tokens,cache_read_input_tokens=cache_read_input_tokens+excluded.cache_read_input_tokens`,
 			session, p.name, period(now, p.d), u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, provider)
 		if err != nil {
 			return err

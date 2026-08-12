@@ -719,3 +719,107 @@ func TestAlertPricesPerProvider(t *testing.T) {
 		t.Fatalf("notices = %v, want no Anthropic alert below its true-cost threshold", notices)
 	}
 }
+
+// TestMixedProviderDayPricesEachProvider is the regression for the #247
+// review finding that a budget key routing requests to both Anthropic and
+// OpenAI-compatible upstreams in one period merged their counters into a
+// single row priced at the last writer's multipliers. Rows are keyed per
+// provider (migration 0030), so each provider's cache tokens price with its
+// own model and the day sum binds on the true per-provider total.
+func TestMixedProviderDayPricesEachProvider(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	session := "mixed-providers"
+	// Anthropic: 1000 cache-read tokens bill at 0.1x = 100.
+	if err := u.AddRequestAt(ctx, session, llm.Usage{InputTokens: 50, CacheReadInputTokens: 1000, Provider: "anthropic"}, now); err != nil {
+		t.Fatal(err)
+	}
+	// OpenAI: 500 cache-read tokens bill at 0.5x = 250. Total true cost 350.
+	if err := u.AddRequestAt(ctx, session, llm.Usage{InputTokens: 50, CacheReadInputTokens: 500, Provider: "openai"}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Another identical Anthropic request accumulates on the Anthropic row only.
+	if err := u.AddRequestAt(ctx, session, llm.Usage{InputTokens: 50, CacheReadInputTokens: 1000, Provider: "anthropic"}, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := u.List(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dayAnthropic, dayOpenAI int
+	for _, row := range rows {
+		if row.Period != "day" {
+			continue
+		}
+		switch row.Provider {
+		case "anthropic":
+			dayAnthropic++
+			if row.Requests != 2 || row.CacheReadInputTokens != 2000 {
+				t.Fatalf("anthropic day row = %+v, want 2 requests and 2000 cache-read tokens", row)
+			}
+		case "openai":
+			dayOpenAI++
+			if row.Requests != 1 || row.CacheReadInputTokens != 500 {
+				t.Fatalf("openai day row = %+v, want 1 request and 500 cache-read tokens", row)
+			}
+		default:
+			t.Fatalf("unexpected day row provider %q", row.Provider)
+		}
+	}
+	if dayAnthropic != 1 || dayOpenAI != 1 {
+		t.Fatalf("day rows per provider: anthropic=%d openai=%d, want 1 each", dayAnthropic, dayOpenAI)
+	}
+	// True cost: 2*50 + 2000*0.1 + 50 + 500*0.5 = 100 + 200 + 50 + 250 = 600.
+	// If the row had merged and repriced everything at the last writer
+	// (openai), the billed total would be 650; at the first writer
+	// (anthropic), 400. Either way 600 pins the per-provider sum.
+	if err := u.Check(ctx, session, Limits{TokensPerDay: 600}, now); err == nil {
+		t.Fatal("budget did not bind on the per-provider true cost 600")
+	}
+	if err := u.Check(ctx, session, Limits{TokensPerDay: 601}, now); err != nil {
+		t.Fatalf("budget bound too early at per-provider true cost 600: %v", err)
+	}
+}
+
+// TestMixedProviderReserveReconcilePricesEachProvider pins the broker path:
+// reservations for different upstreams in the same period stay on their own
+// provider rows through reconciliation, and the combined day binds on the
+// sum of each provider's true cost.
+func TestMixedProviderReserveReconcilePricesEachProvider(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	session := "mixed-reserve"
+	reserved, err := u.ReserveRequestAt(ctx, session, "anthropic", Limits{TokensPerDay: 10000}, now, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.ReconcileReservationAt(ctx, session, now, reserved, llm.Usage{InputTokens: 100, CacheReadInputTokens: 1000, Provider: "anthropic"}); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err = u.ReserveRequestAt(ctx, session, "openai", Limits{TokensPerDay: 10000}, now, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.ReconcileReservationAt(ctx, session, now, reserved, llm.Usage{InputTokens: 100, CacheReadInputTokens: 1000, Provider: "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	// True cost 100 + 1000*0.1 + 100 + 1000*0.5 = 200 + 100 + 500 = 800.
+	if err := u.Check(ctx, session, Limits{TokensPerDay: 800}, now); err == nil {
+		t.Fatal("budget did not bind on combined per-provider true cost 800")
+	}
+	if err := u.Check(ctx, session, Limits{TokensPerDay: 801}, now); err != nil {
+		t.Fatalf("budget bound too early at combined per-provider true cost 800: %v", err)
+	}
+}

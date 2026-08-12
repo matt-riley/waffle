@@ -161,9 +161,9 @@ cannot be bounded locally. Only explicitly completed streams reconcile
 trustworthy final usage; aborted or partial streams retain their reservation.
 Reconciliation carries base, cache-creation, and cache-read input token fields
 separately, and OpenAI-compatible `prompt_tokens_details.cached_tokens` is split
-out the same way. Usage rows record the provider type that produced them
-(legacy rows default to Anthropic), and budget binding prices each row's cache
-counters with that provider's multipliers — Anthropic 1.25x writes / 0.1x reads,
+out the same way. Usage rows are keyed per provider type and record the provider
+that produced them (legacy rows default to Anthropic), so budget binding prices
+each provider's cache counters with that provider's multipliers — Anthropic 1.25x writes / 0.1x reads,
 OpenAI-compatible 1.0x writes / 0.5x reads — instead of billing every input
 token at the full rate. SSE usage is observed incrementally without retaining
 the bounded JSON response prefix or tail.
