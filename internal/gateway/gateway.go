@@ -268,7 +268,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 				defer g.ack(msg)
 				// Handle concurrently across conversations, serially within
 				// one (the per-group lock).
-				g.handle(drainCtx, msg)
+				g.handle(drainCtx, &msg)
 			}(msg)
 		}
 	}
@@ -458,7 +458,7 @@ func (g *Gateway) providerForSession(ctx context.Context, sessionID string) (llm
 	return nil, ""
 }
 
-func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
+func (g *Gateway) handle(ctx context.Context, msg *channel.Message) {
 	if g.Observability != nil {
 		g.Observability.MarkAdapter(msg.Channel)
 	}
@@ -496,11 +496,16 @@ func (g *Gateway) handle(ctx context.Context, msg channel.Message) {
 	unlock := g.lockGroup(msg.Channel + "\x00" + msg.ChatID)
 	defer unlock()
 
-	reply, err := g.converse(ctx, msg)
+	// Attachment bytes are fetched only for an admitted sender, inside the
+	// conversation lock: strangers' attachments are never downloaded, and
+	// downloads serialize with handling per conversation (#251).
+	g.resolveAttachments(ctx, adapter, msg)
+
+	reply, err := g.converse(ctx, *msg)
 	if err != nil {
 		log.Error("agent run", "err", err)
 		detail := fmt.Sprintf("%v", err)
-		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID, agentGroupFor(msg)); groupErr == nil {
+		if group, groupErr := g.Entities.GroupFor(ctx, msg.Channel, msg.ChatID, agentGroupFor(*msg)); groupErr == nil {
 			if selected, agentErr := g.agentForGroup(group); agentErr == nil && selected != nil && selected.Redact != nil {
 				detail = selected.Redact(detail)
 			}
@@ -530,6 +535,84 @@ func agentGroupFor(msg channel.Message) string {
 	return config.GroupMain
 }
 
+// resolveAttachments fetches bytes for decoded attachments through the
+// adapter's AttachmentFetcher. Adapters without a fetcher leave the
+// attachment labelled not-downloaded; a failed fetch is recorded on the
+// attachment so the user gets an explanation instead of silence. The
+// caller holds the conversation lock and has already admitted the sender.
+func (g *Gateway) resolveAttachments(ctx context.Context, adapter channel.Adapter, msg *channel.Message) {
+	if len(msg.Attachments) == 0 {
+		return
+	}
+	fetcher, ok := adapter.(channel.AttachmentFetcher)
+	for i := range msg.Attachments {
+		att := &msg.Attachments[i]
+		if len(att.Data) > 0 || att.Fetch == "" {
+			continue
+		}
+		if !ok {
+			att.Skip = "this channel cannot download attachments"
+			continue
+		}
+		data, err := fetcher.FetchAttachment(ctx, att.Fetch)
+		if err != nil {
+			g.Log.Error("attachment fetch failed", "channel", msg.Channel, "chat", msg.ChatID, "media", att.MediaType, "err", err)
+			att.Skip = "download failed: " + textcut.Cut(err.Error(), 120)
+			continue
+		}
+		att.Data = data
+		att.Fetch = ""
+	}
+}
+
+// userTurnText renders the user message for the model: one labelled note per
+// attachment, then the caption/text. Attachment content is untrusted data
+// from other people, so it is labelled as such before it reaches the model,
+// consistent with tool-output framing (#251).
+func userTurnText(msg channel.Message) string {
+	var b strings.Builder
+	for _, att := range msg.Attachments {
+		b.WriteString(attachmentNote(att))
+		b.WriteString("\n")
+	}
+	if text := strings.TrimSpace(msg.Text); text != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(text)
+	}
+	if b.Len() == 0 {
+		return "(empty message)"
+	}
+	return b.String()
+}
+
+// attachmentNote describes one attachment for the model. Downloaded bytes
+// are named; refused or failed ones carry the reason, so a degraded path is
+// a visible explanation rather than silence.
+func attachmentNote(att channel.Attachment) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[untrusted attachment: %s", att.MediaType)
+	if att.Filename != "" {
+		fmt.Fprintf(&b, " %q", att.Filename)
+	}
+	if att.Size > 0 {
+		fmt.Fprintf(&b, ", %d bytes", att.Size)
+	}
+	if att.MIME != "" {
+		fmt.Fprintf(&b, ", %s", att.MIME)
+	}
+	switch {
+	case len(att.Data) > 0:
+		b.WriteString("]")
+	case att.Skip != "":
+		fmt.Fprintf(&b, ", not downloaded: %s]", att.Skip)
+	default:
+		b.WriteString(", not downloaded]")
+	}
+	return b.String()
+}
+
 // converse routes one owner message through the conversation's session.
 func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, error) {
 	if g.Usage != nil {
@@ -556,7 +639,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	history = session.Repair(history)
 	persisted := len(history)
 
-	history = append(history, llm.UserText(msg.Text))
+	history = append(history, llm.UserText(userTurnText(msg)))
 	log := g.Log
 	if log == nil {
 		log = slog.Default()

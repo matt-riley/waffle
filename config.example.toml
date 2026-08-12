@@ -150,6 +150,17 @@ sandbox = "docker"
 allow = ["read_file", "search", "recall", "expand_output", "expand_context"]
 deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr", "github_comment"]
 
+# Telegram channel (waffle serve). Attachment downloads are inbound data
+# from other people, so they are deny-by-default: unset or 0 refuses every
+# attachment before any fetch, and the example value below is conservative
+# (10 MiB). The cap is enforced from the message's own file_size before
+# getFile or any download; raised values are a trust decision, not a tuning
+# knob. Token is a secret:// reference or TELEGRAM_BOT_TOKEN.
+# [channel.telegram]
+# enabled = true
+# token = "secret://telegram/bot-token"
+# max_attachment_bytes = 10485760
+
 # Surface binds (CLI):
 #   waffle session profile telegram:42 reviewer
 #   waffle cron add dig 0 9 * * 1 "summarize starred repos" --profile researcher
