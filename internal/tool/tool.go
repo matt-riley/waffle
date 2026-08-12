@@ -114,6 +114,11 @@ const OutputLimit = 48 * 1024
 // enough payload for mid-run expand_output / FTS (#69).
 const HostReturnCap = 512 * 1024
 
+// fileContentMaxBytes is the maximum content write_file and edit_file accept.
+// It matches the 2 MiB cap used while accumulating provider tool arguments and
+// reading fetch responses, while leaving enough room for model output.
+const fileContentMaxBytes = 2 * 1024 * 1024
+
 // CapHostReturn bounds tool output to HostReturnCap without applying
 // OutputLimit head+tail truncation (that happens in Agent.runOne after spill).
 // Exported for out-of-package transports that return tool output to the agent

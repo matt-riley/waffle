@@ -143,7 +143,7 @@ var writeSchema = mustSchema(`{
 	"type": "object",
 	"properties": {
 		"path": {"type": "string", "description": "Path of the file to write"},
-		"content": {"type": "string", "description": "Full file content"}
+		"content": {"type": "string", "description": "Full file content (maximum 2 MiB)"}
 	},
 	"required": ["path", "content"]
 }`)
@@ -151,7 +151,7 @@ var writeSchema = mustSchema(`{
 func (WriteFile) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "write_file",
-		Description: "Write content to a file, replacing anything already there. Parent directories are created as needed.",
+		Description: "Write content to a file, replacing anything already there. Parent directories are created as needed. Content is limited to 2 MiB.",
 		InputSchema: writeSchema,
 	}
 }
@@ -163,6 +163,9 @@ func (w WriteFile) Run(ctx context.Context, input json.RawMessage) (string, erro
 	}
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
+	}
+	if len(in.Content) > fileContentMaxBytes {
+		return "", fmt.Errorf("write_file content too large: %d bytes (maximum %d bytes)", len(in.Content), fileContentMaxBytes)
 	}
 	path, err := w.Roots.Resolve(in.Path)
 	if err != nil {
@@ -230,7 +233,7 @@ var editSchema = mustSchema(`{
 	"properties": {
 		"path": {"type": "string", "description": "Path of the file to edit"},
 		"old_string": {"type": "string", "description": "Exact text to replace; must appear exactly once unless replace_all"},
-		"new_string": {"type": "string", "description": "Replacement text"},
+		"new_string": {"type": "string", "description": "Replacement text (maximum 2 MiB)"},
 		"replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring uniqueness"}
 	},
 	"required": ["path", "old_string", "new_string"]
@@ -239,7 +242,7 @@ var editSchema = mustSchema(`{
 func (EditFile) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "edit_file",
-		Description: "Replace an exact string in a file. Fails if the string is missing, or ambiguous without replace_all.",
+		Description: "Replace an exact string in a file. Fails if the string is missing, or ambiguous without replace_all. Replacement text is limited to 2 MiB.",
 		InputSchema: editSchema,
 	}
 }
@@ -253,6 +256,9 @@ func (e EditFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	}
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", fmt.Errorf("bad input: %w", err)
+	}
+	if len(in.NewString) > fileContentMaxBytes {
+		return "", fmt.Errorf("edit_file new_string too large: %d bytes (maximum %d bytes)", len(in.NewString), fileContentMaxBytes)
 	}
 	path, err := e.Roots.Resolve(in.Path)
 	if err != nil {
