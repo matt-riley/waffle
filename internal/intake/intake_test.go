@@ -578,9 +578,9 @@ func TestNextLinkURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := nextLinkURL(tt.hdr)
+			got, ok := NextLinkURL(tt.hdr)
 			if ok != tt.ok || got != tt.want {
-				t.Fatalf("nextLinkURL(%q) = (%q, %v), want (%q, %v)", tt.hdr, got, ok, tt.want, tt.ok)
+				t.Fatalf("NextLinkURL(%q) = (%q, %v), want (%q, %v)", tt.hdr, got, ok, tt.want, tt.ok)
 			}
 		})
 	}

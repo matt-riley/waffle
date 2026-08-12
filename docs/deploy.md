@@ -417,9 +417,9 @@ or data in existing backups.
 
 ## GitHub App setup
 
-Register an App with `Contents: Read and write` and no broader permissions,
-install it only on repositories waffle may operate on, and store its PEM
-private key in the secret store:
+Register an App with the permissions for the tools you use and no broader
+permissions, install it only on repositories waffle may operate on, and store
+its PEM private key in the secret store:
 
 ```toml
 [github.app]
@@ -433,6 +433,18 @@ caches it until five minutes before expiry, and records `backend=github-app`
 plus the repo scope in its audit row. If `[github.app]` is absent, waffle uses
 the scoped `GITHUB_TOKEN`/`secret://github/token` fallback. A session bound to
 repository A cannot mint a credential for repository B.
+
+Host-side tools (`github_pr` plus the issue #252 read/comment surface) mint one
+installation token per call, each carrying only the permission that tool
+needs, and never pass those tokens into a workspace container (containers only
+ever see the `contents:write` git credential). The permission sets are:
+`contents:write` for git push; `pull_requests:write` for `github_pr` and
+`github_comment` on pull requests; `pull_requests:read` for `github_pr_get`,
+`github_pr_diff`, and `github_pr_comments`; `issues:write` for `github_comment`
+on issues; `issues:read` for `github_issue_get`; `checks:read` for
+`github_checks`. Operators upgrading an existing app must re-grant the newly
+needed permissions in the GitHub App settings before the corresponding tools
+start working.
 
 ## Workspace egress
 

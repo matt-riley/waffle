@@ -401,6 +401,10 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 		r.Deny = AppendUnique(r.Deny, "distill_skill")
 		// Working-set mutation is owner-session only by default (#67).
 		r.Deny = AppendUnique(r.Deny, "workspace_update")
+		// Public, permanent publish actions stay denied for unattended tiers
+		// by default (#252): an injected issue body must not be able to
+		// produce a public GitHub comment with no human in the loop.
+		r.Deny = AppendUnique(r.Deny, "github_comment")
 	}
 	if r.Mode == "docker" {
 		r.Deny = AppendUnique(r.Deny, "remember")
@@ -501,9 +505,17 @@ var knownProfileTools = map[string]bool{
 	"remember": true, "memory_update": true, "recall": true, "distill_skill": true,
 	"workspace_update": true, "expand_output": true, "expand_context": true,
 	"spawn_subagent": true,
-	// Opens a pull request for the repo the session's workspace is bound to.
-	// Host-side: the pull-request token is never handed to a container.
-	"github_pr": true,
+	// Host-side GitHub tools (issue #252). Each mints a per-call installation
+	// token carrying only the permission it needs, and none of those tokens
+	// ever enters a container; every tool resolves the repo from the
+	// session's workspace binding, never from tool input.
+	"github_pr":          true,
+	"github_pr_get":      true,
+	"github_pr_diff":     true,
+	"github_pr_comments": true,
+	"github_comment":     true,
+	"github_checks":      true,
+	"github_issue_get":   true,
 	// codeintel
 	"code_find_symbol": true, "code_references": true, "code_callers": true,
 	"code_structure": true, "code_blast_radius": true, "code_suggest_tests": true,
@@ -633,7 +645,7 @@ func (c Config) UsesDocker() bool {
 
 // restrictedDefaultGroup reports whether group is a reserved tier that
 // inherits the unattended deny defaults (bash, remember, memory_update,
-// distill_skill).
+// distill_skill, workspace_update, github_comment).
 func restrictedDefaultGroup(group string) bool {
 	return group == GroupCron || group == GroupIssue || group == GroupGroup
 }

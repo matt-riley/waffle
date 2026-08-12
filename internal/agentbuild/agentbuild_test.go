@@ -3,19 +3,26 @@ package agentbuild
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/repopolicy"
+	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
 )
@@ -237,3 +244,98 @@ func TestSyncWorkspaceOnceSkipsRepeatAfterSuccess(t *testing.T) {
 		t.Fatalf("hits = %+v, want the successful sync not to be repeated", hits)
 	}
 }
+
+// TestBuildRegistersGitHubHostToolsOnlyWhenAnAppExists is the #252 wiring
+// gate: with [github.app] the host toolbox offers the full GitHub surface
+// (github_pr plus the read/comment tools); without it none of them are
+// offered. The tools live in the host toolbox, never the sandbox executor, so
+// their per-call tokens cannot reach a container.
+func TestBuildRegistersGitHubHostToolsOnlyWhenAnAppExists(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key" // literal, avoids secret-store lookup
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	sessions := session.New(st)
+	ws := memory.Workspace{Dir: t.TempDir()}
+	runtime := &buildTestRuntime{}
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	app, err := gitcred.NewApp(42, 7, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), "http://github.test", nil, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	githubTools := []string{"github_pr", "github_pr_get", "github_pr_diff", "github_pr_comments", "github_comment", "github_checks", "github_issue_get"}
+	defNames := func(a *agent.Agent) map[string]bool {
+		names := map[string]bool{}
+		for _, d := range a.Tools.Defs() {
+			names[d.Name] = true
+		}
+		return names
+	}
+
+	withApp, cleanup, err := (&Builder{
+		Config: cfg, Sessions: sessions, Workspace: ws, Runtime: runtime,
+		GitHubApp: func() (*gitcred.App, error) { return app, nil },
+	}).Build(ctx, config.GroupMain, "")
+	if err != nil {
+		t.Fatalf("build with app: %v", err)
+	}
+	defer func() { _ = cleanup.Stop() }()
+	names := defNames(withApp)
+	for _, name := range githubTools {
+		if !names[name] {
+			t.Errorf("with app: toolbox missing %q", name)
+		}
+	}
+
+	without, cleanup2, err := (&Builder{
+		Config: cfg, Sessions: sessions, Workspace: ws, Runtime: runtime,
+	}).Build(ctx, config.GroupMain, "")
+	if err != nil {
+		t.Fatalf("build without app: %v", err)
+	}
+	defer func() { _ = cleanup2.Stop() }()
+	names = defNames(without)
+	for _, name := range githubTools {
+		if names[name] {
+			t.Errorf("without app: toolbox must not offer %q", name)
+		}
+	}
+}
+
+// buildTestRuntime is a minimal Runtime for Builder tests: it answers model
+// calls and resolves a default alias without touching the network.
+type buildTestRuntime struct {
+	*configuredProfileProvider
+}
+
+func (r *buildTestRuntime) Resolve(alias string) (config.ResolvedModel, error) {
+	return config.ResolvedModel{
+		Alias:          alias,
+		ConnectionName: "default",
+		Connection: config.ProviderConnection{
+			Type:      "anthropic",
+			APIKey:    "test-key",
+			MaxTokens: 8192,
+		},
+		UpstreamModel: alias,
+		MaxTokens:     8192,
+	}, nil
+}
+
+func (r *buildTestRuntime) Redact(s string) string { return s }

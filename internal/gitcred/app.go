@@ -82,10 +82,15 @@ func (a *App) jwt(now time.Time) (string, error) {
 // Permission sets requested when minting an installation token. Each caller
 // asks for the narrowest set that does its job: the git credential handed to a
 // workspace can only push code, and never gains the ability to open a pull
-// request even though the same app grants it.
+// request even though the same app grants it. The host-side tools (#252) each
+// pick exactly one of these per call.
 var (
-	permContentsWrite = map[string]string{"contents": "write"}
-	permPullRequests  = map[string]string{"pull_requests": "write"}
+	permContentsWrite    = map[string]string{"contents": "write"}
+	permPullRequests     = map[string]string{"pull_requests": "write"}
+	permPullRequestsRead = map[string]string{"pull_requests": "read"}
+	permIssuesWrite      = map[string]string{"issues": "write"}
+	permIssuesRead       = map[string]string{"issues": "read"}
+	permChecksRead       = map[string]string{"checks": "read"}
 )
 
 // SplitRepo validates and splits a canonical owner/repo path.
@@ -125,20 +130,28 @@ func (a *App) Credential(ctx context.Context, repo string) (string, string, erro
 	return "x-access-token", token, nil
 }
 
-// PullRequestToken mints a token that may open a pull request on repo, and
-// nothing else. It is deliberately not cached alongside Credential's tokens:
-// the two carry different permissions, and one cache keyed only by repo would
-// hand a pull-request token to a workspace asking for git access.
-func (a *App) PullRequestToken(ctx context.Context, repo string) (string, error) {
+// Token mints a single-use installation token for repo carrying exactly
+// permissions, and nothing else. It is deliberately not cached alongside
+// Credential's tokens: the two carry different permissions, and one cache
+// keyed only by repo would hand a write token to a workspace asking for git
+// access. Host-side tools mint per call and use the token once, so a leaked
+// token expires in about an hour and no later request can re-use it.
+func (a *App) Token(ctx context.Context, repo string, permissions map[string]string) (string, error) {
 	_, name, err := SplitRepo(repo)
 	if err != nil {
 		return "", err
 	}
-	token, _, err := a.mint(ctx, name, permPullRequests, a.now().UTC())
+	token, _, err := a.mint(ctx, name, permissions, a.now().UTC())
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// PullRequestToken mints a token that may open a pull request on repo, and
+// nothing else: Token with the pull_requests:write permission set.
+func (a *App) PullRequestToken(ctx context.Context, repo string) (string, error) {
+	return a.Token(ctx, repo, permPullRequests)
 }
 
 // Verify reports whether the configured app credentials can still mint an
