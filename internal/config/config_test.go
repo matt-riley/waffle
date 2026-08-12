@@ -916,6 +916,74 @@ deny = ["fetch"]
 	}
 }
 
+// TestNotifyTierPolicy records the deliberate notify availability per tier
+// (#253): main, cron, and issue may notify (cron/issue are the unattended
+// tiers that most need to reach the owner mid-run); the multi-party group
+// tier is deny-by-default so a group chat cannot make waffle send the owner
+// arbitrary text. An explicit group tool policy is authoritative, matching
+// the existing restricted-tier semantics.
+func TestNotifyTierPolicy(t *testing.T) {
+	cfg := Default() // host mode, no explicit groups
+
+	tests := []struct {
+		name      string
+		group     string
+		wantDeny  bool
+		wantAllow bool // permitted = not denied (no allow-list restriction)
+	}{
+		{name: "main-allowed", group: GroupMain, wantDeny: false, wantAllow: true},
+		{name: "cron-allowed", group: GroupCron, wantDeny: false, wantAllow: true},
+		{name: "issue-allowed", group: GroupIssue, wantDeny: false, wantAllow: true},
+		{name: "group-denied-by-default", group: GroupGroup, wantDeny: true, wantAllow: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pol := cfg.AgentPolicy(tt.group)
+			denied := contains(pol.Deny, "notify")
+			if denied != tt.wantDeny {
+				t.Errorf("notify denied = %v, want %v (deny %v)", denied, tt.wantDeny, pol.Deny)
+			}
+			allowed := !contains(pol.Deny, "notify") && (len(pol.Allow) == 0 || contains(pol.Allow, "notify"))
+			if allowed != tt.wantAllow {
+				t.Errorf("notify permitted = %v, want %v", allowed, tt.wantAllow)
+			}
+		})
+	}
+
+	// An explicit [agent.group.group.tools] policy is authoritative: it can
+	// opt the group tier back into notify (same rule as every other
+	// restricted-tier default).
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.group.group.tools]
+allow = ["notify", "read_file"]
+`)
+	explicit, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if pol := explicit.AgentPolicy(GroupGroup); contains(pol.Deny, "notify") || (len(pol.Allow) > 0 && !contains(pol.Allow, "notify")) {
+		t.Errorf("explicit group policy should permit notify, got deny %v allow %v", pol.Deny, pol.Allow)
+	}
+}
+
+// TestNotifyProfileToolRegistration covers the profile-editor surface: notify
+// is a known profile tool name and ProfileToolNames includes it.
+func TestNotifyProfileToolRegistration(t *testing.T) {
+	if !ValidProfileTool("notify") {
+		t.Fatal(`ValidProfileTool("notify") = false, want true`)
+	}
+	found := false
+	for _, name := range ProfileToolNames() {
+		if name == "notify" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ProfileToolNames = %v, want notify included", ProfileToolNames())
+	}
+}
+
 // TestAgentPolicyFileRoots covers the file-tool boundary (#269): global roots
 // apply everywhere, a group may narrow them, and the restricted tiers fall
 // back to the work dir rather than running unbounded.

@@ -35,6 +35,9 @@ type fakeAdapter struct {
 	sent  map[string][]string // chatID → replies
 	acked []string
 	wake  chan struct{}
+	// sendErr, when set, makes Send fail with this error (delivery-failure
+	// tests, #253).
+	sendErr error
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -77,8 +80,11 @@ func (f *fakeAdapter) ackedIDs() []string {
 
 func (f *fakeAdapter) Send(ctx context.Context, chatID, text string) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	f.sent[chatID] = append(f.sent[chatID], text)
-	f.mu.Unlock()
 	f.wake <- struct{}{}
 	return nil
 }

@@ -232,6 +232,23 @@ OAuth and egress posture under our control. Tool availability is decided by
 the session's policy (openclaw-style allow/deny), evaluated in the gateway,
 not trusted to the sandbox.
 
+**Mid-run owner messaging (#253).** The gateway attaches one session-scoped
+outbound sender per run (`internal/notify`), bound to the conversation's
+channel and chat id — the same adapter resolution the memory-change notifier
+and usage alerts already used. The cron runner binds it to the job's delivery
+target and the issue intake dispatcher to the watcher's target, so the
+unattended tiers can reach the owner too. The `notify` tool sends a short,
+length-capped message through it; destination comes from session origin only
+(no destination field exists in the tool input). It is fire-and-forget: a
+failed send surfaces as a tool error to the model but never fails the run,
+and a per-run budget (5 messages) stops a looping agent from flooding the
+owner. Tier availability is deliberate: `cron` and `issue` keep `notify` (the
+unattended tiers that most need to reach the owner), the multi-party `group`
+tier denies it by default (a group chat must not be able to make waffle send
+the owner arbitrary text), and `spawn_subagent` children never inherit it.
+Sessions with no owner channel (terminal chat, eval, log-only cron/issue
+targets) no-op it with a clear log line instead of an error.
+
 ### Sandboxing & IPC
 
 The agent loop always runs on the host — that keeps one loop implementation

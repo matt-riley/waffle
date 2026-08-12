@@ -643,6 +643,7 @@ func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, 
 	disp := &issueDispatcher{
 		cfg: cfg, st: st, sessions: sessions, skills: skills, memWS: memWS,
 		broker: b, brokerURL: brokerURL, agent: issueAgent, log: log,
+		deliver: deliver,
 	}
 	claims := &intake.ClaimStore{DB: st.DB}
 	var wg sync.WaitGroup
