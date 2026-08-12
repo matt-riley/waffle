@@ -49,9 +49,12 @@ type Agent struct {
 	Log    *slog.Logger
 
 	// SummaryCache avoids re-summarizing the same prefix within a process (#61).
-	// Keyed by session id + prefix length fingerprint.
-	summaryMu    sync.Mutex
-	summaryCache map[string]summaryEntry
+	// Keyed by session id + prefix length fingerprint. Entries are bounded and
+	// evicted least-recently-used so long-running processes do not retain every
+	// summary ever generated.
+	summaryMu       sync.Mutex
+	summaryCache    map[string]summaryEntry
+	summaryCacheSeq uint64
 
 	// Spill, when set, stores full tool outputs before truncation (#69).
 	Spill *spill.Store
@@ -60,6 +63,7 @@ type Agent struct {
 type summaryEntry struct {
 	prefixLen int
 	text      string
+	lastUsed  uint64
 }
 
 // WithSession attaches a session id (delegates to session.WithSession).
@@ -357,7 +361,10 @@ func effectiveProfile(profile string) string {
 // block (using reflection prompt style from chat finish). This implements
 // the summarize-and-truncate required by docs/plan.md while full history
 // is kept for SQLite FTS.
-const recentWindow = 20
+const (
+	recentWindow         = 20
+	summaryCacheCapacity = 128
+)
 
 // prepareContext returns the messages and extra system text for a Complete
 // call. If history exceeds the window, a summary of the prefix is generated
@@ -381,25 +388,15 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	summaryText := ""
 	if sid != "" {
 		cacheKey := fmt.Sprintf("%s:%d", sid, len(prefix))
-		a.summaryMu.Lock()
-		if a.summaryCache != nil {
-			if e, ok := a.summaryCache[cacheKey]; ok && e.prefixLen == len(prefix) {
-				summaryText = e.text
-			}
-		}
-		a.summaryMu.Unlock()
-		if summaryText == "" {
+		var cached bool
+		summaryText, cached = a.summaryCacheGet(cacheKey, len(prefix))
+		if !cached {
 			var err error
 			summaryText, err = a.summarize(ctx, prefix, onUsage)
 			if err != nil {
 				return nil, "", err
 			}
-			a.summaryMu.Lock()
-			if a.summaryCache == nil {
-				a.summaryCache = map[string]summaryEntry{}
-			}
-			a.summaryCache[cacheKey] = summaryEntry{prefixLen: len(prefix), text: summaryText}
-			a.summaryMu.Unlock()
+			a.summaryCachePut(cacheKey, summaryEntry{prefixLen: len(prefix), text: summaryText})
 		}
 	} else {
 		var err error
@@ -424,6 +421,60 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	recent := make([]llm.Message, n-recentStart)
 	copy(recent, fullHistory[recentStart:])
 	return recent, extraSystem, nil
+}
+
+// summaryCacheGet returns a cached summary and records the access under the
+// same lock used by summaryCachePut. Updating recency while holding the lock
+// keeps concurrent prepareContext calls from racing on map or entry state.
+func (a *Agent) summaryCacheGet(key string, prefixLen int) (string, bool) {
+	a.summaryMu.Lock()
+	defer a.summaryMu.Unlock()
+
+	e, ok := a.summaryCache[key]
+	if !ok || e.prefixLen != prefixLen {
+		return "", false
+	}
+	a.summaryCacheSeq++
+	e.lastUsed = a.summaryCacheSeq
+	a.summaryCache[key] = e
+	return e.text, true
+}
+
+// summaryCachePut inserts a summary and evicts the least recently used entry
+// when the process-local cache reaches its hard capacity. All map and recency
+// mutations happen under summaryMu so concurrent runs cannot exceed the bound
+// or corrupt cache state. A miss is still summarized outside this lock, as the
+// provider call may block and duplicate concurrent misses are harmless.
+func (a *Agent) summaryCachePut(key string, entry summaryEntry) {
+	a.summaryMu.Lock()
+	defer a.summaryMu.Unlock()
+
+	if a.summaryCache == nil {
+		a.summaryCache = make(map[string]summaryEntry)
+	}
+	_, exists := a.summaryCache[key]
+	if !exists {
+		for len(a.summaryCache) >= summaryCacheCapacity {
+			var (
+				victimKey string
+				victim    summaryEntry
+				found     bool
+			)
+			for candidateKey, candidate := range a.summaryCache {
+				if !found || candidate.lastUsed < victim.lastUsed ||
+					(candidate.lastUsed == victim.lastUsed && candidateKey < victimKey) {
+					victimKey, victim, found = candidateKey, candidate, true
+				}
+			}
+			if !found { // summaryCacheCapacity is positive, but keep this defensive.
+				break
+			}
+			delete(a.summaryCache, victimKey)
+		}
+	}
+	a.summaryCacheSeq++
+	entry.lastUsed = a.summaryCacheSeq
+	a.summaryCache[key] = entry
 }
 
 // ensureWindowStartsOnUser adjusts start backwards until history[start] is a
