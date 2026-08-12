@@ -249,6 +249,55 @@ func TestOAuthEndpointsValidatedBeforeUse(t *testing.T) {
 			},
 		},
 		{
+			name:   "same-origin registration endpoint accepted",
+			origin: origin,
+			meta: OAuthMetadata{
+				AuthorizationEndpoint: "https://mcp.example.com/authorize",
+				TokenEndpoint:         "https://mcp.example.com/token",
+				RegistrationEndpoint:  "https://mcp.example.com/register",
+			},
+		},
+		{
+			name:   "empty registration endpoint accepted",
+			origin: origin,
+			meta: OAuthMetadata{
+				AuthorizationEndpoint: "https://mcp.example.com/authorize",
+				TokenEndpoint:         "https://mcp.example.com/token",
+				// RegistrationEndpoint omitted: servers without dynamic
+				// registration must still pass validation.
+			},
+		},
+		{
+			name:   "cross-origin registration endpoint rejected",
+			origin: origin,
+			meta: OAuthMetadata{
+				AuthorizationEndpoint: "https://mcp.example.com/authorize",
+				TokenEndpoint:         "https://mcp.example.com/token",
+				RegistrationEndpoint:  "https://attacker.example.net/register",
+			},
+			wantErr: `registration_endpoint "https://attacker.example.net/register" is not on the MCP server's own origin "mcp.example.com"`,
+		},
+		{
+			name:   "plaintext registration endpoint rejected",
+			origin: origin,
+			meta: OAuthMetadata{
+				AuthorizationEndpoint: "https://mcp.example.com/authorize",
+				TokenEndpoint:         "https://mcp.example.com/token",
+				RegistrationEndpoint:  "http://mcp.example.com/register",
+			},
+			wantErr: `registration_endpoint "http://mcp.example.com/register" must use https`,
+		},
+		{
+			name:   "userinfo in registration endpoint rejected",
+			origin: origin,
+			meta: OAuthMetadata{
+				AuthorizationEndpoint: "https://mcp.example.com/authorize",
+				TokenEndpoint:         "https://mcp.example.com/token",
+				RegistrationEndpoint:  "https://attacker:secret@mcp.example.com/register",
+			},
+			wantErr: `registration_endpoint "https://attacker:secret@mcp.example.com/register" must not embed credentials`,
+		},
+		{
 			name:   "loopback http accepted",
 			origin: loopback,
 			meta: OAuthMetadata{

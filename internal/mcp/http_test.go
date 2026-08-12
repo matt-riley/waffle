@@ -611,6 +611,32 @@ func TestSSELineOverMaxFrameBytesErrorsClearly(t *testing.T) {
 	}
 }
 
+// TestSSEMultiLineEventOverMaxFrameBytesErrorsClearly: each data line is
+// individually well under the per-line bound, but one unterminated event's
+// cumulative size exceeds MaxFrameBytes. The event must fail as
+// ErrFrameTooLarge while accumulating — never grow without limit (#249
+// review).
+func TestSSEMultiLineEventOverMaxFrameBytesErrorsClearly(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("event: message\n")
+	line := "data: " + strings.Repeat("x", 16<<10) + "\n" // 16 KiB line, well under the 8 MiB per-line bound
+	for range MaxFrameBytes/len(line) + 2 {
+		b.WriteString(line)
+	}
+	// The event never terminates (no blank line), so only the incremental
+	// cumulative bound can stop it.
+	_, err := readSSEMessage(strings.NewReader(b.String()), 7)
+	if err == nil {
+		t.Fatal("unterminated oversized multi-line SSE event succeeded")
+	}
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("error %v is not ErrFrameTooLarge", err)
+	}
+	if strings.Contains(err.Error(), "stream interrupted") {
+		t.Fatalf("oversized event reported as an interruption: %v", err)
+	}
+}
+
 // TestReadSSELineAccumulatesFragments: readSSELine itself returns long
 // lines whole, trims CRLF, and bounds accumulation by MaxFrameBytes.
 func TestReadSSELineAccumulatesFragments(t *testing.T) {

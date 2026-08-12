@@ -94,13 +94,18 @@ func DiscoverOAuthMetadata(ctx context.Context, serverURL string, client *http.C
 // https (http only on the loopback device, for local development), carry
 // no userinfo, and live on the MCP server's own origin — an attacker who
 // can influence the discovery document must not be able to redirect the
-// authorization code, PKCE verifier, or refresh token to a destination of
+// authorization code, PKCE verifier, refresh token, or dynamic-registration
+// payload (whose returned client_id the flow trusts) to a destination of
 // their choosing (#249).
 func validateOAuthEndpoints(origin *url.URL, meta *OAuthMetadata) error {
 	for _, ep := range []struct{ name, raw string }{
 		{"authorization_endpoint", meta.AuthorizationEndpoint},
 		{"token_endpoint", meta.TokenEndpoint},
+		{"registration_endpoint", meta.RegistrationEndpoint},
 	} {
+		if ep.raw == "" {
+			continue // registration is optional: servers may not offer dynamic registration
+		}
 		if err := validateOAuthEndpoint(ep.name, ep.raw, origin); err != nil {
 			return err
 		}

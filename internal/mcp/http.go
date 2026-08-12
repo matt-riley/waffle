@@ -553,6 +553,16 @@ func readSSEMessage(r io.Reader, wantID int) (json.RawMessage, error) {
 		case bytes.HasPrefix(line, []byte("data:")):
 			chunk := line[len("data:"):]
 			chunk = bytes.TrimPrefix(chunk, []byte(" "))
+			// Bound the cumulative event, not just each line: a server
+			// sending one unterminated event as many individually valid
+			// data lines must not grow memory without limit (#249 review).
+			extra := len(chunk)
+			if len(data) > 0 {
+				extra++ // the '\n' separator between data lines
+			}
+			if len(data)+extra > MaxFrameBytes {
+				return nil, ErrFrameTooLarge
+			}
 			if len(data) > 0 {
 				data = append(data, '\n')
 			}
