@@ -146,7 +146,14 @@ and keeps memory, skills, and session history host-side. What varies per
 session is the **executor**: where its `bash`/`read`/`write`/`edit` tool
 calls actually run.
 
-- `host` executor: in-process, owner-primary sessions only.
+- `host` executor: in-process, owner-primary sessions only. Host Bash uses
+  the configured `[sandbox] pids` budget. On Linux it creates a child cgroup
+  with `pids.max` when the service cgroup is delegated, so the limit covers
+  the shell and every descendant. If delegation is unavailable, a child-only
+  `RLIMIT_NPROC` fallback is used; that fallback is per real UID rather than a
+  true process-tree boundary and may be ignored for root. Other host platforms
+  do not claim a hard process-tree limit; use Docker when that guarantee is
+  required.
 - `docker` executor: a container per session. Because Go builds a static
   binary, the *same* `waffle` binary is bind-mounted read-only into any
   image and started as `waffle runner`.
@@ -160,6 +167,16 @@ it left off. Requests carry the model's durable `tool_use_id`; duplicate
 delivery is absorbed and completed results can be reclaimed after a host
 restart. Containers see only their workspace volume, the queue mount,
 and the host's proxy endpoints — never secrets, never the host filesystem.
+
+**Host Bash availability note (#275).** The host PID budget is availability
+hardening, not an untrusted-code containment boundary. The owner tier can
+already perform broad host operations, and prompt-injected or fetched content
+can still request those operations if policy allows it. Keep the restricted
+tiers denied host Bash and prefer Docker for untrusted work; the host file
+roots and policy tightening in [#269](https://github.com/matt-riley/waffle/issues/269)
+are defense in depth, not a substitute for that boundary. On Linux managed
+systemd services need `Delegate=yes` for the per-command cgroup; see the
+deployment example.
 
 **Bind-mount / queue stress (#29).** Concurrent queue load is covered by
 `go test -tags=sandbox_stress ./internal/sandbox -run Stress` (optional env
