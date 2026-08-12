@@ -21,6 +21,38 @@ import (
 	"github.com/matt-riley/waffle/internal/usage"
 )
 
+// waitDayRows polls a session's day usage rows until want is satisfied or a
+// short deadline passes, then returns the rows. The broker reconciles a
+// proxied request's final usage only after the response body completes, so
+// an assertion immediately after the client consumed the response can race
+// the reconcile commit and observe the still-open reservation (seen as a
+// flake in CI under load, e.g. TestAnthropicSSECacheUsageBindsOnTrueCost).
+// Callers assert on the returned rows so a genuinely wrong reconcile still
+// fails loudly.
+func waitDayRows(t *testing.T, b *Broker, session string, want func([]usage.Row) bool) []usage.Row {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		rows, err := b.Usage.List(context.Background(), session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var day []usage.Row
+		for _, r := range rows {
+			if r.Period == "day" {
+				day = append(day, r)
+			}
+		}
+		if want(day) {
+			return day
+		}
+		if time.Now().After(deadline) {
+			return day
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestProxyAccountsReturnedProviderUsageAndEnforcesBothCaps(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -55,19 +87,11 @@ func TestProxyAccountsReturnedProviderUsageAndEnforcesBothCaps(t *testing.T) {
 	if got := do().StatusCode; got != http.StatusOK {
 		t.Fatalf("first status=%d", got)
 	}
-	rows, err := b.Usage.List(context.Background(), "budget-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var requests, tokens int
-	for _, row := range rows {
-		if row.Period == "day" {
-			requests += row.Requests
-			tokens += row.InputTokens + row.OutputTokens
-		}
-	}
-	if requests != 1 || tokens != 12 {
-		t.Fatalf("requests=%d tokens=%d rows=%+v", requests, tokens, rows)
+	day := waitDayRows(t, b, "budget-a", func(rows []usage.Row) bool {
+		return len(rows) == 1 && rows[0].Requests == 1 && rows[0].InputTokens+rows[0].OutputTokens == 12
+	})
+	if len(day) != 1 || day[0].Requests != 1 || day[0].InputTokens+day[0].OutputTokens != 12 {
+		t.Fatalf("requests=%d tokens=%d rows=%+v", day[0].Requests, day[0].InputTokens+day[0].OutputTokens, day)
 	}
 	if got := do().StatusCode; got != http.StatusTooManyRequests {
 		t.Fatalf("token-capped status=%d", got)
@@ -663,19 +687,11 @@ func TestProxyAccountsStreamingUsageOnce(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	rows, err := b.Usage.List(context.Background(), "stream-budget")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var requests, tokens int
-	for _, row := range rows {
-		if row.Period == "day" {
-			requests += row.Requests
-			tokens += row.InputTokens + row.OutputTokens
-		}
-	}
-	if requests != 1 || tokens != 13 {
-		t.Fatalf("requests=%d tokens=%d rows=%+v", requests, tokens, rows)
+	day := waitDayRows(t, b, "stream-budget", func(rows []usage.Row) bool {
+		return len(rows) == 1 && rows[0].Requests == 1 && rows[0].InputTokens+rows[0].OutputTokens == 13
+	})
+	if len(day) != 1 || day[0].Requests != 1 || day[0].InputTokens+day[0].OutputTokens != 13 {
+		t.Fatalf("requests=%d tokens=%d rows=%+v", day[0].Requests, day[0].InputTokens+day[0].OutputTokens, day)
 	}
 }
 
@@ -713,16 +729,11 @@ func TestAnthropicJSONCacheUsageBindsOnTrueCost(t *testing.T) {
 		t.Fatalf("first status=%d", got)
 	}
 	// The first request's counters reconcile as raw 10/20/30/5.
-	rows, err := b.Usage.List(context.Background(), "anthropic-json-cache")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows {
-		if row.Period == "day" {
-			if row.InputTokens != 10 || row.CacheCreationInputTokens != 20 || row.CacheReadInputTokens != 30 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
-				t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", row)
-			}
-		}
+	day := waitDayRows(t, b, "anthropic-json-cache", func(rows []usage.Row) bool {
+		return len(rows) == 1 && rows[0].InputTokens == 10 && rows[0].CacheCreationInputTokens == 20 && rows[0].CacheReadInputTokens == 30 && rows[0].OutputTokens == 5 && rows[0].ReservedTokens == 0
+	})
+	if len(day) != 1 || day[0].InputTokens != 10 || day[0].CacheCreationInputTokens != 20 || day[0].CacheReadInputTokens != 30 || day[0].OutputTokens != 5 || day[0].ReservedTokens != 0 {
+		t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", day[0])
 	}
 	// Declared 46 (max_tokens 30 + 16-byte body): naive total 65+46=111 would
 	// exceed the 100-token budget; true cost 43+46=89 must pass.
@@ -776,16 +787,11 @@ func TestAnthropicSSECacheUsageBindsOnTrueCost(t *testing.T) {
 	}
 	// The streamed message_start/message_delta usage reconciles as raw
 	// 10/20/30/5, byte-identical to the JSON path.
-	rows, err := b.Usage.List(context.Background(), "anthropic-sse-cache")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows {
-		if row.Period == "day" {
-			if row.InputTokens != 10 || row.CacheCreationInputTokens != 20 || row.CacheReadInputTokens != 30 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
-				t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", row)
-			}
-		}
+	day := waitDayRows(t, b, "anthropic-sse-cache", func(rows []usage.Row) bool {
+		return len(rows) == 1 && rows[0].InputTokens == 10 && rows[0].CacheCreationInputTokens == 20 && rows[0].CacheReadInputTokens == 30 && rows[0].OutputTokens == 5 && rows[0].ReservedTokens == 0
+	})
+	if len(day) != 1 || day[0].InputTokens != 10 || day[0].CacheCreationInputTokens != 20 || day[0].CacheReadInputTokens != 30 || day[0].OutputTokens != 5 || day[0].ReservedTokens != 0 {
+		t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", day[0])
 	}
 	// Naive total 65+46=111 would exceed the 100-token budget; true cost
 	// 43+46=89 must pass.
@@ -1000,18 +1006,19 @@ func TestProxyAccountsTrailingUsageInLargeJSONResponse(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	rows, err := b.Usage.List(context.Background(), "large-json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tokens int
-	for _, row := range rows {
-		if row.Period == "day" {
-			tokens += row.InputTokens + row.OutputTokens
+	day := waitDayRows(t, b, "large-json", func(rows []usage.Row) bool {
+		var tokens int
+		for _, r := range rows {
+			tokens += r.InputTokens + r.OutputTokens
 		}
+		return tokens == 17
+	})
+	var tokens int
+	for _, r := range day {
+		tokens += r.InputTokens + r.OutputTokens
 	}
 	if tokens != 17 {
-		t.Fatalf("tokens=%d rows=%+v", tokens, rows)
+		t.Fatalf("tokens=%d rows=%+v", tokens, day)
 	}
 }
 
@@ -1825,16 +1832,11 @@ func TestOpenAIKindCacheUsageBindsOnHalfRate(t *testing.T) {
 	}
 	// The reconciled row is attributed to openai with raw counters
 	// 50/500/5, and its true cost is 50 + 500*0.5 + 5 = 305.
-	rows, err := b.Usage.List(context.Background(), "openai-kind-cache")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows {
-		if row.Period == "day" {
-			if row.Provider != "openai" || row.InputTokens != 50 || row.CacheReadInputTokens != 500 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
-				t.Fatalf("day row = %+v, want openai 50/500/5 reserved 0", row)
-			}
-		}
+	day := waitDayRows(t, b, "openai-kind-cache", func(rows []usage.Row) bool {
+		return len(rows) == 1 && rows[0].Provider == "openai" && rows[0].InputTokens == 50 && rows[0].CacheReadInputTokens == 500 && rows[0].OutputTokens == 5 && rows[0].ReservedTokens == 0
+	})
+	if len(day) != 1 || day[0].Provider != "openai" || day[0].InputTokens != 50 || day[0].CacheReadInputTokens != 500 || day[0].OutputTokens != 5 || day[0].ReservedTokens != 0 {
+		t.Fatalf("day row = %+v, want openai 50/500/5 reserved 0", day[0])
 	}
 	// True cost 305 exceeds the 300-token budget: the follow-up is refused.
 	// Under Anthropic pricing (105) it would have passed.
