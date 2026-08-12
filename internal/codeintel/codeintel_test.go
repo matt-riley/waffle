@@ -3,9 +3,12 @@ package codeintel
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -477,6 +480,369 @@ func TestGoOnlyToolOutputRemainsArray(t *testing.T) {
 			}
 			if len(got) == 0 {
 				t.Fatal("expected existing Go result")
+			}
+		})
+	}
+}
+
+func TestNoSupportedFilesReportsClearly(t *testing.T) {
+	// A repository with no supported source files must say so explicitly
+	// rather than reporting zero symbols (#255).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# demo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyDir := t.TempDir()
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+	emptyTB := Toolbox(NewService(emptyDir, "acme/demo", "main"))
+
+	for _, tc := range codeToolCases(t, dir) {
+		t.Run("non-source-only/"+tc.name, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tc.name, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output must be an honesty response, got %s: %v", out, err)
+			}
+			if len(got.Results) != 0 {
+				t.Fatalf("results=%v want none", got.Results)
+			}
+			if !strings.Contains(got.Analysis.Limitation, "no Go files were found") {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+			if len(got.Analysis.AnalysedFiles) != 0 || len(got.Analysis.SkippedFiles) != 0 {
+				t.Fatalf("analysed=%v skipped=%v want both empty", got.Analysis.AnalysedFiles, got.Analysis.SkippedFiles)
+			}
+			if !strings.Contains(out, `"results": []`) {
+				t.Fatalf("honesty response must render results as an empty array, not null: %s", out)
+			}
+		})
+	}
+	for _, tc := range codeToolCases(t, emptyDir) {
+		t.Run("empty/"+tc.name, func(t *testing.T) {
+			out, err := emptyTB.Run(context.Background(), tc.name, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got honestyResponse
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output must be an honesty response, got %s: %v", out, err)
+			}
+			if len(got.Results) != 0 {
+				t.Fatalf("results=%v want none", got.Results)
+			}
+			if !strings.Contains(got.Analysis.Limitation, "no Go files were found") {
+				t.Fatalf("limitation=%q", got.Analysis.Limitation)
+			}
+		})
+	}
+}
+
+func TestIndexWalkCancellation(t *testing.T) {
+	dir, _ := writeFixture(t)
+
+	// Pre-cancelled: every tool aborts promptly with the cancellation error
+	// and never emits a partial result as complete (#255).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tb := Toolbox(NewService(dir, "acme/demo", "main"))
+	for _, tc := range codeToolCases(t, dir) {
+		t.Run("pre-cancelled/"+tc.name, func(t *testing.T) {
+			out, err := tb.Run(ctx, tc.name, tc.input)
+			if err == nil {
+				t.Fatalf("cancelled %s returned nil error; output=%s", tc.name, out)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled %s err=%v want context.Canceled", tc.name, err)
+			}
+			if out != "" {
+				t.Fatalf("cancelled %s returned partial output %q; a cancelled build must not read as complete", tc.name, out)
+			}
+		})
+	}
+
+	// In-flight: cancel while the walk is running; the walk must abort with
+	// context.Canceled rather than returning a partial result set.
+	big := t.TempDir()
+	const fileCount = 3000
+	for i := 0; i < fileCount; i++ {
+		name := fmt.Sprintf("f%04d", i)
+		if err := os.WriteFile(filepath.Join(big, name+".go"), []byte("package p\nfunc "+name+"() {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewService(big, "acme/demo", "main")
+	walkCtx, walkCancel := context.WithCancel(context.Background())
+	type walkResult struct {
+		out string
+		err error
+	}
+	done := make(chan walkResult, 1)
+	go func() {
+		out, err := Toolbox(svc).Run(walkCtx, "code_find_symbol", json.RawMessage(`{"name":"f0000"}`))
+		done <- walkResult{out: out, err: err}
+	}()
+	time.Sleep(2 * time.Millisecond)
+	walkCancel()
+	r := <-done
+	if r.err == nil {
+		// The walk won the race and finished before cancellation; it must
+		// then be complete, never partial.
+		if !strings.Contains(r.out, "f0000") {
+			t.Fatalf("completed walk returned partial output: %s", r.out)
+		}
+		return
+	}
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("in-flight walk err=%v want context.Canceled", r.err)
+	}
+	if r.out != "" {
+		t.Fatalf("cancelled in-flight build emitted partial output %q; a cancelled build must not read as complete", r.out)
+	}
+}
+
+func TestConcurrentToolsSharedService(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("F%d", i)
+		p := filepath.Join(dir, fmt.Sprintf("f%d.go", i))
+		if err := os.WriteFile(p, []byte("package p\nfunc "+name+"() {}\nfunc call"+name+"() { "+name+"() }\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	testPath := filepath.Join(dir, "f0_test.go")
+	if err := os.WriteFile(testPath, []byte("package p\nfunc TestF0(t *testing.T) { _ = F0() }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tsPath := writeTypeScriptFixture(t, dir)
+
+	svc := NewService(dir, "acme/demo", "main")
+	ctx := context.Background()
+	var mu sync.Mutex
+	var failures []string
+	report := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		failures = append(failures, fmt.Sprintf(format, args...))
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				n := (g + i) % 8
+				name := fmt.Sprintf("F%d", n)
+				path := paths[n]
+				if locs, err := svc.FindSymbol(ctx, name, ""); err != nil {
+					report("find %s: %v", name, err)
+				} else if len(locs) != 1 || locs[0].Symbol != name {
+					report("find %s: %v", name, locs)
+				}
+				if locs, err := svc.References(ctx, path, 0, name); err != nil {
+					report("refs %s: %v", name, err)
+				} else if len(locs) < 2 {
+					report("refs %s: %v want >=2", name, locs)
+				}
+				if locs, err := svc.Structure(ctx, path); err != nil {
+					report("structure %s: %v", path, err)
+				} else if len(locs) != 2 {
+					report("structure %s: %v want 2 symbols", path, locs)
+				}
+				if locs, err := svc.BlastRadius(ctx, path, name); err != nil {
+					report("blast %s: %v", name, err)
+				} else if len(locs) == 0 {
+					report("blast %s: empty", name)
+				}
+				if locs, err := svc.SuggestTests(ctx, name); err != nil {
+					report("suggest %s: %v", name, err)
+				} else if len(locs) != 0 && locs[0].Symbol != name {
+					report("suggest %s: %v", name, locs)
+				}
+				// Concurrent cache writes on the same path while reads run.
+				if err := svc.IndexFile(path); err != nil {
+					report("index %s: %v", path, err)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		t.Fatalf("concurrent shared-service use failed:\n%s", strings.Join(failures, "\n"))
+	}
+	// The unsupported file must still be reported in a mixed repo under load.
+	tb := Toolbox(svc)
+	out, err := tb.Run(ctx, "code_find_symbol", marshalToolInput(t, map[string]any{"name": "F0"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got honestyResponse
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("output=%s: %v", out, err)
+	}
+	if len(got.Analysis.SkippedFiles) != 1 || got.Analysis.SkippedFiles[0].Path != tsPath {
+		t.Fatalf("skipped_files=%v", got.Analysis.SkippedFiles)
+	}
+}
+
+func TestGoResultsPinnedByteIdentical(t *testing.T) {
+	// Pinned fixture repo: Go output is byte-identical to the checked-in
+	// baseline. Any change to Go parsing or result shape fails here (#255).
+	svc := NewService("testdata/gorepo", "acme/demo", "main")
+	tb := Toolbox(svc)
+	cases := []struct {
+		tool  string
+		input string
+		want  string
+	}{
+		{
+			tool:  "code_find_symbol",
+			input: `{"name":"Hello"}`,
+			want: `[
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 4,
+    "end_line": 4,
+    "symbol": "Hello",
+    "kind": "func",
+    "source": "text-fallback"
+  }
+]`,
+		},
+		{
+			tool:  "code_find_symbol",
+			input: `{"name":"Answer","kind":"const"}`,
+			want: `[
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 6,
+    "end_line": 6,
+    "symbol": "Answer",
+    "kind": "const",
+    "source": "text-fallback"
+  }
+]`,
+		},
+		{
+			tool:  "code_structure",
+			input: `{"path":"testdata/gorepo/hello.go"}`,
+			want: `[
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 4,
+    "end_line": 4,
+    "symbol": "Hello",
+    "kind": "func",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 6,
+    "end_line": 6,
+    "symbol": "Answer",
+    "kind": "const",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 8,
+    "end_line": 8,
+    "symbol": "Greeter",
+    "kind": "type",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 10,
+    "end_line": 10,
+    "symbol": "Greet",
+    "kind": "method",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 12,
+    "end_line": 12,
+    "symbol": "CallHello",
+    "kind": "func",
+    "source": "text-fallback"
+  }
+]`,
+		},
+		{
+			tool:  "code_references",
+			input: `{"symbol":"Hello"}`,
+			want: `[
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 4,
+    "end_line": 4,
+    "symbol": "Hello",
+    "kind": "ref",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 10,
+    "end_line": 10,
+    "symbol": "Hello",
+    "kind": "ref",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello.go",
+    "start_line": 12,
+    "end_line": 12,
+    "symbol": "Hello",
+    "kind": "ref",
+    "source": "text-fallback"
+  },
+  {
+    "repo": "acme/demo",
+    "ref": "main",
+    "path": "testdata/gorepo/hello_test.go",
+    "start_line": 3,
+    "end_line": 3,
+    "symbol": "Hello",
+    "kind": "ref",
+    "source": "text-fallback"
+  }
+]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			out, err := tb.Run(context.Background(), tc.tool, json.RawMessage(tc.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out != tc.want {
+				t.Fatalf("Go output changed:\ngot:\n%s\nwant:\n%s", out, tc.want)
 			}
 		})
 	}

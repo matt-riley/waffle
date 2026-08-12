@@ -175,6 +175,9 @@ func marshalAnalysis(locs []CodeLocation, report *analysisReport) (string, error
 	if report == nil || (len(report.AnalysedFiles) > 0 && len(report.SkippedFiles) == 0) {
 		return marshalLocs(locs)
 	}
+	if locs == nil {
+		locs = []CodeLocation{}
+	}
 	sort.Strings(report.AnalysedFiles)
 	sort.Slice(report.SkippedFiles, func(i, j int) bool {
 		return report.SkippedFiles[i].Path < report.SkippedFiles[j].Path
