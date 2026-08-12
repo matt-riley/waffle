@@ -5,11 +5,14 @@ package anthropicp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 
 	"github.com/matt-riley/waffle/internal/llm"
 )
@@ -106,6 +109,11 @@ func toParams(req llm.Request) (anthropic.MessageNewParams, error) {
 	}
 
 	for _, m := range req.Messages {
+		// Canonical layer owns size/type limits; the translator only
+		// propagates them (never silently drops or truncates media).
+		if err := llm.ValidateBlocks(m.Blocks); err != nil {
+			return params, fmt.Errorf("anthropic: %w", err)
+		}
 		blocks, err := toBlocks(m.Blocks)
 		if err != nil {
 			return params, err
@@ -152,7 +160,31 @@ func toBlocks(blocks []llm.Block) ([]anthropic.ContentBlockParamUnion, error) {
 				Input: b.ToolUse.Input,
 			}})
 		case llm.BlockToolResult:
-			out = append(out, anthropic.NewToolResultBlock(b.ToolResult.ToolUseID, b.ToolResult.Content, b.ToolResult.IsError))
+			if len(b.ToolResult.Blocks) == 0 {
+				out = append(out, anthropic.NewToolResultBlock(b.ToolResult.ToolUseID, b.ToolResult.Content, b.ToolResult.IsError))
+				continue
+			}
+			content, err := toToolResultContent(b.ToolResult.Blocks)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, anthropic.ContentBlockParamUnion{OfToolResult: &anthropic.ToolResultBlockParam{
+				ToolUseID: b.ToolResult.ToolUseID,
+				Content:   content,
+				IsError:   anthropic.Bool(b.ToolResult.IsError),
+			}})
+		case llm.BlockImage:
+			block, err := toImageBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, block)
+		case llm.BlockDocument:
+			block, err := toDocumentBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, block)
 		case llm.BlockThinking:
 			// Replay exactly as received — the API rejects modified blocks.
 			out = append(out, anthropic.ContentBlockParamUnion{OfThinking: &anthropic.ThinkingBlockParam{
@@ -165,6 +197,79 @@ func toBlocks(blocks []llm.Block) ([]anthropic.ContentBlockParamUnion, error) {
 			}})
 		default:
 			return nil, fmt.Errorf("anthropic: unsupported block type %q", b.Type)
+		}
+	}
+	return out, nil
+}
+
+// toImageBlock maps a canonical image block to the SDK's image param. The
+// canonical layer has already validated the source, so every branch here is
+// a straight wire mapping.
+func toImageBlock(b llm.Block) (anthropic.ContentBlockParamUnion, error) {
+	switch b.Source.Type {
+	case llm.SourceBase64:
+		return anthropic.NewImageBlockBase64(b.Source.MediaType, b.Source.Data), nil
+	case llm.SourceURL:
+		return anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: b.Source.URL}), nil
+	default:
+		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: image block with unknown source type %q", b.Source.Type)
+	}
+}
+
+// toDocumentBlock maps a canonical document block to the SDK's document
+// param. PDFs and text types map to the SDK's native sources; other
+// documented office formats ride the base64 source (the API accepts them
+// with their media type).
+func toDocumentBlock(b llm.Block) (anthropic.ContentBlockParamUnion, error) {
+	switch b.Source.Type {
+	case llm.SourceBase64:
+		if strings.HasPrefix(b.Source.MediaType, "text/") {
+			decoded, err := base64.StdEncoding.DecodeString(b.Source.Data)
+			if err != nil {
+				return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: document block has invalid base64 data: %w", err)
+			}
+			return anthropic.NewDocumentBlock(anthropic.PlainTextSourceParam{
+				Data:      string(decoded),
+				MediaType: constant.TextPlain(b.Source.MediaType),
+			}), nil
+		}
+		// application/pdf and office formats: base64 source with the media
+		// type carried through. The SDK's param is named for PDFs but its
+		// media_type marshals whatever constant value it holds.
+		return anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{
+			Data:      b.Source.Data,
+			MediaType: constant.ApplicationPDF(b.Source.MediaType),
+		}), nil
+	case llm.SourceURL:
+		return anthropic.NewDocumentBlock(anthropic.URLPDFSourceParam{URL: b.Source.URL}), nil
+	default:
+		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: document block with unknown source type %q", b.Source.Type)
+	}
+}
+
+// toToolResultContent maps a tool result's structured blocks to the SDK's
+// tool_result content union. Text, image, and document blocks are all
+// representable inside an Anthropic tool result.
+func toToolResultContent(blocks []llm.Block) ([]anthropic.ToolResultBlockParamContentUnion, error) {
+	var out []anthropic.ToolResultBlockParamContentUnion
+	for _, b := range blocks {
+		switch b.Type {
+		case llm.BlockText:
+			out = append(out, anthropic.ToolResultBlockParamContentUnion{OfText: &anthropic.TextBlockParam{Text: b.Text}})
+		case llm.BlockImage:
+			block, err := toImageBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, anthropic.ToolResultBlockParamContentUnion{OfImage: block.OfImage})
+		case llm.BlockDocument:
+			block, err := toDocumentBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, anthropic.ToolResultBlockParamContentUnion{OfDocument: block.OfDocument})
+		default:
+			return nil, fmt.Errorf("anthropic: unsupported block type %q in tool result", b.Type)
 		}
 	}
 	return out, nil

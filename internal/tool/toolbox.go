@@ -27,6 +27,17 @@ type CallerToolbox interface {
 	RunWithID(context.Context, string, string, json.RawMessage) (string, error)
 }
 
+// BlockToolbox is the optional toolbox-level capability for tools that
+// return structured content blocks (images, documents) alongside their text
+// body. The agent loop prefers it when present; toolboxes without it keep
+// the string-only contract. Blocks returned this way are subject to the
+// canonical size/type limits in internal/llm (enforced when the message is
+// validated for a provider call).
+type BlockToolbox interface {
+	Toolbox
+	RunWithBlocks(context.Context, string, json.RawMessage) (string, []llm.Block, error)
+}
+
 // PolicyDenial carries safe, structured audit metadata for a denied tool
 // call. Message is returned to the model; profile, source, and rule are
 // configuration identifiers and must never contain tool input.
@@ -191,6 +202,27 @@ func (r *restricted) RunWithID(ctx context.Context, id, name string, input json.
 	return out, err
 }
 
+// RunWithBlocks implements BlockToolbox for restricted toolboxes: policy
+// checks run exactly as for Run, and the block path is forwarded to the
+// wrapped toolbox when it supports it.
+func (r *restricted) RunWithBlocks(ctx context.Context, name string, input json.RawMessage) (string, []llm.Block, error) {
+	if err := r.checkPolicy(ctx, name, input); err != nil {
+		return "", nil, err
+	}
+	var (
+		out    string
+		blocks []llm.Block
+		err    error
+	)
+	if tb, ok := r.tb.(BlockToolbox); ok {
+		out, blocks, err = tb.RunWithBlocks(ctx, name, input)
+	} else {
+		out, err = r.tb.Run(ctx, name, input)
+	}
+	r.observe(ctx, name, input, err)
+	return out, blocks, err
+}
+
 // denyTool formats a tool-policy denial, including profile when set (#71).
 func (p Policy) denyTool(name string) error {
 	msg := fmt.Sprintf("tool %q is not permitted by policy", name)
@@ -275,4 +307,18 @@ func (c *combined) RunWithID(ctx context.Context, id, name string, input json.Ra
 		return caller.RunWithID(ctx, id, name, input)
 	}
 	return tb.Run(ctx, name, input)
+}
+
+// RunWithBlocks implements BlockToolbox for combined toolboxes, routing to
+// the toolbox that owns the named tool.
+func (c *combined) RunWithBlocks(ctx context.Context, name string, input json.RawMessage) (string, []llm.Block, error) {
+	tb, ok := c.routes[name]
+	if !ok {
+		return "", nil, fmt.Errorf("unknown tool %q", name)
+	}
+	if bt, ok := tb.(BlockToolbox); ok {
+		return bt.RunWithBlocks(ctx, name, input)
+	}
+	out, err := tb.Run(ctx, name, input)
+	return out, nil, err
 }

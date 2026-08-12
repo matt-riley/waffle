@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,6 +28,81 @@ func newTestStore(t *testing.T) *Store {
 		}
 	})
 	return New(st)
+}
+
+// TestLargeImageDoesNotBlowUpTranscriptReads pins the storage acceptance
+// criterion: media payloads are stored inline (base64) in the turns table
+// (decision documented in docs/plan.md, "Media content"), capped at
+// llm.MaxMediaBytes per block. On the store's single SQLite connection, an
+// ordinary transcript read of a session whose turns carry images at the
+// limit must complete with every payload intact — no long-transaction
+// hazard, no truncation.
+func TestLargeImageDoesNotBlowUpTranscriptReads(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.Create(ctx, "image session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One turn per image at the canonical limit, plus text turns between.
+	img, err := llm.NewImageBlock("image/png", make([]byte, llm.MaxMediaBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const turns = 6
+	for i := 0; i < turns; i++ {
+		if err := s.AppendTurn(ctx, sess.ID, llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: "turn"}, img}}); err != nil {
+			t.Fatalf("AppendTurn #%d: %v", i, err)
+		}
+	}
+	got, err := s.Turns(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("Turns: %v", err)
+	}
+	if len(got) != turns {
+		t.Fatalf("turns = %d, want %d", len(got), turns)
+	}
+	for i, m := range got {
+		if len(m.Blocks) != 2 || m.Blocks[1].Source == nil || m.Blocks[1].Source.Data != img.Source.Data {
+			t.Fatalf("turn %d image mangled: %+v", i, m.Blocks)
+		}
+	}
+}
+
+// TestPreImageFixtureRoundTripsThroughStore pins the persisted-format
+// contract end to end: a turn written before image/document blocks existed
+// (checked-in fixture) survives AppendTurn/Turns and re-marshals to the
+// exact canonical bytes old waffle stored.
+func TestPreImageFixtureRoundTripsThroughStore(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.Create(ctx, "old format")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(filepath.Join("..", "llm", "testdata", "turn_pre_image.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg llm.Message
+	if err := json.Unmarshal(fixture, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendTurn(ctx, sess.ID, msg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Turns(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(got[0].Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"type":"tool_result","tool_result":{"tool_use_id":"toolu_1","content":"deploy.sh:3: rsync --delete typo-here","is_error":true}},{"type":"text","text":"that broke it"}]`
+	if string(raw) != want {
+		t.Fatalf("blocks = %s\nwant %s", raw, want)
+	}
 }
 
 func TestSessionAndTurnRoundTrip(t *testing.T) {

@@ -486,6 +486,114 @@ func TestExternalTokenSourceReservesRemainingAllowance(t *testing.T) {
 	}
 }
 
+// TestSandboxedRequestCarryingImageProxiesIntact re-verifies the broker's
+// content-part inspection against real image traffic: a sandboxed request
+// (wk_ session token, the only credential a sandbox holds) carrying a
+// base64 image — in both the Anthropic image-block shape and the
+// OpenAI-compatible data-URI image_url shape — is inspected, forwarded to
+// the upstream with the payload intact, and treated as an external token
+// source (remaining allowance reserved, since the image is not counted by
+// the textual upper bound).
+func TestSandboxedRequestCarryingImageProxiesIntact(t *testing.T) {
+	imgData := base64.StdEncoding.EncodeToString([]byte("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ fake png bytes"))
+	for name, body := range map[string]string{
+		"anthropic image block": `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + imgData + `"}}]}],"max_tokens":10}`,
+		"openai data uri":       `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + imgData + `"}}]}],"max_tokens":10}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var gotBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				w.WriteHeader(http.StatusBadGateway)
+			}))
+			defer upstream.Close()
+			st := openStore(t)
+			b := New(st, []Upstream{{Name: "p", BaseURL: upstream.URL, Header: "Authorization", Value: "real"}})
+			b.Usage = usage.New(st)
+			b.Limits = usage.Limits{TokensPerDay: 100}
+			token, _ := b.Mint(context.Background(), "sandboxed-session")
+			front := httptest.NewServer(b)
+			defer front.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want proxied upstream response (502)", resp.StatusCode)
+			}
+			// The forwarded request carries the image payload untouched.
+			if string(gotBody) != body {
+				t.Fatalf("upstream body mangled:\n got %s\nwant %s", gotBody, body)
+			}
+			// Image input is not bounded by the text upper bound: the full
+			// allowance was reserved, so a follow-up request is refused.
+			follow, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(`{"max_tokens":1}`))
+			follow.Header.Set("Authorization", "Bearer "+token)
+			fr, err := http.DefaultClient.Do(follow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = fr.Body.Close()
+			if fr.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("post-image status = %d, want 429 (remaining allowance reserved)", fr.StatusCode)
+			}
+		})
+	}
+}
+
+// TestLargeImageBodyBeyondInspectCapProxiesUntruncated covers the broker
+// boundary against a real large image: a payload larger than the 1 MiB
+// inspection prefix must still be forwarded in full (the prefix-restore
+// path), never truncated into invalid base64, and it must reserve the
+// remaining allowance like any other external token source.
+func TestLargeImageBodyBeyondInspectCapProxiesUntruncated(t *testing.T) {
+	// ~2.5 MiB of base64 image data: comfortably past maxRequestInspectBytes.
+	imgData := base64.StdEncoding.EncodeToString(make([]byte, 2*1024*1024))
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + imgData + `"}}]}],"max_tokens":10}`
+
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "p", BaseURL: upstream.URL, Header: "Authorization", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 1000}
+	token, _ := b.Mint(context.Background(), "large-image-session")
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if string(gotBody) != body {
+		t.Fatalf("large image body truncated or mangled: got %d bytes, want %d", len(gotBody), len(body))
+	}
+	follow, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(`{"max_tokens":1}`))
+	follow.Header.Set("Authorization", "Bearer "+token)
+	fr, err := http.DefaultClient.Do(follow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fr.Body.Close()
+	if fr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("post-large-image status = %d, want 429", fr.StatusCode)
+	}
+}
+
 func TestProviderSideContextReferencesReserveRemainingAllowance(t *testing.T) {
 	for name, body := range map[string]string{
 		"previous response":  `{"previous_response_id":"resp_123","max_tokens":10}`,

@@ -82,6 +82,13 @@ func RedactMessage(message llm.Message, redact RedactFunc) llm.Message {
 		block.Text = redact(block.Text)
 		block.Signature = redact(block.Signature)
 		block.Data = redact(block.Data)
+		if block.Source != nil {
+			// Redact the URL reference; base64 payloads are binary data and
+			// are left untouched.
+			source := *block.Source
+			block.Source = &source
+			block.Source.URL = redact(block.Source.URL)
+		}
 		if block.ToolUse != nil {
 			toolUse := *block.ToolUse
 			block.ToolUse = &toolUse
@@ -94,9 +101,28 @@ func RedactMessage(message llm.Message, redact RedactFunc) llm.Message {
 			block.ToolResult = &toolResult
 			block.ToolResult.ToolUseID = redact(block.ToolResult.ToolUseID)
 			block.ToolResult.Content = redact(block.ToolResult.Content)
+			// Mixed-content tool results: redact the text parts so a secret
+			// inside a block-carrying result cannot leak through projection.
+			block.ToolResult.Blocks = RedactBlocks(block.ToolResult.Blocks, redact)
 		}
 	}
 	return message
+}
+
+// RedactBlocks returns a copy of blocks with every projected text field
+// (text block bodies and media URL references) passed through redact.
+func RedactBlocks(blocks []llm.Block, redact RedactFunc) []llm.Block {
+	out := make([]llm.Block, len(blocks))
+	copy(out, blocks)
+	for i := range out {
+		out[i].Text = redact(out[i].Text)
+		if out[i].Source != nil {
+			source := *out[i].Source
+			out[i].Source = &source
+			out[i].Source.URL = redact(out[i].Source.URL)
+		}
+	}
+	return out
 }
 
 // RedactJSON walks a JSON tool input and passes every string value through

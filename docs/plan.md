@@ -129,6 +129,57 @@ Anthropic reconciliation sums base, cache-creation, and cache-read input token
 fields. SSE usage is observed incrementally without retaining the bounded JSON
 response prefix or tail.
 
+
+### Media content (images and documents)
+
+`llm.BlockImage` and `llm.BlockDocument` carry media with a source struct
+(`base64` inline data or `url`), mirroring the Anthropic Messages API. The
+canonical layer in `internal/llm` owns the shape and the limits — no
+translator re-decides them:
+
+- **Size.** One media block caps at 5 MiB decoded (`llm.MaxMediaBytes`);
+  URL references cap at 8 KiB (`llm.MaxMediaURLLen`). Over-limit content is
+  rejected with an error naming the limit; it is never truncated into
+  invalid base64 and never silently dropped.
+- **Types.** Images: PNG/JPEG/GIF/WebP. Documents: PDF, text formats, and
+  the common office formats. Anything else fails with
+  `llm.ErrUnsupportedMediaType`.
+- **JSON is the storage format.** Persisted turns stay additive and
+  `omitempty`; turns written before media existed unmarshal and round-trip
+  byte-identically (checked-in fixtures in `internal/llm/testdata`).
+
+**Storage decision: inline base64 in the turns table.** Payloads ride inside
+`source.data` in the persisted turn JSON. This keeps a session's transcript
+in one SQLite row set — portable, backed up, and restorable with the rest of
+waffle ("SQLite for everything") — at the cost of re-reading media bytes
+whenever a transcript is loaded. That cost is bounded by the canonical 5 MiB
+per-block cap and the store's streaming row scan; the single-connection
+read path is covered by a regression test with images at the limit. If real
+usage makes transcript reads heavy, a content-addressed blob store behind
+the same `source` struct (an additive `blob` source type) is the escape
+hatch — the JSON shape does not change.
+
+**Provider translation.** Anthropic emits the SDK's image/document block
+params (including inside tool results). OpenAI-compatible endpoints map
+images to `image_url` content parts (data URI for inline base64); documents
+have no universal equivalent in that dialect, so a document block fails
+with an explicit error naming the provider and block type — convert the
+document to text first, or use a document-capable provider. Images inside
+tool results fail the same way on OpenAI-compatible endpoints (role `tool`
+content is a plain string there). Silent loss is never acceptable: a user
+who sends a photo must not get an answer computed without it.
+
+**Untrusted posture.** Media content is untrusted input that no text filter
+inspects. The agent labels every media-bearing user message with the
+untrusted framing before it reaches a model (data, never instructions), on
+the same path every tier shares — main, cron, issue, and group all route
+through `agent.prepareContext`, so no tier inherits unlabelled media by
+accident. The broker's content-part inspection treats image traffic as an
+external token source (reservation of the remaining allowance), and
+sandboxed requests carrying images are covered by tests. Retention: media
+is persisted like any turn; a lifecycle policy (e.g. deleting media beyond
+session retention) is future work, tracked with channel attachments.
+
 ### Tools
 
 Native Go tools first: `bash` (policy-gated), `read`/`write`/`edit`, `fetch`,

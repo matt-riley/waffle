@@ -50,9 +50,38 @@ func New(apiKey, baseURL string) *Provider {
 
 type wireMessage struct {
 	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
+	Content    wireContent    `json:"content,omitempty"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// wireContent is a message body that is either a plain string (the
+// historical shape) or an array of typed content parts (needed once a
+// message carries an image). The string form is preserved so text-only
+// requests keep the exact wire shape.
+type wireContent struct {
+	Text  string
+	Parts []wireContentPart
+}
+
+func (c wireContent) MarshalJSON() ([]byte, error) {
+	if c.Parts != nil {
+		return json.Marshal(c.Parts)
+	}
+	return json.Marshal(c.Text)
+}
+
+// wireContentPart is one item of a content-part array. Only text and
+// image_url parts exist in this dialect; documents have no equivalent and
+// are rejected up front (see translateMessage).
+type wireContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *wireImageURL `json:"image_url,omitempty"`
+}
+
+type wireImageURL struct {
+	URL string `json:"url"`
 }
 
 type wireToolCall struct {
@@ -91,8 +120,10 @@ type wireTool struct {
 
 type wireChunk struct {
 	Choices []struct {
-		Delta        wireMessage `json:"delta"`
-		FinishReason string      `json:"finish_reason"`
+		// Delta carries streamed deltas, which are always plain strings on
+		// the wire (requests use wireMessage, whose content may be parts).
+		Delta        wireDelta `json:"delta"`
+		FinishReason string    `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -100,9 +131,18 @@ type wireChunk struct {
 	} `json:"usage"`
 }
 
+type wireDelta struct {
+	Content   string         `json:"content"`
+	ToolCalls []wireToolCall `json:"tool_calls"`
+}
+
 // Complete implements llm.Provider.
 func (p *Provider) Complete(ctx context.Context, req llm.Request, onEvent llm.StreamFunc) (resp *llm.Response, err error) {
-	body, err := json.Marshal(p.toWire(req))
+	wire, err := p.toWire(req)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(wire)
 	if err != nil {
 		return nil, err
 	}
@@ -150,16 +190,25 @@ func (p *Provider) client() *http.Client {
 	return http.DefaultClient
 }
 
-func (p *Provider) toWire(req llm.Request) wireRequest {
+func (p *Provider) toWire(req llm.Request) (wireRequest, error) {
 	w := wireRequest{Model: req.Model, Stream: true, MaxTok: req.MaxTokens}
 	if w.Stream {
 		w.StreamOptions = &wireStreamOptions{IncludeUsage: true}
 	}
 	if req.System != "" {
-		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: req.System})
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: wireContent{Text: req.System}})
 	}
 	for _, m := range req.Messages {
-		w.Messages = append(w.Messages, translateMessage(m)...)
+		// Canonical layer owns size/type limits; the translator only
+		// propagates them (never silently drops or truncates media).
+		if err := llm.ValidateBlocks(m.Blocks); err != nil {
+			return wireRequest{}, fmt.Errorf("openai: %w", err)
+		}
+		msgs, err := translateMessage(m)
+		if err != nil {
+			return wireRequest{}, err
+		}
+		w.Messages = append(w.Messages, msgs...)
 	}
 	for _, t := range req.Tools {
 		wt := wireTool{Type: "function"}
@@ -168,20 +217,27 @@ func (p *Provider) toWire(req llm.Request) wireRequest {
 		wt.Function.Parameters = t.InputSchema
 		w.Tools = append(w.Tools, wt)
 	}
-	return w
+	return w, nil
 }
 
 // translateMessage maps one canonical message to one or more wire messages:
 // tool results become role:"tool" messages (which must directly follow the
 // assistant turn that requested them), and thinking blocks are dropped —
 // this dialect has no equivalent.
-func translateMessage(m llm.Message) []wireMessage {
+//
+// Images are representable only as image_url content parts inside user
+// messages. Documents have no universal equivalent in this dialect and
+// images cannot ride tool messages (their content is a plain string), so
+// those combinations fail with an explicit, actionable error instead of
+// silently dropping content: a user who sends a photo must never get an
+// answer computed without it.
+func translateMessage(m llm.Message) ([]wireMessage, error) {
 	if m.Role == llm.RoleAssistant {
 		out := wireMessage{Role: "assistant"}
 		for _, b := range m.Blocks {
 			switch b.Type {
 			case llm.BlockText:
-				out.Content += b.Text
+				out.Content.Text += b.Text
 			case llm.BlockToolUse:
 				tc := wireToolCall{ID: b.ToolUse.ID, Type: "function"}
 				tc.Function.Name = b.ToolUse.Name
@@ -189,27 +245,104 @@ func translateMessage(m llm.Message) []wireMessage {
 				out.ToolCalls = append(out.ToolCalls, tc)
 			}
 		}
-		return []wireMessage{out}
+		return []wireMessage{out}, nil
 	}
 
 	var msgs []wireMessage
-	var text string
+	// userContent accumulates one user message's blocks so text and image
+	// parts keep their order inside a single content array. sawImage is set
+	// the moment an image appears: from then on the accumulated text is
+	// emitted as parts too, so a message that never had an image keeps the
+	// historical plain-string content form.
+	var userContent []wireContentPart
+	var text strings.Builder
+	sawImage := false
+	flushUser := func() {
+		if text.Len() > 0 {
+			if sawImage {
+				userContent = append(userContent, wireContentPart{Type: "text", Text: text.String()})
+			} else {
+				msgs = append(msgs, wireMessage{Role: "user", Content: wireContent{Text: text.String()}})
+			}
+			text.Reset()
+		}
+		if len(userContent) > 0 {
+			msgs = append(msgs, wireMessage{Role: "user", Content: wireContent{Parts: userContent}})
+			userContent = nil
+			sawImage = false
+		}
+	}
 	for _, b := range m.Blocks {
 		switch b.Type {
 		case llm.BlockToolResult:
-			content := b.ToolResult.Content
-			if b.ToolResult.IsError {
-				content = "ERROR: " + content
+			// Preserve the historical wire order: tool messages are emitted
+			// in place and pending user text after them, unless an image
+			// forces parts mode (then the text must flush first so the
+			// content-part array keeps its order).
+			if sawImage {
+				flushUser()
 			}
-			msgs = append(msgs, wireMessage{Role: "tool", ToolCallID: b.ToolResult.ToolUseID, Content: content})
+			content, err := toolResultContent(b.ToolResult)
+			if err != nil {
+				return nil, err
+			}
+			msgs = append(msgs, wireMessage{Role: "tool", ToolCallID: b.ToolResult.ToolUseID, Content: wireContent{Text: content}})
+		case llm.BlockImage:
+			if text.Len() > 0 {
+				userContent = append(userContent, wireContentPart{Type: "text", Text: text.String()})
+				text.Reset()
+			}
+			sawImage = true
+			userContent = append(userContent, wireContentPart{Type: "image_url", ImageURL: &wireImageURL{URL: imageURL(b)}})
+		case llm.BlockDocument:
+			// No universal document part exists in the chat-completions
+			// dialect. Fail loudly rather than let the user's PDF silently
+			// vanish from the prompt (see package doc decision note).
+			return nil, fmt.Errorf("openai: cannot represent block type %q in this dialect (chat completions has no document content part); convert the document to text first, or use a provider that supports documents", llm.BlockDocument)
 		case llm.BlockText:
-			text += b.Text
+			text.WriteString(b.Text)
 		}
 	}
-	if text != "" {
-		msgs = append(msgs, wireMessage{Role: "user", Content: text})
+	flushUser()
+	return msgs, nil
+}
+
+// toolResultContent flattens a tool result to the plain string this dialect
+// requires for role:"tool" messages. Text blocks are concatenated; media
+// blocks have no string form and fail explicitly.
+func toolResultContent(tr *llm.ToolResult) (string, error) {
+	if len(tr.Blocks) == 0 {
+		content := tr.Content
+		if tr.IsError {
+			content = "ERROR: " + content
+		}
+		return content, nil
 	}
-	return msgs
+	var b strings.Builder
+	for _, bl := range tr.Blocks {
+		switch bl.Type {
+		case llm.BlockText:
+			b.WriteString(bl.Text)
+		case llm.BlockImage:
+			return "", fmt.Errorf("openai: cannot represent block type %q inside a tool result (role tool content is a plain string); include the image in a user message instead, or use a provider that supports image tool results", llm.BlockImage)
+		case llm.BlockDocument:
+			return "", fmt.Errorf("openai: cannot represent block type %q inside a tool result (role tool content is a plain string); convert the document to text first, or use a provider that supports documents", llm.BlockDocument)
+		}
+	}
+	if tr.IsError {
+		return "ERROR: " + b.String(), nil
+	}
+	return b.String(), nil
+}
+
+// imageURL renders a canonical image source in the image_url form this
+// dialect requires: a data URI for inline base64, the URL itself for URL
+// sources.
+func imageURL(b llm.Block) string {
+	if b.Source.Type == llm.SourceURL {
+		return b.Source.URL
+	}
+	return "data:" + b.Source.MediaType + ";base64," + b.Source.Data
 }
 
 func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes int) (*llm.Response, error) {
