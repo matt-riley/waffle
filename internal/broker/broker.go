@@ -3,7 +3,8 @@
 // wk_ session tokens (DefaultTokenTTL) and talk to the broker, which injects
 // the real credential upstream. Phase 4 ships the LLM face (Anthropic and
 // OpenAI-compatible passthrough); the git and egress faces arrive with
-// repo workspaces (phase 5).
+// repo workspaces (phase 5); credentialed API faces (#254) generalize the
+// LLM face to any third-party API under /api/<name>/<path>.
 package broker
 
 import (
@@ -15,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -60,6 +62,27 @@ type Upstream struct {
 	Value string
 }
 
+// APIFace is one named credentialed API face the broker serves at
+// /api/<name>/<path> (#254). It generalises Upstream for third-party APIs:
+// the same host-side header injection, but scoped by an explicit method
+// allowlist and path-prefix allowlist, deny-by-default per session, and
+// fully audited. Value is the real credential — it exists only inside the
+// broker process and never leaves the host.
+type APIFace struct {
+	// Name routes the face: the broker serves /api/<name>/<path>.
+	Name string
+	// BaseURL of the real API (e.g. https://api.example.com).
+	BaseURL string
+	// Header is the auth header to inject ("x-api-key" or "Authorization").
+	Header string
+	// Value is the real credential (for Authorization: pass "Bearer ...").
+	Value string
+	// Methods is the explicit method allowlist (upper-case).
+	Methods []string
+	// Paths is the explicit path-prefix allowlist.
+	Paths []string
+}
+
 // EgressTarget is an allowlisted HTTP(S) destination. Value is injected only
 // for this host and is never written to audit logs.
 type EgressTarget struct {
@@ -75,11 +98,33 @@ type EgressTarget struct {
 // signature (docs/plan.md, "Secret management").
 type GitCredentialFunc func(ctx context.Context, sessionID, host, path string) (username, password string, err error)
 
+// apiFace is one configured face plus its ready-to-serve proxy.
+type apiFace struct {
+	face    APIFace
+	base    *url.URL
+	methods map[string]bool
+	paths   []string
+	proxy   *httputil.ReverseProxy
+}
+
 // Broker mints session tokens and proxies authenticated requests.
 type Broker struct {
 	audit     *sql.DB
 	upstreams map[string]*httputil.ReverseProxy
 	egress    map[string]*EgressTarget
+	faces     map[string]*apiFace
+
+	// Redact, when set, scrubs credential values from audit rows, error
+	// text, and proxied response bodies before they leave the broker.
+	// Wire it to a secret-store redactor (internal/secret) so a response
+	// body that echoes the credential is redacted before reaching the
+	// caller, and a credential-shaped path cannot land in an audit row.
+	Redact func(string) string
+	// RedactOverlap is the tail bytes retained while scrubbing a streaming
+	// response body. A credential longer than this could straddle a flush
+	// boundary unseen, so set it to the longest enrolled secret value
+	// (secret.Redactor.MaxLen). Zero uses redactOverlapDefault.
+	RedactOverlap int
 
 	// GitCredential, when set, enables the /git-credential face used by
 	// `waffle git-credential` inside workspace containers.
@@ -92,15 +137,16 @@ type Broker struct {
 	// origin without disabling that refusal for everyone.
 	DialEgress func(ctx context.Context, network, address string) (net.Conn, error)
 
-	mu       sync.Mutex
-	tokens   map[string]tokenEntry // token → session + expiry
-	sessions map[string]string     // session id → current token
-	gitScope map[string]string     // session id → bound repo (owner/name)
-	limits   map[string]usage.Limits
-	budgets  map[string]string
-	kinds    map[string]string // upstream name → provider type ("anthropic"/"openai")
-	Usage    *usage.Store
-	Limits   usage.Limits
+	mu         sync.Mutex
+	tokens     map[string]tokenEntry // token → session + expiry
+	sessions   map[string]string     // session id → current token
+	gitScope   map[string]string     // session id → bound repo (owner/name)
+	limits     map[string]usage.Limits
+	budgets    map[string]string
+	kinds      map[string]string          // upstream name → provider type ("anthropic"/"openai")
+	faceGrants map[string]map[string]bool // session id → granted face names
+	Usage      *usage.Store
+	Limits     usage.Limits
 	// TokenTTL is the lifetime of minted wk_ tokens. Zero means DefaultTokenTTL.
 	TokenTTL time.Duration
 	// Now is injectable for deterministic budget-boundary and TTL tests.
@@ -125,14 +171,16 @@ func (b *Broker) tokenTTL() time.Duration {
 // audit persistence (tests).
 func New(st *store.Store, upstreams []Upstream) *Broker {
 	b := &Broker{
-		upstreams: map[string]*httputil.ReverseProxy{},
-		egress:    map[string]*EgressTarget{},
-		tokens:    map[string]tokenEntry{},
-		sessions:  map[string]string{},
-		gitScope:  map[string]string{},
-		limits:    map[string]usage.Limits{},
-		budgets:   map[string]string{},
-		kinds:     map[string]string{},
+		upstreams:  map[string]*httputil.ReverseProxy{},
+		egress:     map[string]*EgressTarget{},
+		faces:      map[string]*apiFace{},
+		tokens:     map[string]tokenEntry{},
+		sessions:   map[string]string{},
+		gitScope:   map[string]string{},
+		limits:     map[string]usage.Limits{},
+		budgets:    map[string]string{},
+		kinds:      map[string]string{},
+		faceGrants: map[string]map[string]bool{},
 	}
 
 	if st != nil {
@@ -179,18 +227,110 @@ func (b *Broker) SetEgress(targets []EgressTarget) {
 	}
 }
 
+// SetAPIFaces configures the broker's credentialed API faces (#254), served
+// at /api/<name>/<path>. Faces are deny-by-default: a session token carries
+// grants minted with the token (MintScopedFaces), and a request for an
+// un-granted face is refused and audited. Malformed entries (bad base URL,
+// empty allowlists) are skipped, mirroring SetEgress; config.Load already
+// rejects them before serve starts.
+func (b *Broker) SetAPIFaces(faces []APIFace) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.faces = make(map[string]*apiFace, len(faces))
+	for _, f := range faces {
+		base, err := url.Parse(f.BaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+			continue
+		}
+		if len(f.Methods) == 0 || len(f.Paths) == 0 {
+			continue
+		}
+		face := &apiFace{
+			face:    f,
+			base:    base,
+			methods: make(map[string]bool, len(f.Methods)),
+			paths:   append([]string(nil), f.Paths...),
+		}
+		for _, m := range f.Methods {
+			face.methods[strings.ToUpper(m)] = true
+		}
+		face.proxy = newAPIFaceProxy(face, b.redact)
+		b.faces[f.Name] = face
+	}
+}
+
+// newAPIFaceProxy builds the face's reverse proxy. The credential is
+// injected here, host-side, exactly like Upstream — this is the only place a
+// face credential touches a request. The transport never follows redirects:
+// net/http's RoundTripper contract returns 3xx responses without following
+// them, and the face transport keeps that property explicit so a redirect
+// can never carry the credential header to a host outside base_url.
+func newAPIFaceProxy(face *apiFace, redact func(string) string) *httputil.ReverseProxy {
+	header, value := face.face.Header, face.face.Value
+	proxy := &httputil.ReverseProxy{
+		Transport: &faceTransport{},
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(face.base)
+			pr.Out.Host = face.base.Host
+			// Strip the sandbox's token and any caller-supplied auth;
+			// inject the real credential.
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Proxy-Authorization")
+			pr.Out.Header.Del("X-Api-Key")
+			if header != "" {
+				pr.Out.Header.Set(header, value)
+			}
+		},
+	}
+	// Proxy transport errors can include the request URL; scrub them so a
+	// credential-shaped path cannot reach the logs.
+	proxy.ErrorLog = redactingLog(redact)
+	return proxy
+}
+
+// faceHTTPTransport is the shared RoundTripper for face proxies. Like the
+// provider upstreams it dials whatever the operator's base_url names
+// (faces are host config, not untrusted input), but it never follows
+// redirects — see faceTransport.
+var faceHTTPTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	return t
+}()
+
+// faceTransport is the RoundTripper for face proxies. net/http transports
+// never follow redirects (that is http.Client behavior), so a 3xx response
+// is returned to the caller un-followed and the credential header never
+// travels to the redirect target. The type exists to pin that invariant in
+// one place: a face can never be used to reach a host outside its base_url,
+// including via redirect (#254).
+type faceTransport struct{}
+
+func (faceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return faceHTTPTransport.RoundTrip(r)
+}
+
 // Mint issues a wk_ session token bound to sessionID.
 func (b *Broker) Mint(ctx context.Context, sessionID string) (string, error) {
-	return b.mint(ctx, sessionID, "", usage.Limits{}, false)
+	return b.mint(ctx, sessionID, "", usage.Limits{}, false, nil)
 }
 
 // MintScoped issues a token with a group-specific limit and stable accounting
 // identity. The concrete session remains the authorization/audit identity.
 func (b *Broker) MintScoped(ctx context.Context, sessionID, budgetKey string, limits usage.Limits) (string, error) {
-	return b.mint(ctx, sessionID, budgetKey, limits, true)
+	return b.mint(ctx, sessionID, budgetKey, limits, true, nil)
 }
 
-func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits usage.Limits, scoped bool) (string, error) {
+// MintScopedFaces issues a token like MintScoped but also grants the named
+// API faces (#254). Faces are deny-by-default: a token minted without a
+// grant (Mint, MintScoped) can call no face, and an unconfigured face name
+// in faces is silently dropped, never granted. Grants are bound to the
+// session, so a token cannot be re-scoped after minting.
+func (b *Broker) MintScopedFaces(ctx context.Context, sessionID, budgetKey string, limits usage.Limits, faces []string) (string, error) {
+	return b.mint(ctx, sessionID, budgetKey, limits, true, faces)
+}
+
+func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits usage.Limits, scoped bool, faces []string) (string, error) {
 	raw, err := id.NewBytes(16)
 	if err != nil {
 		return "", fmt.Errorf("mint broker token: %w", err)
@@ -217,9 +357,23 @@ func (b *Broker) mint(ctx context.Context, sessionID, budgetKey string, limits u
 		delete(b.limits, sessionID)
 		delete(b.budgets, sessionID)
 	}
+	b.faceGrants[sessionID] = configuredFaceSet(b.faces, faces)
 	b.mu.Unlock()
 	b.record(ctx, token, sessionID, "mint", "")
 	return token, nil
+}
+
+// configuredFaceSet keeps only the granted names that name a configured
+// face. An unknown name is never granted, deny-by-default. Caller holds no
+// lock; b.faces is read-only after SetAPIFaces.
+func configuredFaceSet(faces map[string]*apiFace, grants []string) map[string]bool {
+	set := make(map[string]bool, len(grants))
+	for _, name := range grants {
+		if faces[name] != nil {
+			set[name] = true
+		}
+	}
+	return set
 }
 
 // Revoke invalidates a token (session ended).
@@ -248,6 +402,7 @@ func (b *Broker) clearSessionMapsLocked(sessionID string) {
 	delete(b.gitScope, sessionID)
 	delete(b.limits, sessionID)
 	delete(b.budgets, sessionID)
+	delete(b.faceGrants, sessionID)
 }
 
 // dropTokenLocked removes a token and, when it is still the session's current
@@ -393,6 +548,13 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/egress") || r.URL.IsAbs() {
 		b.serveEgress(w, r, token, sessionID)
+		return
+	}
+	// Credentialed API faces (#254) own the /api/ prefix. The egress and
+	// CONNECT checks above run first so an absolute-form or tunnel request
+	// can never be aimed at a face.
+	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		b.serveAPIFace(w, r, token, sessionID, budgetKey, limits, requestAt)
 		return
 	}
 
@@ -895,6 +1057,268 @@ func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sess
 	proxy.ServeHTTP(w, r)
 }
 
+// serveAPIFace handles one credentialed API face request (#254). Every
+// decision — allowed and denied — is audited via b.record, naming the face
+// and the session. Deny-by-default: the token's mint-time grants decide
+// access first, then the face's method allowlist, then the path allowlist,
+// then the usage gates (Paused and Check already ran in ServeHTTP; this is
+// the atomic request reservation).
+func (b *Broker) serveAPIFace(w http.ResponseWriter, r *http.Request, token, sessionID, budgetKey string, limits usage.Limits, requestAt time.Time) {
+	name, rest, escapedRest, ok := splitAPIRoute(r.URL)
+	if !ok {
+		b.record(r.Context(), token, sessionID, "denied", "api route")
+		http.Error(w, "unknown api face", http.StatusNotFound)
+		return
+	}
+	b.mu.Lock()
+	face := b.faces[name]
+	granted := face != nil && b.faceGrants[sessionID][name]
+	b.mu.Unlock()
+	if face == nil {
+		// The same message for every unknown name: an unknown face must not
+		// disclose which faces exist.
+		b.record(r.Context(), token, sessionID, "denied", "api "+name)
+		http.Error(w, "unknown api face", http.StatusNotFound)
+		return
+	}
+	if !granted {
+		b.record(r.Context(), token, sessionID, "denied", "api "+name+" not granted")
+		http.Error(w, "api face not granted for this session", http.StatusForbidden)
+		return
+	}
+	if !face.methods[r.Method] {
+		b.record(r.Context(), token, sessionID, "denied", "api "+name+" method "+r.Method)
+		http.Error(w, "api face does not allow method "+r.Method, http.StatusForbidden)
+		return
+	}
+	if traversalRefused(r.URL) {
+		b.record(r.Context(), token, sessionID, "denied", "api "+name+" traversal")
+		http.Error(w, "api face path refused", http.StatusForbidden)
+		return
+	}
+	if !face.allowsPath(rest) {
+		b.record(r.Context(), token, sessionID, "denied", "api "+name+" path "+rest)
+		http.Error(w, "api face path not allowed", http.StatusForbidden)
+		return
+	}
+	if b.Usage != nil {
+		// Atomic request-count and cap enforcement. Faces carry no token
+		// payload to meter, so the reservation is 0 tokens and the request
+		// row is the accounting. ReserveRequestAt returns a usage error for
+		// both cap refusals; the attempt itself is audited below.
+		if _, err := b.Usage.ReserveRequestAt(r.Context(), budgetKey, name, limits, requestAt, 0, false); err != nil {
+			b.record(r.Context(), token, sessionID, "denied", "api "+name+" usage")
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "usage limit exceeded") {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, b.redact(err.Error()), status)
+			return
+		}
+	}
+
+	b.record(r.Context(), token, sessionID, "api", name+"/"+rest)
+	r.URL.Path = "/" + rest
+	r.URL.RawPath = "/" + escapedRest
+	if r.URL.RawPath == r.URL.Path {
+		r.URL.RawPath = ""
+	}
+	// Scrub the response body and any proxy error so a body that echoes the
+	// credential is redacted before reaching the caller.
+	capture := &redactResponseWriter{ResponseWriter: w, redact: b.redact, overlap: b.redactOverlap()}
+	face.proxy.ServeHTTP(capture, r)
+	_ = capture.finish()
+}
+
+// splitAPIRoute returns the face name and the decoded/escaped paths under
+// it for a /api/<name>/<path> request. ok is false when the path does not
+// name a face (no name or empty name).
+func splitAPIRoute(u *url.URL) (name, rest, escapedRest string, ok bool) {
+	trimmed := strings.TrimPrefix(u.Path, "/api/")
+	if trimmed == u.Path {
+		return "", "", "", false
+	}
+	name, rest, _ = strings.Cut(trimmed, "/")
+	if name == "" {
+		return "", "", "", false
+	}
+	rawTrimmed := strings.TrimPrefix(u.EscapedPath(), "/api/")
+	_, escapedRest, _ = strings.Cut(rawTrimmed, "/")
+	return name, rest, escapedRest, true
+}
+
+// allowsPath reports whether rest matches the face's path-prefix allowlist.
+// A prefix matches the whole path or a path boundary, so "/v1" never matches
+// "/v1evil".
+func (f *apiFace) allowsPath(rest string) bool {
+	full := "/" + rest // splitAPIRoute strips the leading slash
+	for _, prefix := range f.paths {
+		if full == prefix || strings.HasPrefix(full, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// traversalRefused reports whether a request path tries to escape its face
+// via "..", encoded separators, or double-encoding (#254). Both the decoded
+// Path and the escaped RawPath are checked because each encoding variant
+// survives in a different form: net/http decodes %2e%2e to ".." in Path
+// while RawPath keeps the original, and a double-encoded "%252e" survives
+// Path decoding as "%2e".
+func traversalRefused(u *url.URL) bool {
+	raw := u.RawPath
+	if raw == "" {
+		raw = u.EscapedPath()
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "%25") { // double-encoding
+		return true
+	}
+	if strings.Contains(lower, "%2e") { // encoded dots
+		return true
+	}
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") { // encoded separators
+		return true
+	}
+	for _, p := range []string{u.Path, raw} {
+		if strings.Contains(p, "\\") {
+			return true
+		}
+		for _, seg := range strings.Split(p, "/") {
+			if seg == ".." {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// redactOverlapDefault retains this many tail bytes while scrubbing a
+// streaming response body when the operator did not size the overlap from
+// the redactor (Broker.RedactOverlap). 256KiB covers any realistic
+// credential value.
+const redactOverlapDefault = 256 << 10
+
+func (b *Broker) redactOverlap() int {
+	if b.RedactOverlap > 0 {
+		return b.RedactOverlap
+	}
+	return redactOverlapDefault
+}
+
+func (b *Broker) redact(s string) string {
+	if b.Redact == nil {
+		return s
+	}
+	return b.Redact(s)
+}
+
+// maxRedactBodyBytes is the largest response body the broker buffers to
+// scrub credentials exactly. Almost every API response fits; a body at or
+// under this cap is redacted as one string, so a credential can never be
+// split across flush boundaries and reassembled by the caller.
+const maxRedactBodyBytes = 4 << 20
+
+// redactResponseWriter scrubs a proxied response before it reaches the
+// caller (#254): response headers are scrubbed when the header block is
+// sent, trailers when the body completes, and the body as it streams.
+// Without it, a token-echo endpoint could hand the model the very
+// credential the broker is supposed to contain.
+//
+// Bodies up to maxRedactBodyBytes are buffered and redacted whole — exact
+// containment. Larger bodies stream with an overlap window (streaming
+// true): each flush redacts the whole window (the flushed prefix plus the
+// retained overlap) as one string, then emits the redacted prefix and
+// retains the redacted overlap. A credential straddling a flush boundary
+// is therefore replaced once — neither the emitted bytes nor the retained
+// bytes carry any part of it, so the caller cannot reassemble a split
+// value across flushes.
+type redactResponseWriter struct {
+	http.ResponseWriter
+	redact    func(string) string
+	overlap   int
+	pending   []byte
+	streaming bool
+}
+
+func (w *redactResponseWriter) Write(p []byte) (int, error) {
+	if len(w.pending)+len(p) > maxRedactBodyBytes {
+		w.streaming = true
+	}
+	w.pending = append(w.pending, p...)
+	if w.streaming && len(w.pending) > w.overlap {
+		cut := len(w.pending) - w.overlap
+		redacted := w.redact(string(w.pending))
+		if cut > len(redacted) {
+			cut = len(redacted)
+		}
+		if _, err := io.WriteString(w.ResponseWriter, redacted[:cut]); err != nil {
+			return 0, err
+		}
+		w.pending = []byte(redacted[cut:])
+	}
+	return len(p), nil
+}
+
+// WriteHeader scrubs every upstream response header value before the header
+// block is sent. The ReverseProxy copies upstream headers through the
+// embedded writer untouched, so an upstream that echoes the injected
+// credential in a response header (not just the body) would otherwise hand
+// it straight to the caller (#254 review).
+func (w *redactResponseWriter) WriteHeader(status int) {
+	h := w.Header()
+	for _, vs := range h {
+		for i, v := range vs {
+			vs[i] = w.redact(v)
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *redactResponseWriter) finish() error {
+	// Trailers (http.TrailerPrefix keys) are declared after WriteHeader, so
+	// scrub them here, before the body completes and net/http sends them.
+	h := w.Header()
+	for k, vs := range h {
+		if strings.HasPrefix(k, http.TrailerPrefix) {
+			for i, v := range vs {
+				vs[i] = w.redact(v)
+			}
+		}
+	}
+	if len(w.pending) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.ResponseWriter, w.redact(string(w.pending)))
+	w.pending = nil
+	return err
+}
+
+func (w *redactResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// redactingLog returns a log.Logger that scrubs credential material from
+// reverse-proxy error lines before they reach the process log.
+func redactingLog(redact func(string) string) *log.Logger {
+	return log.New(redactingLogWriter{redact: redact}, "", 0)
+}
+
+type redactingLogWriter struct {
+	redact func(string) string
+}
+
+func (w redactingLogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(w.redact(string(p)))
+	if msg != "" {
+		slog.Default().Error("broker face proxy", "err", msg)
+	}
+	return len(p), nil
+}
+
 // safeHTTPTransport is built once and reused across every proxied egress
 // request, so connections are pooled instead of each RoundTrip getting its
 // own throwaway Transport (and connection pool).
@@ -1024,10 +1448,12 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 	if len(prefix) > 11 {
 		prefix = prefix[:11]
 	}
+	// detail is scrubbed before it can land in a row: a credential-shaped
+	// path or header must never persist in the audit table (#254).
 	if _, err := b.audit.ExecContext(ctx, `
 		INSERT INTO broker_audit (at, token_prefix, session, action, detail)
 		VALUES (?, ?, ?, ?, ?)`,
-		b.now().Format(time.RFC3339Nano), prefix, sessionID, action, detail); err != nil {
+		b.now().Format(time.RFC3339Nano), prefix, sessionID, action, b.redact(detail)); err != nil {
 		slog.Default().Error("broker audit insert failed", "err", err, "token_prefix", prefix, "action", action)
 	}
 }

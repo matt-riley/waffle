@@ -56,7 +56,9 @@ type chatRuntime struct {
 	agentCleanupContext agentCleanupContext
 	wsBroker            *broker.Broker
 	wsURL               string
-	wsClient            io.Closer
+	// api carries the per-face API tool wiring (#254); zero disables them.
+	api      apiBrokerWiring
+	wsClient io.Closer
 
 	modelError          string
 	workspace           string
@@ -134,7 +136,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 		resourceCancel()
 		return chatpkg.State{}, err
 	}
-	built, cleanup, err := buildAgentWithProfileContext(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName)
+	built, cleanup, err := buildAgentWithProfileContext(resourceCtx, r.cfg, ws, skills, r.sessions, config.GroupMain, profileName, r.api)
 	if err != nil {
 		_ = cleanup(resourceCtx)
 		resourceCancel()

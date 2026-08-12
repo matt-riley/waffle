@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/apiface"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/channel/telegram"
@@ -119,6 +120,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	// would try to bind the address serve already holds, which is why /repo
 	// could never open a workspace under serve.
 	var serveBroker *broker.Broker
+	var apiWiring apiBrokerWiring
 	runtimeFactory := func(runtimeCtx context.Context) (chatpkg.Backend, error) {
 		runtime, runtimeErr := newChatRuntime(runtimeCtx, cfg, st)
 		if runtimeErr == nil {
@@ -126,6 +128,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			// Assigned by the time any chat connection is served.
 			runtime.wsBroker = serveBroker
 			runtime.wsURL = serveBrokerURL(cfg.Broker.Listen)
+			runtime.api = apiWiring
 		}
 		if runtimeErr != nil {
 			return runtime, runtimeErr
@@ -219,7 +222,9 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	// The credential broker starts before the agents: remote MCP servers in
 	// docker-mode groups route their traffic through its egress face, so it
 	// must be listening (and mintable) by the time agent build connects
-	// them (#249).
+	// them (#249); per-face API tools (#254) are wired into every tier's
+	// toolbox, and a configured face whose secret cannot be resolved fails
+	// startup rather than silently denying.
 	var brokerDone <-chan struct{}
 	if cfg.Broker.Listen != "" {
 		// Bind synchronously so a busy address fails startup instead of
@@ -237,6 +242,24 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		serveBroker = b
 		b.Usage = usageStore
 		b.Limits = brokerLimits(cfg, config.GroupMain)
+		apiFaces, faceMetas, err := brokerAPIFaces(cfg)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		b.SetAPIFaces(apiFaces)
+		var brokerRedact func(string) string
+		if redactor, redactorErr := brokerRedactor(); redactorErr == nil && redactor != nil {
+			b.Redact = redactor.Redact
+			b.RedactOverlap = redactor.MaxLen()
+			brokerRedact = redactor.Redact
+		}
+		apiWiring = apiBrokerWiring{
+			broker: b,
+			url:    hostBrokerURL(cfg.Broker.Listen),
+			faces:  faceMetas,
+			redact: brokerRedact,
+		}
 		done := make(chan struct{})
 		brokerDone = done
 		go func() {
@@ -245,10 +268,10 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 				log.Error("broker stopped", "err", err)
 			}
 		}()
-		log.Info("credential broker up", "listen", cfg.Broker.Listen, "upstreams", len(upstreams))
+		log.Info("credential broker up", "listen", cfg.Broker.Listen, "upstreams", len(upstreams), "api_faces", len(apiFaces))
 	}
 
-	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions, hostRemoteMCPEgress(cfg, serveBroker))
+	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions, hostRemoteMCPEgress(cfg, serveBroker), apiWiring)
 	if err != nil {
 		cleanup()
 		return err
@@ -559,7 +582,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 	intakeDone := make(chan struct{})
 	go func() {
 		defer close(intakeDone)
-		runIntakeWatchers(lifecycleCtx, cfg, st, sessions, ws, skills, agents, serveBroker, adapterDeliverer(adapters), log)
+		runIntakeWatchers(lifecycleCtx, cfg, st, sessions, ws, skills, agents, serveBroker, apiWiring, adapterDeliverer(adapters), log)
 	}()
 
 	err = <-gatewayDone
@@ -621,12 +644,12 @@ func newChatAudit(log *slog.Logger, lookup peerCredentialLookup) chatwire.AuditF
 	}
 }
 
-func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, sessions *session.Store, memWS memory.Workspace, skills []skill.Skill, agents map[string]*agent.Agent, b *broker.Broker, deliver schedule.Deliverer, log *slog.Logger) {
+func runIntakeWatchers(ctx context.Context, cfg config.Config, st *store.Store, sessions *session.Store, memWS memory.Workspace, skills []skill.Skill, agents map[string]*agent.Agent, b *broker.Broker, api apiBrokerWiring, deliver schedule.Deliverer, log *slog.Logger) {
 	if len(cfg.Intake.GitHub) == 0 {
 		<-ctx.Done()
 		return
 	}
-	issueAgent, issueCleanup, err := ensureIssueAgent(ctx, cfg, memWS, skills, sessions, agents)
+	issueAgent, issueCleanup, err := ensureIssueAgent(ctx, cfg, memWS, skills, sessions, agents, api)
 	if err != nil {
 		log.Error("issue agent build failed", "err", err)
 		<-ctx.Done()
@@ -717,17 +740,17 @@ func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
 // the cron agent used by the scheduler, and named profile agents for channel
 // (main + multiparty group) and cron surfaces (#71). The cleanup callback
 // closes successfully and partially-built agents in reverse build order.
-func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, remoteEgress *mcp.RemoteEgress) (
+func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, remoteEgress *mcp.RemoteEgress, api apiBrokerWiring) (
 	agents map[string]*agent.Agent,
 	cronAgent *agent.Agent,
 	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
 	cleanup func(),
 	err error,
 ) {
-	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg), remoteEgress)
+	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg), remoteEgress, api)
 }
 
-func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress) (
+func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress, api apiBrokerWiring) (
 	agents map[string]*agent.Agent,
 	cronAgent *agent.Agent,
 	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
@@ -746,7 +769,7 @@ func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws me
 	}
 
 	build := func(group string) (*agent.Agent, error) {
-		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime, remoteEgress)
+		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime, remoteEgress, api)
 		cleanups = append(cleanups, closer)
 		if err != nil {
 			return nil, err
@@ -810,7 +833,7 @@ func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws me
 	}
 	for _, name := range profileNames {
 		for _, tier := range profileTiers {
-			a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, tier.group, name, runtime, remoteEgress)
+			a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, tier.group, name, runtime, remoteEgress, api)
 			cleanups = append(cleanups, closer)
 			if err != nil {
 				return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (%s): %w", name, tier.label, err)
@@ -837,6 +860,57 @@ func (ads adapterDeliverer) Deliver(ctx context.Context, target, text string) er
 		}
 	}
 	return fmt.Errorf("no channel %q for delivery", name)
+}
+
+// brokerAPIFaces resolves [[api.upstream]] (#254) into broker faces — the
+// credential resolved host-side exactly once, at startup — and their
+// credential-free metadata for agent tools. A face whose credential cannot
+// be resolved is a startup error: silently dropping a configured face would
+// deny-by-default with no signal to the operator.
+func brokerAPIFaces(cfg config.Config) ([]broker.APIFace, []apiface.Face, error) {
+	faces := make([]broker.APIFace, 0, len(cfg.API.Upstream))
+	metas := make([]apiface.Face, 0, len(cfg.API.Upstream))
+	for _, f := range cfg.API.Upstream {
+		value, err := resolveSecretValue(f.Value, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("api.upstream %q: resolve credential: %w", f.Name, err)
+		}
+		if value == "" {
+			return nil, nil, fmt.Errorf("api.upstream %q: credential resolved empty (store the secret with `waffle secret set %s`)", f.Name, strings.TrimPrefix(f.Value, "secret://"))
+		}
+		faces = append(faces, broker.APIFace{
+			Name: f.Name, BaseURL: f.BaseURL, Header: f.Header, Value: value,
+			Methods: f.Methods, Paths: f.Paths,
+		})
+		metas = append(metas, apiface.Face{Name: f.Name, Methods: f.Methods, Paths: f.Paths})
+	}
+	return faces, metas, nil
+}
+
+// brokerRedactor builds a store-wide secret redactor for the broker, or
+// (nil, nil) when no secret-store identity is available. The broker scrubs
+// audit rows, error text, and proxied response bodies with it, so a
+// credential can never appear on a surface that leaves the host (#254).
+func brokerRedactor() (*secret.Redactor, error) {
+	store, err := secret.TryOpen()
+	if err != nil || store == nil {
+		return nil, nil
+	}
+	return secret.NewRedactor(store)
+}
+
+// hostBrokerURL returns the broker base URL as host-side tools reach it:
+// the literal listen address (containers use the waffle-host alias via
+// serveBrokerURL instead).
+func hostBrokerURL(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // brokerUpstreams assembles the LLM upstreams the broker can front, using

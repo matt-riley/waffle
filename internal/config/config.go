@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +54,8 @@ type Config struct {
 	Intake Intake `toml:"intake"`
 	// CodeIntel configures optional structural-code tools (#79).
 	CodeIntel CodeIntel `toml:"codeintel"`
+	// API configures credentialed API faces (#254).
+	API API `toml:"api"`
 
 	// legacyProviderNormalized records that Providers and Models were derived
 	// from the compatibility [provider] table. It keeps historical secret-value
@@ -551,8 +555,15 @@ var knownProfileTools = map[string]bool{
 // ValidProfileTool reports whether name may appear in a profile's tool
 // allow/deny list. The structured profile editor uses it to refuse an unknown
 // tool by name, instead of surfacing a raw config-load failure (#194).
+// api_<face> names are accepted for any slug: face tools are generated per
+// configured [[api.upstream]] entry, so the static list cannot enumerate
+// them. Load-time validation additionally requires the face to exist.
 func ValidProfileTool(name string) bool {
-	return knownProfileTools[name]
+	if knownProfileTools[name] {
+		return true
+	}
+	face, ok := strings.CutPrefix(name, "api_")
+	return ok && face != "" && slugNameRE.MatchString(face)
 }
 
 // ProfileToolNames lists every tool a profile may name, so an editor can offer
@@ -566,7 +577,7 @@ func ProfileToolNames() []string {
 	return names
 }
 
-func validateProfiles(path string, agent Agent) error {
+func validateProfiles(path string, agent Agent, api API) error {
 	if agent.DefaultProfile != "" && !ValidProfileName(agent.DefaultProfile) {
 		return fmt.Errorf("agent.default_profile: invalid name %q (want slug [a-z0-9-] max %d)", agent.DefaultProfile, ProfileNameMax)
 	}
@@ -591,6 +602,10 @@ func validateProfiles(path string, agent Agent) error {
 		if p.MaxIterations < 0 {
 			return fmt.Errorf("agent.profile %q: max_iterations must be >= 0", name)
 		}
+		apiFaces := map[string]bool{}
+		for _, f := range api.Upstream {
+			apiFaces[f.Name] = true
+		}
 		for _, list := range []struct {
 			label string
 			names []string
@@ -600,6 +615,14 @@ func validateProfiles(path string, agent Agent) error {
 		} {
 			for _, t := range list.names {
 				if t == "" || !knownProfileTools[t] {
+					// api_<face> names must name a configured face: a typo
+					// would silently deny-by-default (#254).
+					if face, ok := strings.CutPrefix(t, "api_"); ok && face != "" && slugNameRE.MatchString(face) {
+						if apiFaces[face] {
+							continue
+						}
+						return fmt.Errorf("agent.profile %q: tools.%s names api_%s but no [[api.upstream]] face %q is configured", name, list.label, face, face)
+					}
 					return fmt.Errorf("agent.profile %q: unknown tool %q in tools.%s", name, t, list.label)
 				}
 			}
@@ -611,6 +634,164 @@ func validateProfiles(path string, agent Agent) error {
 		}
 		// System paths: missing files and escapes are checked at agent build
 		// (needs WAFFLE_HOME). Inline text and empty system are fine here.
+	}
+	return nil
+}
+
+// APIFaceGrants returns the names of the configured faces ([[api.upstream]])
+// the given group's resolved tool policy explicitly grants. Only a literal
+// api_<name> allow entry counts: an empty allow list and the "*" wildcard do
+// NOT grant faces — a face is deny-by-default for every tier, including
+// main (#254). This is the group-policy view used when minting session
+// tokens; host-side tool offer also applies the profile merge.
+func (c Config) APIFaceGrants(group string) []string {
+	pol := c.AgentPolicy(group)
+	grants := make([]string, 0, len(pol.Allow))
+	for _, name := range pol.Allow {
+		face, ok := strings.CutPrefix(name, "api_")
+		if !ok || face == "" || !slugNameRE.MatchString(face) {
+			continue
+		}
+		if slices.Contains(pol.Deny, name) {
+			continue // deny always wins
+		}
+		grants = append(grants, face)
+	}
+	return grants
+}
+
+// apiUpstreamAllowedKeys are the only keys [[api.upstream]] may carry.
+var apiUpstreamAllowedKeys = map[string]bool{
+	"name": true, "base_url": true, "header": true,
+	"value": true, "methods": true, "paths": true,
+}
+
+// detectAPIUpstreamUnknownKeys rejects unknown keys inside [[api.upstream]]
+// tables with the offending face named. The main decode reports undecoded
+// keys without array indices, which cannot be attributed to a face; this
+// second targeted decode can (#254).
+func detectAPIUpstreamUnknownKeys(path string) error {
+	var raw map[string]toml.Primitive
+	meta, err := toml.DecodeFile(path, &raw)
+	if err != nil {
+		return nil // Load already reported the parse error
+	}
+	apiPrim, ok := raw["api"]
+	if !ok {
+		return nil
+	}
+	var apiTable map[string]toml.Primitive
+	if err := meta.PrimitiveDecode(apiPrim, &apiTable); err != nil {
+		return nil
+	}
+	upstreamPrim, ok := apiTable["upstream"]
+	if !ok {
+		return nil
+	}
+	var upstreams []toml.Primitive
+	if err := meta.PrimitiveDecode(upstreamPrim, &upstreams); err != nil {
+		return nil
+	}
+	for i, prim := range upstreams {
+		var keys map[string]toml.Primitive
+		if err := meta.PrimitiveDecode(prim, &keys); err != nil {
+			continue
+		}
+		var u APIUpstream
+		if err := meta.PrimitiveDecode(prim, &u); err != nil {
+			continue
+		}
+		for key := range keys {
+			if apiUpstreamAllowedKeys[key] {
+				continue
+			}
+			face := u.Name
+			if face == "" {
+				face = fmt.Sprintf("[%d]", i)
+			}
+			return fmt.Errorf("api.upstream: face %q: unknown key %q", face, key)
+		}
+	}
+	return nil
+}
+
+// apiHTTPMethodRE matches the HTTP methods a face may allowlist.
+var apiHTTPMethodRE = regexp.MustCompile(`^[A-Z]+$`)
+
+// validateAPIUpstreams enforces the strict face contract (#254): required
+// fields, secret://-only credentials, explicit method and path allowlists,
+// and unique names. Every error names the offending face.
+func validateAPIUpstreams(a API) error {
+	seen := map[string]bool{}
+	for _, f := range a.Upstream {
+		if !ValidProviderConnectionName(f.Name) {
+			return fmt.Errorf("api.upstream: invalid face name %q (want slug [a-z0-9-] max %d)", f.Name, ProviderConnectionNameMax)
+		}
+		if seen[f.Name] {
+			return fmt.Errorf("api.upstream: duplicate face name %q", f.Name)
+		}
+		seen[f.Name] = true
+		base, err := url.Parse(f.BaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+			return fmt.Errorf("api.upstream %q: base_url must be an absolute http(s) URL, got %q", f.Name, f.BaseURL)
+		}
+		if base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+			return fmt.Errorf("api.upstream %q: base_url must not carry userinfo, a query, or a fragment", f.Name)
+		}
+		if !httpTokenRE.MatchString(f.Header) {
+			return fmt.Errorf("api.upstream %q: header %q is not a valid HTTP header name", f.Name, f.Header)
+		}
+		if !strings.HasPrefix(f.Value, "secret://") || strings.TrimPrefix(f.Value, "secret://") == "" {
+			return fmt.Errorf("api.upstream %q: value must be a secret:// reference (real credentials live only in internal/secret)", f.Name)
+		}
+		if len(f.Methods) == 0 {
+			return fmt.Errorf("api.upstream %q: methods allowlist is required (deny-by-default; no implicit allow-all)", f.Name)
+		}
+		for _, m := range f.Methods {
+			if !apiHTTPMethodRE.MatchString(m) || !knownHTTPMethod(m) {
+				return fmt.Errorf("api.upstream %q: method %q is not supported (want GET, POST, PUT, PATCH, DELETE, HEAD, or OPTIONS)", f.Name, m)
+			}
+		}
+		if len(f.Paths) == 0 {
+			return fmt.Errorf("api.upstream %q: paths allowlist is required (deny-by-default; no implicit allow-all)", f.Name)
+		}
+		for _, path := range f.Paths {
+			if err := validFacePath(path); err != nil {
+				return fmt.Errorf("api.upstream %q: path %q: %w", f.Name, path, err)
+			}
+		}
+	}
+	return nil
+}
+
+// knownHTTPMethod reports whether m is one of the methods a face may allow.
+func knownHTTPMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
+// httpTokenRE matches an RFC 7230 token (a valid HTTP header field name).
+var httpTokenRE = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
+
+// validFacePath validates one path-prefix allowlist entry: absolute, no
+// traversal segments, no encoded separators, no backslash, no query or
+// fragment. Refusal of traversal at request time is the enforcement; this
+// keeps the allowlist itself unambiguous.
+func validFacePath(path string) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("must start with %q", "/")
+	}
+	if strings.ContainsAny(path, "\\?#%") {
+		return fmt.Errorf("must not contain backslash, query, fragment, or percent-encoding")
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if seg == ".." {
+			return fmt.Errorf("must not contain %q segments", "..")
+		}
 	}
 	return nil
 }
@@ -794,6 +975,38 @@ type GitHubApp struct {
 // Broker configures the credential broker's HTTP listener; empty disables.
 type Broker struct {
 	Listen string `toml:"listen"`
+}
+
+// API configures credentialed API faces served by the broker at
+// /api/<name>/<path> (#254). Absent config means no faces exist and the
+// routes 404, matching how other optional broker subsystems behave.
+type API struct {
+	Upstream []APIUpstream `toml:"upstream"`
+}
+
+// APIUpstream is one named credentialed API face (#254). The broker injects
+// the resolved credential host-side and the caller never holds it, but the
+// face is deny-by-default: both allowlists are required (a face missing
+// either is a load error, never an implicit allow-all), and a session's tier
+// must explicitly grant the face by naming api_<name> in its tool allow
+// list — the "*" wildcard does not grant faces.
+type APIUpstream struct {
+	// Name routes the face: the broker serves /api/<name>/<path>.
+	Name string `toml:"name"`
+	// BaseURL is the real API root (e.g. https://api.example.com). The
+	// request path is appended to its path, if any.
+	BaseURL string `toml:"base_url"`
+	// Header is the auth header to inject ("x-api-key" or "Authorization").
+	Header string `toml:"header"`
+	// Value is a secret:// reference to the credential. Real credential
+	// values live only in internal/secret; a literal value here is a load
+	// error.
+	Value string `toml:"value"`
+	// Methods is the explicit method allowlist (e.g. ["GET"]). Required.
+	Methods []string `toml:"methods"`
+	// Paths is the explicit path-prefix allowlist (e.g. ["/v1/weather"]).
+	// Required; traversal and encoded separators are refused at request time.
+	Paths []string `toml:"paths"`
 }
 
 // Channels configures messaging surfaces for waffle serve.
@@ -1070,6 +1283,11 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("parse %s: %w", path, err)
 		}
 	}
+	// api.upstream faces report unknown keys with the offending face named;
+	// every other unknown key is reported by path below.
+	if err := detectAPIUpstreamUnknownKeys(path); err != nil {
+		return Config{}, err
+	}
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
@@ -1191,7 +1409,10 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
-	if err := validateProfiles(path, cfg.Agent); err != nil {
+	if err := validateProfiles(path, cfg.Agent, cfg.API); err != nil {
+		return Config{}, err
+	}
+	if err := validateAPIUpstreams(cfg.API); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

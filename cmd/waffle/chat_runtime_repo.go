@@ -104,7 +104,7 @@ func (r *chatRuntime) buildCleanProfileAgent(ctx context.Context, profileName st
 	if err != nil {
 		return nil, nil, err
 	}
-	return buildAgentWithProfileContext(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName)
+	return buildAgentWithProfileContext(ctx, r.cfg, memWS, skills, r.sessions, config.GroupMain, profileName, r.api)
 }
 
 func (r *chatRuntime) installRepo(ctx context.Context, install repoInstall, emit func(chatpkg.Event)) (chatpkg.Result, error) {

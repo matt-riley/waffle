@@ -332,7 +332,7 @@ store; everything else gets scoped, time-bounded derivatives.**
   of sessions. It authenticates callers with per-session `wk_` tokens
   (**24h TTL**, `broker.DefaultTokenTTL`; expired tokens are rejected and
   swept; resume/re-mint issues a fresh token) and applies the session's
-  policy. It has three faces:
+  policy. It has four faces:
   - *LLM:* the provider proxy — injects the real API key upstream
     (unchanged from the base plan).
   - *Git:* mints least-privilege repo credentials — a GitHub
@@ -341,6 +341,23 @@ store; everything else gets scoped, time-bounded derivatives.**
   - *HTTP:* an egress proxy that injects `Authorization` headers for
     allowlisted hosts, so a sandboxed tool can call an API it is entitled
     to without ever seeing the key (nanoclaw's Agent Vault pattern).
+  - *API faces (#254):* named credentialed faces served at
+    `/api/<name>/<path>` for third-party APIs — a generalisation of the
+    LLM upstream with an explicit method and path-prefix allowlist per
+    face. Deny-by-default for every tier: a session token only reaches a
+    face the tier explicitly granted (a literal `api_<name>` entry in its
+    tool allow list; `*` grants nothing), and the broker re-checks the
+    grant, the method allowlist, the path allowlist (traversal and encoded
+    separators refused), and the usage/pause gates on every request.
+    Agents reach a face through a narrow generated `api_<name>` tool rather
+    than a generic `api_call`: one tool per face keeps the schema and
+    description precise about what the face permits, makes tier grants
+    first-class tool policy, and shrinks the blast radius of a prompt
+    injection to the single face the model was given. Credential
+    containment is unchanged: the real value lives in the store and the
+    broker process only; response bodies, audit rows, and errors are
+    redacted before they leave the broker, and redirects are never
+    followed (a face cannot reach a host outside its `base_url`).
 - **Redaction.** The gateway keeps a digest set of all stored secret values
   and scrubs matches from tool output, model context, logs, and traces
   (`[redacted:github/pat]`) — protects against the "cat ~/.netrc into the

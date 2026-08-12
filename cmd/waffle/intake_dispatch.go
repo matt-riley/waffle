@@ -198,8 +198,9 @@ func (o *prodIssueOpener) Open(ctx context.Context, repo string) (issueRunSessio
 	mgr := newWorkspaceManager(o.cfg, o.st, o.broker)
 	if o.broker != nil {
 		limits := brokerLimits(o.cfg, config.GroupIssue)
+		grants := o.cfg.APIFaceGrants(config.GroupIssue)
 		mgr.MintToken = func(mintCtx context.Context, sessionID string) (string, error) {
-			return o.broker.MintScoped(mintCtx, sessionID, sessionID, limits)
+			return o.broker.MintScopedFaces(mintCtx, sessionID, sessionID, limits, grants)
 		}
 	}
 	mgr.BrokerURL = o.brokerURL
@@ -245,9 +246,9 @@ func (r *prodIssueRun) Close() error {
 }
 
 // ensureIssueAgent builds or returns the restricted issue-tier agent.
-func ensureIssueAgent(ctx context.Context, cfg config.Config, memWS memory.Workspace, skills []skill.Skill, sessions *session.Store, agents map[string]*agent.Agent) (*agent.Agent, func(), error) {
+func ensureIssueAgent(ctx context.Context, cfg config.Config, memWS memory.Workspace, skills []skill.Skill, sessions *session.Store, agents map[string]*agent.Agent, api apiBrokerWiring) (*agent.Agent, func(), error) {
 	if a := agents[config.GroupIssue]; a != nil {
 		return a, func() {}, nil
 	}
-	return buildAgent(ctx, cfg, memWS, skills, sessions, config.GroupIssue)
+	return buildAgent(ctx, cfg, memWS, skills, sessions, config.GroupIssue, api)
 }

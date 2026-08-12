@@ -264,8 +264,9 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 	}
 	if b != nil {
 		limits := brokerLimits(cfg, config.GroupMain)
+		grants := cfg.APIFaceGrants(config.GroupMain)
 		mgr.MintToken = func(ctx context.Context, sessionID string) (string, error) {
-			return b.MintScoped(ctx, sessionID, sessionID, limits)
+			return b.MintScopedFaces(ctx, sessionID, sessionID, limits, grants)
 		}
 		mgr.RevokeSession = b.RevokeSession
 		mgr.BindGitScope = b.BindGitRepo
@@ -330,6 +331,18 @@ func startWorkspaceBroker(ctx context.Context, cfg config.Config, st *store.Stor
 	if err := configureWorkspaceBroker(cfg, st, b); err != nil {
 		_ = ln.Close()
 		return nil, "", err
+	}
+	// Credentialed API faces (#254): a face whose secret cannot be resolved
+	// fails the command rather than silently denying every call.
+	apiFaces, _, err := brokerAPIFaces(cfg)
+	if err != nil {
+		_ = ln.Close()
+		return nil, "", err
+	}
+	b.SetAPIFaces(apiFaces)
+	if redactor, redactorErr := brokerRedactor(); redactorErr == nil && redactor != nil {
+		b.Redact = redactor.Redact
+		b.RedactOverlap = redactor.MaxLen()
 	}
 	go func() {
 		if err := b.ServeListener(ctx, ln); err != nil {
