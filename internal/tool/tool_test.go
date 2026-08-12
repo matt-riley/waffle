@@ -81,6 +81,68 @@ func TestFileTools(t *testing.T) {
 	}
 }
 
+func TestFileToolsRejectOversizedContent(t *testing.T) {
+	dir := t.TempDir()
+	tooLarge := strings.Repeat("x", fileContentMaxBytes+1)
+
+	writePath := filepath.Join(dir, "write.txt")
+	writeInput, err := json.Marshal(map[string]string{
+		"path":    writePath,
+		"content": tooLarge,
+	})
+	if err != nil {
+		t.Fatalf("marshal write input: %v", err)
+	}
+	if _, err := run(t, WriteFile{}, string(writeInput)); err == nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("maximum %d bytes", fileContentMaxBytes)) {
+		t.Fatalf("oversized write error = %v", err)
+	}
+	if _, err := os.Stat(writePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized write created %s: %v", writePath, err)
+	}
+
+	editPath := filepath.Join(dir, "edit.txt")
+	if err := os.WriteFile(editPath, []byte("old content"), 0o600); err != nil {
+		t.Fatalf("setup edit file: %v", err)
+	}
+	editInput, err := json.Marshal(map[string]any{
+		"path":       editPath,
+		"old_string": "old",
+		"new_string": tooLarge,
+	})
+	if err != nil {
+		t.Fatalf("marshal edit input: %v", err)
+	}
+	if _, err := run(t, EditFile{}, string(editInput)); err == nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("maximum %d bytes", fileContentMaxBytes)) {
+		t.Fatalf("oversized edit error = %v", err)
+	}
+	if got, err := os.ReadFile(editPath); err != nil || string(got) != "old content" {
+		t.Fatalf("oversized edit changed file to %q (%v)", got, err)
+	}
+}
+
+func TestFileToolDefinitionsDescribeContentLimit(t *testing.T) {
+	defs := []struct {
+		name        string
+		description string
+		schema      json.RawMessage
+	}{
+		{name: "write_file", description: WriteFile{}.Def().Description, schema: WriteFile{}.Def().InputSchema},
+		{name: "edit_file", description: EditFile{}.Def().Description, schema: EditFile{}.Def().InputSchema},
+	}
+	for _, tc := range defs {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.description, "2 MiB") {
+				t.Errorf("description = %q, want content limit", tc.description)
+			}
+			if !strings.Contains(string(tc.schema), "maximum 2 MiB") {
+				t.Errorf("schema = %s, want content limit", tc.schema)
+			}
+		})
+	}
+}
+
 func TestWriteFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 
