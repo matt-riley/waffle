@@ -1087,6 +1087,41 @@ func TestEditFileBatchBounds(t *testing.T) {
 		t.Fatalf("oversized batch error = %v", err)
 	}
 
+	// Evolving-content cap: successive replace_all edits expand the result
+	// past the per-edit new_string limit; the batch must fail and leave the
+	// file untouched (#256 review).
+	growthPath := filepath.Join(dir, "growth.txt")
+	if err := os.WriteFile(growthPath, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	growth := make([]map[string]any, 0, 12)
+	for range 12 {
+		growth = append(growth, map[string]any{"old_string": "x", "new_string": "xxxx", "replace_all": true})
+	}
+	raw, err = json.Marshal(map[string]any{"path": growthPath, "edits": growth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "result too large") {
+		t.Fatalf("expanding batch error = %v, want result-too-large", err)
+	}
+	if got, _ := os.ReadFile(growthPath); string(got) != "x" {
+		t.Fatalf("expanding batch changed file to %q", got)
+	}
+
+	// Oversized source file: the initial read is bounded like write_file.
+	bigPath := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(bigPath, []byte(strings.Repeat("y", fileContentMaxBytes+1)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(map[string]any{"path": bigPath, "edits": []map[string]any{{"old_string": "y", "new_string": "z"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("oversized source error = %v, want maximum-bytes refusal", err)
+	}
+
 	// Permissions preserved on success.
 	before, err := os.Stat(path)
 	if err != nil {

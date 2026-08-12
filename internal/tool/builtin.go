@@ -420,7 +420,7 @@ var editSchema = mustSchema(`{
 func (EditFile) Def() llm.Tool {
 	return llm.Tool{
 		Name:        "edit_file",
-		Description: "Replace an exact string in a file, or apply a batch of edits atomically. Fails if a string is missing, or ambiguous without replace_all. Batch edits apply in order against the evolving content; the file is written only if every edit succeeds. Replacement text is limited to 2 MiB.",
+		Description: "Replace an exact string in a file, or apply a batch of edits atomically. Fails if a string is missing, or ambiguous without replace_all. Batch edits apply in order against the evolving content; the file is written only if every edit succeeds. Replacement text and the batch result are limited to 2 MiB.",
 		InputSchema: editSchema,
 	}
 }
@@ -492,6 +492,9 @@ func (e EditFile) runBatch(in editFileInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(b) > fileContentMaxBytes {
+		return "", fmt.Errorf("edit_file: %s is %d bytes (maximum %d bytes); batch aborted, file unchanged", in.Path, len(b), fileContentMaxBytes)
+	}
 	content := string(b)
 	for i, ed := range in.Edits {
 		if len(ed.NewString) > fileContentMaxBytes {
@@ -505,6 +508,12 @@ func (e EditFile) runBatch(in editFileInput) (string, error) {
 			return "", fmt.Errorf("edit %d of %d: old_string appears %d times in %s; make it unique or set replace_all; batch aborted, file unchanged", i+1, len(in.Edits), count, in.Path)
 		}
 		content = strings.ReplaceAll(content, ed.OldString, ed.NewString)
+		// Bound the evolving result, not just each new_string: successive
+		// replace_all edits can expand content past the per-edit cap, and the
+		// batch must not allocate or write an enormous file (#256 review).
+		if len(content) > fileContentMaxBytes {
+			return "", fmt.Errorf("edit %d of %d: result too large: %d bytes (maximum %d bytes); batch aborted, file unchanged", i+1, len(in.Edits), len(content), fileContentMaxBytes)
+		}
 	}
 	if err := writeFileAtomic(path, []byte(content)); err != nil {
 		return "", err
