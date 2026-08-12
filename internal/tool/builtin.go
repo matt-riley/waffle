@@ -447,6 +447,9 @@ func (e EditFile) Run(ctx context.Context, input json.RawMessage) (string, error
 		}
 		return e.runBatch(in)
 	}
+	if in.OldString == "" {
+		return "", errors.New("edit_file: old_string is required and must not be empty")
+	}
 	if len(in.NewString) > fileContentMaxBytes {
 		return "", fmt.Errorf("edit_file new_string too large: %d bytes (maximum %d bytes)", len(in.NewString), fileContentMaxBytes)
 	}
@@ -499,6 +502,9 @@ func (e EditFile) runBatch(in editFileInput) (string, error) {
 	for i, ed := range in.Edits {
 		if len(ed.NewString) > fileContentMaxBytes {
 			return "", fmt.Errorf("edit %d of %d: new_string too large: %d bytes (maximum %d bytes); batch aborted, file unchanged", i+1, len(in.Edits), len(ed.NewString), fileContentMaxBytes)
+		}
+		if ed.OldString == "" {
+			return "", fmt.Errorf("edit %d of %d: old_string must not be empty; batch aborted, file unchanged", i+1, len(in.Edits))
 		}
 		count := strings.Count(content, ed.OldString)
 		switch {

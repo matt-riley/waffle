@@ -1149,6 +1149,55 @@ func TestEditFileBatchBounds(t *testing.T) {
 	}
 }
 
+// TestEditFileRejectsEmptyOldString pins the review fix: old_string is
+// optional in the schema (batch mode uses edits), but an empty old_string
+// must be rejected explicitly — strings.ReplaceAll(content, "", new) would
+// attempt an allocation proportional to len(content)*len(new) and the
+// resulting "appears N times" error is confusing.
+func TestEditFileRejectsEmptyOldString(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("abc"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Single-edit form, plain and with replace_all.
+	for _, tc := range []struct {
+		name string
+		in   map[string]any
+		want string
+	}{
+		{name: "missing old_string", in: map[string]any{"path": path, "new_string": "x"}, want: "old_string is required"},
+		{name: "empty old_string replace_all", in: map[string]any{"path": path, "old_string": "", "new_string": "x", "replace_all": true}, want: "old_string is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+			if got, _ := os.ReadFile(path); string(got) != "abc" {
+				t.Fatalf("file changed to %q", got)
+			}
+		})
+	}
+	// Batch form: an edit with an empty old_string aborts the whole batch.
+	raw, err := json.Marshal(map[string]any{"path": path, "edits": []map[string]any{
+		{"old_string": "a", "new_string": "A"},
+		{"old_string": "", "new_string": "x"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "old_string must not be empty") {
+		t.Fatalf("batch error = %v, want old_string-must-not-be-empty", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "abc" {
+		t.Fatalf("batch changed file to %q", got)
+	}
+}
+
 // TestFileToolsConcurrent pins the tool.Tool contract for the #256 tools:
 // read_file (ranged), list_files, and edit_file (batch) must be safe for
 // concurrent invocation. Run under -race.
