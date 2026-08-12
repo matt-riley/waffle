@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/session"
 )
 
@@ -45,13 +46,6 @@ type Gate struct {
 	WS     Workspace
 	Notify func(Candidate)
 	mu     sync.Mutex
-}
-
-type notifyKey struct{}
-
-// WithNotify attaches the owner-channel delivery callback for this run.
-func WithNotify(ctx context.Context, notify func(Candidate) error) context.Context {
-	return context.WithValue(ctx, notifyKey{}, notify)
 }
 
 func provenanceFromContext(ctx context.Context, p Provenance) Provenance {
@@ -127,8 +121,12 @@ func (g *Gate) submit(ctx context.Context, c Candidate, apply func() error) (Can
 	if g.Mode == "notify" && g.Notify != nil {
 		g.Notify(c)
 	} else if g.Mode == "notify" {
-		if notify, _ := ctx.Value(notifyKey{}).(func(Candidate) error); notify != nil {
-			if err := notify(c); err != nil {
+		// Deliver through the generalized session-scoped sender (#253): the
+		// gateway attaches one sender per run that the memory gate and the
+		// notify tool both reach. A run with no channel origin has no sender;
+		// the write still applies silently (terminal chat / eval).
+		if sender, ok := notify.SenderFromContext(ctx); ok {
+			if err := sender(ctx, fmt.Sprintf("%s change:\n%s", c.Kind, c.Diff)); err != nil {
 				return c, err
 			}
 		}

@@ -20,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -505,6 +506,15 @@ func (r *Runner) RunAttempt(ctx context.Context, j Job, attempt int) (string, er
 	// of one unattended job share a durable accounting identity.
 	runCtx = agent.WithSession(runCtx, sess.ID)
 	runCtx = usage.WithBudgetKey(runCtx, j.ID)
+	// Mid-run owner notifications (#253): bind the notify tool to the job's
+	// delivery target so an unattended cron job can message the owner while
+	// it works. A log-only job (no delivery target) gets no sender and the
+	// tool degrades to a no-op. Final-digest delivery is unchanged.
+	if j.Deliver != "" && r.Deliverer != nil {
+		runCtx = notify.WithSender(runCtx, func(ctx context.Context, text string) error {
+			return r.Deliverer.Deliver(ctx, j.Deliver, text)
+		})
+	}
 	out, runErr := a.Run(runCtx, history, agent.Hooks{
 		OnText:      func(string) { pulse() },
 		OnToolStart: func(llm.ToolUse) { pulse() },

@@ -17,6 +17,7 @@ import (
 	"github.com/matt-riley/waffle/internal/intake"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llmtest"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -514,5 +515,77 @@ func TestDispatchFailsWhenTranscriptPersistFails(t *testing.T) {
 	}
 	if script.Calls != 1 {
 		t.Fatalf("agent calls = %d, want 1", script.Calls)
+	}
+}
+
+// TestIssueDispatchNotifyToolDeliversMidRun covers the notify tool on the
+// issue tier (#253): a watcher with a delivery target gets a session-scoped
+// sender bound to that target, so an unattended issue run can message the
+// owner while it works. A log-only watcher (no target) gets no sender and
+// the tool degrades to a no-op — never an error.
+func TestIssueDispatchNotifyToolDeliversMidRun(t *testing.T) {
+	tests := []struct {
+		name    string
+		deliver string
+		wantMsg string // "target:text" or "" for no delivery
+	}{
+		{name: "with-delivery-target", deliver: "telegram:99", wantMsg: "telegram:99:60% through the migration"},
+		{name: "log-only-watcher-noops", deliver: "", wantMsg: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			sessions := session.New(st)
+			sess, err := sessions.Create(ctx, "issue notify")
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := &llmtest.Script{Responses: []llm.Response{
+				llmtest.ToolCall("notify", "notify-1", `{"message":"60% through the migration"}`),
+				llmtest.Text("done"),
+			}}
+			cfg := config.Default()
+			hostPol := cfg.AgentPolicy(config.GroupIssue)
+			issueAgent := &agent.Agent{
+				Provider: script,
+				Tools:    tool.Restrict(tool.NewRegistry(notify.Tool{}), tool.Policy{Deny: hostPol.Deny}),
+				System:   "issue-tier agent",
+				Model:    "test-model",
+			}
+			fakeRun := &fakeIssueRun{ws: &workspace.Workspace{
+				ID: "ws-notify", Repo: "acme/widgets",
+				SessionID: sess.ID, Status: workspace.StatusOpen,
+			}}
+			cap := &captureDeliverer{}
+			disp := &issueDispatcher{
+				cfg: cfg, st: st, sessions: sessions, agent: issueAgent,
+				log: slog.Default(), opener: &fakeIssueOpener{run: fakeRun},
+				deliver: cap,
+			}
+			watch := intake.WatchConfig{Repo: "acme/widgets", Label: "agent-ok", MaxConcurrency: 1, Deliver: tt.deliver}
+			iss := intake.Issue{Number: 9, Title: "t", Body: "b", State: "open", Labels: []string{"agent-ok"}, CreatedAt: time.Now(), Priority: 1}
+			reply, err := disp.Dispatch(ctx, watch, iss, nil)
+			if err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if reply != "done" {
+				t.Fatalf("reply = %q, want done (run must not fail on notify)", reply)
+			}
+			cap.mu.Lock()
+			msgs := append([]string(nil), cap.msgs...)
+			cap.mu.Unlock()
+			if tt.wantMsg == "" {
+				if len(msgs) != 0 {
+					t.Fatalf("deliveries = %v, want none for log-only watcher", msgs)
+				}
+			} else if len(msgs) != 1 || msgs[0] != tt.wantMsg {
+				t.Fatalf("deliveries = %v, want [%s]", msgs, tt.wantMsg)
+			}
+		})
 	}
 }

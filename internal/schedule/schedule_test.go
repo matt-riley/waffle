@@ -15,6 +15,8 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/llmtest"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -727,5 +729,49 @@ func TestFireDoesNotMarkOkWhenTranscriptPersistFails(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.LastStatus, "failed") {
 		t.Fatalf("job status = %q, want failed outcome", got.LastStatus)
+	}
+}
+
+// TestRunnerNotifyToolDeliversMidRun covers the notify tool on the cron tier
+// (#253): a job with a delivery target gets a session-scoped sender bound to
+// that target, so the agent can message the owner while it works. A job
+// without a target (log-only) gets no sender and the tool degrades to a
+// no-op; final-digest delivery is untouched in both cases.
+func TestRunnerNotifyToolDeliversMidRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		deliver    string
+		wantTarget string
+		wantText   string
+	}{
+		{name: "with-delivery-target", deliver: "telegram:900", wantTarget: "telegram:900", wantText: "60% through the migration"},
+		{name: "log-only-job-noops", deliver: "", wantTarget: "", wantText: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newTestStore(t)
+			sessions := session.New(st)
+			script := &llmtest.Script{Responses: []llm.Response{
+				llmtest.ToolCall("notify", "notify-1", `{"message":"60% through the migration"}`),
+				llmtest.Text("done"),
+			}}
+			cap := &captureDeliverer{}
+			runner := &Runner{
+				Agent:     &agent.Agent{Provider: script, Tools: tool.NewRegistry(notify.Tool{}), Model: "m"},
+				Sessions:  sessions,
+				Deliverer: cap,
+			}
+			reply, err := runner.Run(ctx, Job{Name: "test", Prompt: "work", Deliver: tt.deliver})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if reply != "done" {
+				t.Fatalf("reply = %q, want done (run must not fail on notify)", reply)
+			}
+			if cap.target != tt.wantTarget || cap.text != tt.wantText {
+				t.Fatalf("deliverer got %q -> %q, want %q -> %q", cap.target, cap.text, tt.wantTarget, tt.wantText)
+			}
+		})
 	}
 }

@@ -54,6 +54,10 @@ type ChildProfile struct {
 // Nested spawn_subagent is omitted from child toolboxes. If that ever
 // changes, children must inherit the same read-only working-set broadcast
 // snapshot — never a widened mutation authority (#68).
+//
+// notify is denied for every child (#253): messaging the owner is an
+// explicit main-agent capability, and a spawn_subagent child must not
+// silently inherit it.
 type SubagentTool struct {
 	Provider  llm.Provider
 	Tools     tool.Toolbox
@@ -168,11 +172,13 @@ func (t SubagentTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		sys += "\n[child_profile=" + profile.Name + "]\n"
 	}
 
-	// Subagent toolboxes must never include workspace_update or spawn (#68).
+	// Subagent toolboxes must never include workspace_update, spawn, or
+	// notify (#68 / #253): the last keeps owner messaging out of children
+	// even though the parent context carries the run's sender.
 	childTools := t.Tools
 	if childTools != nil {
 		childProfile := effectiveProfile(profileName)
-		deny := tool.Policy{Deny: []string{"workspace_update", "spawn_subagent"}, Profile: childProfile}
+		deny := tool.Policy{Deny: []string{"workspace_update", "spawn_subagent", "notify"}, Profile: childProfile}
 		if !profile.Tools.IsZero() {
 			// Tighten-only: apply profile policy, then force parent denials.
 			profilePolicy := profile.Tools

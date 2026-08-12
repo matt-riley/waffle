@@ -33,6 +33,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -211,6 +212,12 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	}
 	syncWorkspaceOnce(notesIdx, agentName, ws)
 	hostToolList := []tool.Tool{
+		// notify (#253) runs on the host: the owner-channel adapter exists
+		// only host-side. Tier availability is policy-controlled (see
+		// config.AgentPolicy): cron/issue keep it, group denies it by
+		// default. Sessions without a channel origin (terminal chat, eval)
+		// no-op it — the gateway is the only place a sender is attached.
+		notify.Tool{Log: slog.Default()},
 		memory.RememberTool{WS: ws, Notes: notesIdx, Gate: &memory.Gate{Mode: b.Config.Memory.WriteGate, WS: ws}, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
 		memory.MemoryUpdateTool{WS: ws, Notes: notesIdx, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
 		memory.RecallTool{Sessions: b.Sessions, WS: ws, Notes: notesIdx, Spills: spillStore},

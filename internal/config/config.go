@@ -436,6 +436,14 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 		// by default (#252): an injected issue body must not be able to
 		// produce a public GitHub comment with no human in the loop.
 		r.Deny = AppendUnique(r.Deny, "github_comment")
+		// notify (#253): cron and issue keep it — they are the unattended
+		// tiers that most need to reach the owner mid-run, and the decision
+		// is deliberate (a scheduled job or issue intake may notify but a
+		// multi-party chat must not be able to make waffle send the owner
+		// arbitrary text). Only the group tier denies it by default.
+		if group == GroupGroup {
+			r.Deny = AppendUnique(r.Deny, "notify")
+		}
 	}
 	if r.Mode == "docker" {
 		r.Deny = AppendUnique(r.Deny, "remember")
@@ -547,6 +555,11 @@ var knownProfileTools = map[string]bool{
 	"github_comment":     true,
 	"github_checks":      true,
 	"github_issue_get":   true,
+	// Sends a short owner notification mid-run (#253). Destination comes
+	// from session origin only, never tool input. Tier availability is
+	// explicit in AgentPolicy: cron/issue keep it deliberately (unattended
+	// tiers need it most); group tier denies it by default.
+	"notify": true,
 	// codeintel
 	"code_find_symbol": true, "code_references": true, "code_callers": true,
 	"code_structure": true, "code_blast_radius": true, "code_suggest_tests": true,

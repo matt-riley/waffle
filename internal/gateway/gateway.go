@@ -19,7 +19,7 @@ import (
 	"github.com/matt-riley/waffle/internal/entity"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
-	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/textcut"
@@ -664,13 +664,21 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 		}
 	}
 	ctx = session.WithOrigin(ctx, group.SessionID, msg.Channel)
-	ctx = memory.WithNotify(ctx, func(candidate memory.Candidate) error {
+	// One session-scoped outbound sender per run (#253): the memory gate's
+	// change notices, usage alerts, and the notify tool all reach the owner
+	// through it. Destination (channel + chat id) is resolved from the
+	// message origin only — never from tool input.
+	// Delivery is bounded: a slow or unresponsive channel must not block the
+	// agent run (which holds the conversation lock) or the usage-alert and
+	// memory-notice paths that share this sender (#253 review).
+	ownerSender := notify.Bound(func(ctx context.Context, text string) error {
 		adapter := g.adapter(msg.Channel)
 		if adapter == nil {
 			return fmt.Errorf("no owner adapter %q", msg.Channel)
 		}
-		return adapter.Send(ctx, msg.ChatID, fmt.Sprintf("%s change:\n%s", candidate.Kind, candidate.Diff))
+		return adapter.Send(ctx, msg.ChatID, text)
 	})
+	ctx = notify.WithSender(ctx, ownerSender)
 	var alertErr error
 	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{
 		OnToolStart: func(use llm.ToolUse) {
@@ -684,11 +692,7 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 			}
 			if g.Usage != nil && alertErr == nil {
 				alertErr = g.Usage.Alert(ctx, group.SessionID, selected.Limits, time.Now(), func(deliverCtx context.Context, notice string) error {
-					adapter := g.adapter(msg.Channel)
-					if adapter == nil {
-						return fmt.Errorf("no owner adapter %q", msg.Channel)
-					}
-					return adapter.Send(deliverCtx, msg.ChatID, notice)
+					return ownerSender(deliverCtx, notice)
 				})
 			}
 		},

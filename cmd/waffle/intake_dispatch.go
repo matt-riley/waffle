@@ -13,8 +13,10 @@ import (
 	"github.com/matt-riley/waffle/internal/intake"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/notify"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/sandbox"
+	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
@@ -56,6 +58,9 @@ type issueDispatcher struct {
 	brokerURL string
 	agent     *agent.Agent
 	log       *slog.Logger
+	// deliver routes "channel:chat_id" targets for mid-run notifications and
+	// end-of-run digests (#253). Nil disables delivery entirely.
+	deliver schedule.Deliverer
 
 	// opener, when non-nil, replaces the production workspace.Manager path.
 	// Tests inject a fake so Dispatch can be exercised without Docker.
@@ -139,6 +144,15 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 		return "", err
 	}
 	runCtx := agent.WithSession(ctx, ws.SessionID)
+	// Mid-run owner notifications (#253): bind the notify tool to the
+	// watcher's delivery target so an unattended issue run can message the
+	// owner while it works. Log-only watchers (no target) get no sender and
+	// the tool degrades to a no-op.
+	if watch.Deliver != "" && d.deliver != nil {
+		runCtx = notify.WithSender(runCtx, notify.Bound(func(ctx context.Context, text string) error {
+			return d.deliver.Deliver(ctx, watch.Deliver, text)
+		}))
+	}
 	out, runErr := runAgent.Run(runCtx, history, agent.Hooks{})
 	for _, m := range out[1:] {
 		if err := d.sessions.AppendTurn(ctx, ws.SessionID, m); err != nil {
