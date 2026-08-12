@@ -12,6 +12,7 @@ package agentbuild
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/sandbox"
+	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/spill"
@@ -66,6 +68,17 @@ type Builder struct {
 	// GitHubApp constructs the pull-request tool's app on demand; nil
 	// disables the tool (the token never enters a container).
 	GitHubApp func() (*gitcred.App, error)
+	// Secrets is the secret store for remote MCP credentials (#249):
+	// static token refs resolve through it, OAuth tokens (from `waffle mcp
+	// login`) are read and refreshed through it, and its values feed the
+	// transcript redactor. Nil means no store: remote MCP servers that
+	// reference credentials fail closed at build.
+	Secrets secret.Store
+	// RemoteEgress, when set, lets remote MCP traffic from docker-mode
+	// groups traverse the gateway broker's egress proxy (allowlist + audit
+	// rows). Nil means broker egress is unavailable and docker-mode groups
+	// cannot use remote MCP servers (#249).
+	RemoteEgress *mcp.RemoteEgress
 }
 
 // Build assembles the agent for one agent group/profile. The returned
@@ -292,6 +305,10 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		return nil, cleanup, fmt.Errorf("unknown sandbox mode %q for agent group %q (want \"host\" or \"docker\")", sandboxMode, group)
 	}
 
+	// Remote MCP servers contribute their credentials to the transcript
+	// redactor: a tool result echoing a token must not reach the model.
+	var mcpRedactors []func(string) string
+
 	boxes := []tool.Toolbox{execTools, hostTools}
 	// MCP before codeintel fallback so a real language server wins on name clash.
 	// MCP servers contribute their tools (the long tail). All launches use the
@@ -304,6 +321,24 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	}
 	for _, s := range b.Config.MCP {
 		if !ServerInGroup(s, group) || !ServerPermitted(s, toolPolicy) {
+			continue
+		}
+		if s.URL != "" {
+			if !RemoteServerInGroup(s, group) {
+				// Unattended tiers are deny-by-default for remote servers
+				// (#249): availability requires the server to name the
+				// group explicitly.
+				continue
+			}
+			tb, closer, redact, err := b.connectRemoteMCP(ctx, s, group, sandboxMode)
+			if err != nil {
+				return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
+			}
+			closers = append(closers, closer)
+			if redact != nil {
+				mcpRedactors = append(mcpRedactors, redact)
+			}
+			boxes = append(boxes, tb)
 			continue
 		}
 		execution := s.Execution
@@ -385,6 +420,19 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
 	}()
 
+	// Remote MCP servers contribute their credentials to the transcript
+	// redactor: a tool result echoing a token must not reach the model.
+	redact := b.Runtime.Redact
+	if len(mcpRedactors) > 0 {
+		base := redact
+		redact = func(s string) string {
+			for _, r := range mcpRedactors {
+				s = r(s)
+			}
+			return base(s)
+		}
+	}
+
 	// Subagents get the execution + MCP tools, but not the ability to
 	// spawn further subagents (their toolbox omits spawn_subagent).
 	// Working-set broadcast is filled per-run when the parent has entries (#68).
@@ -395,7 +443,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 			Tools:               subTools,
 			Model:               model,
 			MaxTokens:           maxTokens,
-			Redact:              b.Runtime.Redact,
+			Redact:              redact,
 			BroadcastWorkingSet: true,
 			WorkingSetBroadcast: "", // filled below if non-empty at build time; runtime inject via note
 			Usage:               usageStore,
@@ -441,7 +489,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		Profile:       effectiveProfile,
 		MaxTokens:     maxTokens,
 		MaxIterations: maxIter,
-		Redact:        b.Runtime.Redact,
+		Redact:        redact,
 		Spill:         spillStore,
 		Usage:         usageStore,
 		Limits:        limits,
@@ -459,4 +507,111 @@ func (c Cleanup) Stop() error {
 		return nil
 	}
 	return c(context.Background())
+}
+
+// connectRemoteMCP launches one URL-based (remote) MCP server (#249):
+// egress posture first (docker-mode groups go through the broker or are
+// refused), then credential resolution (static secret:// token or OAuth
+// tokens from `waffle mcp login`), then the streamable-HTTP handshake.
+func (b *Builder) connectRemoteMCP(ctx context.Context, s config.MCPServer, group, sandboxMode string) (tool.Toolbox, Cleanup, func(string) string, error) {
+	// Egress posture. "broker" is the default for docker-mode groups: their
+	// remote MCP traffic must traverse the broker (allowlist + audit) — an
+	// unaudited direct side channel out of a sandboxed tier is refused.
+	egress := s.Egress
+	if egress == "" {
+		if sandboxMode == "docker" {
+			egress = "broker"
+		} else {
+			egress = "direct"
+		}
+	}
+	var proxyAuth func() (string, error)
+	switch egress {
+	case "direct":
+		if sandboxMode == "docker" {
+			return nil, nil, nil, fmt.Errorf(
+				"egress=direct is refused for docker-mode group %q (remote MCP would be an unaudited side channel out of the sandbox); use egress=\"broker\" or a host-mode group", group)
+		}
+	case "broker":
+		if b.RemoteEgress == nil || b.RemoteEgress.ProxyURL == "" || b.RemoteEgress.MintToken == nil {
+			return nil, nil, nil, fmt.Errorf(
+				"egress=broker requires the gateway credential broker (start under `waffle serve` with [broker] listen); refused for group %q", group)
+		}
+		mint := b.RemoteEgress.MintToken
+		proxyAuth = func() (string, error) {
+			token, err := mint(ctx, group)
+			if err != nil {
+				return "", err
+			}
+			return "Basic " + base64.StdEncoding.EncodeToString([]byte(token+":")), nil
+		}
+	default:
+		return nil, nil, nil, fmt.Errorf("unknown egress %q (config validation should have rejected this)", egress)
+	}
+
+	// Credential resolution. Tokens live in internal/secret; config holds
+	// references only.
+	opts := mcp.HTTPOpts{
+		ProxyURL:  egressURLFor(egress, b.RemoteEgress),
+		ProxyAuth: proxyAuth,
+	}
+	if s.Token != "" {
+		if b.Secrets == nil {
+			return nil, nil, nil, errors.New("token references the secret store but none is available (run `waffle secret init`)")
+		}
+		value, err := secret.Resolve(b.Secrets, s.Token)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("token: %w", err)
+		}
+		opts.BearerToken = value
+	} else if b.Secrets != nil {
+		// Credential refresh is egress traffic too: build the token
+		// client from the same proxy configuration as the MCP connection,
+		// so refresh tokens traverse the broker allowlist and audit rows
+		// instead of bypassing them on http.DefaultClient (#249).
+		tm := &mcp.TokenManager{
+			Store:  b.Secrets,
+			Server: s.Name,
+			HTTP:   mcp.NewTokenHTTPClient(opts.ProxyURL, proxyAuth),
+		}
+		if err := tm.Load(); err == nil {
+			opts.Token = tm
+		} else if !errors.Is(err, mcp.ErrNoToken) {
+			return nil, nil, nil, fmt.Errorf("oauth: %w", err)
+		}
+	}
+
+	client, err := mcp.ConnectHTTP(ctx, s.Name, s.URL, opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	closer := Cleanup(func(cleanupCtx context.Context) error {
+		return client.Close()
+	})
+	// The transcript redactor picks up every stored secret (including this
+	// server's tokens) so a tool result echoing one never reaches the model.
+	var redact func(string) string
+	if b.Secrets != nil {
+		r, err := secret.NewRedactorWith(b.Secrets)
+		if err != nil {
+			_ = client.Close()
+			return nil, nil, nil, fmt.Errorf("redactor: %w", err)
+		}
+		redact = r.Redact
+	}
+	tb, err := client.Toolbox(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, nil, fmt.Errorf("tools: %w", err)
+	}
+	return tb, closer, redact, nil
+}
+
+// egressURLFor returns the broker egress proxy URL when egress is "broker",
+// else empty (direct dialing).
+func egressURLFor(egress string, e *mcp.RemoteEgress) string {
+	if egress == "broker" && e != nil {
+		return e.ProxyURL
+	}
+	return ""
 }

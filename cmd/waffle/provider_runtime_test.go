@@ -196,7 +196,7 @@ func TestChatModelAliasBuildsDefaultUtilityAndProfileRouting(t *testing.T) {
 		"openai":    func(_, base string) llm.Provider { p := &runtimeRecordingProvider{}; upstreams[base] = p; return p },
 	}, func(config.ProviderConnection) (string, func(string) string, error) { return "", nil, nil })
 
-	a, cleanup, err := buildAgentWithProfileRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "research", runtime)
+	a, cleanup, err := buildAgentWithProfileRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "research", runtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestServeModelAliasSharesRuntimeAcrossAgents(t *testing.T) {
 		"openai":    func(_, _ string) llm.Provider { created++; return &runtimeRecordingProvider{} },
 	}, func(config.ProviderConnection) (string, func(string) string, error) { return "", nil, nil })
 
-	agents, _, _, _, _, cleanup, err := buildGatewayAgentsWithRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), runtime)
+	agents, _, _, _, _, cleanup, err := buildGatewayAgentsWithRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), runtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestChatModelAliasChildProfileUsesResolvedTokenDefault(t *testing.T) {
 		"anthropic": func(_, _ string) llm.Provider { return &runtimeRecordingProvider{} },
 		"openai":    func(_, _ string) llm.Provider { return childProvider },
 	}, func(config.ProviderConnection) (string, func(string) string, error) { return "", nil, nil })
-	a, cleanup, err := buildAgentWithProfileRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "", runtime)
+	a, cleanup, err := buildAgentWithProfileRuntime(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "", runtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

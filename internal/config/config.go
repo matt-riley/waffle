@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -220,21 +221,47 @@ type Selfdev struct {
 	Protected []string `toml:"protected"`
 }
 
-// MCPServer is one Model Context Protocol server run over stdio.
+// MCPServer is one Model Context Protocol server: a local command run over
+// stdio, or a remote streamable-HTTP endpoint (#249). Exactly one of
+// Command or URL is set; Load rejects any other combination.
 type MCPServer struct {
 	Name    string   `toml:"name"`
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
-	// Execution is "host" or "sandbox". Sandbox launches via the #77
-	// restricted executor (ConnectRestricted); when the agent group is
-	// docker mode the command is docker-wrapped (network none, allowlisted env).
+	// URL is a remote MCP streamable-HTTP endpoint (alternative to
+	// Command). Remote servers have no process to restrict; their network
+	// posture comes from Egress and their credentials from the secret
+	// store (Token reference or `waffle mcp login`).
+	URL string `toml:"url"`
+	// Execution is "host" or "sandbox" and applies to Command servers only.
+	// Sandbox launches via the #77 restricted executor (ConnectRestricted);
+	// when the agent group is docker mode the command is docker-wrapped
+	// (network none, allowlisted env). URL servers reject execution="sandbox":
+	// there is no process to sandbox, and reachability is Egress's job.
 	Execution string `toml:"execution"`
-	// Groups limits this server to named agent groups; empty means all groups.
+	// Egress governs how a URL server is reached (#249): "broker" routes
+	// through the gateway broker's egress proxy (allowlist + audit rows)
+	// and is the default for docker-mode groups; "direct" dials the URL
+	// from the host and is refused for docker-mode groups (it would be an
+	// unaudited side channel out of a sandboxed tier). Empty resolves per
+	// group mode: docker → broker, host → direct.
+	Egress string `toml:"egress"`
+	// Token is a secret:// reference to a static bearer credential sent as
+	// Authorization: Bearer on every request to a URL server. OAuth tokens
+	// obtained by `waffle mcp login` are stored under the canonical
+	// mcp/<server> secret names instead. Raw values are rejected: config
+	// holds references only.
+	Token string `toml:"token"`
+	// Groups limits this server to named agent groups. For Command servers
+	// empty means all groups; for URL servers empty means the main tier
+	// only — cron/issue/group are deny-by-default and must be named
+	// explicitly (#249).
 	Groups []string `toml:"groups"`
 	// Tools is an optional declaration of the server's exposed tool names.
 	// It permits launch filtering before the process is started.
 	Tools []string `toml:"tools"`
-	// Env names the only parent environment variables copied to the child.
+	// Env names the only parent environment variables copied to the child
+	// (Command servers only; rejected for URL servers).
 	Env []string `toml:"env"`
 }
 
@@ -1120,6 +1147,21 @@ func Load(path string) (Config, error) {
 		}
 	}
 	for _, s := range cfg.MCP {
+		// #249: command and url are the two transports; exactly one is set.
+		hasCommand := strings.TrimSpace(s.Command) != ""
+		hasURL := strings.TrimSpace(s.URL) != ""
+		if hasCommand && hasURL {
+			return Config{}, fmt.Errorf("mcp %q: command and url are mutually exclusive (configure exactly one)", s.Name)
+		}
+		if !hasCommand && !hasURL {
+			return Config{}, fmt.Errorf("mcp %q: exactly one of command or url is required", s.Name)
+		}
+		if hasURL {
+			if err := validateRemoteMCPServer(s); err != nil {
+				return Config{}, err
+			}
+			continue
+		}
 		if s.Execution != "" && s.Execution != "host" && s.Execution != "sandbox" {
 			return Config{}, fmt.Errorf("mcp %q: execution must be \"host\" or \"sandbox\", got %q", s.Name, s.Execution)
 		}
@@ -1444,6 +1486,42 @@ var codeIntelToolNames = map[string]bool{
 	"code_structure":     true,
 	"code_blast_radius":  true,
 	"code_suggest_tests": true,
+}
+
+// mcpServerNameRE constrains url-server names to the secret-store path
+// convention (mcp/<name>/...) so `waffle mcp login` token names are always
+// valid. Command servers keep the historical free-form name.
+var mcpServerNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// validateRemoteMCPServer enforces the #249 contract for url-based servers:
+// a valid http(s) URL, no process-level execution policy, egress only
+// "broker"/"direct", a token that is a secret:// reference or absent, and a
+// server name usable as a secret-store path. Every violation is a load
+// error naming the server — no permissive fallback.
+func validateRemoteMCPServer(s MCPServer) error {
+	if !mcpServerNameRE.MatchString(s.Name) {
+		return fmt.Errorf("mcp %q: url servers need a lowercase [a-z0-9._-] name (OAuth tokens are stored as mcp/<name>/... in the secret store)", s.Name)
+	}
+	u, err := url.Parse(s.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("mcp %q: url must be an absolute http(s) URL, got %q", s.Name, s.URL)
+	}
+	if s.Execution != "" && s.Execution != "host" {
+		return fmt.Errorf("mcp %q: execution=%q is not supported for url servers (there is no process to sandbox); use egress to control reachability", s.Name, s.Execution)
+	}
+	if s.Egress != "" && s.Egress != "broker" && s.Egress != "direct" {
+		return fmt.Errorf("mcp %q: egress must be \"broker\" or \"direct\", got %q", s.Name, s.Egress)
+	}
+	if s.Token != "" && !strings.HasPrefix(s.Token, "secret://") {
+		return fmt.Errorf("mcp %q: token must be a secret:// reference (raw credentials never live in config.toml)", s.Name)
+	}
+	if len(s.Args) > 0 {
+		return fmt.Errorf("mcp %q: args apply to command servers only", s.Name)
+	}
+	if len(s.Env) > 0 {
+		return fmt.Errorf("mcp %q: env applies to command servers only (remote servers receive no ambient environment)", s.Name)
+	}
+	return nil
 }
 
 func validateCodeIntelMCP(s MCPServer, allowHost bool) error {

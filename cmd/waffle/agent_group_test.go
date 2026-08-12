@@ -111,7 +111,7 @@ func TestConfiguredGatewayGroupBuildsRegistryEntry(t *testing.T) {
 		"restricted": {Tools: config.ToolPolicy{Deny: []string{"bash"}}},
 	}
 
-	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st))
+	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
 	if err != nil {
 		t.Fatalf("build gateway agents: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestBuildGatewayAgentsIncludesGroupTier(t *testing.T) {
 	cfg.Provider.APIKey = "test-key"
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = false
-	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st))
+	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
 	if err != nil {
 		t.Fatalf("buildGatewayAgents: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestBuildGatewayAgentsBuildsProfiles(t *testing.T) {
 			Tools:  config.ToolPolicy{Allow: []string{"read_file", "search"}},
 		},
 	}
-	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st))
+	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
 	if err != nil {
 		t.Fatalf("buildGatewayAgents: %v", err)
 	}

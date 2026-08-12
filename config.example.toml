@@ -201,3 +201,46 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 # match = "rm -rf"
 # action = "deny"
 # guidance = "use safer cleanup"
+
+# MCP servers (#249). A server is exactly one of the two transports:
+#
+#   [[mcp.server]]               local command over stdio (default):
+#   name = "codeintel"             command = "gopls", args = ["mcp"]
+#   command = "/path/to/server"    execution = "host" | "sandbox"
+#
+#   [[mcp.server]]               remote streamable-HTTP endpoint:
+#   name = "github"                url = "https://api.github.com/mcp"
+#   url = "https://api.github.com/mcp"
+#
+# Supplying both command and url — or neither — is a load error.
+#
+# Remote servers:
+#   * have no process to restrict, so execution must stay unset or "host";
+#     execution = "sandbox" is rejected (reachability is egress's job).
+#   * egress = "broker" (default for docker-mode groups) routes every
+#     request through the gateway credential broker's egress proxy: hosts
+#     are allowlisted and every request writes a broker_audit row. A
+#     docker-mode group may never use egress = "direct" — that would be an
+#     unaudited side channel out of a sandboxed tier — and broker egress
+#     requires [broker] listen under `waffle serve`.
+#   * egress = "direct" dials the URL straight from the host process
+#     (host-mode groups only). The URL is operator-authored trust: the
+#     config file is the allowlist.
+#   * credentials live in the encrypted secret store, never config.toml:
+#       - `waffle mcp login <name>` runs OAuth authorization-code + PKCE
+#         (dynamic client registration) and stores tokens under
+#         mcp/<name>/access-token etc. (age-encrypted).
+#       - token = "secret://mcp/<name>/access-token" sends a static bearer
+#         credential; only secret:// references are accepted.
+#     Access tokens are refreshed ahead of expiry; a failed refresh or a
+#     rejected credential disables the server (fail closed) with a message
+#     pointing at `waffle mcp login <name>`.
+#   * availability is deny-by-default for the unattended tiers: an empty
+#     groups list means main only; cron/issue/group (and custom tiers)
+#     must name the server explicitly.
+#
+# [[mcp.server]]
+# name = "github"
+# url = "https://api.github.com/mcp"
+# groups = ["main"]
+# egress = "broker"
