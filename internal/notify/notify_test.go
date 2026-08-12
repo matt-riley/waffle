@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // schemaProps returns the property names of the notify tool's input schema.
@@ -199,5 +200,43 @@ func TestNotifyBehaviorConcurrentSendsStayBounded(t *testing.T) {
 func TestSenderFromContextAbsentWithoutAttachment(t *testing.T) {
 	if _, ok := SenderFromContext(context.Background()); ok {
 		t.Fatal("SenderFromContext on bare context should report absent")
+	}
+}
+
+// TestNotifyBoundSenderHonorsTimeout pins the #253 review fix: a delivery
+// on a deadline-free context is still capped by SendTimeout (an
+// unresponsive owner channel must not block the agent run, which holds the
+// gateway conversation lock), and an earlier deadline on the delivery
+// context still wins.
+func TestNotifyBoundSenderHonorsTimeout(t *testing.T) {
+	waiting := make(chan struct{})
+	var entered atomic.Int32
+	s := bound(func(ctx context.Context, _ string) error {
+		entered.Add(1)
+		close(waiting) // the sender is blocked inside delivery
+		<-ctx.Done()
+		return ctx.Err()
+	}, 60*time.Millisecond)
+	start := time.Now()
+	if err := s(context.Background(), "hi"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("send took %v, want the 60ms bound to fire", elapsed)
+	}
+	<-waiting
+	// An earlier deadline on the delivery context wins over the bound.
+	shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	s2 := bound(func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}, 5*time.Second)
+	start = time.Now()
+	if err := s2(shortCtx, "hi"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("short send took %v, want the earlier deadline to fire", elapsed)
 	}
 }

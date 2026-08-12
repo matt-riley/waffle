@@ -668,13 +668,16 @@ func (g *Gateway) converse(ctx context.Context, msg channel.Message) (string, er
 	// change notices, usage alerts, and the notify tool all reach the owner
 	// through it. Destination (channel + chat id) is resolved from the
 	// message origin only — never from tool input.
-	ownerSender := func(ctx context.Context, text string) error {
+	// Delivery is bounded: a slow or unresponsive channel must not block the
+	// agent run (which holds the conversation lock) or the usage-alert and
+	// memory-notice paths that share this sender (#253 review).
+	ownerSender := notify.Bound(func(ctx context.Context, text string) error {
 		adapter := g.adapter(msg.Channel)
 		if adapter == nil {
 			return fmt.Errorf("no owner adapter %q", msg.Channel)
 		}
 		return adapter.Send(ctx, msg.ChatID, text)
-	}
+	})
 	ctx = notify.WithSender(ctx, ownerSender)
 	var alertErr error
 	newHistory, runErr := selected.Run(ctx, history, agent.Hooks{

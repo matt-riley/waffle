@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
 )
@@ -33,6 +34,28 @@ const MaxMessageLen = 4000
 // MaxPerRun bounds how many notifications the notify tool may send in one
 // run, so an agent in a loop cannot flood the owner.
 const MaxPerRun = 5
+
+// SendTimeout bounds a single notification delivery. Owner channels are
+// adapters over remote services: an endpoint that accepts a connection but
+// never completes must not block the agent run — which holds the gateway
+// conversation lock and stalls every subsequent owner turn — indefinitely
+// (#253 review). The delivery context may still cancel earlier.
+const SendTimeout = 30 * time.Second
+
+// Bound wraps s so every delivery carries a SendTimeout deadline, honoring
+// an earlier deadline or cancellation already present on the delivery
+// context. Attach the wrapped sender so system sends (memory-change
+// notices, usage alerts) and the notify tool share the bound.
+func Bound(s Sender) Sender { return bound(s, SendTimeout) }
+
+// bound is Bound with an injectable timeout for tests.
+func bound(s Sender, timeout time.Duration) Sender {
+	return func(ctx context.Context, text string) error {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return s(ctx, text)
+	}
+}
 
 type senderKey struct{}
 

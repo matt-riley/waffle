@@ -149,9 +149,9 @@ func (d *issueDispatcher) Dispatch(ctx context.Context, watch intake.WatchConfig
 	// owner while it works. Log-only watchers (no target) get no sender and
 	// the tool degrades to a no-op.
 	if watch.Deliver != "" && d.deliver != nil {
-		runCtx = notify.WithSender(runCtx, func(ctx context.Context, text string) error {
+		runCtx = notify.WithSender(runCtx, notify.Bound(func(ctx context.Context, text string) error {
 			return d.deliver.Deliver(ctx, watch.Deliver, text)
-		})
+		}))
 	}
 	out, runErr := runAgent.Run(runCtx, history, agent.Hooks{})
 	for _, m := range out[1:] {
