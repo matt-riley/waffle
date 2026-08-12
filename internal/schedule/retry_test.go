@@ -537,3 +537,20 @@ func TestConcurrentFiringsRunJobOnlyOnce(t *testing.T) {
 		t.Fatalf("overlapping firings made %d provider calls", p.count())
 	}
 }
+
+// TestRetryTimerTracksAbsoluteDeadline pins the in-process retry timer to the
+// same absolute deadline as the persisted next_retry. Regression for the
+// flaky TestRetryBackoffIsDeterministicCappedAndEventuallySucceeds: a slow
+// fire goroutine that creates its timer after the clock has already reached
+// the deadline must fire immediately, not a full delay later.
+func TestRetryTimerTracksAbsoluteDeadline(t *testing.T) {
+	c := newManualClock()
+	deadline := c.Now().Add(10 * time.Second)
+	c.Advance(10 * time.Second) // clock reaches the deadline before timer creation
+	timer := retryTimer(c, deadline)
+	select {
+	case <-timer.C():
+	default:
+		t.Fatal("retry timer did not fire at the absolute deadline")
+	}
+}
