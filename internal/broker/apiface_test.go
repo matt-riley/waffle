@@ -727,3 +727,77 @@ func TestAPIFaceRedactsCredentialFromLogLines(t *testing.T) {
 		t.Fatalf("log line not redacted: %q", logged.String())
 	}
 }
+
+// TestAPIFaceRedactsCredentialFromResponseHeaders: an upstream that echoes
+// the injected credential in a response header (not just the body) must not
+// hand it to the caller. ReverseProxy copies upstream headers through the
+// embedded writer untouched, so the face writer scrubs the header block
+// before it is sent (#254 review).
+func TestAPIFaceRedactsCredentialFromResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-Key", apiTestCredential)
+		w.Header().Set("X-Echo-Auth", r.Header.Get("Authorization"))
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	face := apiFaceFixture(t, upstream.URL)
+	b := newAPITestBroker(t, nil, []APIFace{face})
+	token := mintFaces(t, b, "sess", "weather")
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	resp, body := apiDo(t, front, token, http.MethodGet, "/api/weather/v1/weather")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	for _, h := range []string{"X-Echo-Key", "X-Echo-Auth"} {
+		if got := resp.Header.Get(h); strings.Contains(got, apiTestCredential) {
+			t.Fatalf("response header %s leaked the credential: %q", h, got)
+		}
+	}
+	if strings.Contains(body, apiTestCredential) {
+		t.Fatalf("response body leaked the credential: %q", body)
+	}
+}
+
+// TestRedactResponseWriterStreamingBoundaryNeverLeaksCredential pins the
+// large-response streaming path (#254 review): a credential straddling a
+// flush boundary is redacted as a whole because each flush redacts the
+// window of flushed prefix plus retained overlap, so neither the emitted
+// bytes nor the retained bytes carry a reconstructible fragment.
+func TestRedactResponseWriterStreamingBoundaryNeverLeaksCredential(t *testing.T) {
+	redactor, err := secret.NewRedactorWith(nil, secret.NamedValue{Name: "api/weather", Value: apiTestCredential})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overlap := redactor.MaxLen(); overlap < len(apiTestCredential) {
+		t.Fatalf("redactor MaxLen() = %d < credential length %d", overlap, len(apiTestCredential))
+	}
+	rec := httptest.NewRecorder()
+	w := &redactResponseWriter{ResponseWriter: rec, redact: redactor.Redact, overlap: redactor.MaxLen()}
+	half := len(apiTestCredential) / 2
+	// First write: fill past maxRedactBodyBytes so the writer switches to
+	// streaming, ending mid-credential.
+	first := append(bytes.Repeat([]byte("b"), maxRedactBodyBytes-half+1), []byte(apiTestCredential[:half])...)
+	if _, err := w.Write(first); err != nil {
+		t.Fatal(err)
+	}
+	// Second write: complete the credential across the flush boundary with
+	// just enough trailing bytes that the old flush would have split it
+	// (the credential's tail sits inside the retained overlap).
+	second := append([]byte(apiTestCredential[half:]), bytes.Repeat([]byte("c"), 20)...)
+	if _, err := w.Write(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.finish(); err != nil {
+		t.Fatal(err)
+	}
+	got := rec.Body.String()
+	if strings.Contains(got, apiTestCredential) {
+		t.Fatal("streamed response leaked the full credential")
+	}
+	if strings.Contains(got, apiTestCredential[:10]) {
+		t.Fatalf("streamed response leaked a reconstructible fragment (%.80s…)", got)
+	}
+}

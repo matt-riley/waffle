@@ -1220,19 +1220,20 @@ func (b *Broker) redact(s string) string {
 // split across flush boundaries and reassembled by the caller.
 const maxRedactBodyBytes = 4 << 20
 
-// redactResponseWriter scrubs a proxied response body before it reaches the
-// caller (#254). Without it, a token-echo endpoint could hand the model the
-// very credential the broker is supposed to contain.
+// redactResponseWriter scrubs a proxied response before it reaches the
+// caller (#254): response headers are scrubbed when the header block is
+// sent, trailers when the body completes, and the body as it streams.
+// Without it, a token-echo endpoint could hand the model the very
+// credential the broker is supposed to contain.
 //
 // Bodies up to maxRedactBodyBytes are buffered and redacted whole — exact
 // containment. Larger bodies stream with an overlap window (streaming
-// true): the last `overlap` bytes are retained while the earlier bytes are
-// flushed redacted together with the retained tail, so any credential of
-// length <= overlap that sits entirely inside a flushed window is scrubbed.
-// A credential straddling a flush boundary can still appear split across
-// two flushes, which is why the overlap default (256KiB, or the redactor's
-// longest value when wired) is far larger than any realistic credential and
-// why the buffered path is the one the tests rely on.
+// true): each flush redacts the whole window (the flushed prefix plus the
+// retained overlap) as one string, then emits the redacted prefix and
+// retains the redacted overlap. A credential straddling a flush boundary
+// is therefore replaced once — neither the emitted bytes nor the retained
+// bytes carry any part of it, so the caller cannot reassemble a split
+// value across flushes.
 type redactResponseWriter struct {
 	http.ResponseWriter
 	redact    func(string) string
@@ -1247,16 +1248,45 @@ func (w *redactResponseWriter) Write(p []byte) (int, error) {
 	}
 	w.pending = append(w.pending, p...)
 	if w.streaming && len(w.pending) > w.overlap {
-		flush := w.pending[:len(w.pending)-w.overlap]
-		if _, err := io.WriteString(w.ResponseWriter, w.redact(string(flush))); err != nil {
+		cut := len(w.pending) - w.overlap
+		redacted := w.redact(string(w.pending))
+		if cut > len(redacted) {
+			cut = len(redacted)
+		}
+		if _, err := io.WriteString(w.ResponseWriter, redacted[:cut]); err != nil {
 			return 0, err
 		}
-		w.pending = append(w.pending[:0], w.pending[len(w.pending)-w.overlap:]...)
+		w.pending = []byte(redacted[cut:])
 	}
 	return len(p), nil
 }
 
+// WriteHeader scrubs every upstream response header value before the header
+// block is sent. The ReverseProxy copies upstream headers through the
+// embedded writer untouched, so an upstream that echoes the injected
+// credential in a response header (not just the body) would otherwise hand
+// it straight to the caller (#254 review).
+func (w *redactResponseWriter) WriteHeader(status int) {
+	h := w.Header()
+	for _, vs := range h {
+		for i, v := range vs {
+			vs[i] = w.redact(v)
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
 func (w *redactResponseWriter) finish() error {
+	// Trailers (http.TrailerPrefix keys) are declared after WriteHeader, so
+	// scrub them here, before the body completes and net/http sends them.
+	h := w.Header()
+	for k, vs := range h {
+		if strings.HasPrefix(k, http.TrailerPrefix) {
+			for i, v := range vs {
+				vs[i] = w.redact(v)
+			}
+		}
+	}
 	if len(w.pending) == 0 {
 		return nil
 	}
