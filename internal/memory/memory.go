@@ -292,9 +292,20 @@ type note struct {
 }
 
 var (
-	noteIDRE   = regexp.MustCompile(`\[id=([a-zA-Z0-9]+)\]`)
-	noteDateRE = regexp.MustCompile(`\b(\d{4}-\d{2}-\d{2})\b`)
+	noteIDRE       = regexp.MustCompile(`\[id=([a-zA-Z0-9]+)\]`)
+	noteHeaderIDRE = regexp.MustCompile(`^\s*-\s+\[id=([a-zA-Z0-9]+)\]`)
+	noteDateRE     = regexp.MustCompile(`\b(\d{4}-\d{2}-\d{2})\b`)
 )
+
+// parseAnchoredNoteID extracts an ID only from the note header. In
+// particular, an [id=...] quoted by the note body is not an ID marker.
+func parseAnchoredNoteID(line string) string {
+	m := noteHeaderIDRE.FindStringSubmatch(line)
+	if len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
 
 func parseNote(line string, index int) note {
 	n := note{raw: line, index: index, body: extractBody(line)}
@@ -400,6 +411,10 @@ func (w Workspace) Append(note string) (string, error) {
 }
 
 func (w Workspace) appendCandidate(c Candidate) (string, error) {
+	return w.appendCandidateContext(context.Background(), c)
+}
+
+func (w Workspace) appendCandidateContext(ctx context.Context, c Candidate) (string, error) {
 	unlock, err := lockMemoryFile(w.MemoryPath())
 	if err != nil {
 		return "", err
@@ -409,13 +424,13 @@ func (w Workspace) appendCandidate(c Candidate) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Avoid ID collisions with existing notes (cheap check).
-	if existing, err := w.readMemory(); err == nil {
-		for strings.Contains(existing, "[id="+noteID+"]") {
-			noteID, err = newNoteID()
-			if err != nil {
-				return "", err
-			}
+	// Prefer the indexed primary-key lookup. The file fallback preserves the
+	// standalone Workspace API for callers that do not wire a NotesIndex, and
+	// parses note headers so body text containing an ID is not a collision.
+	for w.liveNoteIDExists(ctx, noteID) {
+		noteID, err = newNoteID()
+		if err != nil {
+			return "", err
 		}
 	}
 	day := time.Now().UTC()
@@ -430,8 +445,31 @@ func (w Workspace) appendCandidate(c Candidate) (string, error) {
 	return noteID, nil
 }
 
+// liveNoteIDExists uses the NotesIndex when available, keeping append from
+// re-reading MEMORY.md as it grows. If an index is unavailable or unhealthy,
+// retain the pre-index standalone behavior as a compatibility fallback.
+func (w Workspace) liveNoteIDExists(ctx context.Context, noteID string) bool {
+	if w.Notes != nil && w.Notes.DB != nil {
+		exists, err := w.Notes.LiveIDExists(ctx, noteID)
+		if err == nil {
+			return exists
+		}
+		slog.Warn("memory notes ID lookup failed; falling back to MEMORY.md", "note_id", noteID, "err", err)
+	}
+	existing, err := w.readMemory()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(existing, "\n") {
+		if parseAnchoredNoteID(line) == noteID {
+			return true
+		}
+	}
+	return false
+}
+
 func newNoteID() (string, error) {
-	return id.NewBytes(3) // 6 hex chars
+	return id.NewBytes(6) // 12 hex chars
 }
 
 func formatNoteLine(noteID string, day time.Time, pin bool, p Provenance, body, supersedes string) string {
@@ -676,7 +714,7 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 	}
 	var noteID string
 	c, err := gate.submit(ctx, Candidate{Kind: "memory", Body: in.Note, Provenance: t.Provenance}, func() error {
-		nid, err := ws.appendCandidate(Candidate{Body: in.Note, Provenance: t.Provenance})
+		nid, err := ws.appendCandidateContext(ctx, Candidate{Body: in.Note, Provenance: t.Provenance})
 		if err != nil {
 			return err
 		}

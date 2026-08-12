@@ -46,6 +46,22 @@ func (n *NotesIndex) Upsert(ctx context.Context, agent string, note note, archiv
 	return n.upsert(ctx, n.DB, agent, note, archived)
 }
 
+// LiveIDExists reports whether noteID belongs to a live indexed note. The
+// primary-key lookup avoids scanning note bodies (or MEMORY.md) when appending
+// a note. Archived IDs are intentionally available for reuse, matching the
+// old live-file collision semantics.
+func (n *NotesIndex) LiveIDExists(ctx context.Context, noteID string) (bool, error) {
+	if n == nil || n.DB == nil || noteID == "" {
+		return false, nil
+	}
+	var exists bool
+	err := n.DB.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM memory_notes WHERE id = ? AND archived = 0
+		)`, noteID).Scan(&exists)
+	return exists, err
+}
+
 func (n *NotesIndex) upsert(ctx context.Context, db sqlExecer, agent string, note note, archived bool) error {
 	if agent == "" {
 		agent = DefaultAgent

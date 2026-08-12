@@ -95,6 +95,66 @@ func TestRememberTool(t *testing.T) {
 	}
 }
 
+func TestNewNoteIDUsesWidenedNamespace(t *testing.T) {
+	noteID, err := newNoteID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noteID) != 12 {
+		t.Fatalf("note ID length = %d, want 12: %q", len(noteID), noteID)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(noteID) {
+		t.Fatalf("note ID = %q, want lowercase hexadecimal", noteID)
+	}
+}
+
+func TestLiveNoteIDLookupIgnoresIDsInNoteBodies(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ws := testWorkspace(t)
+	ws.Notes = &NotesIndex{DB: st.DB}
+	line := "- [id=header123] 2026-01-01 [trust=owner_stated source=]: quoted text [id=body123456]"
+	if err := os.WriteFile(ws.MemoryPath(), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Notes.SyncWorkspace(ctx, ws.agentName(), ws); err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := ws.Notes.LiveIDExists(ctx, "body123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("body ID was reported as a live note ID")
+	}
+	if ws.liveNoteIDExists(ctx, "body123456") {
+		t.Fatal("body ID was reported as a live ID through Workspace")
+	}
+	// The standalone Workspace path has the same structural behavior when no
+	// index is wired (for example, during compatibility use by library callers).
+	ws.Notes = nil
+	if ws.liveNoteIDExists(ctx, "body123456") {
+		t.Fatal("body ID was reported as a live ID by the file fallback")
+	}
+	if !ws.liveNoteIDExists(ctx, "header123") {
+		t.Fatal("header ID was not reported as live by the file fallback")
+	}
+	ws.Notes = &NotesIndex{DB: st.DB}
+	exists, err = ws.Notes.LiveIDExists(ctx, "header123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("header ID was not reported as a live note ID")
+	}
+}
+
 func TestRememberDedupesExactBody(t *testing.T) {
 	ws := testWorkspace(t)
 	tool := RememberTool{WS: ws}
