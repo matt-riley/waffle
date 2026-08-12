@@ -157,8 +157,12 @@ func (t PullRequestTool) Run(ctx context.Context, input json.RawMessage) (string
 	if resp.StatusCode/100 != 2 {
 		// The response can echo back submitted content; keep it short and never
 		// let it read as instructions to the model.
+		status := resp.Status
+		if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			status = "rate limited: " + resp.Status
+		}
 		return "", fmt.Errorf("github refused the pull request: %s: %s",
-			resp.Status, strings.TrimSpace(truncate(string(raw), 400)))
+			status, strings.TrimSpace(truncate(string(raw), 400)))
 	}
 	var out struct {
 		Number  int    `json:"number"`

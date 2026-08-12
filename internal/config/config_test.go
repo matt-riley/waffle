@@ -803,6 +803,52 @@ func TestAgentPolicyDefaults(t *testing.T) {
 	}
 }
 
+// The host-side GitHub tools must be nameable in profiles so the Desk
+// profile editor can offer them (issue #252).
+func TestProfileToolNamesIncludesGitHubHostTools(t *testing.T) {
+	want := []string{"github_pr", "github_pr_get", "github_pr_diff", "github_pr_comments", "github_comment", "github_checks", "github_issue_get"}
+	names := ProfileToolNames()
+	for _, name := range want {
+		if !ValidProfileTool(name) {
+			t.Errorf("%q is not a valid profile tool", name)
+		}
+		found := false
+		for _, n := range names {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ProfileToolNames missing %q", name)
+		}
+	}
+}
+
+// github_comment is a public, permanent publish action: denied by default for
+// the unattended cron/issue/group tiers, unless an explicit tool policy opts
+// out (#252).
+func TestGitHubCommentDeniedByDefaultForRestrictedTiers(t *testing.T) {
+	cfg := Default()
+	for _, group := range []string{GroupCron, GroupIssue, GroupGroup} {
+		pol := cfg.AgentPolicy(group)
+		if !contains(pol.Deny, "github_comment") {
+			t.Errorf("%s deny = %v, want github_comment denied by default", group, pol.Deny)
+		}
+	}
+	if contains(cfg.AgentPolicy(GroupMain).Deny, "github_comment") {
+		t.Error("main tier must keep github_comment available")
+	}
+	// An explicit group tool policy opts out of the defaults, so an operator
+	// can explicitly allow the write tool for a tier.
+	cfg.Agent.Groups = map[string]AgentGroup{
+		GroupCron: {Tools: ToolPolicy{Allow: []string{"github_comment"}}},
+	}
+	if contains(cfg.AgentPolicy(GroupCron).Deny, "github_comment") {
+		t.Error("explicit allow for cron must lift the default github_comment deny")
+	}
+}
+
 func TestIntakeAndHooksConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `

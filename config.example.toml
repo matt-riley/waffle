@@ -102,8 +102,18 @@ enabled = false
 # Optional GitHub App for repo workspaces. Waffle mints short-lived
 # installation tokens scoped to the single repo a session is bound to: the git
 # credential a container receives carries contents:write only, while the
-# host-side github_pr tool mints a separate pull_requests:write token that
-# never enters the sandbox. Grant the app both permissions to use both.
+# host-side github_* tools (github_pr and the issue #252 read/comment surface)
+# mint per-call tokens that never enter the sandbox. Each tool requests only
+# the permission it needs, so grant the app the permissions for the tools you
+# use:
+#   contents:write       git push from workspace containers (always)
+#   pull_requests:write  github_pr; github_comment on pull requests
+#   pull_requests:read   github_pr_get, github_pr_diff, github_pr_comments
+#   issues:write         github_comment on issues
+#   issues:read          github_issue_get
+#   checks:read          github_checks
+# Upgrading an existing app requires re-granting the newly needed permissions
+# in the GitHub App settings before the corresponding tools start working.
 # [github.app]
 # app_id = 123456
 # installation_id = 12345678
@@ -129,7 +139,7 @@ model = "default"
 sandbox = "docker"
 [agent.profile.researcher.tools]
 allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]
-deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr", "github_comment"]
 
 # --- reviewer: read-only code critique -------------------------------------
 [agent.profile.reviewer]
@@ -138,7 +148,7 @@ model = "default"
 sandbox = "docker"
 [agent.profile.reviewer.tools]
 allow = ["read_file", "search", "recall", "expand_output", "expand_context"]
-deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr"]
+deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr", "github_comment"]
 
 # Surface binds (CLI):
 #   waffle session profile telegram:42 reviewer

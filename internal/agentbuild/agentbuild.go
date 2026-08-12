@@ -192,28 +192,37 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	if b.Config.Agent.Learn {
 		hostToolList = append(hostToolList, memory.DistillTool{WS: ws, Gate: &memory.Gate{Mode: b.Config.Memory.WriteGate, WS: ws}})
 	}
-	// Opening a pull request needs pull_requests:write, which the workspace git
-	// credential deliberately never carries — anything inside a container can
-	// read its credentials back out with `git credential fill`. So the tool runs
-	// on the host, mints a token for one call, and scopes it to the repo the
-	// session's workspace is bound to. A missing or misconfigured app is not an
-	// error here: the tool simply is not offered.
+	// The GitHub tools (github_pr and the #252 read/comment surface) need
+	// permissions the workspace git credential deliberately never carries —
+	// anything inside a container can read its credentials back out with `git
+	// credential fill`. So they all run on the host: each mints a token for one
+	// call carrying only the permission it needs, scopes it to the repo the
+	// session's workspace is bound to, and never lets it near a container. A
+	// missing or misconfigured app is not an error here: the tools are simply
+	// not offered.
 	if b.GitHubApp != nil {
 		if app, appErr := b.GitHubApp(); appErr == nil && app != nil {
 			bindings := &workspace.Manager{DB: b.Sessions.DB()}
-			hostToolList = append(hostToolList, gitcred.PullRequestTool{
-				App: app,
-				Repo: func(ctx context.Context, sessionID string) (string, error) {
-					// Reuse the manager's own lookup rather than repeating the
-					// query: this is the same binding the broker scopes git
-					// credentials by, and a second copy could drift from it.
-					bound, err := bindings.ForSession(ctx, sessionID)
-					if err != nil {
-						return "", err
-					}
-					return bound.Repo, nil
-				},
-			})
+			repoForSession := func(ctx context.Context, sessionID string) (string, error) {
+				// Reuse the manager's own lookup rather than repeating the
+				// query: this is the same binding the broker scopes git
+				// credentials by, and a second copy could drift from it.
+				bound, err := bindings.ForSession(ctx, sessionID)
+				if err != nil {
+					return "", err
+				}
+				return bound.Repo, nil
+			}
+			host := gitcred.HostTool{App: app, Repo: repoForSession}
+			hostToolList = append(hostToolList,
+				gitcred.PullRequestTool{App: app, Repo: repoForSession},
+				gitcred.PRGetTool{HostTool: host},
+				gitcred.PRDiffTool{HostTool: host},
+				gitcred.PRCommentsTool{HostTool: host},
+				gitcred.CommentTool{HostTool: host},
+				gitcred.ChecksTool{HostTool: host},
+				gitcred.IssueGetTool{HostTool: host},
+			)
 		}
 	}
 	hostTools := tool.NewRegistry(hostToolList...)

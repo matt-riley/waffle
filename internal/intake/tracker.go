@@ -104,7 +104,7 @@ func (g *GitHubTracker) ListOpen(ctx context.Context, repo, label string) ([]Iss
 		}
 		out = append(out, pageIssues...)
 
-		next, ok := nextLinkURL(linkHeader)
+		next, ok := NextLinkURL(linkHeader)
 		if !ok {
 			return out, nil
 		}
@@ -167,9 +167,10 @@ func decodeIssuePage(body io.Reader, label string) ([]Issue, error) {
 	return out, nil
 }
 
-// nextLinkURL extracts the URL for rel="next" from a GitHub Link response header.
-// Example: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"
-func nextLinkURL(linkHeader string) (string, bool) {
+// NextLinkURL extracts the URL for rel="next" from a GitHub Link response
+// header. Example: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last".
+// It is shared with the host-side GitHub tools in internal/gitcred (#252).
+func NextLinkURL(linkHeader string) (string, bool) {
 	if linkHeader == "" {
 		return "", false
 	}
