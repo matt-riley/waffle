@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/matt-riley/waffle/compare/v0.15.0...v0.16.0) (2026-08-12)
+
+
+### Features
+
+* **#254:** scoped credentialed API faces for third-party APIs ([#377](https://github.com/matt-riley/waffle/issues/377)) ([8640886](https://github.com/matt-riley/waffle/commit/8640886f6f2a6d53e8e2a718ca80d0ae796213ef))
+
 ## [0.15.0](https://github.com/matt-riley/waffle/compare/v0.14.0...v0.15.0) (2026-08-12)
 
 
