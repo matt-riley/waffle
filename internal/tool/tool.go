@@ -72,6 +72,10 @@ func (r *Registry) Run(ctx context.Context, name string, input json.RawMessage) 
 
 // BuiltinOptions configures the standard host toolset.
 type BuiltinOptions struct {
+	// BashPIDs limits the host bash process tree. Zero uses
+	// DefaultBashProcessLimit. Docker mode enforces its own container pids
+	// limit, so this is normally set only for the host executor.
+	BashPIDs int
 	// FetchAllowPrivate lists CIDRs / host:port entries fetch may reach in
 	// otherwise-protected address ranges.
 	FetchAllowPrivate []string
@@ -93,7 +97,7 @@ func BuiltinsWithFetch(allowPrivate []string) *Registry {
 // BuiltinsWith returns the standard toolset under opts.
 func BuiltinsWith(opts BuiltinOptions) *Registry {
 	return NewRegistry(
-		Bash{},
+		Bash{MaxProcesses: opts.BashPIDs},
 		ReadFile{Roots: opts.FileRoots},
 		WriteFile{Roots: opts.FileRoots},
 		EditFile{Roots: opts.FileRoots},

@@ -671,7 +671,10 @@ type Sandbox struct {
 	RunnerBinary string `toml:"runner_binary"`
 	// Network for docker mode: "none" (default) or "bridge".
 	Network string `toml:"network"`
-	// Memory, CPUs, and PIDs cap each docker container's host impact.
+	// Memory, CPUs, and PIDs cap each docker container's host impact. The
+	// PIDs value is also used as the host Bash process budget when the host
+	// executor is selected; Linux enforces it with a delegated cgroup when
+	// possible (see docs/plan.md).
 	Memory string  `toml:"memory"`
 	CPUs   float64 `toml:"cpus"`
 	PIDs   int     `toml:"pids"`

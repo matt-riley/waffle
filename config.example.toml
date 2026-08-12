@@ -163,6 +163,7 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 # [sandbox]
 # work_dir = "/srv/waffle/work"
 # file_roots = ["/srv/waffle/work"]
+# pids = 512  # Docker container cap and host Bash process-tree budget
 #
 # [agent.profile.researcher.tools]
 # file_roots = ["/srv/waffle/work/reading"]

@@ -34,7 +34,19 @@ func mustSchema(s string) json.RawMessage {
 // Bash runs a shell command on the host. In later phases the same tool runs
 // inside a sandbox container via the docker executor; the definition is
 // identical either way.
-type Bash struct{}
+//
+// MaxProcesses is the per-command process budget. On Linux, configureProcessLimit
+// places the shell in a delegated cgroup when one is available, so the budget
+// covers the complete descendant tree. Other platforms may not have a
+// process-tree primitive; see the platform-specific implementation and docs.
+type Bash struct {
+	MaxProcesses int
+}
+
+// DefaultBashProcessLimit is deliberately aligned with the Docker sandbox's
+// default pids limit. It is a safety budget, not a containment boundary: host
+// Bash remains an owner-tier capability.
+const DefaultBashProcessLimit = 512
 
 var bashSchema = mustSchema(`{
 	"type": "object",
@@ -53,7 +65,7 @@ func (Bash) Def() llm.Tool {
 	}
 }
 
-func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (b Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Command        string `json:"command"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
@@ -74,7 +86,13 @@ func (Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	limit := b.MaxProcesses
+	if limit <= 0 {
+		limit = DefaultBashProcessLimit
+	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", in.Command)
+	cleanupLimit := configureProcessLimit(cmd, limit)
+	defer cleanupLimit()
 	configureProcessGroup(cmd)
 	out, err := cmd.CombinedOutput()
 	// Return up to HostReturnCap so Agent.runOne can spill before OutputLimit

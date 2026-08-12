@@ -277,6 +277,8 @@ EnvironmentFile=%h/.config/waffle/identity.env
 ProtectSystem=strict
 ProtectHome=read-only
 NoNewPrivileges=true
+# Lets host Bash create a child cgroup with pids.max (#275).
+Delegate=yes
 ReadWritePaths=%h/.waffle %h/.local/state/waffle
 StandardOutput=journal
 StandardError=journal

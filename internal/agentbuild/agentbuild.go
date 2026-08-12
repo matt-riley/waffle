@@ -244,6 +244,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	switch sandboxMode {
 	case "host", "":
 		execTools = tool.BuiltinsWith(tool.BuiltinOptions{
+			BashPIDs:          b.Config.Sandbox.PIDs,
 			FetchAllowPrivate: b.Config.Tools.Fetch.AllowPrivate,
 			FileRoots:         fileRoots,
 		})
