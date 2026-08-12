@@ -160,7 +160,7 @@ func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store) (*
 			cleanups[i]()
 		}
 	}
-	a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron)
+	a, closer, err := buildAgent(ctx, cfg, ws, skills, sessions, config.GroupCron, apiBrokerWiring{})
 	cleanups = append(cleanups, closer)
 	if err != nil {
 		return nil, cleanup, err
@@ -170,7 +170,7 @@ func buildCronRunner(ctx context.Context, cfg config.Config, st *store.Store) (*
 		if name == "" || name == "main" {
 			continue
 		}
-		pa, pCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name)
+		pa, pCloser, err := buildAgentWithProfile(ctx, cfg, ws, skills, sessions, config.GroupCron, name, apiBrokerWiring{})
 		cleanups = append(cleanups, pCloser)
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("profile %q (cron): %w", name, err)

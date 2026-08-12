@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
@@ -38,13 +40,13 @@ func TestBuildAgentCronTierExcludesBash(t *testing.T) {
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = false
 
-	mainAgent, mainCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain)
+	mainAgent, mainCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain, apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("build main agent: %v", err)
 	}
 	defer mainCleanup()
 
-	cronAgent, cronCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupCron)
+	cronAgent, cronCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupCron, apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("build cron agent: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestConfiguredGatewayGroupBuildsRegistryEntry(t *testing.T) {
 		"restricted": {Tools: config.ToolPolicy{Deny: []string{"bash"}}},
 	}
 
-	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
+	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil, apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("build gateway agents: %v", err)
 	}
@@ -157,7 +159,7 @@ func TestBuildAgentGroupTierRestrictsTools(t *testing.T) {
 	cfg.Provider.APIKey = "test-key"
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = true
-	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupGroup)
+	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupGroup, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +189,7 @@ func TestBuildGatewayAgentsIncludesGroupTier(t *testing.T) {
 	cfg.Provider.APIKey = "test-key"
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = false
-	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
+	agents, _, _, _, _, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil, apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("buildGatewayAgents: %v", err)
 	}
@@ -214,7 +216,7 @@ func TestBuildAgentIssueTierRestrictsTools(t *testing.T) {
 	cfg.Provider.APIKey = "test-key"
 	cfg.Agent.Subagents = false
 	cfg.Agent.Learn = true
-	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupIssue)
+	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupIssue, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +262,7 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 		},
 	}
 
-	mainA, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain)
+	mainA, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +271,7 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 		t.Fatalf("main model = %q", mainA.Model)
 	}
 
-	spec, cleanup2, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "reviewer")
+	spec, cleanup2, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "reviewer", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +288,7 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 		}
 	}
 
-	ro, cleanup3, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "readonly")
+	ro, cleanup3, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "readonly", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,14 +302,14 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 
 	// Missing prompt file errors.
 	cfg.Agent.Profiles["broken"] = config.AgentProfile{System: "@" + filepath.Join(home, "missing.md")}
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "broken"); err == nil {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "broken", apiBrokerWiring{}); err == nil {
 		t.Fatal("missing prompt file accepted")
 	}
 	// Path outside WAFFLE_HOME errors.
 	outside := filepath.Join(t.TempDir(), "escape.md")
 	_ = os.WriteFile(outside, []byte("x"), 0o600)
 	cfg.Agent.Profiles["escape"] = config.AgentProfile{System: "@" + outside}
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape"); err == nil {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape", apiBrokerWiring{}); err == nil {
 		t.Fatal("outside-root prompt accepted")
 	}
 	// A path under WAFFLE_HOME that cannot be read as a prompt file also errors.
@@ -316,17 +318,17 @@ func TestBuildAgentWithProfileSpecialist(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Agent.Profiles["unreadable"] = config.AgentProfile{System: "@" + unreadable}
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "unreadable"); err == nil {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "unreadable", apiBrokerWiring{}); err == nil {
 		t.Fatal("unreadable prompt path accepted")
 	}
 	// The selected profile's sandbox posture reaches agent construction.
 	cfg.Agent.Profiles["bad-sandbox"] = config.AgentProfile{System: "x", Sandbox: "invalid-mode"}
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "bad-sandbox"); err == nil || !strings.Contains(err.Error(), "invalid-mode") {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "bad-sandbox", apiBrokerWiring{}); err == nil || !strings.Contains(err.Error(), "invalid-mode") {
 		t.Fatalf("profile sandbox posture error = %v", err)
 	}
 	// Explicit empty system is allowed.
 	cfg.Agent.Profiles["empty-sys"] = config.AgentProfile{System: ""}
-	emptyA, cleanup4, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "empty-sys")
+	emptyA, cleanup4, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "empty-sys", apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("empty system: %v", err)
 	}
@@ -352,12 +354,12 @@ func TestDefaultMainProfilePreservesAgentConstruction(t *testing.T) {
 	ws := memory.Workspace{Dir: t.TempDir()}
 	sessions := session.New(st)
 
-	legacy, cleanupLegacy, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain)
+	legacy, cleanupLegacy, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanupLegacy()
-	profiled, cleanupProfiled, err := buildAgentWithProfile(ctx, cfg, ws, nil, sessions, config.GroupMain, "main")
+	profiled, cleanupProfiled, err := buildAgentWithProfile(ctx, cfg, ws, nil, sessions, config.GroupMain, "main", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +400,7 @@ func TestBuildAgentActionRuleDenialIncludesProfileProvenanceWithoutInput(t *test
 		"reviewer": {System: "review", Tools: config.ToolPolicy{Allow: []string{"read_file"}}},
 	}
 	cfg.Policy.Rule = []config.PolicyRule{{Name: "no-private-read", Tool: "read_file", Action: "deny"}}
-	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "reviewer")
+	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "reviewer", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +439,7 @@ func TestProfileUtilityModelSelectionBuild(t *testing.T) {
 		"cheap":      {System: "u", Model: "utility"},
 		"explicit":   {System: "e", Model: "claude-x"},
 	}
-	a, c1, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "defaultish")
+	a, c1, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "defaultish", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +447,7 @@ func TestProfileUtilityModelSelectionBuild(t *testing.T) {
 	if a.Model != "main-model" {
 		t.Fatalf("default model = %q", a.Model)
 	}
-	a, c2, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap")
+	a, c2, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +455,7 @@ func TestProfileUtilityModelSelectionBuild(t *testing.T) {
 	if a.Model != "cheap-model" {
 		t.Fatalf("utility model = %q", a.Model)
 	}
-	a, c3, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "explicit")
+	a, c3, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "explicit", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +465,7 @@ func TestProfileUtilityModelSelectionBuild(t *testing.T) {
 	}
 	// Missing utility_model errors at build.
 	cfg.Provider.UtilityModel = ""
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap"); err == nil {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "cheap", apiBrokerWiring{}); err == nil {
 		t.Fatal("missing utility_model accepted")
 	}
 }
@@ -491,7 +493,7 @@ func TestWorkspaceOrChatProfileAffectsAgent(t *testing.T) {
 		},
 	}
 	bound := workspace.Workspace{Profile: "researcher"}
-	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, bound.Profile)
+	a, cleanup, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, bound.Profile, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +540,7 @@ func TestBuildGatewayAgentsBuildsProfiles(t *testing.T) {
 			Tools:  config.ToolPolicy{Allow: []string{"read_file", "search"}},
 		},
 	}
-	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil)
+	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), nil, apiBrokerWiring{})
 	if err != nil {
 		t.Fatalf("buildGatewayAgents: %v", err)
 	}
@@ -658,7 +660,7 @@ func TestBuildAgentFileRootsConfineFileTools(t *testing.T) {
 		"escape": {Tools: config.ToolPolicy{FileRoots: []string{outside}}},
 	}
 
-	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain)
+	a, cleanup, err := buildAgent(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +669,7 @@ func TestBuildAgentFileRootsConfineFileTools(t *testing.T) {
 		t.Errorf("read outside roots = %v, want ErrOutsideRoots", err)
 	}
 
-	narrow, cleanupNarrow, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "narrow")
+	narrow, cleanupNarrow, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "narrow", apiBrokerWiring{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +682,102 @@ func TestBuildAgentFileRootsConfineFileTools(t *testing.T) {
 		t.Errorf("narrowed profile read outside its own root = %v, want ErrOutsideRoots", err)
 	}
 
-	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape"); !errors.Is(err, config.ErrProfileWidens) {
+	if _, _, err := buildAgentWithProfile(ctx, cfg, memory.Workspace{Dir: t.TempDir()}, nil, session.New(st), config.GroupMain, "escape", apiBrokerWiring{}); !errors.Is(err, config.ErrProfileWidens) {
 		t.Errorf("widening profile built with err = %v, want ErrProfileWidens", err)
+	}
+}
+
+// TestAPIFaceToolsWiredPerTier is the end-to-end wiring test for #254: a
+// running broker plus configured faces produces api_<name> tools only for
+// tiers whose tool policy explicitly allows them, and the mint path grants
+// exactly those faces to the session token.
+func TestAPIFaceToolsWiredPerTier(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	sessions := session.New(st)
+	ws := memory.Workspace{Dir: t.TempDir()}
+
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	cfg.Sandbox.Allow = []string{"api_weather"} // main tier grants the face
+	cfg.API = config.API{Upstream: []config.APIUpstream{{
+		Name: "weather", BaseURL: "https://api.example.com", Header: "x-api-key",
+		Value: "secret://api/weather", Methods: []string{"GET"}, Paths: []string{"/v1"},
+	}}}
+
+	b := broker.New(st, nil)
+	b.SetAPIFaces([]broker.APIFace{{
+		Name: "weather", BaseURL: "https://api.example.com", Header: "x-api-key",
+		Value: "real-credential-value", Methods: []string{"GET"}, Paths: []string{"/v1"},
+	}})
+	wiring := apiBrokerWiring{broker: b, url: "http://127.0.0.1:8421", faces: []apiface.Face{
+		{Name: "weather", Methods: []string{"GET"}, Paths: []string{"/v1"}},
+	}}
+
+	mainAgent, cleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain, wiring)
+	if err != nil {
+		t.Fatalf("build main agent: %v", err)
+	}
+	defer cleanup()
+	names := map[string]bool{}
+	for _, def := range mainAgent.Tools.Defs() {
+		names[def.Name] = true
+	}
+	if !names["api_weather"] {
+		t.Fatalf("main toolbox lacks api_weather: %v", names)
+	}
+
+	// Cron tier: no explicit grant, so no face tool even though the global
+	// [sandbox] allow names it only for main — group policy replaces global
+	// allow/deny, and the restricted tiers get nothing by default.
+	cfg.Agent.Groups = map[string]config.AgentGroup{
+		config.GroupCron: {Tools: config.ToolPolicy{Allow: []string{"recall"}}},
+	}
+	cronAgent, cronCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupCron, wiring)
+	if err != nil {
+		t.Fatalf("build cron agent: %v", err)
+	}
+	defer cronCleanup()
+	for _, def := range cronAgent.Tools.Defs() {
+		if def.Name == "api_weather" {
+			t.Fatal("cron toolbox offers api_weather without a grant")
+		}
+	}
+
+	// Wildcard allow does not grant faces.
+	cfg.Agent.Groups = nil
+	cfg.Sandbox.Allow = []string{"*"}
+	wildAgent, wildCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain, wiring)
+	if err != nil {
+		t.Fatalf("build wildcard agent: %v", err)
+	}
+	defer wildCleanup()
+	for _, def := range wildAgent.Tools.Defs() {
+		if def.Name == "api_weather" {
+			t.Fatal("wildcard allow offered api_weather (deny by default)")
+		}
+	}
+
+	// No broker wiring: no face tools at all.
+	cfg.Sandbox.Allow = []string{"api_weather"}
+	noBrokerAgent, noBrokerCleanup, err := buildAgent(ctx, cfg, ws, nil, sessions, config.GroupMain, apiBrokerWiring{})
+	if err != nil {
+		t.Fatalf("build no-broker agent: %v", err)
+	}
+	defer noBrokerCleanup()
+	for _, def := range noBrokerAgent.Tools.Defs() {
+		if def.Name == "api_weather" {
+			t.Fatal("no-broker build offered api_weather")
+		}
 	}
 }

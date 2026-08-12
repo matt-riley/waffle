@@ -99,6 +99,39 @@ enabled = false
 # [broker]
 # listen = "172.17.0.1:8423"
 
+# Credentialed API faces (#254): named third-party APIs the broker fronts at
+# /api/<name>/<path> so an agent can call an authenticated HTTP API without
+# ever holding the key. The real credential is resolved host-side from the
+# secret store and injected into the upstream request; it never enters a
+# sandbox, a log, an audit row, an error message, or a response body.
+#
+# Deny by default. A face is served only to sessions whose tier explicitly
+# grants it: add the literal tool name api_<name> to the tier's tool allow
+# list (for example [sandbox] allow = ["api_weather"] or a profile's
+# tools.allow). The "*" wildcard and an empty allow list do NOT grant faces.
+#
+# Both allowlists are required — a face missing methods or paths is a load
+# error, never an implicit allow-all. value must be a secret:// reference;
+# literal credentials in config.toml are rejected. The method and path
+# allowlists are enforced by the broker on every request, and path
+# traversal (`..`, encoded separators, double-encoding) is refused. Every
+# request — allowed and denied — is an audit row naming the face and
+# session, and the usage/pause gates apply.
+#
+# [[api.upstream]]
+# name = "weather"
+# base_url = "https://api.example.com"
+# header = "x-api-key"
+# value = "secret://api/weather"
+# methods = ["GET"]          # explicit allowlist; required
+# paths = ["/v1/weather"]    # explicit prefix allowlist; required
+#
+# Store the credential first:
+#   printf '%s' VALUE | waffle secret set api/weather
+# Grant a tier (main example; cron/issue/group tiers work the same way):
+# [agent.profile.main.tools]
+# allow = ["*", "api_weather"]
+
 # Optional GitHub App for repo workspaces. Waffle mints short-lived
 # installation tokens scoped to the single repo a session is bound to: the git
 # credential a container receives carries contents:write only, while the

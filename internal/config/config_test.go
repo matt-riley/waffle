@@ -1708,3 +1708,301 @@ max_attachment_bytes = 10485760
 		t.Errorf("default max_attachment_bytes = %d, want 0 (deny-by-default)", got)
 	}
 }
+
+func TestAPIUpstreamFacesLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET", "POST"]
+paths = ["/v1/weather", "/v1/alerts"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.API.Upstream) != 1 {
+		t.Fatalf("faces = %d, want 1", len(cfg.API.Upstream))
+	}
+	f := cfg.API.Upstream[0]
+	if f.Name != "weather" || f.BaseURL != "https://api.example.com" || f.Header != "x-api-key" || f.Value != "secret://api/weather" {
+		t.Fatalf("face = %+v", f)
+	}
+	if len(f.Methods) != 2 || f.Methods[0] != "GET" || f.Methods[1] != "POST" {
+		t.Fatalf("methods = %v", f.Methods)
+	}
+	if len(f.Paths) != 2 || f.Paths[0] != "/v1/weather" {
+		t.Fatalf("paths = %v", f.Paths)
+	}
+}
+
+func TestAPIUpstreamAbsentConfigHasNoFaces(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.API.Upstream) != 0 {
+		t.Fatalf("faces = %v, want none", cfg.API.Upstream)
+	}
+	if grants := cfg.APIFaceGrants(GroupMain); len(grants) != 0 {
+		t.Fatalf("main grants = %v, want none (deny by default)", grants)
+	}
+}
+
+func TestAPIUpstreamValidationErrorsNameTheFace(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "missing methods allowlist",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": methods allowlist is required`,
+		},
+		{
+			name: "missing paths allowlist",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+`,
+			wantErr: `api.upstream "weather": paths allowlist is required`,
+		},
+		{
+			name: "literal credential value",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "sk-literal"
+methods = ["GET"]
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": value must be a secret:// reference`,
+		},
+		{
+			name: "empty value",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = ""
+methods = ["GET"]
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": value must be a secret:// reference`,
+		},
+		{
+			name: "bad base url",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": base_url must be an absolute http(s) URL`,
+		},
+		{
+			name: "bad header",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x api key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": header "x api key" is not a valid HTTP header name`,
+		},
+		{
+			name: "unsupported method",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["TRACE"]
+paths = ["/v1"]
+`,
+			wantErr: `api.upstream "weather": method "TRACE" is not supported`,
+		},
+		{
+			name: "traversal in path allowlist",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1/../admin"]
+`,
+			wantErr: `api.upstream "weather": path "/v1/../admin"`,
+		},
+		{
+			name: "encoded separator in path allowlist",
+			body: `[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1%2fadmin"]
+`,
+			wantErr: `api.upstream "weather": path "/v1%2fadmin"`,
+		},
+		{
+			name:    "duplicate face name",
+			body:    "[[api.upstream]]\nname = \"weather\"\nbase_url = \"https://a.example.com\"\nheader = \"x-api-key\"\nvalue = \"secret://api/weather\"\nmethods = [\"GET\"]\npaths = [\"/v1\"]\n[[api.upstream]]\nname = \"weather\"\nbase_url = \"https://b.example.com\"\nheader = \"x-api-key\"\nvalue = \"secret://api/weather\"\nmethods = [\"GET\"]\npaths = [\"/v1\"]\n",
+			wantErr: `api.upstream: duplicate face name "weather"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tc.body)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load succeeded, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want containing %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAPIUpstreamUnknownKeyNamesTheFace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+bogus_key = 1
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load succeeded, want unknown-key error")
+	}
+	if !strings.Contains(err.Error(), `api.upstream: face "weather": unknown key "bogus_key"`) {
+		t.Fatalf("error = %q, want the face named", err.Error())
+	}
+}
+
+func TestAPIFaceGrantsRequireLiteralToolName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[sandbox]
+allow = ["*"]
+
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The "*" wildcard must NOT grant faces.
+	if grants := cfg.APIFaceGrants(GroupMain); len(grants) != 0 {
+		t.Fatalf("main grants = %v, want none for wildcard-only allow", grants)
+	}
+
+	writeFile(t, path, `
+[sandbox]
+allow = ["api_weather"]
+
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+`)
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants := cfg.APIFaceGrants(GroupMain)
+	if len(grants) != 1 || grants[0] != "weather" {
+		t.Fatalf("main grants = %v, want [weather]", grants)
+	}
+	// Deny wins over a literal allow entry.
+	writeFile(t, path, `
+[sandbox]
+allow = ["api_weather"]
+deny = ["api_weather"]
+
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+`)
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grants := cfg.APIFaceGrants(GroupMain); len(grants) != 0 {
+		t.Fatalf("main grants = %v, want none when denied", grants)
+	}
+	// Restricted tiers stay denied without an explicit grant.
+	if grants := cfg.APIFaceGrants(GroupCron); len(grants) != 0 {
+		t.Fatalf("cron grants = %v, want none", grants)
+	}
+}
+
+func TestProfileAPIFaceToolRequiresConfiguredFace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[agent.profile.main.tools]
+allow = ["api_weather"]
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load succeeded, want unknown-face error")
+	}
+	if !strings.Contains(err.Error(), `names api_weather but no [[api.upstream]] face "weather" is configured`) {
+		t.Fatalf("error = %q", err.Error())
+	}
+
+	writeFile(t, path, `
+[[api.upstream]]
+name = "weather"
+base_url = "https://api.example.com"
+header = "x-api-key"
+value = "secret://api/weather"
+methods = ["GET"]
+paths = ["/v1"]
+
+[agent.profile.main.tools]
+allow = ["api_weather"]
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load with configured face: %v", err)
+	}
+}

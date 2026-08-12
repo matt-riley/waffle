@@ -24,6 +24,8 @@ import (
 	"sync"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/gitcred"
@@ -79,6 +81,20 @@ type Builder struct {
 	// rows). Nil means broker egress is unavailable and docker-mode groups
 	// cannot use remote MCP servers (#249).
 	RemoteEgress *mcp.RemoteEgress
+	// Broker, when non-nil, enables per-face API tools (#254): each
+	// configured face whose tool name the effective tool policy explicitly
+	// allows becomes an api_<name> host tool that mints a short-lived
+	// session-scoped broker token per call. Nil disables the tools.
+	Broker *broker.Broker
+	// BrokerURL is the address host-side tools use to reach Broker
+	// (e.g. "http://127.0.0.1:8421"). Required when Broker is set.
+	BrokerURL string
+	// APIFaces are the configured credentialed faces, metadata only — no
+	// credential values ever enter the agent.
+	APIFaces []apiface.Face
+	// APIRedact, when set, scrubs credential material from API tool output
+	// and errors; nil falls back to Runtime.Redact.
+	APIRedact func(string) string
 }
 
 // Build assembles the agent for one agent group/profile. The returned
@@ -238,6 +254,33 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 			)
 		}
 	}
+	// Per-face API tools (#254): offered only to builds whose effective
+	// tool policy explicitly allows the api_<name> tool (a literal allow
+	// entry; the "*" wildcard does not grant faces). The same policy
+	// decision drives the broker token grants, so the model-facing toolbox
+	// and the broker's per-session enforcement cannot drift.
+	if b.Broker != nil && len(b.APIFaces) > 0 {
+		tierLimits := usagepkg.Limits{
+			TokensPerDay:          b.Config.LimitsFor(group).TokensPerDay,
+			RequestsPerHour:       b.Config.LimitsFor(group).RequestsPerHour,
+			AlertThresholdPercent: b.Config.LimitsFor(group).AlertThresholdPercent,
+		}
+		redact := b.APIRedact
+		if redact == nil {
+			redact = b.Runtime.Redact
+		}
+		client := &apiface.Client{
+			Faces:     b.APIFaces,
+			BrokerURL: b.BrokerURL,
+			Mint: func(ctx context.Context, sessionID string, faces []string) (string, error) {
+				return b.Broker.MintScopedFaces(ctx, sessionID, sessionID, tierLimits, faces)
+			},
+			Revoke: b.Broker.Revoke,
+			Redact: redact,
+		}
+		hostToolList = append(hostToolList, client.ToolsFor(toolPolicy)...)
+	}
+
 	hostTools := tool.NewRegistry(hostToolList...)
 
 	// Optional code intelligence (#79): in-process text-fallback tools.

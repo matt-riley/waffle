@@ -14,6 +14,8 @@ const minRedactLen = 6
 // stray `env` or `cat` can't leak a stored key into the transcript.
 type Redactor struct {
 	replacer *strings.Replacer
+	// maxLen is the longest enrolled secret value (see MaxLen).
+	maxLen int
 }
 
 // NewRedactor builds a Redactor over every value currently in the store.
@@ -80,12 +82,24 @@ func NewRedactorWith(store Store, extras ...NamedValue) (*Redactor, error) {
 	})
 
 	pairs := make([]string, 0, len(cands)*2)
+	maxLen := 0
 	for _, c := range cands {
 		pairs = append(pairs, c.value, "[redacted:"+c.name+"]")
+		if len(c.value) > maxLen {
+			maxLen = len(c.value)
+		}
 	}
-	return &Redactor{replacer: strings.NewReplacer(pairs...)}, nil
+	return &Redactor{replacer: strings.NewReplacer(pairs...), maxLen: maxLen}, nil
 }
 
 // Redact returns s with every known secret value replaced by its
 // [redacted:name] marker.
 func (r *Redactor) Redact(s string) string { return r.replacer.Replace(s) }
+
+// MaxLen returns the length of the longest enrolled secret value, or 0 when
+// the redactor knows no values. Streaming redaction (e.g. broker response
+// bodies) retains this many tail bytes so a credential can never straddle a
+// flush boundary unseen; callers fall back to a sane default when it is 0.
+func (r *Redactor) MaxLen() int {
+	return r.maxLen
+}

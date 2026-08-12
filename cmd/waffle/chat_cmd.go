@@ -11,6 +11,8 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/agentbuild"
+	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/broker"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
 	"github.com/matt-riley/waffle/internal/config"
@@ -250,10 +252,16 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 	return cfg, st, nil
 }
 
-// buildAgent assembles the agent for an agent group (docs/plan.md trust
-// tiering): the group's resolved policy decides where tools run (host vs
-// docker) and which tools it may use. The returned cleanup stops any sandbox
-// container; call it when done (it is never nil).
+// apiBrokerWiring carries the running credential broker into agent builds
+// so per-face API tools (internal/apiface, #254) can be offered. The zero
+// value disables them; surfaces that run a broker (serve, ws) set it before
+// any agent is built.
+type apiBrokerWiring struct {
+	broker *broker.Broker
+	url    string
+	faces  []apiface.Face
+	redact func(string) string
+}
 
 // buildAgent assembles the agent for an agent group (docs/plan.md trust
 // tiering): the group's resolved policy decides where tools run (host vs
@@ -261,13 +269,13 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 // container; call it when done (it is never nil). The assembly itself lives
 // in internal/agentbuild; these wrappers only supply package-main wiring
 // (model runtime resolver, GitHub App construction) (#287).
-func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group string) (*agent.Agent, func(), error) {
-	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", newModelRuntimeResolver(cfg), nil)
+func buildAgent(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group string, api apiBrokerWiring) (*agent.Agent, func(), error) {
+	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", newModelRuntimeResolver(cfg), nil, api)
 }
 
 // buildAgentWithProfile is buildAgent with an optional named profile (#71).
-func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string) (*agent.Agent, func(), error) {
-	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg), nil)
+func buildAgentWithProfile(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, api apiBrokerWiring) (*agent.Agent, func(), error) {
+	return buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg), nil, api)
 }
 
 type agentCleanupContext func(context.Context) error
@@ -280,12 +288,12 @@ func cleanupWithoutContext(cleanup agentCleanupContext) func() {
 	}
 }
 
-func buildAgentWithProfileContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string) (*agent.Agent, agentCleanupContext, error) {
-	return buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg), nil)
+func buildAgentWithProfileContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, api apiBrokerWiring) (*agent.Agent, agentCleanupContext, error) {
+	return buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, newModelRuntimeResolver(cfg), nil, api)
 }
 
-func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress) (*agent.Agent, func(), error) {
-	built, cleanup, err := buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, runtime, remoteEgress)
+func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress, api apiBrokerWiring) (*agent.Agent, func(), error) {
+	built, cleanup, err := buildAgentWithProfileRuntimeContext(ctx, cfg, ws, skills, sessions, group, profileName, runtime, remoteEgress, api)
 	return built, cleanupWithoutContext(cleanup), err
 }
 
@@ -294,7 +302,7 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 // call through here, and it delegates the composition to internal/agentbuild.
 // remoteEgress is nil outside serve (or without a broker), which refuses
 // remote MCP for docker-mode groups at build (#249).
-func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress) (*agent.Agent, agentCleanupContext, error) {
+func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress, api apiBrokerWiring) (*agent.Agent, agentCleanupContext, error) {
 	secrets, _ := secret.TryOpen() // nil without an identity; remote MCP tokens fail closed then
 	builder := &agentbuild.Builder{
 		Config:       cfg,
@@ -305,6 +313,10 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 		GitHubApp:    func() (*gitcred.App, error) { return newGitHubApp(cfg) },
 		Secrets:      secrets,
 		RemoteEgress: remoteEgress,
+		Broker:       api.broker,
+		BrokerURL:    api.url,
+		APIFaces:     api.faces,
+		APIRedact:    api.redact,
 	}
 	built, cleanup, err := builder.Build(ctx, group, profileName)
 	if err != nil {
