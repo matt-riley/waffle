@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/matt-riley/waffle/compare/v0.14.0...v0.15.0) (2026-08-12)
+
+
+### Features
+
+* **mcp:** streamable HTTP transport with OAuth and brokered egress ([#249](https://github.com/matt-riley/waffle/issues/249)) ([#378](https://github.com/matt-riley/waffle/issues/378)) ([58bac40](https://github.com/matt-riley/waffle/commit/58bac406de35fa75750c856098b722ed48d72f7f))
+
 ## [0.14.0](https://github.com/matt-riley/waffle/compare/v0.13.0...v0.14.0) (2026-08-12)
 
 
