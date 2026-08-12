@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.13.0](https://github.com/matt-riley/waffle/compare/v0.12.8...v0.13.0) (2026-08-12)
+
+
+### Features
+
+* **#248:** fetch shapes HTML, JSON and binary bodies by content type ([#369](https://github.com/matt-riley/waffle/issues/369)) ([baab341](https://github.com/matt-riley/waffle/commit/baab341b7a1098e8ffa9f67320ae51b2236bf6b1))
+* **#250:** add image and document blocks to canonical LLM types ([#373](https://github.com/matt-riley/waffle/issues/373)) ([9158dc8](https://github.com/matt-riley/waffle/commit/9158dc878df7511c9856ddceaa48f5cfb7a4d4a0))
+* **#252:** host-side GitHub tools mirroring github_pr ([#370](https://github.com/matt-riley/waffle/issues/370)) ([4995a35](https://github.com/matt-riley/waffle/commit/4995a35ec52535b63fa9bc91ffc0f3f652a4c0c4))
+* **channel:** message attachments with fetch/send capability interfaces ([#251](https://github.com/matt-riley/waffle/issues/251)) ([#371](https://github.com/matt-riley/waffle/issues/371)) ([f495da8](https://github.com/matt-riley/waffle/commit/f495da877a70f3f8fcf0ed57567f2b6b21818e75))
+
+
+### Bug Fixes
+
+* **#255:** close codeintel honesty acceptance criteria ([#368](https://github.com/matt-riley/waffle/issues/368)) ([fd00967](https://github.com/matt-riley/waffle/commit/fd0096706cf72080e25c95d9b526450eac4baec2))
+
 ## [0.12.8](https://github.com/matt-riley/waffle/compare/v0.12.7...v0.12.8) (2026-08-12)
 
 
