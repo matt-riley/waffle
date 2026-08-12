@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -653,6 +654,37 @@ func TestExistIDsReportsPresentAndAbsent(t *testing.T) {
 	empty, err := sessions.ExistIDs(ctx, nil)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty ExistIDs = %#v, %v", empty, err)
+	}
+}
+
+func TestExistIDsChunksVeryLargeInput(t *testing.T) {
+	ctx := context.Background()
+	sessions := newTestStore(t)
+	a, err := sessions.Create(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := sessions.Create(ctx, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This exceeds SQLite's maximum number of bind variables when sent as one
+	// IN clause. Keep the second existing ID after the first batch so the test
+	// also verifies that every chunk is queried and merged.
+	ids := make([]string, 0, 40_002)
+	ids = append(ids, a.ID)
+	for i := 0; i < 40_000; i++ {
+		ids = append(ids, fmt.Sprintf("missing-%05d", i))
+	}
+	ids = append(ids, b.ID, a.ID, "")
+
+	got, err := sessions.ExistIDs(ctx, ids)
+	if err != nil {
+		t.Fatalf("ExistIDs with large input: %v", err)
+	}
+	if len(got) != 2 || !got[a.ID] || !got[b.ID] {
+		t.Fatalf("ExistIDs = %#v, want only %q and %q", got, a.ID, b.ID)
 	}
 }
 

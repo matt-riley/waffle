@@ -320,6 +320,8 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	return &sess, nil
 }
 
+const existIDsBatchSize = 100
+
 // ExistIDs reports which of the given session IDs currently exist. Missing IDs
 // are simply absent from the result map. Empty input returns an empty map.
 func (s *Store) ExistIDs(ctx context.Context, ids []string) (map[string]bool, error) {
@@ -342,27 +344,38 @@ func (s *Store) ExistIDs(ctx context.Context, ids []string) (map[string]bool, er
 	if len(unique) == 0 {
 		return out, nil
 	}
-	placeholders := make([]string, len(unique))
-	args := make([]any, len(unique))
-	for i, id := range unique {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	query := `SELECT id FROM sessions WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("exist sessions: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+
+	// Keep each IN clause small enough for SQLite's variable limit. Besides
+	// avoiding SQLITE_TOOBIG for bulk callers, executing each batch separately
+	// preserves the same set semantics as one query.
+	for start := 0; start < len(unique); start += existIDsBatchSize {
+		end := min(start+existIDsBatchSize, len(unique))
+		placeholders := make([]string, end-start)
+		args := make([]any, end-start)
+		for i, id := range unique[start:end] {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := `SELECT id FROM sessions WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
 			return nil, fmt.Errorf("exist sessions: %w", err)
 		}
-		out[id] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("exist sessions: %w", err)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("exist sessions: %w", err)
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("exist sessions: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("exist sessions: %w", err)
+		}
 	}
 	return out, nil
 }

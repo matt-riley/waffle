@@ -42,6 +42,13 @@ func (c *manualClock) NewTimer(d time.Duration) Timer {
 	defer c.mu.Unlock()
 	t := &manualTimer{clock: c, ch: make(chan time.Time, 1), due: c.now.Add(d), active: true}
 	c.timers = append(c.timers, t)
+	// Advance may have happened before the goroutine registered its timer.
+	// Match real timer semantics by delivering an already-due timer immediately
+	// instead of losing the wakeup under a slow CI scheduler.
+	if !t.due.After(c.now) {
+		t.active = false
+		t.ch <- c.now
+	}
 	return t
 }
 func (c *manualClock) Advance(d time.Duration) {
