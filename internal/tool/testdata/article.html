@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Waffle: the terminal waffle iron simulator hits 1.0</title>
+<style>
+.rule0 { margin: 0px; padding: 0px; color: #abc0def; }
+.rule1 { margin: 1px; padding: 1px; color: #abc1def; }
+.rule2 { margin: 2px; padding: 2px; color: #abc2def; }
+.rule3 { margin: 3px; padding: 3px; color: #abc3def; }
+.rule4 { margin: 4px; padding: 4px; color: #abc4def; }
+.rule5 { margin: 5px; padding: 5px; color: #abc5def; }
+.rule6 { margin: 6px; padding: 6px; color: #abc6def; }
+.rule7 { margin: 7px; padding: 7px; color: #abc7def; }
+.rule8 { margin: 8px; padding: 8px; color: #abc8def; }
+.rule9 { margin: 9px; padding: 9px; color: #abc0def; }
+.rule10 { margin: 10px; padding: 10px; color: #abc1def; }
+.rule11 { margin: 11px; padding: 11px; color: #abc2def; }
+.rule12 { margin: 12px; padding: 12px; color: #abc3def; }
+.rule13 { margin: 13px; padding: 13px; color: #abc4def; }
+.rule14 { margin: 14px; padding: 14px; color: #abc5def; }
+.rule15 { margin: 15px; padding: 15px; color: #abc6def; }
+.rule16 { margin: 16px; padding: 16px; color: #abc7def; }
+.rule17 { margin: 17px; padding: 17px; color: #abc8def; }
+.rule18 { margin: 18px; padding: 18px; color: #abc0def; }
+.rule19 { margin: 19px; padding: 19px; color: #abc1def; }
+.rule20 { margin: 20px; padding: 20px; color: #abc2def; }
+.rule21 { margin: 21px; padding: 21px; color: #abc3def; }
+.rule22 { margin: 22px; padding: 22px; color: #abc4def; }
+.rule23 { margin: 23px; padding: 23px; color: #abc5def; }
+.rule24 { margin: 24px; padding: 24px; color: #abc6def; }
+.rule25 { margin: 25px; padding: 25px; color: #abc7def; }
+.rule26 { margin: 26px; padding: 26px; color: #abc8def; }
+.rule27 { margin: 27px; padding: 27px; color: #abc0def; }
+.rule28 { margin: 28px; padding: 28px; color: #abc1def; }
+.rule29 { margin: 29px; padding: 29px; color: #abc2def; }
+.rule30 { margin: 30px; padding: 30px; color: #abc3def; }
+.rule31 { margin: 31px; padding: 31px; color: #abc4def; }
+.rule32 { margin: 32px; padding: 32px; color: #abc5def; }
+.rule33 { margin: 33px; padding: 33px; color: #abc6def; }
+.rule34 { margin: 34px; padding: 34px; color: #abc7def; }
+.rule35 { margin: 35px; padding: 35px; color: #abc8def; }
+.rule36 { margin: 36px; padding: 36px; color: #abc0def; }
+.rule37 { margin: 37px; padding: 37px; color: #abc1def; }
+.rule38 { margin: 38px; padding: 38px; color: #abc2def; }
+.rule39 { margin: 39px; padding: 39px; color: #abc3def; }
+.rule40 { margin: 40px; padding: 40px; color: #abc4def; }
+.rule41 { margin: 41px; padding: 41px; color: #abc5def; }
+.rule42 { margin: 42px; padding: 42px; color: #abc6def; }
+.rule43 { margin: 43px; padding: 43px; color: #abc7def; }
+.rule44 { margin: 44px; padding: 44px; color: #abc8def; }
+.rule45 { margin: 45px; padding: 45px; color: #abc0def; }
+.rule46 { margin: 46px; padding: 46px; color: #abc1def; }
+.rule47 { margin: 47px; padding: 47px; color: #abc2def; }
+.rule48 { margin: 48px; padding: 48px; color: #abc3def; }
+.rule49 { margin: 49px; padding: 49px; color: #abc4def; }
+.rule50 { margin: 50px; padding: 50px; color: #abc5def; }
+.rule51 { margin: 51px; padding: 51px; color: #abc6def; }
+.rule52 { margin: 52px; padding: 52px; color: #abc7def; }
+.rule53 { margin: 53px; padding: 53px; color: #abc8def; }
+.rule54 { margin: 54px; padding: 54px; color: #abc0def; }
+.rule55 { margin: 55px; padding: 55px; color: #abc1def; }
+.rule56 { margin: 56px; padding: 56px; color: #abc2def; }
+.rule57 { margin: 57px; padding: 57px; color: #abc3def; }
+.rule58 { margin: 58px; padding: 58px; color: #abc4def; }
+.rule59 { margin: 59px; padding: 59px; color: #abc5def; }
+.rule60 { margin: 60px; padding: 60px; color: #abc6def; }
+.rule61 { margin: 61px; padding: 61px; color: #abc7def; }
+.rule62 { margin: 62px; padding: 62px; color: #abc8def; }
+.rule63 { margin: 63px; padding: 63px; color: #abc0def; }
+.rule64 { margin: 64px; padding: 64px; color: #abc1def; }
+.rule65 { margin: 65px; padding: 65px; color: #abc2def; }
+.rule66 { margin: 66px; padding: 66px; color: #abc3def; }
+.rule67 { margin: 67px; padding: 67px; color: #abc4def; }
+.rule68 { margin: 68px; padding: 68px; color: #abc5def; }
+.rule69 { margin: 69px; padding: 69px; color: #abc6def; }
+.rule70 { margin: 70px; padding: 70px; color: #abc7def; }
+.rule71 { margin: 71px; padding: 71px; color: #abc8def; }
+.rule72 { margin: 72px; padding: 72px; color: #abc0def; }
+.rule73 { margin: 73px; padding: 73px; color: #abc1def; }
+.rule74 { margin: 74px; padding: 74px; color: #abc2def; }
+.rule75 { margin: 75px; padding: 75px; color: #abc3def; }
+.rule76 { margin: 76px; padding: 76px; color: #abc4def; }
+.rule77 { margin: 77px; padding: 77px; color: #abc5def; }
+.rule78 { margin: 78px; padding: 78px; color: #abc6def; }
+.rule79 { margin: 79px; padding: 79px; color: #abc7def; }
+.rule80 { margin: 80px; padding: 80px; color: #abc8def; }
+.rule81 { margin: 81px; padding: 81px; color: #abc0def; }
+.rule82 { margin: 82px; padding: 82px; color: #abc1def; }
+.rule83 { margin: 83px; padding: 83px; color: #abc2def; }
+.rule84 { margin: 84px; padding: 84px; color: #abc3def; }
+.rule85 { margin: 85px; padding: 85px; color: #abc4def; }
+.rule86 { margin: 86px; padding: 86px; color: #abc5def; }
+.rule87 { margin: 87px; padding: 87px; color: #abc6def; }
+.rule88 { margin: 88px; padding: 88px; color: #abc7def; }
+.rule89 { margin: 89px; padding: 89px; color: #abc8def; }
+.rule90 { margin: 90px; padding: 90px; color: #abc0def; }
+.rule91 { margin: 91px; padding: 91px; color: #abc1def; }
+.rule92 { margin: 92px; padding: 92px; color: #abc2def; }
+.rule93 { margin: 93px; padding: 93px; color: #abc3def; }
+.rule94 { margin: 94px; padding: 94px; color: #abc4def; }
+.rule95 { margin: 95px; padding: 95px; color: #abc5def; }
+.rule96 { margin: 96px; padding: 96px; color: #abc6def; }
+.rule97 { margin: 97px; padding: 97px; color: #abc7def; }
+.rule98 { margin: 98px; padding: 98px; color: #abc8def; }
+.rule99 { margin: 99px; padding: 99px; color: #abc0def; }
+.rule100 { margin: 100px; padding: 100px; color: #abc1def; }
+.rule101 { margin: 101px; padding: 101px; color: #abc2def; }
+.rule102 { margin: 102px; padding: 102px; color: #abc3def; }
+.rule103 { margin: 103px; padding: 103px; color: #abc4def; }
+.rule104 { margin: 104px; padding: 104px; color: #abc5def; }
+.rule105 { margin: 105px; padding: 105px; color: #abc6def; }
+.rule106 { margin: 106px; padding: 106px; color: #abc7def; }
+.rule107 { margin: 107px; padding: 107px; color: #abc8def; }
+.rule108 { margin: 108px; padding: 108px; color: #abc0def; }
+.rule109 { margin: 109px; padding: 109px; color: #abc1def; }
+.rule110 { margin: 110px; padding: 110px; color: #abc2def; }
+.rule111 { margin: 111px; padding: 111px; color: #abc3def; }
+.rule112 { margin: 112px; padding: 112px; color: #abc4def; }
+.rule113 { margin: 113px; padding: 113px; color: #abc5def; }
+.rule114 { margin: 114px; padding: 114px; color: #abc6def; }
+.rule115 { margin: 115px; padding: 115px; color: #abc7def; }
+.rule116 { margin: 116px; padding: 116px; color: #abc8def; }
+.rule117 { margin: 117px; padding: 117px; color: #abc0def; }
+.rule118 { margin: 118px; padding: 118px; color: #abc1def; }
+.rule119 { margin: 119px; padding: 119px; color: #abc2def; }
+.rule120 { margin: 120px; padding: 120px; color: #abc3def; }
+.rule121 { margin: 121px; padding: 121px; color: #abc4def; }
+.rule122 { margin: 122px; padding: 122px; color: #abc5def; }
+.rule123 { margin: 123px; padding: 123px; color: #abc6def; }
+.rule124 { margin: 124px; padding: 124px; color: #abc7def; }
+.rule125 { margin: 125px; padding: 125px; color: #abc8def; }
+.rule126 { margin: 126px; padding: 126px; color: #abc0def; }
+.rule127 { margin: 127px; padding: 127px; color: #abc1def; }
+.rule128 { margin: 128px; padding: 128px; color: #abc2def; }
+.rule129 { margin: 129px; padding: 129px; color: #abc3def; }
+.rule130 { margin: 130px; padding: 130px; color: #abc4def; }
+.rule131 { margin: 131px; padding: 131px; color: #abc5def; }
+.rule132 { margin: 132px; padding: 132px; color: #abc6def; }
+.rule133 { margin: 133px; padding: 133px; color: #abc7def; }
+.rule134 { margin: 134px; padding: 134px; color: #abc8def; }
+.rule135 { margin: 135px; padding: 135px; color: #abc0def; }
+.rule136 { margin: 136px; padding: 136px; color: #abc1def; }
+.rule137 { margin: 137px; padding: 137px; color: #abc2def; }
+.rule138 { margin: 138px; padding: 138px; color: #abc3def; }
+.rule139 { margin: 139px; padding: 139px; color: #abc4def; }
+.rule140 { margin: 140px; padding: 140px; color: #abc5def; }
+.rule141 { margin: 141px; padding: 141px; color: #abc6def; }
+.rule142 { margin: 142px; padding: 142px; color: #abc7def; }
+.rule143 { margin: 143px; padding: 143px; color: #abc8def; }
+.rule144 { margin: 144px; padding: 144px; color: #abc0def; }
+.rule145 { margin: 145px; padding: 145px; color: #abc1def; }
+.rule146 { margin: 146px; padding: 146px; color: #abc2def; }
+.rule147 { margin: 147px; padding: 147px; color: #abc3def; }
+.rule148 { margin: 148px; padding: 148px; color: #abc4def; }
+.rule149 { margin: 149px; padding: 149px; color: #abc5def; }
+.rule150 { margin: 150px; padding: 150px; color: #abc6def; }
+.rule151 { margin: 151px; padding: 151px; color: #abc7def; }
+.rule152 { margin: 152px; padding: 152px; color: #abc8def; }
+.rule153 { margin: 153px; padding: 153px; color: #abc0def; }
+.rule154 { margin: 154px; padding: 154px; color: #abc1def; }
+.rule155 { margin: 155px; padding: 155px; color: #abc2def; }
+.rule156 { margin: 156px; padding: 156px; color: #abc3def; }
+.rule157 { margin: 157px; padding: 157px; color: #abc4def; }
+.rule158 { margin: 158px; padding: 158px; color: #abc5def; }
+.rule159 { margin: 159px; padding: 159px; color: #abc6def; }
+.rule160 { margin: 160px; padding: 160px; color: #abc7def; }
+.rule161 { margin: 161px; padding: 161px; color: #abc8def; }
+.rule162 { margin: 162px; padding: 162px; color: #abc0def; }
+.rule163 { margin: 163px; padding: 163px; color: #abc1def; }
+.rule164 { margin: 164px; padding: 164px; color: #abc2def; }
+.rule165 { margin: 165px; padding: 165px; color: #abc3def; }
+.rule166 { margin: 166px; padding: 166px; color: #abc4def; }
+.rule167 { margin: 167px; padding: 167px; color: #abc5def; }
+.rule168 { margin: 168px; padding: 168px; color: #abc6def; }
+.rule169 { margin: 169px; padding: 169px; color: #abc7def; }
+.rule170 { margin: 170px; padding: 170px; color: #abc8def; }
+.rule171 { margin: 171px; padding: 171px; color: #abc0def; }
+.rule172 { margin: 172px; padding: 172px; color: #abc1def; }
+.rule173 { margin: 173px; padding: 173px; color: #abc2def; }
+.rule174 { margin: 174px; padding: 174px; color: #abc3def; }
+.rule175 { margin: 175px; padding: 175px; color: #abc4def; }
+.rule176 { margin: 176px; padding: 176px; color: #abc5def; }
+.rule177 { margin: 177px; padding: 177px; color: #abc6def; }
+.rule178 { margin: 178px; padding: 178px; color: #abc7def; }
+.rule179 { margin: 179px; padding: 179px; color: #abc8def; }
+.rule180 { margin: 180px; padding: 180px; color: #abc0def; }
+.rule181 { margin: 181px; padding: 181px; color: #abc1def; }
+.rule182 { margin: 182px; padding: 182px; color: #abc2def; }
+.rule183 { margin: 183px; padding: 183px; color: #abc3def; }
+.rule184 { margin: 184px; padding: 184px; color: #abc4def; }
+.rule185 { margin: 185px; padding: 185px; color: #abc5def; }
+.rule186 { margin: 186px; padding: 186px; color: #abc6def; }
+.rule187 { margin: 187px; padding: 187px; color: #abc7def; }
+.rule188 { margin: 188px; padding: 188px; color: #abc8def; }
+.rule189 { margin: 189px; padding: 189px; color: #abc0def; }
+.rule190 { margin: 190px; padding: 190px; color: #abc1def; }
+.rule191 { margin: 191px; padding: 191px; color: #abc2def; }
+.rule192 { margin: 192px; padding: 192px; color: #abc3def; }
+.rule193 { margin: 193px; padding: 193px; color: #abc4def; }
+.rule194 { margin: 194px; padding: 194px; color: #abc5def; }
+.rule195 { margin: 195px; padding: 195px; color: #abc6def; }
+.rule196 { margin: 196px; padding: 196px; color: #abc7def; }
+.rule197 { margin: 197px; padding: 197px; color: #abc8def; }
+.rule198 { margin: 198px; padding: 198px; color: #abc0def; }
+.rule199 { margin: 199px; padding: 199px; color: #abc1def; }
+.rule200 { margin: 200px; padding: 200px; color: #abc2def; }
+.rule201 { margin: 201px; padding: 201px; color: #abc3def; }
+.rule202 { margin: 202px; padding: 202px; color: #abc4def; }
+.rule203 { margin: 203px; padding: 203px; color: #abc5def; }
+.rule204 { margin: 204px; padding: 204px; color: #abc6def; }
+.rule205 { margin: 205px; padding: 205px; color: #abc7def; }
+.rule206 { margin: 206px; padding: 206px; color: #abc8def; }
+.rule207 { margin: 207px; padding: 207px; color: #abc0def; }
+.rule208 { margin: 208px; padding: 208px; color: #abc1def; }
+.rule209 { margin: 209px; padding: 209px; color: #abc2def; }
+.rule210 { margin: 210px; padding: 210px; color: #abc3def; }
+.rule211 { margin: 211px; padding: 211px; color: #abc4def; }
+.rule212 { margin: 212px; padding: 212px; color: #abc5def; }
+.rule213 { margin: 213px; padding: 213px; color: #abc6def; }
+.rule214 { margin: 214px; padding: 214px; color: #abc7def; }
+.rule215 { margin: 215px; padding: 215px; color: #abc8def; }
+.rule216 { margin: 216px; padding: 216px; color: #abc0def; }
+.rule217 { margin: 217px; padding: 217px; color: #abc1def; }
+.rule218 { margin: 218px; padding: 218px; color: #abc2def; }
+.rule219 { margin: 219px; padding: 219px; color: #abc3def; }
+.rule220 { margin: 220px; padding: 220px; color: #abc4def; }
+.rule221 { margin: 221px; padding: 221px; color: #abc5def; }
+.rule222 { margin: 222px; padding: 222px; color: #abc6def; }
+.rule223 { margin: 223px; padding: 223px; color: #abc7def; }
+.rule224 { margin: 224px; padding: 224px; color: #abc8def; }
+.rule225 { margin: 225px; padding: 225px; color: #abc0def; }
+.rule226 { margin: 226px; padding: 226px; color: #abc1def; }
+.rule227 { margin: 227px; padding: 227px; color: #abc2def; }
+.rule228 { margin: 228px; padding: 228px; color: #abc3def; }
+.rule229 { margin: 229px; padding: 229px; color: #abc4def; }
+.rule230 { margin: 230px; padding: 230px; color: #abc5def; }
+.rule231 { margin: 231px; padding: 231px; color: #abc6def; }
+.rule232 { margin: 232px; padding: 232px; color: #abc7def; }
+.rule233 { margin: 233px; padding: 233px; color: #abc8def; }
+.rule234 { margin: 234px; padding: 234px; color: #abc0def; }
+.rule235 { margin: 235px; padding: 235px; color: #abc1def; }
+.rule236 { margin: 236px; padding: 236px; color: #abc2def; }
+.rule237 { margin: 237px; padding: 237px; color: #abc3def; }
+.rule238 { margin: 238px; padding: 238px; color: #abc4def; }
+.rule239 { margin: 239px; padding: 239px; color: #abc5def; }
+.rule240 { margin: 240px; padding: 240px; color: #abc6def; }
+.rule241 { margin: 241px; padding: 241px; color: #abc7def; }
+.rule242 { margin: 242px; padding: 242px; color: #abc8def; }
+.rule243 { margin: 243px; padding: 243px; color: #abc0def; }
+.rule244 { margin: 244px; padding: 244px; color: #abc1def; }
+.rule245 { margin: 245px; padding: 245px; color: #abc2def; }
+.rule246 { margin: 246px; padding: 246px; color: #abc3def; }
+.rule247 { margin: 247px; padding: 247px; color: #abc4def; }
+.rule248 { margin: 248px; padding: 248px; color: #abc5def; }
+.rule249 { margin: 249px; padding: 249px; color: #abc6def; }
+.rule250 { margin: 250px; padding: 250px; color: #abc7def; }
+.rule251 { margin: 251px; padding: 251px; color: #abc8def; }
+.rule252 { margin: 252px; padding: 252px; color: #abc0def; }
+.rule253 { margin: 253px; padding: 253px; color: #abc1def; }
+.rule254 { margin: 254px; padding: 254px; color: #abc2def; }
+.rule255 { margin: 255px; padding: 255px; color: #abc3def; }
+.rule256 { margin: 256px; padding: 256px; color: #abc4def; }
+.rule257 { margin: 257px; padding: 257px; color: #abc5def; }
+.rule258 { margin: 258px; padding: 258px; color: #abc6def; }
+.rule259 { margin: 259px; padding: 259px; color: #abc7def; }
+.rule260 { margin: 260px; padding: 260px; color: #abc8def; }
+.rule261 { margin: 261px; padding: 261px; color: #abc0def; }
+.rule262 { margin: 262px; padding: 262px; color: #abc1def; }
+.rule263 { margin: 263px; padding: 263px; color: #abc2def; }
+.rule264 { margin: 264px; padding: 264px; color: #abc3def; }
+.rule265 { margin: 265px; padding: 265px; color: #abc4def; }
+.rule266 { margin: 266px; padding: 266px; color: #abc5def; }
+.rule267 { margin: 267px; padding: 267px; color: #abc6def; }
+.rule268 { margin: 268px; padding: 268px; color: #abc7def; }
+.rule269 { margin: 269px; padding: 269px; color: #abc8def; }
+.rule270 { margin: 270px; padding: 270px; color: #abc0def; }
+.rule271 { margin: 271px; padding: 271px; color: #abc1def; }
+.rule272 { margin: 272px; padding: 272px; color: #abc2def; }
+.rule273 { margin: 273px; padding: 273px; color: #abc3def; }
+.rule274 { margin: 274px; padding: 274px; color: #abc4def; }
+.rule275 { margin: 275px; padding: 275px; color: #abc5def; }
+.rule276 { margin: 276px; padding: 276px; color: #abc6def; }
+.rule277 { margin: 277px; padding: 277px; color: #abc7def; }
+.rule278 { margin: 278px; padding: 278px; color: #abc8def; }
+.rule279 { margin: 279px; padding: 279px; color: #abc0def; }
+.rule280 { margin: 280px; padding: 280px; color: #abc1def; }
+.rule281 { margin: 281px; padding: 281px; color: #abc2def; }
+.rule282 { margin: 282px; padding: 282px; color: #abc3def; }
+.rule283 { margin: 283px; padding: 283px; color: #abc4def; }
+.rule284 { margin: 284px; padding: 284px; color: #abc5def; }
+.rule285 { margin: 285px; padding: 285px; color: #abc6def; }
+.rule286 { margin: 286px; padding: 286px; color: #abc7def; }
+.rule287 { margin: 287px; padding: 287px; color: #abc8def; }
+.rule288 { margin: 288px; padding: 288px; color: #abc0def; }
+.rule289 { margin: 289px; padding: 289px; color: #abc1def; }
+.rule290 { margin: 290px; padding: 290px; color: #abc2def; }
+.rule291 { margin: 291px; padding: 291px; color: #abc3def; }
+.rule292 { margin: 292px; padding: 292px; color: #abc4def; }
+.rule293 { margin: 293px; padding: 293px; color: #abc5def; }
+.rule294 { margin: 294px; padding: 294px; color: #abc6def; }
+.rule295 { margin: 295px; padding: 295px; color: #abc7def; }
+.rule296 { margin: 296px; padding: 296px; color: #abc8def; }
+.rule297 { margin: 297px; padding: 297px; color: #abc0def; }
+.rule298 { margin: 298px; padding: 298px; color: #abc1def; }
+.rule299 { margin: 299px; padding: 299px; color: #abc2def; }
+</style>
+<script>
+track('event_0', { value: 0, ok: true });
+track('event_1', { value: 1, ok: true });
+track('event_2', { value: 2, ok: true });
+track('event_3', { value: 3, ok: true });
+track('event_4', { value: 4, ok: true });
+track('event_5', { value: 5, ok: true });
+track('event_6', { value: 6, ok: true });
+track('event_7', { value: 7, ok: true });
+track('event_8', { value: 8, ok: true });
+track('event_9', { value: 9, ok: true });
+track('event_10', { value: 10, ok: true });
+track('event_11', { value: 11, ok: true });
+track('event_12', { value: 12, ok: true });
+track('event_13', { value: 13, ok: true });
+track('event_14', { value: 14, ok: true });
+track('event_15', { value: 15, ok: true });
+track('event_16', { value: 16, ok: true });
+track('event_17', { value: 17, ok: true });
+track('event_18', { value: 18, ok: true });
+track('event_19', { value: 19, ok: true });
+track('event_20', { value: 20, ok: true });
+track('event_21', { value: 21, ok: true });
+track('event_22', { value: 22, ok: true });
+track('event_23', { value: 23, ok: true });
+track('event_24', { value: 24, ok: true });
+track('event_25', { value: 25, ok: true });
+track('event_26', { value: 26, ok: true });
+track('event_27', { value: 27, ok: true });
+track('event_28', { value: 28, ok: true });
+track('event_29', { value: 29, ok: true });
+track('event_30', { value: 30, ok: true });
+track('event_31', { value: 31, ok: true });
+track('event_32', { value: 32, ok: true });
+track('event_33', { value: 33, ok: true });
+track('event_34', { value: 34, ok: true });
+track('event_35', { value: 35, ok: true });
+track('event_36', { value: 36, ok: true });
+track('event_37', { value: 37, ok: true });
+track('event_38', { value: 38, ok: true });
+track('event_39', { value: 39, ok: true });
+track('event_40', { value: 40, ok: true });
+track('event_41', { value: 41, ok: true });
+track('event_42', { value: 42, ok: true });
+track('event_43', { value: 43, ok: true });
+track('event_44', { value: 44, ok: true });
+track('event_45', { value: 45, ok: true });
+track('event_46', { value: 46, ok: true });
+track('event_47', { value: 47, ok: true });
+track('event_48', { value: 48, ok: true });
+track('event_49', { value: 49, ok: true });
+track('event_50', { value: 50, ok: true });
+track('event_51', { value: 51, ok: true });
+track('event_52', { value: 52, ok: true });
+track('event_53', { value: 53, ok: true });
+track('event_54', { value: 54, ok: true });
+track('event_55', { value: 55, ok: true });
+track('event_56', { value: 56, ok: true });
+track('event_57', { value: 57, ok: true });
+track('event_58', { value: 58, ok: true });
+track('event_59', { value: 59, ok: true });
+track('event_60', { value: 60, ok: true });
+track('event_61', { value: 61, ok: true });
+track('event_62', { value: 62, ok: true });
+track('event_63', { value: 63, ok: true });
+track('event_64', { value: 64, ok: true });
+track('event_65', { value: 65, ok: true });
+track('event_66', { value: 66, ok: true });
+track('event_67', { value: 67, ok: true });
+track('event_68', { value: 68, ok: true });
+track('event_69', { value: 69, ok: true });
+track('event_70', { value: 70, ok: true });
+track('event_71', { value: 71, ok: true });
+track('event_72', { value: 72, ok: true });
+track('event_73', { value: 73, ok: true });
+track('event_74', { value: 74, ok: true });
+track('event_75', { value: 75, ok: true });
+track('event_76', { value: 76, ok: true });
+track('event_77', { value: 77, ok: true });
+track('event_78', { value: 78, ok: true });
+track('event_79', { value: 79, ok: true });
+track('event_80', { value: 80, ok: true });
+track('event_81', { value: 81, ok: true });
+track('event_82', { value: 82, ok: true });
+track('event_83', { value: 83, ok: true });
+track('event_84', { value: 84, ok: true });
+track('event_85', { value: 85, ok: true });
+track('event_86', { value: 86, ok: true });
+track('event_87', { value: 87, ok: true });
+track('event_88', { value: 88, ok: true });
+track('event_89', { value: 89, ok: true });
+track('event_90', { value: 90, ok: true });
+track('event_91', { value: 91, ok: true });
+track('event_92', { value: 92, ok: true });
+track('event_93', { value: 93, ok: true });
+track('event_94', { value: 94, ok: true });
+track('event_95', { value: 95, ok: true });
+track('event_96', { value: 96, ok: true });
+track('event_97', { value: 97, ok: true });
+track('event_98', { value: 98, ok: true });
+track('event_99', { value: 99, ok: true });
+track('event_100', { value: 100, ok: true });
+track('event_101', { value: 101, ok: true });
+track('event_102', { value: 102, ok: true });
+track('event_103', { value: 103, ok: true });
+track('event_104', { value: 104, ok: true });
+track('event_105', { value: 105, ok: true });
+track('event_106', { value: 106, ok: true });
+track('event_107', { value: 107, ok: true });
+track('event_108', { value: 108, ok: true });
+track('event_109', { value: 109, ok: true });
+track('event_110', { value: 110, ok: true });
+track('event_111', { value: 111, ok: true });
+track('event_112', { value: 112, ok: true });
+track('event_113', { value: 113, ok: true });
+track('event_114', { value: 114, ok: true });
+track('event_115', { value: 115, ok: true });
+track('event_116', { value: 116, ok: true });
+track('event_117', { value: 117, ok: true });
+track('event_118', { value: 118, ok: true });
+track('event_119', { value: 119, ok: true });
+track('event_120', { value: 120, ok: true });
+track('event_121', { value: 121, ok: true });
+track('event_122', { value: 122, ok: true });
+track('event_123', { value: 123, ok: true });
+track('event_124', { value: 124, ok: true });
+track('event_125', { value: 125, ok: true });
+track('event_126', { value: 126, ok: true });
+track('event_127', { value: 127, ok: true });
+track('event_128', { value: 128, ok: true });
+track('event_129', { value: 129, ok: true });
+track('event_130', { value: 130, ok: true });
+track('event_131', { value: 131, ok: true });
+track('event_132', { value: 132, ok: true });
+track('event_133', { value: 133, ok: true });
+track('event_134', { value: 134, ok: true });
+track('event_135', { value: 135, ok: true });
+track('event_136', { value: 136, ok: true });
+track('event_137', { value: 137, ok: true });
+track('event_138', { value: 138, ok: true });
+track('event_139', { value: 139, ok: true });
+track('event_140', { value: 140, ok: true });
+track('event_141', { value: 141, ok: true });
+track('event_142', { value: 142, ok: true });
+track('event_143', { value: 143, ok: true });
+track('event_144', { value: 144, ok: true });
+track('event_145', { value: 145, ok: true });
+track('event_146', { value: 146, ok: true });
+track('event_147', { value: 147, ok: true });
+track('event_148', { value: 148, ok: true });
+track('event_149', { value: 149, ok: true });
+track('event_150', { value: 150, ok: true });
+track('event_151', { value: 151, ok: true });
+track('event_152', { value: 152, ok: true });
+track('event_153', { value: 153, ok: true });
+track('event_154', { value: 154, ok: true });
+track('event_155', { value: 155, ok: true });
+track('event_156', { value: 156, ok: true });
+track('event_157', { value: 157, ok: true });
+track('event_158', { value: 158, ok: true });
+track('event_159', { value: 159, ok: true });
+track('event_160', { value: 160, ok: true });
+track('event_161', { value: 161, ok: true });
+track('event_162', { value: 162, ok: true });
+track('event_163', { value: 163, ok: true });
+track('event_164', { value: 164, ok: true });
+track('event_165', { value: 165, ok: true });
+track('event_166', { value: 166, ok: true });
+track('event_167', { value: 167, ok: true });
+track('event_168', { value: 168, ok: true });
+track('event_169', { value: 169, ok: true });
+track('event_170', { value: 170, ok: true });
+track('event_171', { value: 171, ok: true });
+track('event_172', { value: 172, ok: true });
+track('event_173', { value: 173, ok: true });
+track('event_174', { value: 174, ok: true });
+track('event_175', { value: 175, ok: true });
+track('event_176', { value: 176, ok: true });
+track('event_177', { value: 177, ok: true });
+track('event_178', { value: 178, ok: true });
+track('event_179', { value: 179, ok: true });
+track('event_180', { value: 180, ok: true });
+track('event_181', { value: 181, ok: true });
+track('event_182', { value: 182, ok: true });
+track('event_183', { value: 183, ok: true });
+track('event_184', { value: 184, ok: true });
+track('event_185', { value: 185, ok: true });
+track('event_186', { value: 186, ok: true });
+track('event_187', { value: 187, ok: true });
+track('event_188', { value: 188, ok: true });
+track('event_189', { value: 189, ok: true });
+track('event_190', { value: 190, ok: true });
+track('event_191', { value: 191, ok: true });
+track('event_192', { value: 192, ok: true });
+track('event_193', { value: 193, ok: true });
+track('event_194', { value: 194, ok: true });
+track('event_195', { value: 195, ok: true });
+track('event_196', { value: 196, ok: true });
+track('event_197', { value: 197, ok: true });
+track('event_198', { value: 198, ok: true });
+track('event_199', { value: 199, ok: true });
+track('event_200', { value: 200, ok: true });
+track('event_201', { value: 201, ok: true });
+track('event_202', { value: 202, ok: true });
+track('event_203', { value: 203, ok: true });
+track('event_204', { value: 204, ok: true });
+track('event_205', { value: 205, ok: true });
+track('event_206', { value: 206, ok: true });
+track('event_207', { value: 207, ok: true });
+track('event_208', { value: 208, ok: true });
+track('event_209', { value: 209, ok: true });
+track('event_210', { value: 210, ok: true });
+track('event_211', { value: 211, ok: true });
+track('event_212', { value: 212, ok: true });
+track('event_213', { value: 213, ok: true });
+track('event_214', { value: 214, ok: true });
+track('event_215', { value: 215, ok: true });
+track('event_216', { value: 216, ok: true });
+track('event_217', { value: 217, ok: true });
+track('event_218', { value: 218, ok: true });
+track('event_219', { value: 219, ok: true });
+track('event_220', { value: 220, ok: true });
+track('event_221', { value: 221, ok: true });
+track('event_222', { value: 222, ok: true });
+track('event_223', { value: 223, ok: true });
+track('event_224', { value: 224, ok: true });
+track('event_225', { value: 225, ok: true });
+track('event_226', { value: 226, ok: true });
+track('event_227', { value: 227, ok: true });
+track('event_228', { value: 228, ok: true });
+track('event_229', { value: 229, ok: true });
+track('event_230', { value: 230, ok: true });
+track('event_231', { value: 231, ok: true });
+track('event_232', { value: 232, ok: true });
+track('event_233', { value: 233, ok: true });
+track('event_234', { value: 234, ok: true });
+track('event_235', { value: 235, ok: true });
+track('event_236', { value: 236, ok: true });
+track('event_237', { value: 237, ok: true });
+track('event_238', { value: 238, ok: true });
+track('event_239', { value: 239, ok: true });
+track('event_240', { value: 240, ok: true });
+track('event_241', { value: 241, ok: true });
+track('event_242', { value: 242, ok: true });
+track('event_243', { value: 243, ok: true });
+track('event_244', { value: 244, ok: true });
+track('event_245', { value: 245, ok: true });
+track('event_246', { value: 246, ok: true });
+track('event_247', { value: 247, ok: true });
+track('event_248', { value: 248, ok: true });
+track('event_249', { value: 249, ok: true });
+track('event_250', { value: 250, ok: true });
+track('event_251', { value: 251, ok: true });
+track('event_252', { value: 252, ok: true });
+track('event_253', { value: 253, ok: true });
+track('event_254', { value: 254, ok: true });
+track('event_255', { value: 255, ok: true });
+track('event_256', { value: 256, ok: true });
+track('event_257', { value: 257, ok: true });
+track('event_258', { value: 258, ok: true });
+track('event_259', { value: 259, ok: true });
+track('event_260', { value: 260, ok: true });
+track('event_261', { value: 261, ok: true });
+track('event_262', { value: 262, ok: true });
+track('event_263', { value: 263, ok: true });
+track('event_264', { value: 264, ok: true });
+track('event_265', { value: 265, ok: true });
+track('event_266', { value: 266, ok: true });
+track('event_267', { value: 267, ok: true });
+track('event_268', { value: 268, ok: true });
+track('event_269', { value: 269, ok: true });
+track('event_270', { value: 270, ok: true });
+track('event_271', { value: 271, ok: true });
+track('event_272', { value: 272, ok: true });
+track('event_273', { value: 273, ok: true });
+track('event_274', { value: 274, ok: true });
+track('event_275', { value: 275, ok: true });
+track('event_276', { value: 276, ok: true });
+track('event_277', { value: 277, ok: true });
+track('event_278', { value: 278, ok: true });
+track('event_279', { value: 279, ok: true });
+track('event_280', { value: 280, ok: true });
+track('event_281', { value: 281, ok: true });
+track('event_282', { value: 282, ok: true });
+track('event_283', { value: 283, ok: true });
+track('event_284', { value: 284, ok: true });
+track('event_285', { value: 285, ok: true });
+track('event_286', { value: 286, ok: true });
+track('event_287', { value: 287, ok: true });
+track('event_288', { value: 288, ok: true });
+track('event_289', { value: 289, ok: true });
+track('event_290', { value: 290, ok: true });
+track('event_291', { value: 291, ok: true });
+track('event_292', { value: 292, ok: true });
+track('event_293', { value: 293, ok: true });
+track('event_294', { value: 294, ok: true });
+track('event_295', { value: 295, ok: true });
+track('event_296', { value: 296, ok: true });
+track('event_297', { value: 297, ok: true });
+track('event_298', { value: 298, ok: true });
+track('event_299', { value: 299, ok: true });
+</script>
+</head>
+<body>
+<nav>
+  <a href="/home">Home</a> <a href="/docs">Docs</a> <a href="/pricing">Pricing</a>
+</nav>
+<header>
+  <h1>Waffle HQ banner: never extracted</h1>
+</header>
+<article>
+  <h1>Waffle simulators reach 1.0</h1>
+  <p>After <strong>three years</strong> of development, the <em>waffle</em> project has shipped its first stable release. Read the <a href="https://example.com/announcement">announcement</a> for details.</p>
+  <h2>What changed</h2>
+  <ul>
+    <li>Grid rendering is now <code>60 fps</code> on a Raspberry Pi.</li>
+    <li>Batter temperature is <a href="https://example.com/batter">monitored</a> every 100 ms.</li>
+    <li>Pattern memory survives a power cycle.</li>
+  </ul>
+  <p>Getting started with a 12 by 8 grid:</p>
+  <pre><code>waffle run --grid 12x8 --batter 210c
+waffle pour --pattern hearts</code></pre>
+  <p>SVG diagrams and footer links were removed from the feed.</p>
+</article>
+<footer>
+  <p>Copyright footer text that must not appear</p>
+</footer>
+<svg width="100" height="100"><circle cx="50" cy="50" r="40"/></svg>
+<!-- a comment that must not appear either -->
+<script>document.write("script payload that must not appear");</script>
+</body>
+</html>

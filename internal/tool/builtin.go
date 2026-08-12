@@ -381,15 +381,34 @@ func (f *Fetch) Run(ctx context.Context, input json.RawMessage) (result string, 
 		}
 	}()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	// Read one byte past the cap so an exact-cap body is not reported as
+	// truncated. Bodies over fetchReadCap are cut here, before shaping, so
+	// the cap bounds memory while extraction still sees the full prefix.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchReadCap+1))
 	if err != nil {
 		return "", err
 	}
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(string(body), 2048))
+	readTruncated := len(body) > fetchReadCap
+	if readTruncated {
+		body = body[:fetchReadCap]
 	}
-	// HostReturnCap (not OutputLimit) so Agent can spill before model truncate (#69).
-	return CapHostReturn(string(body)), nil
+	contentType := resp.Header.Get("Content-Type")
+	filename := fetchFilename(resp.Header.Get("Content-Disposition"), req.URL)
+	// Shape the body by content type (#248): HTML is extracted to readable
+	// prose before the return cap is applied, so the 512 KiB budget is spent
+	// on prose rather than markup; binary content becomes a short descriptor.
+	// Missing Content-Type falls back to the historical pass-through.
+	out := formatFetchBody(contentType, body, readTruncated, filename)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP %s\n%s", resp.Status, Truncate(out, 2048))
+	}
+	// formatFetchBody already caps at HostReturnCap (not OutputLimit) so
+	// Agent can spill before model truncate (#69), with an explicit marker
+	// when the cap is hit.
+	return out, nil
 }
 
 type fetchPolicy struct {
