@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.8](https://github.com/matt-riley/waffle/compare/v0.12.7...v0.12.8) (2026-08-12)
+
+
+### Bug Fixes
+
+* **agent:** bound summary cache ([#361](https://github.com/matt-riley/waffle/issues/361)) ([20708b0](https://github.com/matt-riley/waffle/commit/20708b021dd1f4c8813b08e6d1644e2132870958))
+* **memory:** widen note IDs and index collision checks ([#363](https://github.com/matt-riley/waffle/issues/363)) ([2e4e2ff](https://github.com/matt-riley/waffle/commit/2e4e2ffb5b637be27c0b86e14474d18eff71fc0a))
+* **schedule:** fire in-process retry timers at the persisted deadline ([#367](https://github.com/matt-riley/waffle/issues/367)) ([5997690](https://github.com/matt-riley/waffle/commit/59976904eea3a9834d7d56a4d1b78771d13db804))
+* **session:** chunk ExistIDs queries ([#364](https://github.com/matt-riley/waffle/issues/364)) ([a95ff38](https://github.com/matt-riley/waffle/commit/a95ff389b44d69e512ffd08f4807bbf544d5d081))
+* **tool:** bound write and edit file content ([#266](https://github.com/matt-riley/waffle/issues/266)) ([#362](https://github.com/matt-riley/waffle/issues/362)) ([a3f502d](https://github.com/matt-riley/waffle/commit/a3f502dcd65aa8508cc47fd57773b663134ea0b8))
+* **tool:** limit host bash process trees ([#365](https://github.com/matt-riley/waffle/issues/365)) ([3be3e5a](https://github.com/matt-riley/waffle/commit/3be3e5acc3a229315f7a38d5c07ccf97b9389a36))
+
 ## [0.12.7](https://github.com/matt-riley/waffle/compare/v0.12.6...v0.12.7) (2026-08-09)
 
 
