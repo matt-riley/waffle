@@ -517,6 +517,105 @@ func TestSummaryCacheSingleCallPerPrefix(t *testing.T) {
 	}
 }
 
+func TestSummaryCacheIsBoundedAndEvictsLeastRecentlyUsed(t *testing.T) {
+	var summarizeCalls int
+	p := &recordingProvider{onComplete: func(llm.Request) llm.Response {
+		summarizeCalls++
+		return llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    assistantText(fmt.Sprintf("summary-%d", summarizeCalls)),
+		}
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+	history := overflowingHistory()
+	prepare := func(sid string) string {
+		_, system, err := a.prepareContext(WithSession(context.Background(), sid), history, nil)
+		if err != nil {
+			t.Fatalf("prepareContext(%q): %v", sid, err)
+		}
+		return system
+	}
+	cacheLen := func() int {
+		a.summaryMu.Lock()
+		defer a.summaryMu.Unlock()
+		return len(a.summaryCache)
+	}
+
+	for i := 0; i < summaryCacheCapacity; i++ {
+		prepare(fmt.Sprintf("summary-cache-%d", i))
+	}
+	if got := cacheLen(); got != summaryCacheCapacity {
+		t.Fatalf("cache len=%d, want capacity %d", got, summaryCacheCapacity)
+	}
+	if summarizeCalls != summaryCacheCapacity {
+		t.Fatalf("summarize calls=%d, want %d", summarizeCalls, summaryCacheCapacity)
+	}
+
+	// A hit refreshes recency, so this entry must survive the next insertion.
+	hitSystem := prepare("summary-cache-0")
+	if summarizeCalls != summaryCacheCapacity {
+		t.Fatalf("cache hit re-summarized: calls=%d", summarizeCalls)
+	}
+	prepare("summary-cache-new")
+	if got := cacheLen(); got != summaryCacheCapacity {
+		t.Fatalf("cache len after insertion=%d, want capacity %d", got, summaryCacheCapacity)
+	}
+	if summarizeCalls != summaryCacheCapacity+1 {
+		t.Fatalf("summarize calls after insertion=%d, want %d", summarizeCalls, summaryCacheCapacity+1)
+	}
+
+	// The untouched oldest entry was evicted, while the recently used entry
+	// remains and still returns its original summary.
+	evictedSystem := prepare("summary-cache-1")
+	if summarizeCalls != summaryCacheCapacity+2 {
+		t.Fatalf("evicted entry did not re-summarize: calls=%d", summarizeCalls)
+	}
+	if strings.Contains(evictedSystem, "summary-2") {
+		t.Fatalf("evicted entry returned stale cached summary: %q", evictedSystem)
+	}
+	if got := prepare("summary-cache-0"); got != hitSystem {
+		t.Fatalf("recently used entry changed after eviction:\n got: %q\nwant: %q", got, hitSystem)
+	}
+	if summarizeCalls != summaryCacheCapacity+2 {
+		t.Fatalf("recently used entry re-summarized: calls=%d", summarizeCalls)
+	}
+}
+
+func TestSummaryCacheConcurrentAccessStaysBounded(t *testing.T) {
+	p := &recordingProvider{onComplete: func(llm.Request) llm.Response {
+		return llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    assistantText("concurrent summary"),
+		}
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+	history := overflowingHistory()
+	const workers = summaryCacheCapacity * 2
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, err := a.prepareContext(WithSession(context.Background(), fmt.Sprintf("concurrent-%d", i)), history, nil)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.summaryMu.Lock()
+	got := len(a.summaryCache)
+	a.summaryMu.Unlock()
+	if got != summaryCacheCapacity {
+		t.Fatalf("concurrent cache len=%d, want capacity %d", got, summaryCacheCapacity)
+	}
+}
+
 func TestFreshAgentLazilyRebuildsSummaryCacheForResumedSession(t *testing.T) {
 	history := overflowingHistory()
 	firstProvider := &fakeProvider{responses: []llm.Response{
