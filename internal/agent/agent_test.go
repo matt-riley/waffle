@@ -314,6 +314,151 @@ func TestRunRedactsToolResults(t *testing.T) {
 	}
 }
 
+// TestRunLabelsMediaUntrustedReachingModel pins the untrusted-input posture
+// for media content: a user message carrying an image or document reaches
+// the model with the untrusted framing text block inserted before the media
+// block — the same data-never-instructions posture tool output and fetched
+// content carry. The persisted history the caller receives is NOT mutated.
+func TestRunLabelsMediaUntrustedReachingModel(t *testing.T) {
+	img, err := llm.NewImageBlock("image/png", []byte("png-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := llm.NewDocumentBlock("application/pdf", []byte("%PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		profile string
+		blocks  []llm.Block
+	}{
+		{"main tier", "main", []llm.Block{{Type: llm.BlockText, Text: "what is this?"}, img}},
+		{"cron tier", "cron", []llm.Block{{Type: llm.BlockText, Text: "what is this?"}, img, doc}},
+		{"issue tier", "issue", []llm.Block{img}},
+		{"group tier", "group", []llm.Block{{Type: llm.BlockText, Text: "check"}, img}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakeProvider{responses: []llm.Response{{Message: assistantText("ok"), StopReason: llm.StopEndTurn}}}
+			a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m", Profile: tc.profile}
+			incoming := llm.Message{Role: llm.RoleUser, Blocks: append([]llm.Block(nil), tc.blocks...)}
+			history, err := a.Run(context.Background(), []llm.Message{incoming}, Hooks{})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(p.requests) != 1 {
+				t.Fatalf("provider calls = %d, want 1", len(p.requests))
+			}
+			sent := p.requests[0].Messages[0]
+			labelled := false
+			for _, b := range sent.Blocks {
+				if b.Type == llm.BlockText && strings.Contains(b.Text, llm.UntrustedMediaLabel) {
+					labelled = true
+				}
+			}
+			if !labelled {
+				t.Fatalf("untrusted label did not reach the model: %+v", sent.Blocks)
+			}
+			// The label must precede the media block, not trail it.
+			for i, b := range sent.Blocks {
+				if b.Type == llm.BlockImage || b.Type == llm.BlockDocument {
+					if i == 0 || !strings.Contains(sent.Blocks[i-1].Text, llm.UntrustedMediaLabel) {
+						t.Fatalf("media block at %d not preceded by label: %+v", i, sent.Blocks)
+					}
+					break
+				}
+			}
+			// Persisted history keeps the caller's message unchanged (no
+			// label): Run appends only the assistant response.
+			if len(history) != 2 || !reflect.DeepEqual(history[0].Blocks, tc.blocks) {
+				t.Fatalf("persisted history mutated: %+v", history)
+			}
+		})
+	}
+}
+
+// TestRunDoesNotLabelTextOnlyMessages guards against labelling noise on
+// ordinary conversations.
+func TestRunDoesNotLabelTextOnlyMessages(t *testing.T) {
+	p := &fakeProvider{responses: []llm.Response{{Message: assistantText("ok"), StopReason: llm.StopEndTurn}}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"}
+	if _, err := a.Run(context.Background(), []llm.Message{llm.UserText("hello")}, Hooks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, b := range p.requests[0].Messages[0].Blocks {
+		if strings.Contains(b.Text, llm.UntrustedMediaLabel) {
+			t.Fatalf("text-only message labelled: %+v", p.requests[0].Messages[0].Blocks)
+		}
+	}
+}
+
+// TestRunRedactsTextPartsOfMixedToolResult pins that secret redaction still
+// runs on the text parts of a block-carrying tool result (and that media
+// payloads are not touched).
+func TestRunRedactsTextPartsOfMixedToolResult(t *testing.T) {
+	secret := "sk-super-secret-value"
+	img, err := llm.NewImageBlock("image/png", []byte("png-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{responses: []llm.Response{
+		{
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "mixed", Input: json.RawMessage(`{}`)}},
+			}},
+			StopReason: llm.StopToolUse,
+		},
+		{Message: assistantText("ok"), StopReason: llm.StopEndTurn},
+	}}
+	echo := &mixedResultTool{img: img, secret: secret}
+	a := &Agent{
+		Provider: p, Tools: tool.NewRegistry(echo), Model: "m",
+		Redact: func(s string) string { return strings.ReplaceAll(s, secret, "[redacted]") },
+	}
+	history, err := a.Run(context.Background(), []llm.Message{llm.UserText("go")}, Hooks{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tr := history[2].Blocks[0].ToolResult
+	if tr == nil || len(tr.Blocks) != 2 {
+		t.Fatalf("tool result = %+v", tr)
+	}
+	if strings.Contains(tr.Blocks[0].Text, secret) {
+		t.Fatalf("secret leaked into text part: %q", tr.Blocks[0].Text)
+	}
+	if !strings.Contains(tr.Blocks[0].Text, "[redacted]") {
+		t.Fatalf("text part not redacted: %q", tr.Blocks[0].Text)
+	}
+	// Media payload is binary data, not text: left untouched.
+	if tr.Blocks[1].Source == nil || tr.Blocks[1].Source.Data != img.Source.Data {
+		t.Fatalf("media payload mangled: %+v", tr.Blocks[1])
+	}
+}
+
+// mixedResultTool returns a tool result carrying a text block (with a secret
+// in it) and an image block.
+type mixedResultTool struct {
+	img    llm.Block
+	secret string
+}
+
+func (m *mixedResultTool) Def() llm.Tool {
+	return llm.Tool{Name: "mixed", Description: "mixed", InputSchema: json.RawMessage(`{}`)}
+}
+
+func (m *mixedResultTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	return "", nil
+}
+
+// RunBlocks implements tool.BlockTool: the text body carries a secret, and
+// an image block rides along.
+func (m *mixedResultTool) RunBlocks(ctx context.Context, input json.RawMessage) (string, []llm.Block, error) {
+	return "mixed output", []llm.Block{
+		{Type: llm.BlockText, Text: "chart for " + m.secret},
+		m.img,
+	}, nil
+}
+
 func TestRunIterationGuard(t *testing.T) {
 	loop := llm.Response{
 		Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
@@ -474,7 +619,7 @@ func TestSummaryCacheSingleCallPerPrefix(t *testing.T) {
 		{Message: assistantText("summary v1"), StopReason: llm.StopEndTurn}, // summarize prefix
 		{ // main: request tool
 			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{
-				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"x"}`)}},
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "mixed", Input: json.RawMessage(`{}`)}},
 			}},
 			StopReason: llm.StopToolUse,
 		},

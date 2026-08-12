@@ -73,6 +73,11 @@ func (t ExpandContextTool) Run(ctx context.Context, input json.RawMessage) (stri
 		for _, bl := range m.Blocks {
 			if bl.Type == llm.BlockToolResult && bl.ToolResult != nil {
 				text += "\n[tool_result] " + bl.ToolResult.Content
+				for _, inner := range bl.ToolResult.Blocks {
+					if inner.Type == llm.BlockText {
+						text += " " + inner.Text
+					}
+				}
 			}
 			if bl.Type == llm.BlockToolUse && bl.ToolUse != nil {
 				text += fmt.Sprintf("\n[tool_use %s] %s", bl.ToolUse.Name, string(bl.ToolUse.Input))

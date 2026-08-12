@@ -204,6 +204,12 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 				sesspkg.MarkUntrusted(ctx)
 			}
 		}
+		// Media-bearing user content taints the origin like fetch output:
+		// anything a later model-invoked write depends on came from an
+		// image or document no text filter inspected.
+		if history[len(history)-1].HasMedia() {
+			sesspkg.MarkUntrusted(ctx)
+		}
 		blocks := make([]llm.Block, len(results))
 		for j, res := range results {
 			blocks[j] = llm.Block{Type: llm.BlockToolResult, ToolResult: &res}
@@ -300,16 +306,30 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) (res llm.ToolResult
 		a.Log.Info("tool call started", "profile", effectiveProfile(a.Profile), "tool", use.Name)
 	}
 	var out string
+	var blocks []llm.Block
 	var err error
+	// Block-capable toolboxes let a tool return images/documents alongside
+	// its text body (tool.BlockTool). The string-only path is unchanged for
+	// everyone else; sandboxed executors keep the string contract until a
+	// channel ships binary results over IPC.
 	if caller, ok := a.Tools.(tool.CallerToolbox); ok {
-		out, err = caller.RunWithID(ctx, use.ID, use.Name, use.Input)
+		if bt, ok := a.Tools.(tool.BlockToolbox); ok {
+			out, blocks, err = bt.RunWithBlocks(ctx, use.Name, use.Input)
+		} else {
+			out, err = caller.RunWithID(ctx, use.ID, use.Name, use.Input)
+		}
+	} else if bt, ok := a.Tools.(tool.BlockToolbox); ok {
+		out, blocks, err = bt.RunWithBlocks(ctx, use.Name, use.Input)
 	} else {
 		out, err = a.Tools.Run(ctx, use.Name, use.Input)
 	}
-	res = llm.ToolResult{ToolUseID: use.ID, Content: out}
+	res = llm.ToolResult{ToolUseID: use.ID, Content: out, Blocks: blocks}
 	if err != nil {
 		res.Content = fmt.Sprintf("error: %v", err)
 		res.IsError = true
+		// An errored result carries no media: the model asked for content
+		// and got a failure, and error framing must stay text-only.
+		res.Blocks = nil
 	}
 	if a.Log != nil {
 		event := "tool call finished"
@@ -326,6 +346,14 @@ func (a *Agent) runOne(ctx context.Context, use llm.ToolUse) (res llm.ToolResult
 	}
 	if a.Redact != nil {
 		res.Content = a.Redact(res.Content)
+		// Mixed-content tool results: the redactor runs on the text parts of
+		// a block-carrying result too. Binary media payloads are not text and
+		// are left untouched.
+		for i := range res.Blocks {
+			if res.Blocks[i].Type == llm.BlockText {
+				res.Blocks[i].Text = a.Redact(res.Blocks[i].Text)
+			}
+		}
 	}
 	// Spill large results after redaction so mid-run expand_output can recover
 	// dropped bytes without putting secrets into SQLite (#69).
@@ -377,7 +405,7 @@ const (
 func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, onUsage func(llm.Usage) error) ([]llm.Message, string, error) {
 	n := len(fullHistory)
 	if n <= recentWindow {
-		return append([]llm.Message(nil), fullHistory...), "", nil
+		return labelMediaUntrusted(append([]llm.Message(nil), fullHistory...)), "", nil
 	}
 	prefix := fullHistory[:n-recentWindow]
 	// Cache by session + prefix length so successive iterations of one Run
@@ -420,7 +448,25 @@ func (a *Agent) prepareContext(ctx context.Context, fullHistory []llm.Message, o
 	recentStart = ensureWindowStartsOnUser(fullHistory, recentStart)
 	recent := make([]llm.Message, n-recentStart)
 	copy(recent, fullHistory[recentStart:])
-	return recent, extraSystem, nil
+	return labelMediaUntrusted(recent), extraSystem, nil
+}
+
+// labelMediaUntrusted frames media content for the model: image and
+// document blocks are untrusted input from wherever they entered — a
+// channel, a tool result — and no text filter inspects them. It inserts the
+// untrusted label exactly like tool output and fetched content are framed:
+// data, never instructions. The label is applied to the copy sent to the
+// provider; persisted turns stay exactly as the caller provided them, so
+// every replay labels again. This path is shared by every agent tier (main,
+// cron, issue, group), so no tier inherits unlabelled media by accident.
+func labelMediaUntrusted(messages []llm.Message) []llm.Message {
+	for i := range messages {
+		if !messages[i].HasMedia() {
+			continue
+		}
+		messages[i].Blocks = llm.LabelUntrustedMedia(messages[i].Blocks)
+	}
+	return messages
 }
 
 // summaryCacheGet returns a cached summary and records the access under the

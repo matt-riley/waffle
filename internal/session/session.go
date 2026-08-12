@@ -482,7 +482,8 @@ func (s *Store) Turns(ctx context.Context, sessionID string) (msgs []llm.Message
 }
 
 // indexableText extracts the searchable text of a message: visible text and
-// tool results, not thinking or tool-call JSON.
+// tool results, not thinking or tool-call JSON. Text blocks inside a
+// block-carrying tool result are indexed too; media payloads are not.
 func indexableText(msg llm.Message) string {
 	var parts []string
 	for _, b := range msg.Blocks {
@@ -491,6 +492,11 @@ func indexableText(msg llm.Message) string {
 			parts = append(parts, b.Text)
 		case llm.BlockToolResult:
 			parts = append(parts, b.ToolResult.Content)
+			for _, bl := range b.ToolResult.Blocks {
+				if bl.Type == llm.BlockText {
+					parts = append(parts, bl.Text)
+				}
+			}
 		}
 	}
 	return strings.Join(parts, "\n")

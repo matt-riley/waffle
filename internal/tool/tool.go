@@ -31,6 +31,16 @@ type Tool interface {
 	Run(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+// BlockTool is an optional capability for tools that return structured
+// content alongside their text body: RunBlocks returns the text (which
+// becomes ToolResult.Content) plus the blocks (which become
+// ToolResult.Blocks). The canonical size and media-type limits in
+// internal/llm apply to every returned block.
+type BlockTool interface {
+	Tool
+	RunBlocks(ctx context.Context, input json.RawMessage) (string, []llm.Block, error)
+}
+
 // Registry holds the tools available to a session, in a stable order.
 type Registry struct {
 	order  []Tool
@@ -68,6 +78,20 @@ func (r *Registry) Run(ctx context.Context, name string, input json.RawMessage) 
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
 	return t.Run(ctx, input)
+}
+
+// RunWithBlocks implements BlockToolbox: tools that implement BlockTool
+// return their blocks; every other tool falls back to the string contract.
+func (r *Registry) RunWithBlocks(ctx context.Context, name string, input json.RawMessage) (string, []llm.Block, error) {
+	t, ok := r.byName[name]
+	if !ok {
+		return "", nil, fmt.Errorf("unknown tool %q", name)
+	}
+	if bt, ok := t.(BlockTool); ok {
+		return bt.RunBlocks(ctx, input)
+	}
+	out, err := t.Run(ctx, input)
+	return out, nil, err
 }
 
 // BuiltinOptions configures the standard host toolset.
