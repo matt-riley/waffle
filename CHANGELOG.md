@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/matt-riley/waffle/compare/v0.16.0...v0.17.0) (2026-08-12)
+
+
+### Features
+
+* **#253:** notify tool for mid-run owner messages ([#374](https://github.com/matt-riley/waffle/issues/374)) ([72c0fed](https://github.com/matt-riley/waffle/commit/72c0fed0067eb26e88dbb04c2fb8ec4d99b5d8d2))
+* **#256:** add ranged reads, file listing, and atomic batch edits ([#372](https://github.com/matt-riley/waffle/issues/372)) ([2ef9943](https://github.com/matt-riley/waffle/commit/2ef99437d84be08d5fe26251bb38a158f572e9f7))
+
 ## [0.16.0](https://github.com/matt-riley/waffle/compare/v0.15.0...v0.16.0) (2026-08-12)
 
 
