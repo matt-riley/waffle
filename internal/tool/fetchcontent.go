@@ -36,6 +36,8 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/text/encoding/htmlindex"
 	"golang.org/x/text/transform"
+
+	"github.com/matt-riley/waffle/internal/textcut"
 )
 
 // fetchReadCap bounds how many bytes of a response body fetch reads. The
@@ -72,10 +74,27 @@ func formatFetchBody(contentType string, body []byte, readTruncated bool, filena
 		content = fmt.Sprintf("\n[fetch-truncated: response body exceeds %d-byte read cap; remainder dropped]\n", fetchReadCap) + content
 	}
 	if len(content) > HostReturnCap {
-		content = fmt.Sprintf("\n[fetch-truncated: output exceeds %d-byte return cap; %d bytes dropped]\n", HostReturnCap, len(content)-HostReturnCap) + content
-		content = CapHostReturn(content)
+		content = capFetchReturn(content)
 	}
 	return content
+}
+
+// capFetchReturn caps shaped output at HostReturnCap with an explicit marker
+// whose dropped-byte count is exact: it reports the number of content bytes
+// actually omitted, so the marker's own length and any UTF-8 boundary snap
+// are never counted as payload. The marker's width can itself grow with the
+// count, so the payload is re-shrunk until marker + payload fits the cap.
+func capFetchReturn(content string) string {
+	marker := func(dropped int) string {
+		return fmt.Sprintf("\n[fetch-truncated: output exceeds %d-byte return cap; %d bytes dropped]\n", HostReturnCap, dropped)
+	}
+	kept := textcut.Cut(CapHostReturn(content), HostReturnCap-len(marker(0)))
+	dropped := len(content) - len(kept)
+	for len(marker(dropped))+len(kept) > HostReturnCap {
+		kept = textcut.Cut(kept, HostReturnCap-len(marker(dropped)))
+		dropped = len(content) - len(kept)
+	}
+	return marker(dropped) + kept
 }
 
 // fetchFilename picks a display name for a non-text body: the Content-
@@ -178,23 +197,26 @@ var htmlBlockTags = map[string]bool{
 }
 
 type htmlFrame struct {
-	lineLen int
+	lineLen int    // line length when the frame opened (stale after a flush)
+	outLen  int    // out length when the frame opened, for block-flow anchors
 	kind    string // "a" (append " (href)") or "code" (append "`")
 	href    string
 }
 
 type htmlExtractor struct {
-	out    bytes.Buffer // finished lines, each ending in "\n"
-	line   bytes.Buffer // current line being accumulated
-	inPre  bool
-	inHead bool
-	frames []htmlFrame
+	out           bytes.Buffer // finished lines, each ending in "\n"
+	line          bytes.Buffer // current line being accumulated
+	inPre         bool
+	inHead        bool
+	frames        []htmlFrame
+	pendingMarker string // list bullet materialized on first content ("- ")
 }
 
 func (x *htmlExtractor) walk(n *html.Node) {
 	switch n.Type {
 	case html.TextNode:
 		if !x.inHead {
+			x.materializePending()
 			x.line.WriteString(n.Data)
 		}
 		return
@@ -255,7 +277,10 @@ func (x *htmlExtractor) walk(n *html.Node) {
 		case "h1", "h2", "h3", "h4", "h5", "h6":
 			x.line.WriteString(strings.Repeat("#", int(tag[1]-'0')) + " ")
 		case "li":
-			x.line.WriteString("- ")
+			// Defer the bullet so a block child that flushes the line before
+			// any text (e.g. <li><div>text</div></li>) cannot orphan a bare
+			// "-" marker; the bullet is materialized with the first content.
+			x.pendingMarker = "- "
 		case "pre":
 			x.out.WriteString("```\n")
 			x.line.Reset()
@@ -265,13 +290,15 @@ func (x *htmlExtractor) walk(n *html.Node) {
 		switch tag {
 		case "a":
 			if href := hrefAttr(n); href != "" {
-				x.frames = append(x.frames, htmlFrame{lineLen: x.line.Len(), kind: "a", href: href})
+				x.frames = append(x.frames, htmlFrame{lineLen: x.line.Len(), outLen: x.out.Len(), kind: "a", href: href})
 			}
 		case "code":
+			x.materializePending()
 			x.frames = append(x.frames, htmlFrame{lineLen: x.line.Len(), kind: "code"})
 			x.line.WriteByte('`')
 		case "img":
 			if alt := attr(n, "alt"); alt != "" {
+				x.materializePending()
 				x.line.WriteString(alt)
 				x.line.WriteByte(' ')
 			}
@@ -292,6 +319,11 @@ func (x *htmlExtractor) walk(n *html.Node) {
 	}
 	if htmlBlockTags[tag] {
 		x.flushLine()
+		if tag == "li" {
+			// The list item is over: a bullet that was never materialized
+			// (empty item) must not leak to the following content.
+			x.pendingMarker = ""
+		}
 		return
 	}
 	switch tag {
@@ -299,8 +331,11 @@ func (x *htmlExtractor) walk(n *html.Node) {
 		if len(x.frames) > 0 && x.frames[len(x.frames)-1].kind == "a" {
 			f := x.frames[len(x.frames)-1]
 			x.frames = x.frames[:len(x.frames)-1]
-			if strings.TrimSpace(x.line.String()[f.lineLen:]) != "" {
-				x.line.WriteString(" (" + f.href + ")")
+			if !x.attachAnchor(f) && x.out.Len() > f.outLen {
+				// Block-flow anchor: the text was flushed in lines; attach the
+				// destination to the last emitted line so a linked card or
+				// article block keeps its URL.
+				x.appendHrefToLastLine(f.href)
 			}
 		}
 	case "code":
@@ -309,23 +344,75 @@ func (x *htmlExtractor) walk(n *html.Node) {
 			x.frames = x.frames[:len(x.frames)-1]
 			if x.line.Len() > f.lineLen {
 				x.line.WriteByte('`')
-			} else {
+			} else if f.lineLen <= x.line.Len() {
 				x.line.Truncate(f.lineLen)
 			}
 		}
 	}
 }
 
+// attachAnchor appends " (href)" to the current line when the anchor's text
+// is still on it (inline case, or content after a mid-anchor flush). It
+// reports whether the destination was attached.
+func (x *htmlExtractor) attachAnchor(f htmlFrame) bool {
+	if f.lineLen <= x.line.Len() {
+		if rest := strings.TrimSpace(x.line.String()[f.lineLen:]); rest != "" {
+			x.line.WriteString(" (" + f.href + ")")
+			return true
+		}
+		return false
+	}
+	if x.line.Len() > 0 {
+		// The line was reset by a block flush after the anchor opened, so
+		// everything on it belongs to the anchor.
+		x.line.WriteString(" (" + f.href + ")")
+		return true
+	}
+	return false
+}
+
+// appendHrefToLastLine attaches " (href)" to the most recently flushed line.
+func (x *htmlExtractor) appendHrefToLastLine(href string) {
+	b := x.out.Bytes()
+	n := len(b)
+	for n > 0 && b[n-1] == '\n' {
+		n--
+	}
+	if n == 0 {
+		return
+	}
+	x.out.Truncate(n)
+	x.out.WriteString(" (" + href + ")")
+	x.out.WriteByte('\n')
+}
+
+// materializePending writes a deferred list bullet into the current line on
+// first content, so an empty or block-leading list item never renders as a
+// bare dash.
+func (x *htmlExtractor) materializePending() {
+	if x.pendingMarker != "" {
+		x.line.WriteString(x.pendingMarker)
+		x.pendingMarker = ""
+	}
+}
+
 // flushLine writes the accumulated line (whitespace collapsed) to out and
-// clears the line. Block boundaries end any open link/code frames: text that
-// was flushed can no longer carry a " (url)" suffix.
+// clears the line. Block boundaries end open inline-code frames (backticks
+// cannot span lines), but an enclosing anchor may wrap block content, so its
+// frame survives: the destination is attached when the anchor closes.
 func (x *htmlExtractor) flushLine() {
 	if s := strings.Join(strings.Fields(x.line.String()), " "); s != "" {
 		x.out.WriteString(s)
 		x.out.WriteByte('\n')
 	}
+	kept := x.frames[:0]
+	for _, f := range x.frames {
+		if f.kind == "a" {
+			kept = append(kept, f)
+		}
+	}
+	x.frames = kept
 	x.line.Reset()
-	x.frames = nil
 }
 
 // gap flushes the pending line and ensures a blank line separates blocks.

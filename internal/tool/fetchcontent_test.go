@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -383,5 +384,99 @@ func TestFetchCancellation(t *testing.T) {
 	}
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", runErr)
+	}
+}
+
+// TestFetchHTMLBlockFlowAnchorKeepsDestination: an anchor wrapping block
+// content (a linked card or article block) must not silently lose its href
+// when the block boundaries flush lines (#248 Greptile review).
+func TestFetchHTMLBlockFlowAnchorKeepsDestination(t *testing.T) {
+	html := `<html><body><article><a href="/guide"><div>Getting started</div><div>Read the guide here</div></a>` +
+		`<p>Plain paragraph</p><a href="/single"><p>Single block card</p></a></article></body></html>`
+	out, err := fetchRaw(t, "text/html", []byte(html), nil, "")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	for _, want := range []string{
+		"Getting started",
+		"Read the guide here (/guide)",
+		"Plain paragraph",
+		"Single block card (/single)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "guide)") && strings.Contains(out, "Read the guide here\n") {
+		// The href must be on the same line as the card text, not lost.
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "Read the guide here") && !strings.Contains(line, "/guide") {
+				t.Errorf("card line lost its destination: %q", line)
+			}
+		}
+	}
+}
+
+// TestFetchHTMLListItemWithBlockChildKeepsMarker: a list item whose first
+// child is a block element must render as a bullet, not as an orphan dash
+// followed by unindented content (#248 Greptile review).
+func TestFetchHTMLListItemWithBlockChildKeepsMarker(t *testing.T) {
+	html := `<html><body><ul><li><div>alpha</div></li><li>beta</li><li><div><p>gamma</p></div></li></ul></body></html>`
+	out, err := fetchRaw(t, "text/html", []byte(html), nil, "")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var bullets int
+	for _, line := range lines {
+		if strings.HasPrefix(line, "- alpha") || strings.HasPrefix(line, "- beta") || strings.HasPrefix(line, "- gamma") {
+			bullets++
+		}
+		if line == "-" {
+			t.Errorf("orphan dash line rendered:\n%s", out)
+		}
+		if strings.HasPrefix(line, "alpha") || strings.HasPrefix(line, "gamma") {
+			t.Errorf("block-child list item lost its bullet: %q", line)
+		}
+	}
+	if bullets != 3 {
+		t.Errorf("want 3 bullet lines, got %d:\n%s", bullets, out)
+	}
+}
+
+// TestFetchReturnCapMarkerCountsExactDroppedBytes: the return-cap marker must
+// report the exact number of content bytes omitted, excluding the marker's
+// own length and any UTF-8 boundary adjustment (#248 Greptile review).
+func TestFetchReturnCapMarkerCountsExactDroppedBytes(t *testing.T) {
+	body := bytes.Repeat([]byte("z"), 1024*1024)
+	out, err := fetchRaw(t, "text/plain", body, nil, "")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !strings.HasPrefix(out, "\n[fetch-truncated:") {
+		t.Fatalf("missing return-cap marker: %.120q...", out)
+	}
+	markerEnd := strings.Index(out, "]\n") // end of the marker line
+	if markerEnd < 0 {
+		t.Fatalf("marker line not terminated: %.120q...", out)
+	}
+	markerLen := markerEnd + 2
+	head := out[:markerEnd]
+	if !strings.Contains(head, "bytes dropped") {
+		t.Fatalf("marker text malformed: %q", head)
+	}
+	fields := strings.Fields(head)
+	dropped, err := strconv.Atoi(fields[len(fields)-3])
+	if err != nil {
+		t.Fatalf("parse dropped count from %q: %v", head, err)
+	}
+	// The count must equal the content bytes actually omitted: the total
+	// minus what survives after the marker's own length is carved out.
+	retained := len(out) - markerLen
+	if dropped != len(body)-retained {
+		t.Errorf("dropped = %d, want %d (marker length %d must not count as payload)", dropped, len(body)-retained, markerLen)
+	}
+	if len(out) > HostReturnCap {
+		t.Errorf("capped output len = %d exceeds %d", len(out), HostReturnCap)
 	}
 }
