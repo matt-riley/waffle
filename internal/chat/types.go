@@ -37,13 +37,15 @@ type Session struct {
 
 // UsageRow is one persisted usage-accounting row.
 type UsageRow struct {
-	SessionID      string `json:"session_id"`
-	Period         string `json:"period"`
-	PeriodStart    string `json:"period_start"`
-	Requests       int    `json:"requests"`
-	InputTokens    int    `json:"input_tokens"`
-	OutputTokens   int    `json:"output_tokens"`
-	ReservedTokens int    `json:"reserved_tokens"`
+	SessionID                string `json:"session_id"`
+	Period                   string `json:"period"`
+	PeriodStart              string `json:"period_start"`
+	Requests                 int    `json:"requests"`
+	InputTokens              int    `json:"input_tokens"`
+	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
+	OutputTokens             int    `json:"output_tokens"`
+	ReservedTokens           int    `json:"reserved_tokens"`
 }
 
 // PermissionView describes effective sandbox and tool policy without any

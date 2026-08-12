@@ -194,9 +194,9 @@ func (r *plainRenderer) result(result chatpkg.Result) {
 		fmt.Fprintln(r.stdout)
 	}
 	for _, value := range result.Usage {
-		fmt.Fprintf(r.stdout, "session=%s period=%s start=%s requests=%d input=%d output=%d reserved=%d\n",
+		fmt.Fprintf(r.stdout, "session=%s period=%s start=%s requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d\n",
 			plainRow(value.SessionID), plainRow(value.Period), plainRow(value.PeriodStart), value.Requests,
-			value.InputTokens, value.OutputTokens, value.ReservedTokens)
+			value.InputTokens, value.CacheCreationInputTokens, value.CacheReadInputTokens, value.OutputTokens, value.ReservedTokens)
 	}
 	if result.Permissions != nil {
 		fmt.Fprintf(r.stdout, "sandbox=%s allow=%s deny=%s deny-prefixes=%s\n",

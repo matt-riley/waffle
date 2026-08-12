@@ -457,10 +457,11 @@ func evalSummarizePreservesFact(ctx context.Context) error {
 	if !strings.Contains(last, fact) {
 		return fmt.Errorf("final answer missing fact: %q", last)
 	}
-	// Main request should carry the summary with the planted fact.
+	// Main request should carry the summary (with the planted fact) in
+	// SystemExtra; the stable System field stays untouched (#247).
 	main := p.Requests[len(p.Requests)-1]
-	if !strings.Contains(main.System, fact) {
-		return fmt.Errorf("summary system missing fact %q: %q", fact, main.System)
+	if !strings.Contains(main.SystemExtra, fact) {
+		return fmt.Errorf("summary system missing fact %q: %q", fact, main.SystemExtra)
 	}
 	return nil
 }

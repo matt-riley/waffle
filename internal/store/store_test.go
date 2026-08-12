@@ -636,3 +636,246 @@ func TestFTSSurvivesTurnUpdate(t *testing.T) {
 		t.Errorf("new term not indexed after update: %d hits", newHits)
 	}
 }
+
+// TestUsageCacheColumnsMigrationOnPopulatedDB simulates a database written
+// before #247: usage rows exist without the cache columns. Reopening applies
+// the additive 0028 migration and the pre-migration rows read back with
+// zeroed cache counters — no error, no NULL panic.
+func TestUsageCacheColumnsMigrationOnPopulatedDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, reserved_tokens)
+		VALUES ('pre', 'day', '2026-07-13T00:00:00Z', 3, 100, 50, 0),
+		       ('pre', 'hour', '2026-07-13T10:00:00Z', 3, 100, 50, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	// Tear down 0028 as if it had never run.
+	for _, stmt := range []string{
+		`ALTER TABLE usage DROP COLUMN cache_creation_input_tokens`,
+		`ALTER TABLE usage DROP COLUMN cache_read_input_tokens`,
+		`DELETE FROM schema_migrations WHERE version = 28`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen applies pending 0028 against the populated DB.
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after 0028: %v", err)
+	}
+	defer func() {
+		if err := s2.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	var requests, input, output, cacheWrite, cacheRead int
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+		FROM usage WHERE session_id='pre' AND period='day'`).Scan(&requests, &input, &output, &cacheWrite, &cacheRead); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 || input != 100 || output != 50 || cacheWrite != 0 || cacheRead != 0 {
+		t.Fatalf("pre-migration row = requests=%d input=%d output=%d cache_write=%d cache_read=%d, want 3/100/50/0/0",
+			requests, input, output, cacheWrite, cacheRead)
+	}
+	// New writes carry the cache counters.
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+		VALUES ('post', 'day', '2026-07-13T00:00:00Z', 1, 10, 5, 20, 30)`); err != nil {
+		t.Fatal(err)
+	}
+	var write, read int
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT cache_creation_input_tokens, cache_read_input_tokens FROM usage WHERE session_id='post'`).Scan(&write, &read); err != nil {
+		t.Fatal(err)
+	}
+	if write != 20 || read != 30 {
+		t.Fatalf("post-migration row = cache_write=%d cache_read=%d, want 20/30", write, read)
+	}
+}
+
+// TestUsageProviderMigrationOnPopulatedDB simulates a database written
+// before the #247 review fix: usage rows exist without the provider column.
+// Reopening applies the additive 0029 migration and the pre-migration rows
+// read back as 'anthropic' — the legacy default whose 0.1x cache-read price
+// they were originally billed under — while new writes carry the provider.
+func TestUsageProviderMigrationOnPopulatedDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tear down 0029 as if it had never run. The provider column is part of
+	// the 0030 primary key, so it cannot be dropped in place; rebuild the
+	// table to the pre-0029 shape (no provider column, provider-less key).
+	for _, stmt := range []string{
+		`DROP TABLE usage`,
+		`CREATE TABLE usage (
+			session_id   TEXT NOT NULL,
+			period       TEXT NOT NULL,
+			period_start TEXT NOT NULL,
+			requests     INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			reserved_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, period, period_start)
+		) STRICT`,
+		`DELETE FROM schema_migrations WHERE version = 29`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// Pre-0029 rows: written after the rebuild so they land in the
+	// provider-less table the migration will upgrade.
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, reserved_tokens)
+		VALUES ('pre', 'day', '2026-07-13T00:00:00Z', 3, 100, 50, 20, 30, 0),
+		       ('pre', 'hour', '2026-07-13T10:00:00Z', 3, 100, 50, 20, 30, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen applies pending 0029 against the populated DB.
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after 0029: %v", err)
+	}
+	defer func() {
+		if err := s2.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	var provider string
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT provider FROM usage WHERE session_id='pre' AND period='day'`).Scan(&provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "anthropic" {
+		t.Fatalf("pre-migration row provider = %q, want the 'anthropic' legacy default", provider)
+	}
+	// New writes carry an explicit provider.
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, provider)
+		VALUES ('post', 'day', '2026-07-13T00:00:00Z', 1, 10, 5, 20, 30, 'openai')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT provider FROM usage WHERE session_id='post'`).Scan(&provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "openai" {
+		t.Fatalf("post-migration row provider = %q, want openai", provider)
+	}
+}
+
+// TestUsageProviderKeyMigrationOnPopulatedDB simulates a database written
+// before the per-provider row key (#247 review): the usage table is keyed
+// by (session_id, period, period_start) with a single provider column, so
+// one budget key can hold at most one row per period. Reopening applies the
+// 0030 rebuild; pre-migration rows survive with their counters and provider,
+// and the new key lets one period hold one row per provider so mixed
+// Anthropic/OpenAI usage prices each provider with its own cost model.
+func TestUsageProviderKeyMigrationOnPopulatedDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "waffle.db")
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tear down 0030 as if it had never run: restore the pre-0030 table
+	// shape (single provider column, provider-less primary key).
+	for _, stmt := range []string{
+		`DROP TABLE usage`,
+		`CREATE TABLE usage (
+			session_id   TEXT NOT NULL,
+			period       TEXT NOT NULL,
+			period_start TEXT NOT NULL,
+			requests     INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			reserved_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+			provider     TEXT NOT NULL DEFAULT 'anthropic',
+			PRIMARY KEY (session_id, period, period_start)
+		) STRICT`,
+		`DELETE FROM schema_migrations WHERE version = 30`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// Pre-0030 rows: the old key allowed exactly one row per period.
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, reserved_tokens, provider)
+		VALUES ('pre', 'day', '2026-07-13T00:00:00Z', 3, 100, 50, 20, 30, 0, 'anthropic'),
+		       ('pre', 'hour', '2026-07-13T10:00:00Z', 3, 100, 50, 20, 30, 0, 'anthropic')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen applies pending 0030 against the populated DB.
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after 0030: %v", err)
+	}
+	defer func() {
+		if err := s2.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	var requests, input, output, cacheWrite, cacheRead int
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+		FROM usage WHERE session_id='pre' AND period='day' AND provider='anthropic'`).Scan(&requests, &input, &output, &cacheWrite, &cacheRead); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 || input != 100 || output != 50 || cacheWrite != 20 || cacheRead != 30 {
+		t.Fatalf("pre-migration row = requests=%d input=%d output=%d cache_write=%d cache_read=%d, want 3/100/50/20/30",
+			requests, input, output, cacheWrite, cacheRead)
+	}
+	// The new key admits one row per provider per period.
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, provider)
+		VALUES ('pre', 'day', '2026-07-13T00:00:00Z', 1, 10, 5, 0, 500, 'openai')`); err != nil {
+		t.Fatalf("per-provider row insert after 0030: %v", err)
+	}
+	var providers int
+	if err := s2.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM usage WHERE session_id='pre' AND period='day' AND period_start='2026-07-13T00:00:00Z'`).Scan(&providers); err != nil {
+		t.Fatal(err)
+	}
+	if providers != 2 {
+		t.Fatalf("day rows after 0030 = %d, want 2 (one per provider)", providers)
+	}
+	// The provider-less duplicate the old key allowed is now rejected.
+	if _, err := s2.DB.ExecContext(ctx, `
+		INSERT INTO usage (session_id, period, period_start, requests, provider)
+		VALUES ('pre', 'day', '2026-07-13T00:00:00Z', 1, 'anthropic')`); err == nil {
+		t.Fatal("duplicate (session, period, period_start, provider) insert unexpectedly succeeded")
+	}
+}

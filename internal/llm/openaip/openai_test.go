@@ -321,3 +321,121 @@ func TestCompleteToolCallKeptWhenAnotherTruncated(t *testing.T) {
 		t.Errorf("expected truncation warning, got %q", full)
 	}
 }
+
+// TestCachedTokensSplitFromPromptTokens pins the accounting half of #247
+// for OpenAI-compatible endpoints: the final stream chunk's
+// prompt_tokens_details.cached_tokens lands in CacheReadInputTokens, and
+// prompt_tokens (which includes the cached subset) is reduced so the three
+// counters sum to the provider-reported total.
+func TestCachedTokensSplitFromPromptTokens(t *testing.T) {
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"role":"assistant","content":"Hi"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{llm.UserText("hi")}}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	want := llm.Usage{InputTokens: 7, OutputTokens: 5, CacheReadInputTokens: 3, Provider: "openai"}
+	if resp.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", resp.Usage, want)
+	}
+	// InputTokens + CacheReadInputTokens must equal the reported prompt
+	// total; cached input is never billed at the full input rate.
+	if got := resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens; got != 10 {
+		t.Fatalf("input counters sum = %d, want 10", got)
+	}
+}
+
+// TestCachedTokensNeverNegative pins the failure path for a provider that
+// over-reports the cached subset: the uncached count clamps at zero instead
+// of going negative.
+func TestCachedTokensNeverNegative(t *testing.T) {
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":9}}}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{llm.UserText("hi")}}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Usage.InputTokens != 0 || resp.Usage.CacheReadInputTokens != 9 {
+		t.Fatalf("usage = %+v, want input 0 cache_read 9", resp.Usage)
+	}
+}
+
+// TestProviderWithoutUsageYieldsZeroedCounters pins the OpenAI failure path:
+// a response with no usage object yields zeroed counters, never a panic.
+func TestProviderWithoutUsageYieldsZeroedCounters(t *testing.T) {
+	srv := sseServer(t, nil,
+		`{"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	resp, err := p.Complete(context.Background(), llm.Request{Model: "m", Messages: []llm.Message{llm.UserText("hi")}}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Usage != (llm.Usage{}) {
+		t.Fatalf("usage = %+v, want zeroed counters", resp.Usage)
+	}
+}
+
+// TestSystemExtraMergedIntoSingleSystemMessage pins finding 2 of the #247
+// review for OpenAI-compatible providers: they have no cache breakpoints,
+// so the translator merges SystemExtra back into the one system message —
+// byte-identical to the pre-split combined text — and never loses the
+// summary.
+func TestSystemExtraMergedIntoSingleSystemMessage(t *testing.T) {
+	var body map[string]any
+	srv := sseServer(t, &body,
+		`{"choices":[{"delta":{"role":"assistant","content":"Hi"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`,
+	)
+	defer srv.Close()
+
+	p := New("k", srv.URL+"/v1")
+	const system = "you are waffle"
+	const extra = "[CONTEXT SUMMARY turns=1-2] prior work"
+	if _, err := p.Complete(context.Background(), llm.Request{
+		Model:       "m",
+		System:      system,
+		SystemExtra: extra,
+		Messages:    []llm.Message{llm.UserText("hi")},
+	}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	msgs := body["messages"].([]any)
+	if len(msgs) < 1 {
+		t.Fatal("no messages in request")
+	}
+	sys := msgs[0].(map[string]any)
+	if sys["role"] != "system" {
+		t.Fatalf("first message role = %v, want system", sys["role"])
+	}
+	if got := sys["content"]; got != system+"\n\n"+extra {
+		t.Fatalf("system content = %q, want combined %q", got, system+"\n\n"+extra)
+	}
+
+	// With an empty stable System the extra text becomes the system message.
+	if _, err := p.Complete(context.Background(), llm.Request{
+		Model:       "m",
+		SystemExtra: extra,
+		Messages:    []llm.Message{llm.UserText("hi")},
+	}, nil); err != nil {
+		t.Fatalf("Complete with SystemExtra only: %v", err)
+	}
+	msgs = body["messages"].([]any)
+	sys = msgs[0].(map[string]any)
+	if got := sys["content"]; got != extra {
+		t.Fatalf("system content = %q, want extra text %q", got, extra)
+	}
+}

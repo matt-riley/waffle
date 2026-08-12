@@ -1,6 +1,7 @@
 package anthropicp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -414,5 +415,495 @@ func TestCompleteClosesStreamBodyRepeated(t *testing.T) {
 	}
 	if got := closes.Load(); got != int32(n) {
 		t.Errorf("body Close calls = %d, want %d", got, n)
+	}
+}
+
+// TestPromptCachingBreakpointsOnStablePrefix pins the request-side caching
+// contract (#247): cache_control breakpoints land on the system block and
+// the last tool definition — the spans that are byte-identical across calls
+// in a session — and never after message content, which varies per turn.
+// Two calls with an identical prefix emit byte-identical breakpoints.
+func TestPromptCachingBreakpointsOnStablePrefix(t *testing.T) {
+	// ~1100 tokens of stable system text and ~1100 tokens of tool schema
+	// text each, comfortably above the 1024-token minimum cacheable length.
+	system := strings.Repeat("waffle is a personal assistant with a stable system prompt. ", 90)
+	bigSchema := func(prefix string) json.RawMessage {
+		props := make(map[string]any)
+		for i := range 40 {
+			props[fmt.Sprintf("%s_field_%d", prefix, i)] = map[string]any{
+				"type":        "string",
+				"description": strings.Repeat("a long description that costs tokens ", 12),
+			}
+		}
+		raw, _ := json.Marshal(map[string]any{"type": "object", "properties": props, "required": []string{prefix + "_field_0"}})
+		return raw
+	}
+	req := func(msg string) llm.Request {
+		return llm.Request{
+			System:   system,
+			Messages: []llm.Message{llm.UserText(msg)},
+			Tools: []llm.Tool{
+				{Name: "alpha", Description: "first tool", InputSchema: bigSchema("alpha")},
+				{Name: "omega", Description: "last tool", InputSchema: bigSchema("omega")},
+			},
+		}
+	}
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_c","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+	}))
+	defer srv.Close()
+	p := New("k", srv.URL)
+	for _, msg := range []string{"first turn", "second turn"} {
+		if _, err := p.Complete(context.Background(), req(msg), nil); err != nil {
+			t.Fatalf("Complete(%q): %v", msg, err)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("captured %d request bodies, want 2", len(bodies))
+	}
+	checkBody := func(body map[string]any) {
+		t.Helper()
+		sysBlocks := body["system"].([]any)
+		if len(sysBlocks) != 1 {
+			t.Fatalf("system blocks = %d", len(sysBlocks))
+		}
+		sys := sysBlocks[0].(map[string]any)
+		cc, ok := sys["cache_control"].(map[string]any)
+		if !ok || cc["type"] != "ephemeral" {
+			t.Fatalf("system cache_control = %v, want ephemeral breakpoint", sys["cache_control"])
+		}
+		tools := body["tools"].([]any)
+		if len(tools) != 2 {
+			t.Fatalf("tools = %d", len(tools))
+		}
+		if _, ok := tools[0].(map[string]any)["cache_control"]; ok {
+			t.Fatal("breakpoint on non-final tool: the prefix up to it varies once a later tool exists")
+		}
+		last := tools[1].(map[string]any)
+		cc, ok = last["cache_control"].(map[string]any)
+		if !ok || cc["type"] != "ephemeral" {
+			t.Fatalf("last tool cache_control = %v, want ephemeral breakpoint", last["cache_control"])
+		}
+		for i, m := range body["messages"].([]any) {
+			if _, ok := m.(map[string]any)["cache_control"]; ok {
+				t.Fatalf("cache_control on message %d: message content varies per turn", i)
+			}
+		}
+	}
+	for i, body := range bodies {
+		checkBody(body)
+		// Breakpoint placement is deterministic: system block 0 and tool
+		// index 1 in both calls. Re-marshal to compare the stable spans
+		// byte-for-byte across calls.
+		sysA, _ := json.Marshal(body["system"])
+		sysB, _ := json.Marshal(bodies[1-i]["system"])
+		if !bytes.Equal(sysA, sysB) {
+			t.Fatalf("system span differs across calls: %s vs %s", sysA, sysB)
+		}
+	}
+}
+
+// TestPromptCachingSkipsBelowMinimumCacheableLength pins that a prefix below
+// the provider's minimum cacheable length requests no cache write at all —
+// a session whose prefix is too short to cache is never made more expensive
+// by the surcharge.
+func TestPromptCachingSkipsBelowMinimumCacheableLength(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	if _, err := p.Complete(context.Background(), llm.Request{
+		System:   "short system prompt",
+		Messages: []llm.Message{llm.UserText("hi")},
+		Tools: []llm.Tool{{
+			Name:        "bash",
+			Description: "run a command",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`),
+		}},
+	}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if sys := body["system"].([]any)[0].(map[string]any); sys["cache_control"] != nil {
+		t.Fatalf("short system requested a cache write: %v", sys["cache_control"])
+	}
+	tools := body["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %d", len(tools))
+	}
+	if cc := tools[0].(map[string]any)["cache_control"]; cc != nil {
+		t.Fatalf("short prefix requested a cache write: %v", cc)
+	}
+}
+
+// TestFromMessagePopulatesCacheUsage pins the accounting half of the
+// Anthropic translator: the cache counters flow from the streamed usage
+// objects into llm.Usage, with InputTokens staying uncached.
+func TestFromMessagePopulatesCacheUsage(t *testing.T) {
+	srv := messagesServer(t, nil, []string{
+		`{"type":"message_start","message":{"id":"msg_u","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"output_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"cache_read_input_tokens":30,"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	resp, err := p.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{llm.UserText("hi")},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	want := llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30, Provider: "anthropic"}
+	if resp.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", resp.Usage, want)
+	}
+	// The three input counters sum to the provider-reported input total.
+	if got := resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens; got != 60 {
+		t.Fatalf("input counters sum = %d, want 60", got)
+	}
+}
+
+// TestProviderWithoutUsageYieldsZeroedCounters pins the failure path: a
+// response carrying no usage object must not panic and must yield zeroed
+// counters (the broker then keeps the reservation charged).
+func TestProviderWithoutUsageYieldsZeroedCounters(t *testing.T) {
+	srv := messagesServer(t, nil, []string{
+		`{"type":"message_start","message":{"id":"msg_z","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":null}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":null}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	resp, err := p.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{llm.UserText("hi")},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// The counters must be zeroed; Provider is attribution metadata and is
+	// set regardless (the translator still knows which provider spoke).
+	if resp.Usage.InputTokens != 0 || resp.Usage.OutputTokens != 0 ||
+		resp.Usage.CacheCreationInputTokens != 0 || resp.Usage.CacheReadInputTokens != 0 {
+		t.Fatalf("usage = %+v, want zeroed counters", resp.Usage)
+	}
+}
+
+// TestPromptCachingTwoCallsReportCacheReads pins the caching behaviour end
+// to end: two consecutive Complete calls sharing an identical system prompt
+// and tool set report CacheReadInputTokens > 0 on the second (the provider's
+// usage object says the prefix came from cache).
+func TestPromptCachingTwoCallsReportCacheReads(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		var usage string
+		if n == 1 {
+			usage = `{"input_tokens":2000,"cache_creation_input_tokens":2000,"output_tokens":1}`
+		} else {
+			usage = `{"input_tokens":50,"cache_read_input_tokens":2000,"output_tokens":1}`
+		}
+		fmt.Fprintf(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_p","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":%s}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`, usage)
+	}))
+	defer srv.Close()
+	system := strings.Repeat("stable system prompt for prompt caching tests. ", 120)
+	tools := []llm.Tool{{
+		Name:        "bash",
+		Description: strings.Repeat("run commands in a sandbox. ", 40),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	}}
+	p := New("k", srv.URL)
+	first, err := p.Complete(context.Background(), llm.Request{System: system, Messages: []llm.Message{llm.UserText("turn one")}, Tools: tools}, nil)
+	if err != nil {
+		t.Fatalf("first Complete: %v", err)
+	}
+	second, err := p.Complete(context.Background(), llm.Request{System: system, Messages: []llm.Message{llm.UserText("turn two")}, Tools: tools}, nil)
+	if err != nil {
+		t.Fatalf("second Complete: %v", err)
+	}
+	if first.Usage.CacheReadInputTokens != 0 || first.Usage.CacheCreationInputTokens != 2000 {
+		t.Fatalf("first usage = %+v, want cache creation only", first.Usage)
+	}
+	if second.Usage.CacheReadInputTokens <= 0 {
+		t.Fatalf("second usage = %+v, want CacheReadInputTokens > 0", second.Usage)
+	}
+	if second.Usage.InputTokens != 50 {
+		t.Fatalf("second uncached input = %d, want 50", second.Usage.InputTokens)
+	}
+}
+
+// TestPromptCachingBilledInputBelowNPrefix numerically asserts the point of
+// the feature: for N turns of one session whose stable prefix is cached
+// after the first call, total billed input is strictly less than N x the
+// prefix size (the first turn pays creation, later turns pay 0.1x reads).
+func TestPromptCachingBilledInputBelowNPrefix(t *testing.T) {
+	const (
+		prefixTokens = 2000 // stable system + tools prefix
+		turns        = 5
+		uncached     = 100 // per-turn variable input
+	)
+	billed := 0.0
+	for turn := 1; turn <= turns; turn++ {
+		u := llm.Usage{InputTokens: uncached}
+		if turn == 1 {
+			u.CacheCreationInputTokens = prefixTokens
+		} else {
+			u.CacheReadInputTokens = prefixTokens
+		}
+		billed += llm.AnthropicCost.BilledInput(u)
+	}
+	naive := float64(turns * (prefixTokens + uncached))
+	if billed >= naive {
+		t.Fatalf("billed %v >= naive %v: caching made N turns no cheaper", billed, naive)
+	}
+	if billed != float64(uncached*turns)+1.25*float64(prefixTokens)+0.1*float64(prefixTokens*(turns-1)) {
+		t.Fatalf("billed = %v, want the numeric cache-write/read arithmetic", billed)
+	}
+}
+
+// TestSystemExtraEmitsSecondUncachedSystemBlock pins finding 2 of the #247
+// review: when a Request carries a changing SystemExtra (the agent's
+// per-run context summary), the translator emits it as a SECOND system
+// block without cache_control, so the first block — the byte-stable System
+// prefix — keeps its ephemeral breakpoint and stays reusable across calls.
+func TestSystemExtraEmitsSecondUncachedSystemBlock(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	// ~1100 tokens of stable system text: clears minCacheableTokens.
+	system := strings.Repeat("waffle is a personal assistant with a stable system prompt. ", 90)
+	const extra = "[CONTEXT SUMMARY turns=1-4 — generated for bounding only] prior work done"
+	if _, err := p.Complete(context.Background(), llm.Request{
+		System:      system,
+		SystemExtra: extra,
+		Messages:    []llm.Message{llm.UserText("hi")},
+	}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	blocks := body["system"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("system blocks = %d, want 2 (stable prefix + uncached extra)", len(blocks))
+	}
+	first := blocks[0].(map[string]any)
+	if first["text"] != system {
+		t.Fatalf("first block text does not equal the stable System")
+	}
+	cc, ok := first["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" {
+		t.Fatalf("first block cache_control = %v, want ephemeral breakpoint", first["cache_control"])
+	}
+	second := blocks[1].(map[string]any)
+	if second["text"] != extra {
+		t.Fatalf("second block text = %q, want %q", second["text"], extra)
+	}
+	if second["cache_control"] != nil {
+		t.Fatalf("SystemExtra block carries a cache breakpoint: %v", second["cache_control"])
+	}
+}
+
+// TestSystemExtraKeepsSystemPrefixByteStableAcrossCalls pins the point of
+// the split end to end: two calls with the same System but different
+// SystemExtra emit a byte-identical first system block (the cached span),
+// while only the uncached second block varies.
+func TestSystemExtraKeepsSystemPrefixByteStableAcrossCalls(t *testing.T) {
+	system := strings.Repeat("stable system prompt for caching tests. ", 90)
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+	}))
+	defer srv.Close()
+	p := New("k", srv.URL)
+	for _, extra := range []string{"[CONTEXT SUMMARY turns=1-2] first summary", "[CONTEXT SUMMARY turns=1-3] second, longer summary"} {
+		if _, err := p.Complete(context.Background(), llm.Request{
+			System:      system,
+			SystemExtra: extra,
+			Messages:    []llm.Message{llm.UserText("hi")},
+		}, nil); err != nil {
+			t.Fatalf("Complete(%q): %v", extra, err)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("captured %d request bodies, want 2", len(bodies))
+	}
+	firstA, _ := json.Marshal(bodies[0]["system"].([]any)[0])
+	firstB, _ := json.Marshal(bodies[1]["system"].([]any)[0])
+	if !bytes.Equal(firstA, firstB) {
+		t.Fatalf("cached system block differs across calls: %s vs %s", firstA, firstB)
+	}
+	extraA, _ := json.Marshal(bodies[0]["system"].([]any)[1])
+	extraB, _ := json.Marshal(bodies[1]["system"].([]any)[1])
+	if bytes.Equal(extraA, extraB) {
+		t.Fatalf("uncached extra block identical across calls: %s", extraA)
+	}
+}
+
+// TestSystemExtraSuppressesToolsBreakpoint pins that a tools breakpoint is
+// not emitted while a changing SystemExtra is present: the tools breakpoint
+// caches everything before it, including the extra block, so its prefix
+// would differ every call — the breakpoint would only pay the cache-write
+// surcharge and never reuse an entry (#247 review).
+func TestSystemExtraSuppressesToolsBreakpoint(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_t","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	system := strings.Repeat("stable system prompt for tools caching tests. ", 90)
+	bigSchema := json.RawMessage(`{"type":"object","properties":{"cmd":{"type":"string","description":"` +
+		strings.Repeat("a long description that costs tokens ", 12) + `"}},"required":["cmd"]}`)
+	req := func(extra string) llm.Request {
+		return llm.Request{
+			System:      system,
+			SystemExtra: extra,
+			Messages:    []llm.Message{llm.UserText("hi")},
+			Tools:       []llm.Tool{{Name: "bash", Description: strings.Repeat("run commands. ", 40), InputSchema: bigSchema}},
+		}
+	}
+	if _, err := p.Complete(context.Background(), req("[CONTEXT SUMMARY turns=1-2] summary"), nil); err != nil {
+		t.Fatalf("Complete with SystemExtra: %v", err)
+	}
+	tools := body["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %d", len(tools))
+	}
+	if cc := tools[0].(map[string]any)["cache_control"]; cc != nil {
+		t.Fatalf("tools breakpoint emitted under a changing SystemExtra: %v", cc)
+	}
+	// Without SystemExtra the same prefix clears the minimum and the tools
+	// breakpoint returns (covered in detail by
+	// TestPromptCachingBreakpointsOnStablePrefix).
+	if _, err := p.Complete(context.Background(), req(""), nil); err != nil {
+		t.Fatalf("Complete without SystemExtra: %v", err)
+	}
+	if cc := body["tools"].([]any)[0].(map[string]any)["cache_control"]; cc == nil {
+		t.Fatal("tools breakpoint missing once SystemExtra is empty")
+	}
+}
+
+// TestSystemExtraAloneWhenSystemEmpty pins the degenerate split: with an
+// empty stable System the extra text becomes the only system block and gets
+// no cache breakpoint (its bytes change between calls).
+func TestSystemExtraAloneWhenSystemEmpty(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_e","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	const extra = "[CONTEXT SUMMARY turns=1-2] summary only"
+	if _, err := p.Complete(context.Background(), llm.Request{
+		SystemExtra: extra,
+		Messages:    []llm.Message{llm.UserText("hi")},
+	}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	blocks := body["system"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("system blocks = %d, want 1", len(blocks))
+	}
+	block := blocks[0].(map[string]any)
+	if block["text"] != extra {
+		t.Fatalf("system text = %q, want %q", block["text"], extra)
+	}
+	if block["cache_control"] != nil {
+		t.Fatalf("changing extra text requested a cache write: %v", block["cache_control"])
 	}
 }

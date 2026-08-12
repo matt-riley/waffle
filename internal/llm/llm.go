@@ -341,6 +341,16 @@ type Request struct {
 	Messages  []Message
 	Tools     []Tool
 	MaxTokens int
+
+	// SystemExtra is additional system text that changes between calls (the
+	// agent's per-run context summary). It is kept separate from System so
+	// providers with prompt-cache breakpoints can keep the System bytes
+	// stable across calls: anthropicp emits it as a second system block
+	// WITHOUT cache_control (a breakpoint on changing text would cache
+	// nothing and only pay the write surcharge), while providers without
+	// cache breakpoints (openaip) append it to the system text so the model
+	// still receives it. Empty means no extra system text.
+	SystemExtra string
 }
 
 // StopReason says why the model stopped.
@@ -355,9 +365,29 @@ const (
 )
 
 // Usage is token accounting for one call.
+//
+// InputTokens always means *uncached* input. Providers that report cached
+// input separately (Anthropic's cache_creation_input_tokens /
+// cache_read_input_tokens; OpenAI-compatible prompt_tokens_details.
+// cached_tokens) populate CacheCreationInputTokens / CacheReadInputTokens,
+// and translators subtract the cached subset out of InputTokens where the
+// provider reports a total that includes it (OpenAI-compatible
+// prompt_tokens). The three counters therefore sum to the provider's
+// reported input total, and existing arithmetic on InputTokens keeps its
+// meaning.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
+	InputTokens              int
+	OutputTokens             int
+	CacheCreationInputTokens int // tokens written to the provider's prompt cache
+	CacheReadInputTokens     int // tokens served from the provider's prompt cache
+
+	// Provider is the provider type that reported this usage ("anthropic"
+	// or "openai"; the latter covers any OpenAI-compatible endpoint). It
+	// selects the cost model applied when budget binding prices the cache
+	// counters; empty means unknown and prices at the Anthropic model (the
+	// legacy default). Translators and the broker's usage capture set it;
+	// callers that never learn the provider leave it empty.
+	Provider string
 }
 
 // Response is the model's complete answer to a Request.

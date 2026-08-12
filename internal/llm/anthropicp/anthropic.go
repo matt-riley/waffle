@@ -20,9 +20,30 @@ import (
 const (
 	// DefaultBaseURL is the Anthropic API's default endpoint.
 	DefaultBaseURL = "https://api.anthropic.com"
-	// DefaultModel is used when the request doesn't name one.
-	DefaultModel = "claude-opus-4-8"
+	// DefaultModel is used when the request doesn't name one. The Opus 4.x
+	// line is end-of-life; the current flagship is Opus 5.
+	DefaultModel = "claude-opus-5"
+
+	// minCacheableTokens is Anthropic's minimum cacheable prompt length. A
+	// cache_control breakpoint whose prefix is shorter than this is refused
+	// by the API, so breakpoints are only emitted when the estimated prefix
+	// clears it.
+	minCacheableTokens = 1024
+
+	// charsPerToken is the character-per-token heuristic used to estimate
+	// whether a breakpoint's prefix reaches minCacheableTokens. ~4
+	// chars/token under-estimates code and JSON (which tokenize closer to
+	// 6-7 chars/token), so the guard errs toward *skipping* a breakpoint
+	// rather than requesting a cache the provider would refuse.
+	charsPerToken = 4
 )
+
+// estimatedTokens approximates a text span's token count from its character
+// length. Exact tokenization is unavailable client-side; the heuristic only
+// gates cache-breakpoint placement (see minCacheableTokens).
+func estimatedTokens(chars int) int {
+	return chars / charsPerToken
+}
 
 // Provider calls the Anthropic Messages API.
 type Provider struct {
@@ -92,20 +113,58 @@ func toParams(req llm.Request) (anthropic.MessageNewParams, error) {
 			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
 		},
 	}
+	// Prompt caching: the stable prefix (system text plus the tool set) is
+	// byte-identical across calls in a session, so the two breakpoints below
+	// let Anthropic serve it from cache on every call after the first. The
+	// guard estimates the prefix's token length because a breakpoint on a
+	// prompt below the provider's minimum cacheable length is refused.
+	// Messages are deliberately excluded: prepareContext summarises and
+	// rewrites the history prefix, so a transcript breakpoint would sit
+	// after content that varies between calls and cache nothing while still
+	// paying the cache-write surcharge.
 	if req.System != "" {
-		params.System = []anthropic.TextBlockParam{{Text: req.System}}
+		block := anthropic.TextBlockParam{Text: req.System}
+		if estimatedTokens(len(req.System)) >= minCacheableTokens {
+			block.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+		params.System = []anthropic.TextBlockParam{block}
+	}
+	// SystemExtra (the agent's per-run context summary) is a SECOND system
+	// block without a breakpoint: it changes between calls, so a breakpoint
+	// on it would cache nothing and only pay the cache-write surcharge.
+	// Keeping it out of the System block also keeps that block's bytes
+	// stable, which is what makes its breakpoint reusable (#247).
+	if req.SystemExtra != "" {
+		params.System = append(params.System, anthropic.TextBlockParam{Text: req.SystemExtra})
 	}
 
+	// estimatedChars is the character span of the stable prefix as it will
+	// appear on the wire, up to and including the final tool definition. The
+	// tools breakpoint only lands on the *last* tool — the one whose prefix
+	// is the whole stable span — and only when that prefix clears the
+	// minimum cacheable length. A breakpoint on an earlier tool would cache
+	// a shorter prefix at the same surcharge for no benefit.
+	estimatedChars := len(req.System)
 	for _, t := range req.Tools {
 		schema, err := toInputSchema(t.InputSchema)
 		if err != nil {
 			return params, fmt.Errorf("anthropic: tool %q schema: %w", t.Name, err)
 		}
+		estimatedChars += len(t.Name) + len(t.Description) + len(t.InputSchema)
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
 			Name:        t.Name,
 			Description: anthropic.String(t.Description),
 			InputSchema: schema,
 		}})
+	}
+	// The tools breakpoint caches everything before it, including every
+	// system block. A changing SystemExtra block between System and the
+	// tools would therefore invalidate the prefix on every call, so the
+	// breakpoint is suppressed whenever extra system text is present —
+	// emitting it would only pay the write surcharge, never reuse a cache
+	// entry (#247).
+	if req.SystemExtra == "" && len(params.Tools) > 0 && estimatedTokens(estimatedChars) >= minCacheableTokens {
+		params.Tools[len(params.Tools)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 
 	for _, m := range req.Messages {
@@ -279,8 +338,13 @@ func fromMessage(msg anthropic.Message) (*llm.Response, error) {
 	resp := &llm.Response{
 		Message: llm.Message{Role: llm.RoleAssistant},
 		Usage: llm.Usage{
-			InputTokens:  int(msg.Usage.InputTokens),
-			OutputTokens: int(msg.Usage.OutputTokens),
+			InputTokens:              int(msg.Usage.InputTokens),
+			OutputTokens:             int(msg.Usage.OutputTokens),
+			CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
+			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
+			// The translator knows the provider, so the usage it reports is
+			// attributed to it for per-provider budget pricing (#247).
+			Provider: "anthropic",
 		},
 	}
 	for _, block := range msg.Content {

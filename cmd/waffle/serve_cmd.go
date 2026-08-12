@@ -890,7 +890,7 @@ func brokerUpstreamsWithSecretResolver(cfg config.Config, secrets secretResolver
 		default:
 			continue
 		}
-		ups = append(ups, broker.Upstream{Name: name, BaseURL: base, Header: header, Value: value})
+		ups = append(ups, broker.Upstream{Name: name, Kind: connection.Type, BaseURL: base, Header: header, Value: value})
 	}
 	return ups
 }
