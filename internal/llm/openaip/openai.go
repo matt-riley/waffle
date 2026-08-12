@@ -128,6 +128,11 @@ type wireChunk struct {
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		// PromptTokensDetails breaks prompt_tokens down; cached_tokens is
+		// the subset served from the endpoint's automatic prompt cache.
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -195,8 +200,21 @@ func (p *Provider) toWire(req llm.Request) (wireRequest, error) {
 	if w.Stream {
 		w.StreamOptions = &wireStreamOptions{IncludeUsage: true}
 	}
-	if req.System != "" {
-		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: wireContent{Text: req.System}})
+	// OpenAI-compatible endpoints have no prompt-cache breakpoints, so the
+	// changing SystemExtra (the agent's context summary) is merged back into
+	// the single system message exactly as pre-#247 code combined it: the
+	// model still receives the summary, and providers that do understand a
+	// split (anthropicp) get the byte-stable System prefix from Request.
+	system := req.System
+	if req.SystemExtra != "" {
+		if system != "" {
+			system += "\n\n" + req.SystemExtra
+		} else {
+			system = req.SystemExtra
+		}
+	}
+	if system != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: wireContent{Text: system}})
 	}
 	for _, m := range req.Messages {
 		// Canonical layer owns size/type limits; the translator only
@@ -379,8 +397,25 @@ func (p *Provider) readStream(body io.Reader, onEvent llm.StreamFunc, maxBytes i
 			return nil, fmt.Errorf("openai: bad stream chunk: %w", err)
 		}
 		if chunk.Usage != nil {
-			resp.Usage.InputTokens = chunk.Usage.PromptTokens
+			// OpenAI-compatible endpoints cache automatically and bill cache
+			// reads at a discount, but prompt_tokens is the *total* including
+			// the cached subset. InputTokens means uncached input, so the
+			// cached subset is split out and reported separately. The
+			// translator attributes the usage to the openai cost model for
+			// per-provider budget pricing (#247).
+			resp.Usage.Provider = "openai"
 			resp.Usage.OutputTokens = chunk.Usage.CompletionTokens
+			resp.Usage.InputTokens = chunk.Usage.PromptTokens
+			if details := chunk.Usage.PromptTokensDetails; details != nil && details.CachedTokens > 0 {
+				resp.Usage.CacheReadInputTokens = details.CachedTokens
+				if resp.Usage.InputTokens >= details.CachedTokens {
+					resp.Usage.InputTokens -= details.CachedTokens
+				} else {
+					// A provider that over-reports cached tokens must never
+					// yield a negative uncached count.
+					resp.Usage.InputTokens = 0
+				}
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue

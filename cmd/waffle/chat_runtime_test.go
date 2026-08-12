@@ -1103,12 +1103,12 @@ func TestChatRuntimeTurnEmitsHooksAndPersistsHistory(t *testing.T) {
 				Type:    llm.BlockToolUse,
 				ToolUse: &llm.ToolUse{ID: "call-1", Name: "runtime_test", Input: json.RawMessage(`{"ok":true}`)},
 			}}},
-			Usage: llm.Usage{InputTokens: 3, OutputTokens: 5},
+			Usage: llm.Usage{InputTokens: 3, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30},
 		}},
 		{response: llm.Response{
 			StopReason: llm.StopEndTurn,
 			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}},
-			Usage:      llm.Usage{InputTokens: 2, OutputTokens: 7},
+			Usage:      llm.Usage{InputTokens: 2, OutputTokens: 7, CacheReadInputTokens: 40},
 		}, stream: "done"},
 	}}
 	runtime.agent.Tools = tool.NewRegistry(runtimeTestTool{})
@@ -1142,7 +1142,7 @@ func TestChatRuntimeTurnEmitsHooksAndPersistsHistory(t *testing.T) {
 		t.Fatalf("tool duration = %dms, want a non-negative server measurement", finished.DurationMS)
 	}
 	done := events[len(events)-1]
-	if done.Kind != chatpkg.EventTurnDone || done.Usage != (llm.Usage{InputTokens: 5, OutputTokens: 12}) {
+	if done.Kind != chatpkg.EventTurnDone || done.Usage != (llm.Usage{InputTokens: 5, OutputTokens: 12, CacheCreationInputTokens: 20, CacheReadInputTokens: 70}) {
 		t.Fatalf("turn_done = %+v", done)
 	}
 	turns, err := sessions.Turns(ctx, state.SessionID)
@@ -1373,7 +1373,7 @@ func TestChatRuntimeCommandResults(t *testing.T) {
 			},
 			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
 				t.Helper()
-				want := "Current session totals: requests=2 input=4 output=6 reserved=0\nPersisted aggregate totals: requests=4 input=12 output=16 reserved=0"
+				want := "Current session totals: requests=2 input=4 cache_write=0 cache_read=0 output=6 reserved=0\nPersisted aggregate totals: requests=4 input=12 cache_write=0 cache_read=0 output=16 reserved=0"
 				if got.Title != "Usage" || len(got.Usage) != 6 || got.Text != want {
 					t.Fatalf("usage result = %+v\ntext=%q", got, got.Text)
 				}

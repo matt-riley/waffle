@@ -46,6 +46,12 @@ type tokenEntry struct {
 type Upstream struct {
 	// Name routes requests: the broker serves /<name>/<upstream path>.
 	Name string
+	// Kind is the provider type the upstream speaks ("anthropic" or
+	// "openai"; the latter covers any OpenAI-compatible endpoint). It
+	// selects the cost model used when budget binding prices the cache
+	// tokens of metered traffic; empty means unknown and prices as
+	// Anthropic, the legacy default (#247).
+	Kind string
 	// BaseURL of the real provider (e.g. https://api.anthropic.com).
 	BaseURL string
 	// Header is the auth header to inject ("x-api-key" or "Authorization").
@@ -92,6 +98,7 @@ type Broker struct {
 	gitScope map[string]string     // session id → bound repo (owner/name)
 	limits   map[string]usage.Limits
 	budgets  map[string]string
+	kinds    map[string]string // upstream name → provider type ("anthropic"/"openai")
 	Usage    *usage.Store
 	Limits   usage.Limits
 	// TokenTTL is the lifetime of minted wk_ tokens. Zero means DefaultTokenTTL.
@@ -125,6 +132,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		gitScope:  map[string]string{},
 		limits:    map[string]usage.Limits{},
 		budgets:   map[string]string{},
+		kinds:     map[string]string{},
 	}
 
 	if st != nil {
@@ -151,6 +159,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 			},
 		}
 		b.upstreams[u.Name] = proxy
+		b.kinds[u.Name] = u.Kind
 	}
 	return b
 }
@@ -395,10 +404,11 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid provider request body", http.StatusBadRequest)
 		return
 	}
+	kind := b.kinds[name]
 	reserved := 0
 	if b.Usage != nil {
 		var err error
-		reserved, err = b.Usage.ReserveRequestAt(r.Context(), budgetKey, limits, requestAt, declared, reserveRemaining)
+		reserved, err = b.Usage.ReserveRequestAt(r.Context(), budgetKey, kind, limits, requestAt, declared, reserveRemaining)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "usage limit exceeded") {
@@ -416,7 +426,11 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	capture := &usageResponseWriter{ResponseWriter: w}
 	proxy.ServeHTTP(capture, r)
 	if b.Usage != nil {
-		if err := b.Usage.ReconcileReservationAt(context.WithoutCancel(r.Context()), budgetKey, requestAt, reserved, capture.providerUsage()); err != nil {
+		// Attribute the captured usage to the upstream's provider type so
+		// its cache tokens price at the provider's own multipliers (#247).
+		usage := capture.providerUsage()
+		usage.Provider = kind
+		if err := b.Usage.ReconcileReservationAt(context.WithoutCancel(r.Context()), budgetKey, requestAt, reserved, usage); err != nil {
 			b.record(context.WithoutCancel(r.Context()), token, sessionID, "usage-error", err.Error())
 		}
 	}
@@ -652,12 +666,9 @@ func parseTrailingUsage(body []byte) llm.Usage {
 	if json.NewDecoder(bytes.NewReader(rest[colon+1:])).Decode(&raw) != nil {
 		return llm.Usage{}
 	}
-	input := billedInputTokens(raw)
-	output := maxJSONInt(raw, "output_tokens", "completion_tokens")
-	if input == 0 && output == 0 {
-		input = maxJSONInt(raw, "total_tokens")
-	}
-	return llm.Usage{InputTokens: input, OutputTokens: output}
+	var result llm.Usage
+	observeUsageObject(raw, &result)
+	return result
 }
 
 func mergeUsage(dst *llm.Usage, src llm.Usage) {
@@ -666,6 +677,12 @@ func mergeUsage(dst *llm.Usage, src llm.Usage) {
 	}
 	if src.OutputTokens > dst.OutputTokens {
 		dst.OutputTokens = src.OutputTokens
+	}
+	if src.CacheCreationInputTokens > dst.CacheCreationInputTokens {
+		dst.CacheCreationInputTokens = src.CacheCreationInputTokens
+	}
+	if src.CacheReadInputTokens > dst.CacheReadInputTokens {
+		dst.CacheReadInputTokens = src.CacheReadInputTokens
 	}
 }
 
@@ -752,17 +769,7 @@ func walkUsage(value any, result *llm.Usage) {
 		return
 	}
 	if raw, ok := m["usage"].(map[string]any); ok {
-		input := billedInputTokens(raw)
-		output := maxJSONInt(raw, "output_tokens", "completion_tokens")
-		if input == 0 && output == 0 {
-			input = maxJSONInt(raw, "total_tokens")
-		}
-		if input > result.InputTokens {
-			result.InputTokens = input
-		}
-		if output > result.OutputTokens {
-			result.OutputTokens = output
-		}
+		observeUsageObject(raw, result)
 	}
 	for _, child := range m {
 		walkUsage(child, result)
@@ -785,26 +792,50 @@ func maxJSONInt(m map[string]any, keys ...string) int {
 	return best
 }
 
-// billedInputTokens follows Anthropic's billing contract: cached input is
-// additive, not an alternative observation. OpenAI-compatible prompt_tokens
-// remains an alias of input_tokens when cache fields are absent.
-func billedInputTokens(m map[string]any) int {
-	_, hasCreation := m["cache_creation_input_tokens"]
-	_, hasRead := m["cache_read_input_tokens"]
-	if !hasCreation && !hasRead {
-		return maxJSONInt(m, "input_tokens", "prompt_tokens")
+// observeUsageObject extracts the token counters from one provider usage
+// object into result, carrying cache fields separately so sandboxed traffic
+// meters byte-identically to host traffic (the translators split the same
+// wire fields). InputTokens always means uncached input:
+//
+//   - Anthropic reports disjoint fields: input_tokens already excludes
+//     cache_creation_input_tokens and cache_read_input_tokens, which are
+//     additive for billing.
+//   - OpenAI-compatible endpoints report prompt_tokens as the *total*
+//     including prompt_tokens_details.cached_tokens; the cached subset is
+//     subtracted out so the three counters sum to the reported total.
+//
+// A usage object with none of these fields yields zeroed counters — never a
+// panic, never a negative total.
+func observeUsageObject(raw map[string]any, result *llm.Usage) {
+	input := maxJSONInt(raw, "input_tokens", "prompt_tokens")
+	output := maxJSONInt(raw, "output_tokens", "completion_tokens")
+	if input == 0 && output == 0 {
+		input = maxJSONInt(raw, "total_tokens")
 	}
-	total := maxJSONInt(m, "input_tokens")
-	total = saturatingAdd(total, maxJSONInt(m, "cache_creation_input_tokens"))
-	return saturatingAdd(total, maxJSONInt(m, "cache_read_input_tokens"))
-}
-
-func saturatingAdd(a, b int) int {
-	maxInt := int(^uint(0) >> 1)
-	if b > maxInt-a {
-		return maxInt
+	_, hasCreation := raw["cache_creation_input_tokens"]
+	_, hasRead := raw["cache_read_input_tokens"]
+	switch {
+	case hasCreation || hasRead:
+		result.CacheCreationInputTokens = max(result.CacheCreationInputTokens, maxJSONInt(raw, "cache_creation_input_tokens"))
+		result.CacheReadInputTokens = max(result.CacheReadInputTokens, maxJSONInt(raw, "cache_read_input_tokens"))
+	case input > 0:
+		if details, ok := raw["prompt_tokens_details"].(map[string]any); ok {
+			if cached := maxJSONInt(details, "cached_tokens"); cached > 0 {
+				result.CacheReadInputTokens = max(result.CacheReadInputTokens, cached)
+				if cached >= input {
+					input = 0
+				} else {
+					input -= cached
+				}
+			}
+		}
 	}
-	return a + b
+	if input > result.InputTokens {
+		result.InputTokens = input
+	}
+	if output > result.OutputTokens {
+		result.OutputTokens = output
+	}
 }
 
 func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sessionID string) {

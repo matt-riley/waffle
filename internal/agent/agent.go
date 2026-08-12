@@ -122,6 +122,8 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	observeUsage := func(callUsage llm.Usage) error {
 		cumulativeUsage.InputTokens += callUsage.InputTokens
 		cumulativeUsage.OutputTokens += callUsage.OutputTokens
+		cumulativeUsage.CacheCreationInputTokens += callUsage.CacheCreationInputTokens
+		cumulativeUsage.CacheReadInputTokens += callUsage.CacheReadInputTokens
 		if a.Usage != nil {
 			if err := a.Usage.AddRequest(ctx, usage.BudgetKey(ctx, SessionID(ctx)), callUsage); err != nil {
 				// Losing spend lets Check pass forever once a limit is
@@ -160,23 +162,22 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 		if err != nil {
 			return history, err
 		}
-		system := a.System
-		if extraSystem != "" {
-			if system != "" {
-				system = system + "\n\n" + extraSystem
-			} else {
-				system = extraSystem
-			}
-		}
+		// extraSystem (the per-run context summary) rides in Request.SystemExtra
+		// instead of being merged into System: it changes every call, so
+		// merging would invalidate the byte-stable system prefix that
+		// providers with prompt-cache breakpoints rely on (#247). Providers
+		// without cache breakpoints append SystemExtra to the system text,
+		// so the summary is never lost.
 		if a.Log != nil {
 			a.Log.Info("provider call", "profile", effectiveProfile(a.Profile), "model", a.Model)
 		}
 		resp, err := a.Provider.Complete(ctx, llm.Request{
-			Model:     a.Model,
-			System:    system,
-			Messages:  messages,
-			Tools:     a.Tools.Defs(),
-			MaxTokens: a.MaxTokens,
+			Model:       a.Model,
+			System:      a.System,
+			SystemExtra: extraSystem,
+			Messages:    messages,
+			Tools:       a.Tools.Defs(),
+			MaxTokens:   a.MaxTokens,
 		}, func(e llm.Event) {
 			if e.Type == llm.EventTextDelta && hooks.OnText != nil {
 				hooks.OnText(e.Text)

@@ -150,7 +150,7 @@ func TestSharedDTOsUseStableJSONFieldNames(t *testing.T) {
 		{OpenOptions{Continue: true, SessionID: "s", Profile: "p", Capabilities: []string{"c"}}, []string{"continue", "session_id", "profile", "capabilities"}},
 		{Model{Alias: "a", Provider: "p", Upstream: "u", Current: true}, []string{"alias", "provider", "upstream", "current"}},
 		{Session{ID: "s", Title: "t", Summary: "x", ModelAlias: "a", UpdatedAt: stamp}, []string{"id", "title", "summary", "model_alias", "updated_at"}},
-		{UsageRow{SessionID: "s", Period: "day", PeriodStart: "today", Requests: 1, InputTokens: 2, OutputTokens: 3, ReservedTokens: 4}, []string{"session_id", "period", "period_start", "requests", "input_tokens", "output_tokens", "reserved_tokens"}},
+		{UsageRow{SessionID: "s", Period: "day", PeriodStart: "today", Requests: 1, InputTokens: 2, OutputTokens: 3, ReservedTokens: 4, CacheCreationInputTokens: 5, CacheReadInputTokens: 6}, []string{"session_id", "period", "period_start", "requests", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "reserved_tokens"}},
 		{PermissionView{SandboxMode: "read-only", Allow: []string{"read"}, Deny: []string{"bash"}, DenyPrefixes: []string{"secret"}}, []string{"sandbox_mode", "allow", "deny", "deny_prefixes"}},
 		{WorkItem{ID: "w", Text: "work"}, []string{"id", "text"}},
 		{SkillRef{Name: "reviewer", Description: "review changes", Attached: true, Missing: false}, []string{"name", "description", "attached", "missing"}},

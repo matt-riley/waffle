@@ -34,31 +34,35 @@ func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) (err er
 		return writeJSON(out, outRows)
 	}
 	for _, r := range rows {
-		fmt.Fprintf(out, "%s %s requests=%d input=%d output=%d reserved=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.OutputTokens, r.ReservedTokens)
+		fmt.Fprintf(out, "%s %s requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens, r.OutputTokens, r.ReservedTokens)
 	}
 	return nil
 }
 
 // usageRowJSON is the machine-readable shape for `waffle usage --json`.
 type usageRowJSON struct {
-	SessionID      string `json:"session_id"`
-	Period         string `json:"period"`
-	PeriodStart    string `json:"period_start"`
-	Requests       int    `json:"requests"`
-	InputTokens    int    `json:"input_tokens"`
-	OutputTokens   int    `json:"output_tokens"`
-	ReservedTokens int    `json:"reserved_tokens"`
+	SessionID                string `json:"session_id"`
+	Period                   string `json:"period"`
+	PeriodStart              string `json:"period_start"`
+	Requests                 int    `json:"requests"`
+	InputTokens              int    `json:"input_tokens"`
+	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
+	OutputTokens             int    `json:"output_tokens"`
+	ReservedTokens           int    `json:"reserved_tokens"`
 }
 
 func usageRowToJSON(r usagepkg.Row) usageRowJSON {
 	return usageRowJSON{
-		SessionID:      r.SessionID,
-		Period:         r.Period,
-		PeriodStart:    r.PeriodStart,
-		Requests:       r.Requests,
-		InputTokens:    r.InputTokens,
-		OutputTokens:   r.OutputTokens,
-		ReservedTokens: r.ReservedTokens,
+		SessionID:                r.SessionID,
+		Period:                   r.Period,
+		PeriodStart:              r.PeriodStart,
+		Requests:                 r.Requests,
+		InputTokens:              r.InputTokens,
+		CacheCreationInputTokens: r.CacheCreationInputTokens,
+		CacheReadInputTokens:     r.CacheReadInputTokens,
+		OutputTokens:             r.OutputTokens,
+		ReservedTokens:           r.ReservedTokens,
 	}
 }
 

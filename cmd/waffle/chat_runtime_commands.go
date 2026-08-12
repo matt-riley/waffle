@@ -392,9 +392,9 @@ func (r *chatRuntime) commandUsage(ctx context.Context) (chatpkg.Result, error) 
 	currentTotals := totalUsageRows(current)
 	aggregateTotals := totalUsageRows(aggregate)
 	text := fmt.Sprintf(
-		"Current session totals: requests=%d input=%d output=%d reserved=%d\nPersisted aggregate totals: requests=%d input=%d output=%d reserved=%d",
-		currentTotals.Requests, currentTotals.InputTokens, currentTotals.OutputTokens, currentTotals.ReservedTokens,
-		aggregateTotals.Requests, aggregateTotals.InputTokens, aggregateTotals.OutputTokens, aggregateTotals.ReservedTokens,
+		"Current session totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d\nPersisted aggregate totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d",
+		currentTotals.Requests, currentTotals.InputTokens, currentTotals.CacheCreationInputTokens, currentTotals.CacheReadInputTokens, currentTotals.OutputTokens, currentTotals.ReservedTokens,
+		aggregateTotals.Requests, aggregateTotals.InputTokens, aggregateTotals.CacheCreationInputTokens, aggregateTotals.CacheReadInputTokens, aggregateTotals.OutputTokens, aggregateTotals.ReservedTokens,
 	)
 	return chatpkg.Result{Title: "Usage", Text: text, Usage: rows}, nil
 }
@@ -405,7 +405,10 @@ func chatUsageRows(rows []usagepkg.Row) []chatpkg.UsageRow {
 		out[i] = chatpkg.UsageRow{
 			SessionID: row.SessionID, Period: row.Period, PeriodStart: row.PeriodStart,
 			Requests: row.Requests, InputTokens: row.InputTokens,
-			OutputTokens: row.OutputTokens, ReservedTokens: row.ReservedTokens,
+			CacheCreationInputTokens: row.CacheCreationInputTokens,
+			CacheReadInputTokens:     row.CacheReadInputTokens,
+			OutputTokens:             row.OutputTokens,
+			ReservedTokens:           row.ReservedTokens,
 		}
 	}
 	return out
@@ -416,6 +419,8 @@ func totalUsageRows(rows []usagepkg.Row) usagepkg.Row {
 	for _, row := range rows {
 		total.Requests += row.Requests
 		total.InputTokens += row.InputTokens
+		total.CacheCreationInputTokens += row.CacheCreationInputTokens
+		total.CacheReadInputTokens += row.CacheReadInputTokens
 		total.OutputTokens += row.OutputTokens
 		total.ReservedTokens += row.ReservedTokens
 	}

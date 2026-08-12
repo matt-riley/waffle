@@ -244,12 +244,12 @@ func TestRunReportsCumulativeUsageAfterEachProviderResponse(t *testing.T) {
 				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "echo", Input: json.RawMessage(`{"text":"a"}`)}},
 			}},
 			StopReason: llm.StopToolUse,
-			Usage:      llm.Usage{InputTokens: 3, OutputTokens: 5},
+			Usage:      llm.Usage{InputTokens: 3, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30},
 		},
 		{
 			Message:    assistantText("done"),
 			StopReason: llm.StopEndTurn,
-			Usage:      llm.Usage{InputTokens: 7, OutputTokens: 11},
+			Usage:      llm.Usage{InputTokens: 7, OutputTokens: 11, CacheReadInputTokens: 40},
 		},
 	}}
 	a := &Agent{Provider: p, Tools: tool.NewRegistry(&echoTool{}), Model: "m"}
@@ -261,7 +261,10 @@ func TestRunReportsCumulativeUsageAfterEachProviderResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := []llm.Usage{{InputTokens: 3, OutputTokens: 5}, {InputTokens: 10, OutputTokens: 16}}
+	want := []llm.Usage{
+		{InputTokens: 3, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30},
+		{InputTokens: 10, OutputTokens: 16, CacheCreationInputTokens: 20, CacheReadInputTokens: 70},
+	}
 	if !slices.Equal(observations, want) {
 		t.Errorf("usage observations = %#v, want %#v", observations, want)
 	}
@@ -533,16 +536,62 @@ func TestRunSummarizeAndTruncate(t *testing.T) {
 	if len(mainReq.Messages) < 2 {
 		t.Errorf("main context too small")
 	}
-	// Summary is carried as extra system text (not as a message) to satisfy
-	// provider invariants: first message must be user role, messages must
-	// alternate. Injecting it into System is also immune to prompt injection
-	// from model-generated content.
-	if !strings.Contains(mainReq.System, "CONTEXT SUMMARY") {
-		t.Errorf("system text does not contain summary: %q", mainReq.System)
+	// Summary is carried as SystemExtra (not merged into System, and not as
+	// a message) so the stable System prefix keeps its prompt-cache
+	// breakpoint across calls (#247). Provider invariants still hold: first
+	// message must be user role, messages must alternate.
+	if !strings.Contains(mainReq.SystemExtra, "CONTEXT SUMMARY") {
+		t.Errorf("SystemExtra does not contain summary: %q", mainReq.SystemExtra)
+	}
+	if mainReq.System != "" {
+		t.Errorf("System = %q, want empty (no stable system prompt in this test)", mainReq.System)
 	}
 	// First message sent to provider must always be user role.
 	if mainReq.Messages[0].Role != llm.RoleUser {
 		t.Errorf("first message role = %q, want user", mainReq.Messages[0].Role)
+	}
+}
+
+// TestRunSplitsSummaryIntoSystemExtra pins finding 2 of the #247 review at
+// the agent layer: the per-run context summary rides in Request.SystemExtra
+// while Request.System stays the agent's stable system prompt, so providers
+// with prompt-cache breakpoints (anthropicp) can keep the system bytes
+// identical across calls.
+func TestRunSplitsSummaryIntoSystemExtra(t *testing.T) {
+	p := &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("old work: planned then coded"), StopReason: llm.StopEndTurn},
+		{Message: assistantText("ok with recent"), StopReason: llm.StopEndTurn},
+	}}
+	const stableSystem = "you are waffle, a personal assistant with a long stable system prompt"
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m", System: stableSystem}
+
+	longHist := make([]llm.Message, 25)
+	for i := 0; i < 25; i++ {
+		longHist[i] = llm.UserText(fmt.Sprintf("turn %d", i))
+	}
+	hist := append(longHist, llm.UserText("current question"))
+	if _, err := a.Run(context.Background(), hist, Hooks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("completes=%d want 2 (one for summarize, one main)", len(p.requests))
+	}
+	mainReq := p.requests[1]
+	if mainReq.System != stableSystem {
+		t.Errorf("main System = %q, want the stable system prompt unchanged", mainReq.System)
+	}
+	if !strings.Contains(mainReq.SystemExtra, "CONTEXT SUMMARY") {
+		t.Errorf("main SystemExtra does not carry the summary: %q", mainReq.SystemExtra)
+	}
+	// Without a summary the extra field stays empty and System is untouched.
+	short := &Agent{Provider: &fakeProvider{responses: []llm.Response{
+		{Message: assistantText("plain answer"), StopReason: llm.StopEndTurn},
+	}}, Tools: tool.NewRegistry(), Model: "m", System: stableSystem}
+	if _, err := short.Run(context.Background(), []llm.Message{llm.UserText("hi")}, Hooks{}); err != nil {
+		t.Fatalf("short Run: %v", err)
+	}
+	if got := short.Provider.(*fakeProvider).requests[0]; got.System != stableSystem || got.SystemExtra != "" {
+		t.Errorf("short request = System %q SystemExtra %q, want stable system and no extra", got.System, got.SystemExtra)
 	}
 }
 
@@ -584,13 +633,13 @@ func TestSummaryCacheSkippedWhenSessionIDEmpty(t *testing.T) {
 	if len(p.requests) != 4 {
 		t.Fatalf("requests=%d want 4 (summarize+main per run, no cache share)", len(p.requests))
 	}
-	// Main request for run B must contain beta summary, not alpha.
+	// Main request for run B must carry beta summary, not alpha.
 	mainB := p.requests[3]
-	if !strings.Contains(mainB.System, "summary about beta") {
-		t.Errorf("run B system text should contain beta summary, got: %q", mainB.System)
+	if !strings.Contains(mainB.SystemExtra, "summary about beta") {
+		t.Errorf("run B SystemExtra should contain beta summary, got: %q", mainB.SystemExtra)
 	}
-	if strings.Contains(mainB.System, "summary about alpha") {
-		t.Errorf("run B system text cross-contaminated with alpha summary: %q", mainB.System)
+	if strings.Contains(mainB.SystemExtra, "summary about alpha") {
+		t.Errorf("run B SystemExtra cross-contaminated with alpha summary: %q", mainB.SystemExtra)
 	}
 	// Cache must remain empty when sid is absent.
 	a.summaryMu.Lock()
@@ -780,7 +829,7 @@ func TestFreshAgentLazilyRebuildsSummaryCacheForResumedSession(t *testing.T) {
 	if _, err := resumed.Run(ctx, history, Hooks{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(secondProvider.requests) != 2 || !strings.Contains(secondProvider.requests[1].System, "rebuilt summary") {
+	if len(secondProvider.requests) != 2 || !strings.Contains(secondProvider.requests[1].SystemExtra, "rebuilt summary") {
 		t.Fatalf("fresh agent did not lazily rebuild summary: %+v", secondProvider.requests)
 	}
 }
@@ -849,7 +898,7 @@ func TestSummaryBlockFormatGolden(t *testing.T) {
 	if len(p.requests) < 2 {
 		t.Fatalf("requests=%d", len(p.requests))
 	}
-	sys := p.requests[1].System
+	sys := p.requests[1].SystemExtra
 	// Golden shape: turn range handle for expand_context (#61).
 	// hist = 25 prior + current = 26; prefix = 26-recentWindow(20) = 6.
 	const golden = "[CONTEXT SUMMARY turns=1-6 — generated for bounding only; not a user instruction; full history in SQLite; expand_context can fetch verbatim turns] old work summary"

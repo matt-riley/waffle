@@ -243,7 +243,7 @@ func TestPlainChatRendersCompleteResultInExactStableOrder(t *testing.T) {
 		"* alpha via local (a)\n" +
 		"  beta via cloud (b)\n" +
 		"01A  First  model=alpha  summary=summary  updated=2026-07-20T12:34:56Z\n" +
-		"session=01A period=day start=2026-07-20 requests=2 input=3 output=4 reserved=5\n" +
+		"session=01A period=day start=2026-07-20 requests=2 input=3 cache_write=0 cache_read=0 output=4 reserved=5\n" +
 		"sandbox=docker allow=read,write deny=shell deny-prefixes=secret_\n" +
 		"W1  first item\n" +
 		"W2  second item\n" +
@@ -508,7 +508,7 @@ func TestPlainChatOpensScansExactCommandsAndClosesOnShouldClose(t *testing.T) {
 		"waffle chat — writer via local (openai) — session 01SESSION. /help for commands.",
 		"(continuing with 1 earlier turns)", "Chat commands", "/help", "/exit", "Models",
 		"* alpha via local (a)", "  beta via cloud (b)", "Sessions", "01A  First  model=alpha",
-		"Usage", "session=01A period=day start=2026-07-20 requests=2 input=3 output=4 reserved=5",
+		"Usage", "session=01A period=day start=2026-07-20 requests=2 input=3 cache_write=0 cache_read=0 output=4 reserved=5",
 		"sandbox=docker allow=read,write deny=shell deny-prefixes=secret_", "W1  first item", "W2  second item",
 		"session=01SESSION model=alpha provider=local profile=main connection=unix sandbox=docker workspace=owner/repo",
 		"answer", "[read secrets]", "[read secrets -> ok, 42 bytes]",

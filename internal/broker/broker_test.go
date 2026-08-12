@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/usage"
 )
@@ -678,7 +679,12 @@ func TestProxyAccountsStreamingUsageOnce(t *testing.T) {
 	}
 }
 
-func TestAnthropicJSONCacheUsageConsumesFullDailyBudget(t *testing.T) {
+// TestAnthropicJSONCacheUsageBindsOnTrueCost pins the accounting half of
+// prompt caching (#247): the persisted row carries raw uncached/cache-write/
+// cache-read counters, and the budget binds on true cost (10 + 20*1.25 +
+// 30*0.1 + 5 = 43 billed tokens) rather than the pre-cache total (65), so a
+// follow-up that would have been refused under the old arithmetic is allowed.
+func TestAnthropicJSONCacheUsageBindsOnTrueCost(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -706,22 +712,44 @@ func TestAnthropicJSONCacheUsageConsumesFullDailyBudget(t *testing.T) {
 	if got := do(70); got != http.StatusOK {
 		t.Fatalf("first status=%d", got)
 	}
-	if got := do(30); got != http.StatusTooManyRequests {
-		t.Fatalf("cached follow-up status=%d", got)
+	// The first request's counters reconcile as raw 10/20/30/5.
+	rows, err := b.Usage.List(context.Background(), "anthropic-json-cache")
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertDayUsage(t, b.Usage, "anthropic-json-cache", 65, 0)
-	if got := calls.Load(); got != 1 {
+	for _, row := range rows {
+		if row.Period == "day" {
+			if row.InputTokens != 10 || row.CacheCreationInputTokens != 20 || row.CacheReadInputTokens != 30 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
+				t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", row)
+			}
+		}
+	}
+	// Declared 46 (max_tokens 30 + 16-byte body): naive total 65+46=111 would
+	// exceed the 100-token budget; true cost 43+46=89 must pass.
+	if got := do(30); got != http.StatusOK {
+		t.Fatalf("cached follow-up status=%d, want OK under true-cost binding", got)
+	}
+	// Declared 76 (max_tokens 58 + 18-byte body): 43+76=119 > 100 even at
+	// true cost, so the budget still binds.
+	if got := do(58); got != http.StatusTooManyRequests {
+		t.Fatalf("over-budget status=%d, want 429", got)
+	}
+	if got := calls.Load(); got != 2 {
 		t.Fatalf("upstream calls=%d", got)
 	}
 }
 
-func TestAnthropicSSECacheUsageConsumesFullDailyBudget(t *testing.T) {
+// TestAnthropicSSECacheUsageBindsOnTrueCost is the SSE twin of
+// TestAnthropicJSONCacheUsageBindsOnTrueCost: the cache counters are split
+// out of the streamed message_start/message_delta usage objects and the
+// budget binds on the same true cost as the JSON path.
+func TestAnthropicSSECacheUsageBindsOnTrueCost(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30,\"output_tokens\":0}}}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"output_tokens\":0}}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":30,\"output_tokens\":5}}\n\n")
 		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
 	}))
 	defer upstream.Close()
@@ -746,42 +774,174 @@ func TestAnthropicSSECacheUsageConsumesFullDailyBudget(t *testing.T) {
 	if got := do(70); got != http.StatusOK {
 		t.Fatalf("first status=%d", got)
 	}
-	if got := do(30); got != http.StatusTooManyRequests {
-		t.Fatalf("cached follow-up status=%d", got)
-	}
-	assertDayUsage(t, b.Usage, "anthropic-sse-cache", 65, 0)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("upstream calls=%d", got)
-	}
-}
-
-func TestProviderUsageCacheSumSaturatesAndPreservesOpenAIAliases(t *testing.T) {
-	openAI := parseProviderUsage([]byte(`{"usage":{"input_tokens":7,"prompt_tokens":9,"completion_tokens":5}}`))
-	if openAI.InputTokens != 9 || openAI.OutputTokens != 5 {
-		t.Fatalf("OpenAI aliases changed: %+v", openAI)
-	}
-	maxInt := int(^uint(0) >> 1)
-	anthropic := parseProviderUsage([]byte(`{"usage":{"input_tokens":9e100,"cache_creation_input_tokens":9e100,"cache_read_input_tokens":9e100,"output_tokens":1}}`))
-	if anthropic.InputTokens != maxInt || anthropic.OutputTokens != 1 {
-		t.Fatalf("Anthropic saturation failed: %+v", anthropic)
-	}
-}
-
-func assertDayUsage(t *testing.T, u *usage.Store, session string, actual, reserved int) {
-	t.Helper()
-	rows, err := u.List(context.Background(), session)
+	// The streamed message_start/message_delta usage reconciles as raw
+	// 10/20/30/5, byte-identical to the JSON path.
+	rows, err := b.Usage.List(context.Background(), "anthropic-sse-cache")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
 		if row.Period == "day" {
-			if got := row.InputTokens + row.OutputTokens; got != actual || row.ReservedTokens != reserved {
-				t.Fatalf("day actual=%d reserved=%d rows=%+v", got, row.ReservedTokens, rows)
+			if row.InputTokens != 10 || row.CacheCreationInputTokens != 20 || row.CacheReadInputTokens != 30 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
+				t.Fatalf("day row = %+v, want raw counters 10/20/30/5 reserved 0", row)
 			}
-			return
 		}
 	}
-	t.Fatalf("day usage row missing: %+v", rows)
+	// Naive total 65+46=111 would exceed the 100-token budget; true cost
+	// 43+46=89 must pass.
+	if got := do(30); got != http.StatusOK {
+		t.Fatalf("cached follow-up status=%d, want OK under true-cost binding", got)
+	}
+	if got := do(58); got != http.StatusTooManyRequests {
+		t.Fatalf("over-budget status=%d, want 429", got)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls=%d", got)
+	}
+}
+
+func TestProviderUsageCacheFieldsSplitAndSaturate(t *testing.T) {
+	// OpenAI-compatible aliases: prompt_tokens wins over input_tokens, and
+	// no cache fields means zeroed cache counters.
+	openAI := parseProviderUsage([]byte(`{"usage":{"input_tokens":7,"prompt_tokens":9,"completion_tokens":5}}`))
+	if openAI != (llm.Usage{InputTokens: 9, OutputTokens: 5}) {
+		t.Fatalf("OpenAI aliases changed: %+v", openAI)
+	}
+	// OpenAI-compatible cached_tokens: prompt_tokens includes the cached
+	// subset, which is split out into CacheReadInputTokens.
+	cached := parseProviderUsage([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`))
+	if cached != (llm.Usage{InputTokens: 7, OutputTokens: 5, CacheReadInputTokens: 3}) {
+		t.Fatalf("OpenAI cached split failed: %+v", cached)
+	}
+	// Anthropic disjoint fields: input_tokens stays uncached, cache fields
+	// are carried separately.
+	anthropic := parseProviderUsage([]byte(`{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}`))
+	if anthropic != (llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}) {
+		t.Fatalf("Anthropic cache fields failed: %+v", anthropic)
+	}
+	// A provider response with no usage object yields zeroed counters —
+	// never a panic, never a negative total.
+	if got := parseProviderUsage([]byte(`{"id":"msg_1"}`)); got != (llm.Usage{}) {
+		t.Fatalf("missing usage = %+v, want zeroed", got)
+	}
+	if got := parseProviderUsage([]byte(`{"usage":{"prompt_tokens":5,"prompt_tokens_details":{"cached_tokens":9}}}`)); got.InputTokens != 0 || got.CacheReadInputTokens != 9 {
+		t.Fatalf("over-reported cached tokens went negative: %+v", got)
+	}
+	maxInt := int(^uint(0) >> 1)
+	saturated := parseProviderUsage([]byte(`{"usage":{"input_tokens":9e100,"cache_creation_input_tokens":9e100,"cache_read_input_tokens":9e100,"output_tokens":1}}`))
+	if saturated != (llm.Usage{InputTokens: maxInt, OutputTokens: 1, CacheCreationInputTokens: maxInt, CacheReadInputTokens: maxInt}) {
+		t.Fatalf("Anthropic saturation failed: %+v", saturated)
+	}
+}
+
+// TestParseTrailingUsageCarriesCacheFields pins the large-JSON tail path for
+// both wire dialects (#247).
+func TestParseTrailingUsageCarriesCacheFields(t *testing.T) {
+	anthropic := parseTrailingUsage([]byte(`{"id":"msg_1","content":[],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}`))
+	if anthropic != (llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}) {
+		t.Fatalf("anthropic tail = %+v", anthropic)
+	}
+	openai := parseTrailingUsage([]byte(`{"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`))
+	if openai != (llm.Usage{InputTokens: 7, OutputTokens: 5, CacheReadInputTokens: 3}) {
+		t.Fatalf("openai tail = %+v", openai)
+	}
+	if got := parseTrailingUsage([]byte(`{"id":"x"}`)); got != (llm.Usage{}) {
+		t.Fatalf("tail without usage = %+v, want zeroed", got)
+	}
+}
+
+// TestSandboxedMetersByteIdenticallyToHost pins that the broker's parse
+// paths split cache fields exactly as the translators do, so sandboxed
+// traffic meters identically to host traffic for the same wire usage. The
+// fixtures are byte-identical to the ones the translator tests consume
+// (anthropicp: message usage object; openaip: final stream chunk).
+func TestSandboxedMetersByteIdenticallyToHost(t *testing.T) {
+	// Anthropic wire shape — anthropicp.fromMessage maps the same object to
+	// llm.Usage{InputTokens:10, OutputTokens:5, CacheCreationInputTokens:20,
+	// CacheReadInputTokens:30}.
+	anthropicWire := `{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}`
+	if got := parseProviderUsage([]byte(anthropicWire)); got != (llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}) {
+		t.Fatalf("anthropic metering diverged from host translator: %+v", got)
+	}
+	if got := parseTrailingUsage([]byte(`{"id":"m","content":[],` + anthropicWire[1:])); got != (llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}) {
+		t.Fatalf("anthropic tail metering diverged from host translator: %+v", got)
+	}
+	// OpenAI wire shape — openaip.readStream maps the same final chunk to
+	// llm.Usage{InputTokens:7, OutputTokens:5, CacheReadInputTokens:3}.
+	openaiWire := `{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`
+	if got := parseProviderUsage([]byte(openaiWire)); got != (llm.Usage{InputTokens: 7, OutputTokens: 5, CacheReadInputTokens: 3}) {
+		t.Fatalf("openai metering diverged from host translator: %+v", got)
+	}
+}
+
+// TestSSECacheUsageSplitAcrossEvents pins the incremental accumulation: the
+// cache-creation count arrives on message_start and the cache-read count on
+// message_delta, and providerUsage merges them per-field.
+func TestSSECacheUsageSplitAcrossEvents(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/event-stream")
+	w := &usageResponseWriter{ResponseWriter: recorder}
+	for _, line := range []string{
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"output_tokens\":0}}}\n\n",
+		"data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":30,\"output_tokens\":5}}\n\n",
+		"data: {\"type\":\"message_stop\"}\n\n",
+	} {
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := w.providerUsage(); got != (llm.Usage{InputTokens: 10, OutputTokens: 5, CacheCreationInputTokens: 20, CacheReadInputTokens: 30}) {
+		t.Fatalf("sse usage = %+v", got)
+	}
+}
+
+// TestPartialSSECacheUsageDoesNotRecordPartialCounts pins the cancellation
+// contract: a stream aborted mid-flight (here after message_start, which
+// already carried a cache-creation count) must not record a partial cache
+// count as if complete — the reservation stays charged instead.
+func TestPartialSSECacheUsageDoesNotRecordPartialCounts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"output_tokens\":0}}}\n\n")
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "p", BaseURL: upstream.URL, Header: "Authorization", Value: "real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 100}
+	token, _ := b.Mint(context.Background(), "partial-sse-cache")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	do := func(max int) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/p/v1", strings.NewReader(fmt.Sprintf(`{"max_tokens":%d}`, max)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := do(80); got != http.StatusOK {
+		t.Fatalf("partial stream status=%d", got)
+	}
+	// The reservation (80 + 17-byte body = 97) is retained; nothing was
+	// recorded as final, so no cache tokens leaked into the day total.
+	rows, err := b.Usage.List(context.Background(), "partial-sse-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Period == "day" {
+			if row.InputTokens != 0 || row.CacheCreationInputTokens != 0 || row.CacheReadInputTokens != 0 || row.OutputTokens != 0 || row.ReservedTokens != 97 {
+				t.Fatalf("day row = %+v, want zeroed counters with reservation retained", row)
+			}
+		}
+	}
+	if got := do(1); got != http.StatusTooManyRequests {
+		t.Fatalf("post-partial status=%d, reservation was released", got)
+	}
 }
 
 func TestSSEResponseWriterDoesNotRetainResponseBody(t *testing.T) {
@@ -1624,5 +1784,64 @@ func TestConnectDenialAuditNamesTheTarget(t *testing.T) {
 	}
 	if !strings.Contains(detail, "blocked.example:443") {
 		t.Fatalf("denial detail = %q, want the CONNECT target named", detail)
+	}
+}
+
+// TestOpenAIKindCacheUsageBindsOnHalfRate pins finding 1 of the #247
+// review through the broker: metered traffic fronting an upstream whose
+// Kind is "openai" records rows attributed to the openai cost model, so
+// budget binding prices cache reads at 0.5x instead of Anthropic's 0.1x.
+// The same counters under the old hardcoded Anthropic model (true cost 105)
+// would let the follow-up request through; under OpenAI pricing (true cost
+// 305) the 300-token budget binds.
+func TestOpenAIKindCacheUsageBindsOnHalfRate(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"usage":{"input_tokens":50,"cache_read_input_tokens":500,"output_tokens":5}}`)
+	}))
+	defer upstream.Close()
+	st := openStore(t)
+	b := New(st, []Upstream{{Name: "openai", Kind: "openai", BaseURL: upstream.URL, Header: "Authorization", Value: "Bearer real"}})
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TokensPerDay: 300}
+	token, _ := b.Mint(context.Background(), "openai-kind-cache")
+	front := httptest.NewServer(b)
+	defer front.Close()
+	do := func(max int) int {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"max_tokens":%d}`, max)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := do(70); got != http.StatusOK {
+		t.Fatalf("first status=%d", got)
+	}
+	// The reconciled row is attributed to openai with raw counters
+	// 50/500/5, and its true cost is 50 + 500*0.5 + 5 = 305.
+	rows, err := b.Usage.List(context.Background(), "openai-kind-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Period == "day" {
+			if row.Provider != "openai" || row.InputTokens != 50 || row.CacheReadInputTokens != 500 || row.OutputTokens != 5 || row.ReservedTokens != 0 {
+				t.Fatalf("day row = %+v, want openai 50/500/5 reserved 0", row)
+			}
+		}
+	}
+	// True cost 305 exceeds the 300-token budget: the follow-up is refused.
+	// Under Anthropic pricing (105) it would have passed.
+	if got := do(20); got != http.StatusTooManyRequests {
+		t.Fatalf("follow-up status=%d, want 429 under openai 0.5x pricing", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls=%d, want 1 (follow-up refused before dispatch)", got)
 	}
 }
