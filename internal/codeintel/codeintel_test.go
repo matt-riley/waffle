@@ -485,7 +485,7 @@ func TestGoOnlyToolOutputRemainsArray(t *testing.T) {
 	}
 }
 
-func TestNoSupportedFilesReportsClearly(t *testing.T) {
+func TestNoSupportedFilesReportsLimitation(t *testing.T) {
 	// A repository with no supported source files must say so explicitly
 	// rather than reporting zero symbols (#255).
 	dir := t.TempDir()
@@ -540,7 +540,7 @@ func TestNoSupportedFilesReportsClearly(t *testing.T) {
 	}
 }
 
-func TestIndexWalkCancellation(t *testing.T) {
+func TestCancelledIndexWalkAbortsWithoutPartialResults(t *testing.T) {
 	dir, _ := writeFixture(t)
 
 	// Pre-cancelled: every tool aborts promptly with the cancellation error
@@ -603,7 +603,7 @@ func TestIndexWalkCancellation(t *testing.T) {
 	}
 }
 
-func TestConcurrentToolsSharedService(t *testing.T) {
+func TestConcurrentToolCallsShareServiceSafely(t *testing.T) {
 	dir := t.TempDir()
 	paths := make([]string, 0, 8)
 	for i := 0; i < 8; i++ {
@@ -690,7 +690,7 @@ func TestConcurrentToolsSharedService(t *testing.T) {
 	}
 }
 
-func TestGoResultsPinnedByteIdentical(t *testing.T) {
+func TestGoResultsAreByteIdenticalToPinnedFixture(t *testing.T) {
 	// Pinned fixture repo: Go output is byte-identical to the checked-in
 	// baseline. Any change to Go parsing or result shape fails here (#255).
 	svc := NewService("testdata/gorepo", "acme/demo", "main")
