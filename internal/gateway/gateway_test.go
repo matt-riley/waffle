@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -1507,5 +1508,331 @@ func TestConversePersistenceStaysBounded(t *testing.T) {
 	}
 	if len(turns) != 0 {
 		t.Fatalf("turns = %+v, want none written past the deadline", turns)
+	}
+}
+
+// fetchingAdapter is a fakeAdapter with attachment fetch support. It records
+// every fetch, can fail or stall them, and tracks concurrency so tests can
+// assert the gateway never downloads in parallel within one conversation.
+type fetchingAdapter struct {
+	*fakeAdapter
+	fetchErr  error
+	slow      time.Duration
+	mu        sync.Mutex
+	fetches   []string
+	active    int
+	maxActive int
+}
+
+func (f *fetchingAdapter) FetchAttachment(ctx context.Context, handle string) ([]byte, error) {
+	f.mu.Lock()
+	f.fetches = append(f.fetches, handle)
+	f.active++
+	if f.active > f.maxActive {
+		f.maxActive = f.active
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
+	if f.slow > 0 {
+		select {
+		case <-time.After(f.slow):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
+	return []byte("bytes:" + handle), nil
+}
+
+func (f *fetchingAdapter) fetchStats() (fetches []string, maxActive int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.fetches...), f.maxActive
+}
+
+// pairOwner records an identity so the gateway treats SenderID "owner" as
+// the paired owner without going through the pairing flow.
+func pairOwner(t *testing.T, st *store.Store, channel, externalID string) {
+	t.Helper()
+	if _, err := st.DB.ExecContext(context.Background(),
+		`INSERT INTO identities (channel, external_id, name, created_at) VALUES (?, ?, 'Matt', datetime('now'))`,
+		channel, externalID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBehaviorUnknownSenderAttachmentNotFetched(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter()}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "c1", SenderID: "stranger", SenderName: "S",
+		Text:        "check this",
+		Attachments: []channel.Attachment{{MediaType: "photo", Filename: "x.jpg", Size: 1, Fetch: "f-stranger"}},
+	}
+	replies := adapter.waitForReply(t, "c1", 1)
+	if !strings.Contains(replies[0], "Pairing code:") {
+		t.Fatalf("reply = %q, want pairing code", replies[0])
+	}
+	fetches, _ := adapter.fetchStats()
+	if len(fetches) != 0 {
+		t.Fatalf("stranger's attachment fetched: %v", fetches)
+	}
+}
+
+func TestBehaviorUnknownGroupSenderAttachmentNotFetched(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter()}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "-100", SenderID: "stranger", SenderName: "S",
+		Text: "@waffle check this", IsGroup: true, ChatType: "supergroup",
+		Attachments: []channel.Attachment{{MediaType: "photo", Filename: "x.jpg", Size: 1, Fetch: "f-group-stranger"}},
+	}
+	// No reply: unknown senders in groups are silently ignored (#34).
+	select {
+	case <-adapter.wake:
+		adapter.mu.Lock()
+		replies := append([]string(nil), adapter.sent["-100"]...)
+		adapter.mu.Unlock()
+		t.Fatalf("unexpected group reply to stranger: %v", replies)
+	case <-time.After(300 * time.Millisecond):
+	}
+	fetches, _ := adapter.fetchStats()
+	if len(fetches) != 0 {
+		t.Fatalf("stranger's group attachment fetched: %v", fetches)
+	}
+	pending, err := entities.Pairings(context.Background())
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("group contact created pairing: %v, %v", pending, err)
+	}
+}
+
+func TestBehaviorOwnerAttachmentFetchedAndLabelledUntrusted(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	pairOwner(t, st, "fake", "owner")
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter()}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "c1", SenderID: "owner", SenderName: "Matt",
+		Text: "the washing machine display",
+		Attachments: []channel.Attachment{
+			{MediaType: "photo", Filename: "display.jpg", MIME: "image/jpeg", Size: 5, Fetch: "f1"},
+		},
+	}
+	replies := adapter.waitForReply(t, "c1", 1)
+	turn := strings.TrimPrefix(replies[0], "echo: ")
+	if !strings.Contains(replies[0], "untrusted attachment") {
+		t.Errorf("reply = %q, want the attachment labelled untrusted", replies[0])
+	}
+	if !strings.Contains(turn, "display.jpg") || !strings.Contains(turn, "5 bytes") {
+		t.Errorf("turn = %q, want filename and size", turn)
+	}
+	if !strings.Contains(turn, "the washing machine display") {
+		t.Errorf("turn = %q, want the caption preserved", turn)
+	}
+	fetches, _ := adapter.fetchStats()
+	if len(fetches) != 1 || fetches[0] != "f1" {
+		t.Fatalf("fetches = %v, want the owner's handle fetched once", fetches)
+	}
+}
+
+func TestBehaviorOwnerAttachmentFetchFailureRepliesNotSilent(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	pairOwner(t, st, "fake", "owner")
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter(), fetchErr: errors.New("getFile: file is too big")}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "c1", SenderID: "owner", SenderName: "Matt",
+		Attachments: []channel.Attachment{{MediaType: "document", Filename: "a.pdf", Size: 2, Fetch: "f2"}},
+	}
+	replies := adapter.waitForReply(t, "c1", 1)
+	if !strings.Contains(replies[0], "not downloaded: download failed") {
+		t.Fatalf("reply = %q, want a visible download-failure explanation", replies[0])
+	}
+	fetches, _ := adapter.fetchStats()
+	if len(fetches) != 1 {
+		t.Fatalf("fetches = %v, want one attempted fetch", fetches)
+	}
+}
+
+func TestBehaviorGroupOwnerAttachmentUsesRestrictedTier(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	pairOwner(t, st, "fake", "owner")
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter()}
+	gw := &Gateway{
+		Agent: &agent.Agent{Provider: namedProvider("main"), Tools: tool.NewRegistry(), Model: "m"},
+		Agents: map[string]*agent.Agent{
+			"group": {Provider: namedProvider("group"), Tools: tool.NewRegistry(), Model: "m"},
+		},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	adapter.inbound <- channel.Message{
+		Channel: "fake", ChatID: "-99", SenderID: "owner", SenderName: "Matt",
+		Text: "check this", IsGroup: true, ChatType: "group",
+		Attachments: []channel.Attachment{{MediaType: "photo", Filename: "g.jpg", Size: 3, Fetch: "f3"}},
+	}
+	replies := adapter.waitForReply(t, "-99", 1)
+	if !strings.HasPrefix(replies[0], "group: ") {
+		t.Fatalf("reply = %q, want the restricted group tier", replies[0])
+	}
+	if !strings.Contains(replies[0], "untrusted attachment") {
+		t.Errorf("reply = %q, want untrusted labelling in the group tier too", replies[0])
+	}
+	fetches, _ := adapter.fetchStats()
+	if len(fetches) != 1 || fetches[0] != "f3" {
+		t.Fatalf("fetches = %v, want the owner's group attachment fetched", fetches)
+	}
+}
+
+func TestBehaviorAttachmentFetchSerializedPerConversation(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	pairOwner(t, st, "fake", "owner")
+
+	adapter := &fetchingAdapter{fakeAdapter: newFakeAdapter(), slow: 100 * time.Millisecond}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: scriptProvider{}, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Adapters: []channel.Adapter{adapter},
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { _ = gw.Run(runCtx) }()
+
+	for i := 0; i < 2; i++ {
+		adapter.inbound <- channel.Message{
+			Channel: "fake", ChatID: "c1", SenderID: "owner", SenderName: "Matt",
+			Attachments: []channel.Attachment{
+				{MediaType: "photo", Filename: "p.jpg", Size: 1, Fetch: fmt.Sprintf("f%d", i)},
+			},
+		}
+	}
+	adapter.waitForReply(t, "c1", 2)
+	fetches, maxActive := adapter.fetchStats()
+	if len(fetches) != 2 {
+		t.Fatalf("fetches = %v, want both attachments fetched", fetches)
+	}
+	if maxActive != 1 {
+		t.Fatalf("max concurrent fetches = %d, want 1 (per-conversation serialisation)", maxActive)
 	}
 }

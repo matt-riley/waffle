@@ -1497,3 +1497,29 @@ env = ["GITHUB_TOKEN"]
 		t.Fatal("expected secret env rejection")
 	}
 }
+
+// TestTelegramChannelConfig pins #251: the attachment cap is configurable
+// and defaults to disabled (deny-by-default), and the key is accepted by
+// Load's strict unknown-key rejection.
+func TestTelegramChannelConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[channel.telegram]
+enabled = true
+token = "secret://telegram/bot-token"
+max_attachment_bytes = 10485760
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Channel.Telegram.Enabled {
+		t.Error("enabled = false, want true")
+	}
+	if cfg.Channel.Telegram.MaxAttachmentBytes != 10485760 {
+		t.Errorf("max_attachment_bytes = %d, want 10485760", cfg.Channel.Telegram.MaxAttachmentBytes)
+	}
+	if got := Default().Channel.Telegram.MaxAttachmentBytes; got != 0 {
+		t.Errorf("default max_attachment_bytes = %d, want 0 (deny-by-default)", got)
+	}
+}

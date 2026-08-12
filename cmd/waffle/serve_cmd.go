@@ -701,7 +701,9 @@ func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
 		if token == "" {
 			return nil, errors.New("telegram enabled but no token: store one with `waffle secret set telegram/bot-token` or set TELEGRAM_BOT_TOKEN")
 		}
-		adapters = append(adapters, telegram.New(token, cfg.Channel.Telegram.BaseURL))
+		adapter := telegram.New(token, cfg.Channel.Telegram.BaseURL)
+		adapter.MaxAttachmentBytes = cfg.Channel.Telegram.MaxAttachmentBytes
+		adapters = append(adapters, adapter)
 	}
 	return adapters, nil
 }

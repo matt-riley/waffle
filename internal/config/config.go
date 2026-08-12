@@ -769,6 +769,12 @@ type Telegram struct {
 	Token string `toml:"token"`
 	// BaseURL overrides the Bot API endpoint; for tests and proxies.
 	BaseURL string `toml:"base_url"`
+	// MaxAttachmentBytes caps inbound attachment downloads; zero disables
+	// them entirely (deny-by-default — attachments are inbound data from
+	// other people). The cap is enforced before any fetch, so an oversized
+	// attachment is refused without being downloaded. config.example.toml
+	// documents a conservative example.
+	MaxAttachmentBytes int64 `toml:"max_attachment_bytes"`
 }
 
 // Provider selects and configures the LLM backend.

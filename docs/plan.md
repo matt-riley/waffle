@@ -77,6 +77,40 @@ group* is a configured agent (workspace, persona, tool policy, model
 preferences). A *session* is one conversation thread with history. This one
 chain answers routing, isolation, and storage questions uniformly.
 
+Messages may carry media attachments (see "Channel messages &
+attachments" below): decoded metadata plus a fetch handle, resolved to
+bytes only after the sender has been admitted, size-capped before any
+fetch, and labelled untrusted before the content reaches the model.
+
+### Channel messages & attachments
+
+The adapter contract is text-first in both directions (`internal/channel`):
+`Message` carries the conversation scope, sender, text (the caption for
+media messages), and — since #251 — an `Attachments` slice. An attachment
+is decoded metadata (media type, size, filename, MIME) plus either bytes or
+an opaque fetch handle; adapters decode metadata without fetching. The
+gateway resolves handles through the adapter's optional `AttachmentFetcher`
+only after the sender has been admitted, inside the conversation lock, so
+strangers' attachments are never downloaded and downloads serialize with
+handling per conversation. Inbound attachment bytes are capped by config
+(`[channel.telegram] max_attachment_bytes`, deny-by-default with a
+conservative example) *before* any fetch — an oversized attachment is
+refused without getFile or a download — and held in memory; no temp file is
+written, so there is no world-readable path and nothing to clean up on
+error or cancellation. `edited_message` updates are deliberately ignored
+with a logged reason, and no update kind is dropped without a log line.
+
+Outbound, `Send` stays text-only (splitting unchanged); adapters that can
+carry bytes implement the optional `AttachmentSender` (Telegram:
+`sendPhoto` / `sendDocument`). Callers use
+`channel.SendAttachmentOrExplain`, which degrades to a short text
+explanation on channels without attachment support instead of erroring the
+run. Inbound attachment content is labelled untrusted before it reaches
+the model, consistent with tool-output framing; until `llm.Block` can
+carry media (#250), the model sees the labelled metadata and caption, and
+every degraded path produces a user-visible reply — silence is the bug
+this design exists to prevent.
+
 ### Agent loop
 
 Plain and synchronous per session, streaming to the channel:
@@ -511,7 +545,9 @@ cmd/waffle/            main; subcommands: serve, chat, status, pair, runner,
                        secret, backup/restore, doctor, upgrade, rollback, version
 internal/gateway/      control plane: wiring, pairing, serve loop
 internal/entity/       user/channel-group/agent-group/session model
-internal/channel/      Adapter interface; telegram/ (hand-rolled Bot API HTTP)
+internal/channel/      Adapter interface; attachments (fetch/send capability
+                       interfaces); telegram/ (hand-rolled Bot API HTTP,
+                       media decode + sendPhoto/sendDocument)
 internal/agent/        the loop: context assembly, streaming, tool dispatch,
                        subagents
 internal/llm/          canonical types; anthropicp/, openaip/
