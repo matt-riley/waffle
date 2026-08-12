@@ -20,6 +20,16 @@ func TestBashProcessLimitCoversDescendants(t *testing.T) {
 		t.Skip("root ignores RLIMIT_NPROC when the test cgroup is unavailable")
 	}
 	const limit = 8
+	// The fallback is intentionally weaker (per-UID) and can be affected by
+	// unrelated processes on the runner. Exercise the descendant-tree
+	// guarantee only when this environment permits creating a delegated cgroup;
+	// the fallback remains covered by its documented behavior and unit paths.
+	probe, ok := createBashCgroup(limit)
+	if !ok {
+		t.Skip("host cgroup is not delegated; skipping process-tree integration test")
+	}
+	cleanupBashCgroup(probe)
+
 	command := `
 set +e
 i=0

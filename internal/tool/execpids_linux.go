@@ -23,7 +23,7 @@ import (
 // This keeps shell metacharacters in the requested command data rather than
 // changing the limit setup logic.
 const bashProcessCgroupScript = `
-if printf '%s\n' "$$" > "$2" 2>/dev/null; then
+if [ -n "$2" ] && printf '%s\n' "$$" > "$2" 2>/dev/null; then
 	exec bash -c -- "$1"
 fi
 # A cgroup may be unavailable (for example, an undelegated systemd service).
