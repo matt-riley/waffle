@@ -14,7 +14,7 @@ import (
 var ErrOutsideRoots = errors.New("path is outside the allowed roots")
 
 // FileRoots confines the builtin file tools (read_file, write_file, edit_file,
-// search) to a set of directory trees (#269).
+// search, list_files) to a set of directory trees (#269).
 //
 // Tool policy can deny a tool *name*, but nothing stopped a host-mode session
 // from reading ~/.ssh/id_ed25519 or writing /etc — docker mode gets OS-level

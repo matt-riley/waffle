@@ -539,7 +539,7 @@ var knownProfileTools = map[string]bool{
 	"*": true,
 	// builtins
 	"bash": true, "read_file": true, "write_file": true, "edit_file": true,
-	"fetch": true, "search": true,
+	"fetch": true, "search": true, "list_files": true,
 	// host memory / session / workset / spill
 	"remember": true, "memory_update": true, "recall": true, "distill_skill": true,
 	"workspace_update": true, "expand_output": true, "expand_context": true,

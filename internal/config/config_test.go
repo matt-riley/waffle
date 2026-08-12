@@ -2074,3 +2074,88 @@ allow = ["api_weather"]
 		t.Fatalf("Load with configured face: %v", err)
 	}
 }
+
+// TestProfileToolNamesIncludeNewTools pins #256 registration: every new tool
+// must be nameable in profile allow/deny lists so profiles and the Desk
+// editor can offer it.
+func TestProfileToolNamesIncludeNewTools(t *testing.T) {
+	names := ProfileToolNames()
+	for _, name := range []string{"list_files", "read_file", "search", "edit_file", "write_file", "bash", "fetch"} {
+		if !contains(names, name) {
+			t.Errorf("ProfileToolNames missing %q: %v", name, names)
+		}
+		if !ValidProfileTool(name) {
+			t.Errorf("ValidProfileTool(%q) = false", name)
+		}
+	}
+}
+
+// TestExampleReadOnlyProfilesCannotReachMutatingTools loads the shipped
+// example config and asserts the researcher and reviewer profiles stay
+// read-only after the #256 additions: list_files and ranged reads belong in
+// read-only profiles, batched edits (edit_file) do not.
+func TestExampleReadOnlyProfilesCannotReachMutatingTools(t *testing.T) {
+	path := filepath.Join("..", "..", "config.example.toml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The example allow lists must actually name list_files (pins the file
+	// update itself, not just the resolved behavior).
+	for _, want := range []string{
+		`allow = ["read_file", "fetch", "search", "list_files", "recall", "expand_output", "expand_context"]`,
+		`allow = ["read_file", "search", "list_files", "recall", "expand_output", "expand_context"]`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("config.example.toml missing %q", want)
+		}
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	mutating := []string{"bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr"}
+	readOnly := map[string][]string{
+		"researcher": {"read_file", "fetch", "search", "list_files", "recall", "expand_output", "expand_context"},
+		"reviewer":   {"read_file", "search", "list_files", "recall", "expand_output", "expand_context"},
+	}
+	for _, profileName := range []string{"researcher", "reviewer"} {
+		t.Run(profileName, func(t *testing.T) {
+			profile, ok := cfg.Profile(profileName)
+			if !ok {
+				t.Fatalf("profile %s missing from example config", profileName)
+			}
+			effective := ApplyProfilePolicy(cfg.AgentPolicy(GroupMain), profile)
+			for _, name := range mutating {
+				if profilePermits(effective, name) {
+					t.Errorf("read-only profile %s can reach mutating tool %s (effective %+v)", profileName, name, effective)
+				}
+			}
+			for _, name := range readOnly[profileName] {
+				if !profilePermits(effective, name) {
+					t.Errorf("profile %s cannot reach read-only tool %s (effective %+v)", profileName, name, effective)
+				}
+			}
+		})
+	}
+}
+
+// profilePermits mirrors tool.Policy.Permits for a resolved agent policy
+// (allow empty = everything not denied; deny wins; "*" allows all).
+func profilePermits(p ResolvedAgentPolicy, name string) bool {
+	for _, denied := range p.Deny {
+		if denied == name {
+			return false
+		}
+	}
+	if len(p.Allow) == 0 {
+		return true
+	}
+	for _, allowed := range p.Allow {
+		if allowed == "*" || allowed == name {
+			return true
+		}
+	}
+	return false
+}
