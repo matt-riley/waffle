@@ -101,6 +101,14 @@ workspace open / issue dispatch.
 - test suggestions from `*_test.go` name hits
 - optional content-hash cache for staleness demos
 
+**Supported language: Go only** (state kept in sync with tool descriptions
+and `CapabilitiesJSON`). Every `code_*` tool asked about a repo or path in
+another language returns an explicit limitation naming the language instead
+of an empty result: a Go-only repo returns the plain result array, a
+mixed-language repo lists which files were analysed and which were skipped,
+and a repo with no supported files says so. Coverage for other languages is
+deferred (see #255); a tool that cannot answer a question says so.
+
 Full accuracy: configure an external MCP bridge over `gopls` (or similar)
 under the isolation rules above.
 
