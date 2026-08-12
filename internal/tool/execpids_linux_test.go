@@ -70,12 +70,20 @@ printf 'spawned=%s\n' "$i"
 }
 
 func TestCleanupBashCgroupRetriesUntilEmpty(t *testing.T) {
-	dir := t.TempDir()
-	procsPath := filepath.Join(dir, "cgroup.procs")
-	if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), nil, 0o600); err != nil {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	dir := filepath.Join(base, "cgroup")
+	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(target, "cgroup.kill"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	procsPath := filepath.Join(target, "cgroup.procs")
 	if err := os.WriteFile(procsPath, []byte("1234\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
@@ -86,7 +94,7 @@ func TestCleanupBashCgroupRetriesUntilEmpty(t *testing.T) {
 	}()
 	cleanupBashCgroup(dir)
 	<-done
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Fatalf("cgroup directory still exists: %v", err)
 	}
 }
