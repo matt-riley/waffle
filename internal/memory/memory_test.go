@@ -155,6 +155,73 @@ func TestLiveNoteIDLookupIgnoresIDsInNoteBodies(t *testing.T) {
 	}
 }
 
+func TestAppendRefreshesHealthyStaleNotesIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ws := testWorkspace(t)
+	ws.Notes = &NotesIndex{DB: st.DB}
+	initial := "- [id=indexed0001] 2026-01-01 [trust=owner_stated source=]: indexed note\n"
+	if err := os.WriteFile(ws.MemoryPath(), []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Notes.SyncWorkspace(ctx, ws.agentName(), ws); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a healthy index that missed an authoritative file edit.
+	stale := "- [id=stale000001] 2026-01-02 [trust=owner_stated source=]: stale index note\n"
+	f, err := os.OpenFile(ws.MemoryPath(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(stale); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	exists, err := ws.Notes.LiveIDExists(ctx, "stale000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("test setup unexpectedly indexed stale note")
+	}
+
+	oldGenerator := generateNoteID
+	defer func() { generateNoteID = oldGenerator }()
+	ids := []string{"stale000001", "fresh000001"}
+	generateNoteID = func() (string, error) {
+		id := ids[0]
+		ids = ids[1:]
+		return id, nil
+	}
+	got, err := ws.Append("new note after stale index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "fresh000001" {
+		t.Fatalf("Append returned ID %q, want fresh000001", got)
+	}
+	body, err := os.ReadFile(ws.MemoryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if strings.Count(text, "[id=stale000001]") != 1 {
+		t.Fatalf("stale live ID was duplicated:\n%s", text)
+	}
+	if !strings.Contains(text, "[id=fresh000001]") {
+		t.Fatalf("fresh note missing:\n%s", text)
+	}
+}
+
 func TestRememberDedupesExactBody(t *testing.T) {
 	ws := testWorkspace(t)
 	tool := RememberTool{WS: ws}

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,20 @@ import (
 type NotesIndex struct {
 	DB  *sql.DB
 	Now func() time.Time
+
+	syncMu           sync.Mutex
+	syncedWorkspaces map[string]workspaceFileStamp
+}
+
+type fileStamp struct {
+	exists  bool
+	size    int64
+	modTime int64
+}
+
+type workspaceFileStamp struct {
+	memory  fileStamp
+	archive fileStamp
 }
 
 type sqlExecer interface {
@@ -129,6 +145,33 @@ func (n *NotesIndex) SyncWorkspace(ctx context.Context, agent string, ws Workspa
 	if n == nil || n.DB == nil {
 		return nil
 	}
+	n.syncMu.Lock()
+	defer n.syncMu.Unlock()
+	return n.syncWorkspaceLocked(ctx, agent, ws)
+}
+
+// ensureWorkspaceSynced refreshes only when either authoritative file has
+// changed since the last successful index sync. Callers that mutate MEMORY.md
+// hold lockMemoryFile, so the stat, refresh, and subsequent mutation are
+// serialized with other memory writers without reparsing every append.
+func (n *NotesIndex) ensureWorkspaceSynced(ctx context.Context, agent string, ws Workspace) error {
+	if n == nil || n.DB == nil {
+		return nil
+	}
+	n.syncMu.Lock()
+	defer n.syncMu.Unlock()
+	stamp, err := workspaceFileStampFor(ws)
+	if err != nil {
+		return err
+	}
+	key := workspaceStampKey(agent, ws)
+	if previous, ok := n.syncedWorkspaces[key]; ok && previous == stamp {
+		return nil
+	}
+	return n.syncWorkspaceLocked(ctx, agent, ws)
+}
+
+func (n *NotesIndex) syncWorkspaceLocked(ctx context.Context, agent string, ws Workspace) error {
 	if agent == "" {
 		agent = DefaultAgent
 	}
@@ -157,7 +200,66 @@ func (n *NotesIndex) SyncWorkspace(ctx context.Context, agent string, ws Workspa
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if stamp, err := workspaceFileStampFor(ws); err == nil {
+		if n.syncedWorkspaces == nil {
+			n.syncedWorkspaces = make(map[string]workspaceFileStamp)
+		}
+		n.syncedWorkspaces[workspaceStampKey(agent, ws)] = stamp
+	}
+	return nil
+}
+
+func workspaceStampKey(agent string, ws Workspace) string {
+	dir, err := filepath.Abs(ws.Dir)
+	if err != nil {
+		dir = ws.Dir
+	}
+	if agent == "" {
+		agent = DefaultAgent
+	}
+	return agent + "\x00" + dir
+}
+
+func workspaceFileStampFor(ws Workspace) (workspaceFileStamp, error) {
+	memory, err := fileStampFor(ws.MemoryPath())
+	if err != nil {
+		return workspaceFileStamp{}, err
+	}
+	archive, err := fileStampFor(ws.ArchivePath())
+	if err != nil {
+		return workspaceFileStamp{}, err
+	}
+	return workspaceFileStamp{memory: memory, archive: archive}, nil
+}
+
+func fileStampFor(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fileStamp{}, nil
+	}
+	if err != nil {
+		return fileStamp{}, err
+	}
+	return fileStamp{exists: true, size: info.Size(), modTime: info.ModTime().UnixNano()}, nil
+}
+
+func (n *NotesIndex) markWorkspaceSynced(agent string, ws Workspace) {
+	if n == nil || n.DB == nil {
+		return
+	}
+	stamp, err := workspaceFileStampFor(ws)
+	if err != nil {
+		return
+	}
+	n.syncMu.Lock()
+	defer n.syncMu.Unlock()
+	if n.syncedWorkspaces == nil {
+		n.syncedWorkspaces = make(map[string]workspaceFileStamp)
+	}
+	n.syncedWorkspaces[workspaceStampKey(agent, ws)] = stamp
 }
 
 type indexedNote struct {

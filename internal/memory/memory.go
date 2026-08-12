@@ -110,7 +110,9 @@ func (w Workspace) syncNote(ctx context.Context, n note, archived bool) {
 	}
 	if err := w.Notes.Upsert(ctx, w.agentName(), n, archived); err != nil {
 		slog.Warn("memory notes FTS upsert failed", "note_id", n.id, "err", err)
+		return
 	}
+	w.Notes.markWorkspaceSynced(w.agentName(), w)
 }
 
 // MatchingLines returns numbered memory lines containing all query terms.
@@ -424,9 +426,9 @@ func (w Workspace) appendCandidateContext(ctx context.Context, c Candidate) (str
 	if err != nil {
 		return "", err
 	}
-	// Prefer the indexed primary-key lookup. The file fallback preserves the
-	// standalone Workspace API for callers that do not wire a NotesIndex, and
-	// parses note headers so body text containing an ID is not a collision.
+	// Prefer the indexed primary-key lookup. liveNoteIDExists refreshes the
+	// index when MEMORY.md changed while this append holds the memory lock, so
+	// a healthy-but-stale DB miss cannot permit a duplicate live ID.
 	for w.liveNoteIDExists(ctx, noteID) {
 		noteID, err = newNoteID()
 		if err != nil {
@@ -445,17 +447,28 @@ func (w Workspace) appendCandidateContext(ctx context.Context, c Candidate) (str
 	return noteID, nil
 }
 
-// liveNoteIDExists uses the NotesIndex when available, keeping append from
-// re-reading MEMORY.md as it grows. If an index is unavailable or unhealthy,
-// retain the pre-index standalone behavior as a compatibility fallback.
+// liveNoteIDExists ensures the NotesIndex reflects the authoritative files
+// before consulting it. The caller holds lockMemoryFile, so a needed refresh
+// and the subsequent append are serialized with every other memory mutation.
+// This keeps a healthy-but-stale index from turning a miss into a duplicate ID.
+// If the index is unavailable or unhealthy, retain the standalone Workspace
+// behavior as a compatibility fallback.
 func (w Workspace) liveNoteIDExists(ctx context.Context, noteID string) bool {
 	if w.Notes != nil && w.Notes.DB != nil {
-		exists, err := w.Notes.LiveIDExists(ctx, noteID)
-		if err == nil {
-			return exists
+		if err := w.Notes.ensureWorkspaceSynced(ctx, w.agentName(), w); err != nil {
+			slog.Warn("memory notes index sync failed; falling back to MEMORY.md", "note_id", noteID, "err", err)
+		} else {
+			exists, err := w.Notes.LiveIDExists(ctx, noteID)
+			if err == nil {
+				return exists
+			}
+			slog.Warn("memory notes ID lookup failed; falling back to MEMORY.md", "note_id", noteID, "err", err)
 		}
-		slog.Warn("memory notes ID lookup failed; falling back to MEMORY.md", "note_id", noteID, "err", err)
 	}
+	return w.liveNoteIDExistsInFile(noteID)
+}
+
+func (w Workspace) liveNoteIDExistsInFile(noteID string) bool {
 	existing, err := w.readMemory()
 	if err != nil {
 		return false
@@ -468,8 +481,12 @@ func (w Workspace) liveNoteIDExists(ctx context.Context, noteID string) bool {
 	return false
 }
 
-func newNoteID() (string, error) {
+var generateNoteID = func() (string, error) {
 	return id.NewBytes(6) // 12 hex chars
+}
+
+func newNoteID() (string, error) {
+	return generateNoteID()
 }
 
 func formatNoteLine(noteID string, day time.Time, pin bool, p Provenance, body, supersedes string) string {
