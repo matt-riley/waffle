@@ -54,7 +54,7 @@ borrowed idea are in [research.md](./research.md).
              │                     │                        tool dispatch │
              │                     │                         │       │    │
              │                     │                     host tools  MCP  │
-             │                     │                      (stdio only)    │
+             │                     │                      (stdio + HTTP)  │
              │                     │  provider proxy ──► Anthropic /      │
              │                     │  (only key holder)   OpenAI-compat   │
 	             │                     │                   (Ollama / Gemini / │
@@ -223,11 +223,14 @@ session retention) is future work, tracked with channel attachments.
 
 Native Go tools first: `bash` (policy-gated), `read`/`write`/`edit`, `fetch`,
 `search`. Everything else arrives via MCP — waffle ships a **hand-rolled
-stdio JSON-RPC client** in `internal/mcp` (not the official go-sdk; no
-HTTP/SSE transport — see [Deviations](#deviations)) so third-party servers
-provide the long tail instead of a 40-tool builtin matrix. Tool availability
-is decided by the session's policy (openclaw-style allow/deny), evaluated in
-the gateway, not trusted to the sandbox.
+JSON-RPC client** in `internal/mcp` behind one transport interface: **stdio**
+(the default, for local commands) and **streamable HTTP** (POST + SSE +
+session-id, for the remote connector ecosystem; see [Deviations](#deviations),
+#249). The SDK is still deliberately not used: the surface (initialize,
+tools/list, tools/call) is small enough to own, and hand-rolling keeps the
+OAuth and egress posture under our control. Tool availability is decided by
+the session's policy (openclaw-style allow/deny), evaluated in the gateway,
+not trusted to the sandbox.
 
 ### Sandboxing & IPC
 
@@ -609,7 +612,8 @@ internal/agent/        the loop: context assembly, streaming, tool dispatch,
 internal/llm/          canonical types; anthropicp/, openaip/
                        (no gemini/ — OpenAI-compatible endpoint instead)
 internal/tool/         Tool interface, builtins, policy
-internal/mcp/          hand-rolled stdio JSON-RPC MCP client (no HTTP/SSE)
+internal/mcp/          hand-rolled MCP client: stdio (default) + streamable
+                       HTTP (#249), OAuth/PKCE token lifecycle
 internal/codeintel/    structural code tools (#79) + go/parser fallback
 internal/sandbox/      executors: host, docker; runner; sqlite queue IPC
 internal/workspace/    repo workspaces: lifecycle, devcontainer, git helper
@@ -629,10 +633,11 @@ docs/                  this plan, research notes, deploy, ADRs
 
 Key dependencies (all pure Go where possible): `modernc.org/sqlite`,
 `robfig/cron/v3`, `filippo.io/age`, `github.com/zalando/go-keyring`,
-Anthropic SDK, stdlib `net/http` for Telegram Bot API and OpenAI-compatible
-providers, OTel SDK for tracing. **Not** used (deliberate cuts):
-`charmbracelet/bubbletea`, `modelcontextprotocol/go-sdk`, `go-telegram/bot`,
-`bwmarrin/discordgo` — see [Deviations](#deviations).
+Anthropic SDK, stdlib `net/http` for Telegram Bot API, OpenAI-compatible
+providers, streamable-HTTP MCP (#249), and OTel SDK for tracing. **Not**
+used (deliberate cuts): `charmbracelet/bubbletea`,
+`modelcontextprotocol/go-sdk`, `go-telegram/bot`, `bwmarrin/discordgo` —
+see [Deviations](#deviations).
 
 ## Deviations
 
@@ -643,10 +648,25 @@ incomplete work; they are choices to stay small enough to read (principle 2).
    provider at Gemini's compatible endpoint (`name = "openai"`, suitable
    `base_url` and model). One translator covers OpenRouter, Ollama, Gemini,
    and other OpenAI-compatible endpoints.
-2. **MCP SDK** — hand-rolled stdio JSON-RPC in `internal/mcp` instead of
-   `modelcontextprotocol/go-sdk`. **stdio-only; no HTTP/SSE transport.** The
-   surface waffle needs (initialize, tools/list, tools/call) is small enough
-   to own; an SDK would pull a large dependency graph for little gain.
+2. **MCP SDK** — hand-rolled JSON-RPC in `internal/mcp` instead of
+   `modelcontextprotocol/go-sdk`. **Reopened for the remote connector
+   ecosystem (#249).** The original stdio-only call was right for local
+   commands, and still is; what changed is where servers live — Gmail,
+   Notion, Linear, Slack, GitHub's own server are remote HTTP servers
+   authenticated with OAuth, not local commands. The transport layer is now
+   factored behind one interface: stdio stays the default implementation,
+   and a streamable-HTTP transport (POST + SSE + `Mcp-Session-Id`
+   resumability, per the MCP spec) reaches remote servers. OAuth is
+   authorization-code + PKCE with dynamic client registration where the
+   server offers it; tokens live in `internal/secret` (age-encrypted), never
+   `config.toml`, refreshed ahead of expiry and fail-closed on rejection.
+   Egress from docker-mode groups routes through the broker proxy
+   (allowlist + audit rows) or is refused; the unattended tiers
+   (cron/issue/group) are deny-by-default for remote servers. The SDK is
+   still not pulled: the protocol surface is small enough to own, and
+   hand-rolling keeps the CGO-free static-linux posture (no CGO anywhere in
+   the module today) and the security boundary (token handling, egress)
+   under our control rather than an SDK's default behavior.
 3. **Channel deps** — Telegram is hand-rolled Bot API HTTP in
    `internal/channel/telegram` (no `go-telegram/bot`). **Discord is optional
    and not shipped** (`bwmarrin/discordgo` never added; a second channel
@@ -663,7 +683,7 @@ optional/cut items above plus anything still open on the tracker:
 |---|---|---|
 | Discord adapter | not shipped | deliberate; see deviation 3 |
 | Native Gemini package | not shipped | deliberate; use OpenAI-compat |
-| MCP over HTTP/SSE | not shipped | deliberate; stdio-only |
+| Remote MCP over streamable HTTP | shipped | #249; stdio remains the default; OAuth + brokered egress required for remote servers |
 | In-process host hooks (Lua/JS) | deferred | extension-surface decision (#41) |
 | Smart routing in-tree | out of scope | select explicit model aliases or use provider-hosted routing |
 
@@ -713,7 +733,8 @@ channel spins up a container and ends in a pushed branch.*
 
 **Phase 6 — Automation.** Cron scheduler with channel delivery; subagents
 (parallel sandboxed sessions reporting back to a parent); MCP client
-(hand-rolled stdio JSON-RPC — see [Deviations](#deviations)). *Milestone:
+(hand-rolled JSON-RPC; stdio default + streamable HTTP, see
+[Deviations](#deviations)). *Milestone:
 unattended recurring jobs, including scheduled repo work.*
 
 **Phase 7 — The learning loops.** Post-task skill distillation, in-use

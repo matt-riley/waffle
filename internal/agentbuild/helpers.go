@@ -425,3 +425,16 @@ func envKey(provider string) string {
 	}
 	return os.Getenv("ANTHROPIC_API_KEY")
 }
+
+// RemoteServerInGroup reports whether a URL-based (remote) MCP server is
+// available to an agent group (#249). stdio servers default an empty
+// groups list to "all groups"; remote servers are attacker-influenceable
+// network endpoints, so the unattended tiers (cron, issue, group — and any
+// custom tier) are deny-by-default: an empty groups list means main only,
+// and every other tier must be named explicitly.
+func RemoteServerInGroup(s config.MCPServer, group string) bool {
+	if len(s.Groups) == 0 {
+		return group == config.GroupMain
+	}
+	return slices.Contains(s.Groups, group)
+}

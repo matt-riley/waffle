@@ -32,6 +32,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
 	"github.com/matt-riley/waffle/internal/localsocket"
+	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/providerconfig"
@@ -215,13 +216,10 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			}
 		}()
 	}
-	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions)
-	if err != nil {
-		cleanup()
-		return err
-	}
-	defer cleanup()
-
+	// The credential broker starts before the agents: remote MCP servers in
+	// docker-mode groups route their traffic through its egress face, so it
+	// must be listening (and mintable) by the time agent build connects
+	// them (#249).
 	var brokerDone <-chan struct{}
 	if cfg.Broker.Listen != "" {
 		// Bind synchronously so a busy address fails startup instead of
@@ -249,6 +247,13 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		}()
 		log.Info("credential broker up", "listen", cfg.Broker.Listen, "upstreams", len(upstreams))
 	}
+
+	agents, cronAgent, profilesMain, profilesGroup, profilesCron, cleanup, err := buildGatewayAgents(ctx, cfg, ws, skills, sessions, hostRemoteMCPEgress(cfg, serveBroker))
+	if err != nil {
+		cleanup()
+		return err
+	}
+	defer cleanup()
 
 	adapters, err := makeAdapters(cfg)
 	if err != nil {
@@ -712,17 +717,17 @@ func configuredAdapters(cfg config.Config) ([]channel.Adapter, error) {
 // the cron agent used by the scheduler, and named profile agents for channel
 // (main + multiparty group) and cron surfaces (#71). The cleanup callback
 // closes successfully and partially-built agents in reverse build order.
-func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store) (
+func buildGatewayAgents(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, remoteEgress *mcp.RemoteEgress) (
 	agents map[string]*agent.Agent,
 	cronAgent *agent.Agent,
 	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
 	cleanup func(),
 	err error,
 ) {
-	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg))
+	return buildGatewayAgentsWithRuntime(ctx, cfg, ws, skills, sessions, newModelRuntimeResolver(cfg), remoteEgress)
 }
 
-func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver) (
+func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress) (
 	agents map[string]*agent.Agent,
 	cronAgent *agent.Agent,
 	profilesMain, profilesGroup, profilesCron map[string]*agent.Agent,
@@ -741,7 +746,7 @@ func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws me
 	}
 
 	build := func(group string) (*agent.Agent, error) {
-		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime)
+		a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, group, "", runtime, remoteEgress)
 		cleanups = append(cleanups, closer)
 		if err != nil {
 			return nil, err
@@ -805,7 +810,7 @@ func buildGatewayAgentsWithRuntime(ctx context.Context, cfg config.Config, ws me
 	}
 	for _, name := range profileNames {
 		for _, tier := range profileTiers {
-			a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, tier.group, name, runtime)
+			a, closer, err := buildAgentWithProfileRuntime(ctx, cfg, ws, skills, sessions, tier.group, name, runtime, remoteEgress)
 			cleanups = append(cleanups, closer)
 			if err != nil {
 				return nil, nil, nil, nil, nil, cleanup, fmt.Errorf("profile %q (%s): %w", name, tier.label, err)
@@ -931,4 +936,30 @@ func (b *loggingChatBackend) Turn(ctx context.Context, input string, emit func(c
 		return err
 	}
 	return nil
+}
+
+// hostRemoteMCPEgress describes how this process reaches its own broker's
+// egress face, for remote MCP servers in docker-mode groups (#249). The
+// container-facing name (waffle-host) is a docker DNS alias that does not
+// resolve in the gateway process, so the host loopback address is used
+// here. Returns nil when no broker is configured: docker-mode groups then
+// refuse remote MCP at build.
+func hostRemoteMCPEgress(cfg config.Config, serveBroker *broker.Broker) *mcp.RemoteEgress {
+	if cfg.Broker.Listen == "" || serveBroker == nil {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(cfg.Broker.Listen)
+	if err != nil || port == "" {
+		return nil
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return &mcp.RemoteEgress{
+		ProxyURL: "http://" + net.JoinHostPort(host, port) + "/egress",
+		MintToken: func(ctx context.Context, group string) (string, error) {
+			return serveBroker.Mint(ctx, "mcp-egress:"+group)
+		},
+	}
 }

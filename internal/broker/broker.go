@@ -336,13 +336,18 @@ func (b *Broker) usageScope(token string) (sessionID, budgetKey string, limits u
 // ServeHTTP implements the broker's HTTP face: /<upstream>/<path>, bearer
 // wk_ token required.
 func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == r.Header.Get("Authorization") {
-		if scheme, value, ok := strings.Cut(r.Header.Get("Proxy-Authorization"), " "); ok && strings.EqualFold(scheme, "Basic") {
-			if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
-				token, _, _ = strings.Cut(string(decoded), ":")
-			}
-		}
+	// Proxy clients (CONNECT or absolute-form URI) authenticate with the
+	// proxy credential. On such a request the Authorization header belongs
+	// to the origin (e.g. an MCP OAuth bearer for the remote server) and
+	// must not be mistaken for the broker session token — an MCP client
+	// legitimately sends both, and preferring Authorization would refuse
+	// every proxied request it makes (#249). API-face requests keep
+	// Authorization.
+	token := ""
+	if proxyStyleRequest(r) {
+		token = proxyCredential(r)
+	} else {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
 	sessionID := ""
 	budgetKey := ""
@@ -866,18 +871,25 @@ func (b *Broker) serveEgress(w http.ResponseWriter, r *http.Request, token, sess
 	outURL := *targetURL
 	outURL.Scheme, outURL.Host = base.Scheme, base.Host
 	proxy := httputil.NewSingleHostReverseProxy(base)
-	proxy.Transport = safeTransport{}
+	proxy.Transport = b.egressTransport()
 	// ReverseProxy.ServeHTTP clones r internally before calling Director, so
 	// the rewrite only needs to happen once, here — not again on a
 	// pre-mutated copy of r.
 	proxy.Director = func(out *http.Request) {
 		out.URL = &outURL
 		out.Host = base.Host
-		out.Header.Del("Authorization")
 		out.Header.Del("Proxy-Authorization")
 		if target.Header != "" {
+			// The broker owns the credential for this host: strip whatever the
+			// client sent and inject the configured one (git/package-manager
+			// egress). Value is never written to audit rows.
+			out.Header.Del("Authorization")
 			out.Header.Set(target.Header, target.Value)
 		}
+		// Without a configured credential the client's Authorization passes
+		// through unchanged: a host-side MCP client legitimately carries an
+		// OAuth bearer for the origin (#249). The egress allowlist still
+		// bounds which hosts are reachable, and every request is audited.
 	}
 	b.record(r.Context(), token, sessionID, "egress", host+targetURL.EscapedPath())
 	proxy.ServeHTTP(w, r)
@@ -897,6 +909,20 @@ type safeTransport struct{}
 
 func (safeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return safeHTTPTransport.RoundTrip(r)
+}
+
+// egressTransport returns the dialing transport for the HTTP egress face.
+// Production keeps the pooled safe transport (private targets refused). A
+// test-supplied DialEgress — the documented escape hatch for loopback
+// origins — is honored here too, exactly as it is on the CONNECT face, so
+// both egress paths behave identically under the override.
+func (b *Broker) egressTransport() http.RoundTripper {
+	if b.DialEgress == nil {
+		return safeTransport{}
+	}
+	t := safeHTTPTransport.Clone()
+	t.DialContext = b.DialEgress
+	return t
 }
 
 func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -1011,6 +1037,18 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 // absolute request URI, is only ever produced by a proxy client.
 func proxyStyleRequest(r *http.Request) bool {
 	return r.Method == http.MethodConnect || r.URL.IsAbs()
+}
+
+// proxyCredential extracts the session token from a proxy-style request's
+// Proxy-Authorization header ("Basic <base64 token:>").
+func proxyCredential(r *http.Request) string {
+	if scheme, value, ok := strings.Cut(r.Header.Get("Proxy-Authorization"), " "); ok && strings.EqualFold(scheme, "Basic") {
+		if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+			token, _, _ := strings.Cut(string(decoded), ":")
+			return token
+		}
+	}
+	return ""
 }
 
 // denyUnauthenticated refuses a request that carried no usable session token.

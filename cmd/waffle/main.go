@@ -113,6 +113,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return nil
 	case "secret":
 		return secretCmd(args[1:], stdin, stdout, stderr)
+	case "mcp":
+		return mcpCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "provider":
 		return providerCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "backup":
@@ -256,6 +258,7 @@ Commands:
   pause     pause new agent runs
   resume    resume agent runs
   secret    manage the encrypted secret store
+  mcp       authorize and manage remote MCP servers (login/status/logout)
   provider  add, list, test, or remove model-provider connections
   backup    create a local state backup
   restore   validate and restore a local state backup

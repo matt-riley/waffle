@@ -1504,6 +1504,145 @@ func TestUsesDocker(t *testing.T) {
 	}
 }
 
+// TestRemoteMCPServerConfigContractEnforcedOnLoad is the #249 config contract: command and url are
+// mutually exclusive (both set and neither set are load errors naming the
+// server), execution=sandbox is rejected for url servers, egress is
+// broker/direct only, tokens are secret:// references only, and remote
+// servers keep a secret-store-safe name.
+func TestRemoteMCPServerConfigContractEnforcedOnLoad(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "url server loads",
+			body: `
+[[mcp]]
+name = "github"
+url = "https://api.github.com/mcp"
+`,
+			wantErr: "",
+		},
+		{
+			name: "url server with egress and token ref loads",
+			body: `
+[[mcp]]
+name = "notion"
+url = "https://mcp.notion.com"
+egress = "broker"
+token = "secret://mcp/notion/access-token"
+`,
+			wantErr: "",
+		},
+		{
+			name: "command and url both set is a load error",
+			body: `
+[[mcp]]
+name = "both"
+command = "/bin/true"
+url = "https://example.com/mcp"
+`,
+			wantErr: `mcp "both": command and url are mutually exclusive`,
+		},
+		{
+			name: "neither command nor url is a load error",
+			body: `
+[[mcp]]
+name = "neither"
+`,
+			wantErr: `mcp "neither": exactly one of command or url is required`,
+		},
+		{
+			name: "url with execution sandbox is rejected explicitly",
+			body: `
+[[mcp]]
+name = "sandboxed"
+url = "https://example.com/mcp"
+execution = "sandbox"
+`,
+			wantErr: `mcp "sandboxed": execution="sandbox" is not supported for url servers`,
+		},
+		{
+			name: "url with invalid egress is rejected",
+			body: `
+[[mcp]]
+name = "badegress"
+url = "https://example.com/mcp"
+egress = "anywhere"
+`,
+			wantErr: `mcp "badegress": egress must be "broker" or "direct"`,
+		},
+		{
+			name: "raw token value is rejected",
+			body: `
+[[mcp]]
+name = "rawtoken"
+url = "https://example.com/mcp"
+token = "ghp_literal_secret"
+`,
+			wantErr: `mcp "rawtoken": token must be a secret:// reference`,
+		},
+		{
+			name: "non-http url is rejected",
+			body: `
+[[mcp]]
+name = "ftp"
+url = "ftp://example.com/mcp"
+`,
+			wantErr: `mcp "ftp": url must be an absolute http(s) URL`,
+		},
+		{
+			name: "uppercase server name is rejected for url servers",
+			body: `
+[[mcp]]
+name = "MyServer"
+url = "https://example.com/mcp"
+`,
+			wantErr: `mcp "MyServer": url servers need a lowercase`,
+		},
+		{
+			name: "args rejected for url servers",
+			body: `
+[[mcp]]
+name = "withargs"
+url = "https://example.com/mcp"
+args = ["--flag"]
+`,
+			wantErr: `mcp "withargs": args apply to command servers only`,
+		},
+		{
+			name: "env rejected for url servers",
+			body: `
+[[mcp]]
+name = "withenv"
+url = "https://example.com/mcp"
+env = ["HOME"]
+`,
+			wantErr: `mcp "withenv": env applies to command servers only`,
+		},
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, path, tc.body)
+			_, err := Load(path)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Load succeeded, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestCodeIntelMCPValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	// Host codeintel without allow_host_mcp fails.

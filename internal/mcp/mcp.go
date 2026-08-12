@@ -1,8 +1,10 @@
-// Package mcp is a minimal Model Context Protocol client over stdio
-// (docs/plan.md, "Tools" — the long tail arrives via MCP). It speaks
-// enough of the protocol to list a server's tools and call them, exposing
-// each as a waffle tool.Toolbox. One dependency-free JSON-RPC client
-// rather than an SDK: the surface waffle needs is small.
+// Package mcp is a minimal Model Context Protocol client (docs/plan.md,
+// "Tools" — the long tail arrives via MCP). It speaks enough of the
+// protocol to list a server's tools and call them, exposing each as a
+// waffle tool.Toolbox. Two transports sit behind one JSON-RPC surface:
+// stdio (a command over pipes, the default) and streamable HTTP for
+// remote servers (#249). One dependency-free client rather than an SDK:
+// the surface waffle needs is small.
 package mcp
 
 import (
@@ -37,12 +39,20 @@ const MaxFrameBytes = 8 << 20
 // therefore buffering) the rest of the oversized line.
 var ErrFrameTooLarge = errors.New("mcp: server line exceeds max frame size")
 
-// Server is one configured MCP server (a command run over stdio).
+// Server is one configured MCP server: either a local command run over
+// stdio (the default), or a remote streamable-HTTP endpoint (#249). Exactly
+// one of Command or URL is set; config validation enforces the contract
+// before this struct is ever built from user input.
 type Server struct {
 	Name    string
 	Command string
 	Args    []string
 	Env     []string // allowlisted parent environment variable names
+	// URL is a remote MCP streamable HTTP endpoint. Mutually exclusive with
+	// Command. Remote servers have no process to restrict; their network
+	// posture (broker egress vs direct) and credential handling are decided
+	// by the caller at connect time (#249).
+	URL string
 	// DockerContainer is the docker --name set by WrapDocker. ConnectRestricted
 	// copies it onto Client so Close can docker stop/rm the container (#97).
 	DockerContainer string
@@ -263,7 +273,7 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 		_ = c.Close()
 		return nil, err
 	}
-	if err := c.notify("notifications/initialized"); err != nil {
+	if err := c.notify(ctx, "notifications/initialized"); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
@@ -475,7 +485,7 @@ func (c *Client) connClosed() error {
 	return fmt.Errorf("mcp %s: connection closed: %w", c.name, err)
 }
 
-func (c *Client) notify(method string) error {
+func (c *Client) notify(ctx context.Context, method string) error {
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
 	c.writeMu.Lock()
 	_, err := fmt.Fprintf(c.in, "%s\n", body)
@@ -492,29 +502,11 @@ type mcpTool struct {
 // Toolbox lists the server's tools and returns a tool.Toolbox exposing
 // them. Tool names are prefixed with the server name to avoid collisions.
 func (c *Client) Toolbox(ctx context.Context) (tool.Toolbox, error) {
-	raw, err := c.call(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
-	}
-	var listed struct {
-		Tools []mcpTool `json:"tools"`
-	}
-	if err := json.Unmarshal(raw, &listed); err != nil {
-		return nil, err
-	}
-	tb := &toolbox{client: c, prefix: c.name + "__"}
-	for _, t := range listed.Tools {
-		tb.defs = append(tb.defs, llm.Tool{
-			Name:        tb.prefix + t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-		})
-	}
-	return tb, nil
+	return newToolbox(c, ctx, c.name)
 }
 
 type toolbox struct {
-	client *Client
+	client rpcClient
 	prefix string
 	defs   []llm.Tool
 }
