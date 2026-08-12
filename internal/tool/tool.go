@@ -127,6 +127,7 @@ func BuiltinsWith(opts BuiltinOptions) *Registry {
 		EditFile{Roots: opts.FileRoots},
 		&Fetch{AllowPrivate: opts.FetchAllowPrivate},
 		Search{Roots: opts.FileRoots},
+		ListFiles{Roots: opts.FileRoots},
 	)
 }
 

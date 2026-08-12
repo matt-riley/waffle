@@ -171,7 +171,7 @@ system = "You research thoroughly using read/fetch/search tools. Never mutate fi
 model = "default"
 sandbox = "docker"
 [agent.profile.researcher.tools]
-allow = ["read_file", "fetch", "search", "recall", "expand_output", "expand_context"]
+allow = ["read_file", "fetch", "search", "list_files", "recall", "expand_output", "expand_context"]
 deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr", "github_comment"]
 
 # --- reviewer: read-only code critique -------------------------------------
@@ -180,7 +180,7 @@ system = "You are a strict code reviewer. Report issues; do not edit."
 model = "default"
 sandbox = "docker"
 [agent.profile.reviewer.tools]
-allow = ["read_file", "search", "recall", "expand_output", "expand_context"]
+allow = ["read_file", "search", "list_files", "recall", "expand_output", "expand_context"]
 deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill_skill", "workspace_update", "github_pr", "github_comment"]
 
 # Telegram channel (waffle serve). Attachment downloads are inbound data
@@ -201,7 +201,7 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 #   waffle ws open owner/repo --profile reviewer
 
 # Filesystem boundary for the builtin file tools — read_file, write_file,
-# edit_file, and search (#269). Tool policy can deny a tool by name but cannot
+# edit_file, search, and list_files (#269). Tool policy can deny a tool by name but cannot
 # restrict paths, so in host mode a session with write_file could otherwise
 # reach /etc or ~/.ssh. Docker mode gets this boundary from the container.
 #

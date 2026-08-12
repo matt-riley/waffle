@@ -11,7 +11,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"unicode/utf8"
@@ -430,11 +432,14 @@ func TestSearch(t *testing.T) {
 func TestRegistry(t *testing.T) {
 	r := Builtins()
 	defs := r.Defs()
-	if len(defs) != 6 {
+	if len(defs) != 7 {
 		t.Fatalf("builtins = %d", len(defs))
 	}
 	if defs[5].Name != "search" {
-		t.Errorf("last builtin = %q, want search", defs[5].Name)
+		t.Errorf("search builtin = %q, want search", defs[5].Name)
+	}
+	if defs[6].Name != "list_files" {
+		t.Errorf("last builtin = %q, want list_files", defs[6].Name)
 	}
 	for _, d := range defs {
 		var schema map[string]any
@@ -565,5 +570,681 @@ func TestFetchReusesTransportAcrossRuns(t *testing.T) {
 	}
 	if f.cachedTransport != first {
 		t.Fatal("transport was rebuilt on a later Run")
+	}
+}
+
+// TestReadFileOmittingRangesIsByteIdentical pins the #256 backward-compat
+// contract: a read_file call without offset or limit must return exactly the
+// same bytes as before ranges existed (asserted by the pre-existing tests
+// passing unmodified).
+func TestReadFileOmittingRangesIsByteIdentical(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "plain", body: "one two one"},
+		{name: "CRLF", body: "a\r\nb\r\n"},
+		{name: "NUL byte", body: "a\x00b\n"},
+		{name: "no trailing newline", body: "line1\nline2"},
+		{name: "empty", body: ""},
+		{name: "invalid UTF-8", body: "caf\xc3\x28\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q}`, path))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if out != tc.body {
+				t.Fatalf("read = %q, want byte-identical %q", out, tc.body)
+			}
+		})
+	}
+}
+
+// TestReadFileRanges covers the #256 range semantics: 1-indexed line numbers,
+// offset beyond EOF, negative values, zero limit, limit exceeding remaining
+// lines, a single-line file, no trailing newline, CRLF, NUL bytes, and the
+// total line count footer.
+func TestReadFileRanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		offset  int
+		limit   int
+		want    string
+		wantErr string
+	}{
+		{name: "offset beyond EOF", body: "a\nb\nc\n", offset: 10, want: "[3 total lines; showing 0]"},
+		{name: "negative offset", body: "a\n", offset: -1, wantErr: "offset must not be negative"},
+		{name: "negative limit", body: "a\n", limit: -1, wantErr: "limit must not be negative"},
+		{name: "zero limit reads all remaining", body: "a\nb\nc\n", offset: 2, limit: 0, want: "2: b\n3: c\n[3 total lines; showing 2]"},
+		{name: "limit exceeding remaining", body: "a\nb\nc\n", offset: 2, limit: 100, want: "2: b\n3: c\n[3 total lines; showing 2]"},
+		{name: "single-line file", body: "only\n", offset: 1, limit: 1, want: "1: only\n[1 total lines; showing 1]"},
+		{name: "no trailing newline", body: "a\nb", offset: 2, limit: 1, want: "2: b\n[2 total lines; showing 1]"},
+		{name: "CRLF normalized in range", body: "a\r\nb\r\n", offset: 1, limit: 2, want: "1: a\n2: b\n[2 total lines; showing 2]"},
+		{name: "NUL byte verbatim", body: "a\x00b\nc\n", offset: 1, limit: 1, want: "1: a\x00b\n[2 total lines; showing 1]"},
+		{name: "empty file", body: "", offset: 1, want: "[0 total lines; showing 0]"},
+		{name: "offset zero defaults to first line", body: "a\nb\n", offset: 0, limit: 1, want: "1: a\n[2 total lines; showing 1]"},
+		{name: "middle range", body: "a\nb\nc\nd\n", offset: 2, limit: 2, want: "2: b\n3: c\n[4 total lines; showing 2]"},
+		{name: "range footer states total lines", body: "a\nb\nc\nd\ne\n", offset: 3, limit: 1, want: "3: c\n[5 total lines; showing 1]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input, err := json.Marshal(map[string]any{"path": path, "offset": tc.offset, "limit": tc.limit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := run(t, ReadFile{}, string(input))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("read = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadFileRangeRespectsHostReturnCap pins the #256 truncation contract: a
+// range selecting more than HostReturnCap bytes is cut with an explicit
+// marker, the cut lands on a UTF-8 rune boundary (textcut), and the marker
+// states the total line count. The fixture is sized so the cumulative
+// numbered output lands inside the marker-reserve window, forcing the
+// textcut cut path.
+func TestReadFileRangeRespectsHostReturnCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	base := strings.Repeat("🌍", 407) // ~1.6 KiB per line of 4-byte runes
+
+	// Build the fixture so the cumulative numbered output lands exactly one
+	// byte under the cap after the final emitted line, with one more line
+	// after it that cannot fit: the marker-reserve window is only ~70 bytes
+	// wide (far smaller than one line), so this forces the textcut cut path.
+	k := 0
+	emitted := 0
+	for {
+		lineLen := len(fmt.Sprintf("%d: %s\n", k+1, base))
+		if emitted+lineLen > HostReturnCap-2 {
+			break
+		}
+		emitted += lineLen
+		k++
+	}
+	numPrefix := fmt.Sprintf("%d: ", k+1)
+	filler := HostReturnCap - 1 - emitted - len(numPrefix) - 1 // minus trailing "\n"
+	// End the sized line with emoji so the marker-reserve cut (~69 bytes
+	// before the end) lands mid-rune and textcut must retreat.
+	lineK1 := strings.Repeat("x", filler-68) + strings.Repeat("🌍", 17)
+	if filler < 68 {
+		t.Fatalf("fixture filler=%d too small", filler)
+	}
+	var sb strings.Builder
+	for i := 0; i < k; i++ {
+		sb.WriteString(base)
+		sb.WriteString("\n")
+	}
+	sb.WriteString(lineK1)
+	sb.WriteString("\n")
+	sb.WriteString("z\n") // one byte over the cap once the sized line is emitted
+	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	total, shown := k+2, k+1
+	marker := fmt.Sprintf("\n... [output truncated at %d bytes; %d total lines; showing %d]", HostReturnCap, total, shown)
+	cumulative := emitted + len(numPrefix) + filler + 1 // one byte under the cap
+	if cumulative <= HostReturnCap-len(marker) {
+		t.Fatalf("fixture cumulative=%d does not exercise the textcut cut path (window > %d)", cumulative, HostReturnCap-len(marker))
+	}
+
+	out, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q,"offset":1,"limit":0}`, path))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.HasSuffix(out, marker) {
+		t.Fatalf("output missing truncation marker %q:\n%.200s...", marker, out)
+	}
+	if len(out) > HostReturnCap {
+		t.Fatalf("output len=%d exceeds HostReturnCap %d", len(out), HostReturnCap)
+	}
+	// The cut branch ran (not the append branch), so the prefix was cut by
+	// textcut and must be valid UTF-8 with no split rune.
+	if len(out) <= HostReturnCap-len(marker) {
+		t.Fatalf("output len=%d, want the textcut cut path (len > %d)", len(out), HostReturnCap-len(marker))
+	}
+	prefix := out[:len(out)-len(marker)]
+	if !utf8.ValidString(prefix) {
+		t.Fatalf("truncated prefix is invalid UTF-8: %q", prefix)
+	}
+}
+
+// TestReadFileRangeInvalidUTF8 pins #256's untrusted-data handling: invalid
+// UTF-8 inside the selected range is returned verbatim (exactly as the raw
+// path does), and the numbered wrapper never corrupts it.
+func TestReadFileRangeInvalidUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.txt")
+	body := "caf\xc3\x28\nok\n" // \xc3\x28 is an invalid UTF-8 sequence
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q,"offset":1,"limit":2}`, path))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "1: caf\xc3\x28\n2: ok\n[2 total lines; showing 2]"
+	if out != want {
+		t.Fatalf("read = %q, want %q", out, want)
+	}
+}
+
+// TestReadFileRangeLongLineError pins the bounded-memory guarantee: a line
+// beyond readMaxLineBytes is refused with a clear error naming the line, and
+// the raw (unranged) path still reads such files.
+func TestReadFileRangeLongLineError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "long.txt")
+	body := "short\n" + strings.Repeat("x", readMaxLineBytes+1) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q,"offset":1}`, path)); err == nil ||
+		!strings.Contains(err.Error(), "line 2 exceeds") {
+		t.Fatalf("long line error = %v", err)
+	}
+	// The raw path has no line-length bound and must still read the file
+	// (capped at HostReturnCap as before ranges existed).
+	out, err := run(t, ReadFile{}, fmt.Sprintf(`{"path":%q}`, path))
+	if err != nil {
+		t.Fatalf("raw read of long line: %v", err)
+	}
+	if out != body[:HostReturnCap] {
+		t.Fatalf("raw read mismatch: len=%d want %d", len(out), HostReturnCap)
+	}
+}
+
+// TestListFiles exercises the #256 listing tool against a fixture tree:
+// type+size rows, basename glob, VCS-directory skips, deterministic sorting,
+// the entry cap, and the distinct non-existent vs not-a-directory errors.
+func TestListFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package a\n")
+	write("notes.txt", "notes\n")
+	write("sub/b.go", "package b\n")
+	write("sub/deep/c.txt", "c\n")
+	write(".git/config", "ignored\n")
+	write(".hg/x", "ignored\n")
+	write(".svn/y", "ignored\n")
+	loop := filepath.Join(dir, "loop")
+	if err := os.Symlink(dir, loop); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	row := func(rel, typ string) string {
+		t.Helper()
+		info, err := os.Lstat(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%s\t%s\t%d", filepath.Join(dir, rel), typ, info.Size())
+	}
+	all := []string{
+		row("a.go", "file"),
+		row("loop", "symlink"),
+		row("notes.txt", "file"),
+		row("sub", "dir"),
+		row(filepath.Join("sub", "b.go"), "file"),
+		row(filepath.Join("sub", "deep"), "dir"),
+		row(filepath.Join("sub", "deep", "c.txt"), "file"),
+	}
+	sort.Strings(all)
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{
+			name:  "full tree with type and size",
+			input: fmt.Sprintf(`{"path":%q}`, dir),
+			want:  strings.Join(all, "\n"),
+		},
+		{
+			name:  "basename glob",
+			input: fmt.Sprintf(`{"path":%q,"glob":"*.go"}`, dir),
+			want:  strings.Join([]string{all[0], all[4]}, "\n"),
+		},
+		{
+			name:  "glob no match",
+			input: fmt.Sprintf(`{"path":%q,"glob":"*.rs"}`, dir),
+			want:  "(no entries)",
+		},
+		{
+			name:    "invalid glob is a clear error",
+			input:   fmt.Sprintf(`{"path":%q,"glob":"["}`, dir),
+			wantErr: "invalid glob",
+		},
+		{
+			name:    "non-existent path",
+			input:   fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "missing")),
+			wantErr: "does not exist",
+		},
+		{
+			name:    "file is not a directory",
+			input:   fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.go")),
+			wantErr: "not a directory",
+		},
+		{
+			name:  "capped with marker",
+			input: fmt.Sprintf(`{"path":%q,"max_results":2}`, dir),
+			want:  strings.Join(all[:2], "\n") + "\n... [listing capped at 2]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := run(t, ListFiles{}, tc.input)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("list = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestListFilesSkipsVCSEverywhere pins the Search parity: VCS directories are
+// skipped at every depth, not only at the listing root.
+func TestListFilesSkipsVCSEverywhere(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", ".git", "config"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "keep.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, ListFiles{}, fmt.Sprintf(`{"path":%q}`, dir))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(out, ".git") || !strings.Contains(out, "keep.txt") {
+		t.Fatalf("listing = %q, want .git skipped and keep.txt present", out)
+	}
+}
+
+// TestListFilesSymlinkLoopTerminates pins the #256 termination guarantee: a
+// symlink cycle in the fixture must not cause infinite recursion.
+func TestListFilesSymlinkLoopTerminates(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// sub/loop -> dir, and dir/loop2 -> sub: a cycle between two levels.
+	if err := os.Symlink(dir, filepath.Join(sub, "loop")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(sub, filepath.Join(dir, "loop2")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	out, err := run(t, ListFiles{}, fmt.Sprintf(`{"path":%q}`, dir))
+	if err != nil {
+		t.Fatalf("list with symlink loop: %v", err)
+	}
+	if !strings.Contains(out, "loop2\tsymlink\t") || !strings.Contains(out, "loop\tsymlink\t") {
+		t.Fatalf("listing = %q, want symlink entries listed without descending", out)
+	}
+	if !strings.Contains(out, "sub/f.txt\tfile\t") {
+		t.Fatalf("listing = %q, want sub/f.txt present", out)
+	}
+}
+
+// TestListFilesCancellation pins the Search-parity cancellation contract: a
+// cancelled context aborts the walk promptly with context.Canceled.
+func TestListFilesCancellation(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 200; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.txt", i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (ListFiles{}).Run(ctx, json.RawMessage(fmt.Sprintf(`{"path":%q}`, dir))); err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled list_files error = %v", err)
+	}
+}
+
+// TestEditFileBatch covers the #256 batched form: edits apply in order
+// against the evolving content, and a failure on ANY edit — including the
+// last — leaves the file byte-identical to its pre-call state.
+func TestEditFileBatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		edits   []map[string]any
+		extra   map[string]any // additional top-level fields (e.g. old_string)
+		want    string         // final content on success
+		wantErr string
+	}{
+		{
+			name:  "edits apply in order against evolving content",
+			body:  "one two three",
+			edits: []map[string]any{{"old_string": "one", "new_string": "1"}, {"old_string": "two", "new_string": "2"}},
+			want:  "1 2 three",
+		},
+		{
+			name:  "later edit matches earlier edit's result",
+			body:  "ab",
+			edits: []map[string]any{{"old_string": "ab", "new_string": "Xbc"}, {"old_string": "Xbc", "new_string": "Y"}},
+			want:  "Y",
+		},
+		{
+			name:    "overlapping edits fail deterministically",
+			body:    "abc",
+			edits:   []map[string]any{{"old_string": "ab", "new_string": "X"}, {"old_string": "bc", "new_string": "Y"}},
+			wantErr: "batch aborted, file unchanged",
+		},
+		{
+			name:    "failure on last edit leaves file byte-identical",
+			body:    "one two",
+			edits:   []map[string]any{{"old_string": "one", "new_string": "1"}, {"old_string": "missing", "new_string": "x"}},
+			wantErr: "edit 2 of 2",
+		},
+		{
+			name:    "ambiguity without replace_all aborts batch",
+			body:    "a a",
+			edits:   []map[string]any{{"old_string": "a", "new_string": "b"}},
+			wantErr: "appears 2 times",
+		},
+		{
+			name:  "replace_all inside a batch",
+			body:  "a a",
+			edits: []map[string]any{{"old_string": "a", "new_string": "b", "replace_all": true}},
+			want:  "b b",
+		},
+		{
+			name:    "batch combined with old_string rejected",
+			body:    "x",
+			edits:   []map[string]any{{"old_string": "x", "new_string": "y"}},
+			extra:   map[string]any{"old_string": "x"},
+			wantErr: "cannot be combined",
+		},
+		{
+			name:    "empty batch rejected",
+			body:    "x",
+			edits:   []map[string]any{},
+			wantErr: "at least one edit",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "f.txt")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input := map[string]any{"path": path, "edits": tc.edits}
+			for k, v := range tc.extra {
+				input[k] = v
+			}
+			raw, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := run(t, EditFile{}, string(raw))
+			got, _ := os.ReadFile(path)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				if string(got) != tc.body {
+					t.Fatalf("failed batch changed the file: %q, want byte-identical %q", got, tc.body)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("batch: %v", err)
+			}
+			if !strings.Contains(out, "applied 2 edit(s)") && !strings.Contains(out, "applied 1 edit(s)") {
+				t.Fatalf("result message = %q", out)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("content = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEditFileBatchBounds pins the batch guards: per-edit content size, the
+// batch length cap, and permission preservation via info.Mode().Perm().
+func TestEditFileBatchBounds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Per-edit new_string size cap.
+	tooLarge := strings.Repeat("x", fileContentMaxBytes+1)
+	raw, err := json.Marshal(map[string]any{"path": path, "edits": []map[string]any{{"old_string": "old", "new_string": tooLarge}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "new_string too large") {
+		t.Fatalf("oversized batch edit error = %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "old" {
+		t.Fatalf("oversized batch edit changed file to %q", got)
+	}
+
+	// Batch length cap.
+	edits := make([]map[string]any, 0, editBatchMaxEdits+1)
+	for i := 0; i < editBatchMaxEdits+1; i++ {
+		edits = append(edits, map[string]any{"old_string": "old", "new_string": "x"})
+	}
+	raw, err = json.Marshal(map[string]any{"path": path, "edits": edits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "exceeds maximum 100") {
+		t.Fatalf("oversized batch error = %v", err)
+	}
+
+	// Evolving-content cap: successive replace_all edits expand the result
+	// past the per-edit new_string limit; the batch must fail and leave the
+	// file untouched (#256 review).
+	growthPath := filepath.Join(dir, "growth.txt")
+	if err := os.WriteFile(growthPath, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	growth := make([]map[string]any, 0, 12)
+	for range 12 {
+		growth = append(growth, map[string]any{"old_string": "x", "new_string": "xxxx", "replace_all": true})
+	}
+	raw, err = json.Marshal(map[string]any{"path": growthPath, "edits": growth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "result too large") {
+		t.Fatalf("expanding batch error = %v, want result-too-large", err)
+	}
+	if got, _ := os.ReadFile(growthPath); string(got) != "x" {
+		t.Fatalf("expanding batch changed file to %q", got)
+	}
+
+	// Oversized source file: the initial read is bounded like write_file.
+	bigPath := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(bigPath, []byte(strings.Repeat("y", fileContentMaxBytes+1)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(map[string]any{"path": bigPath, "edits": []map[string]any{{"old_string": "y", "new_string": "z"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("oversized source error = %v, want maximum-bytes refusal", err)
+	}
+
+	// Permissions preserved on success.
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(map[string]any{"path": path, "edits": []map[string]any{{"old_string": "old", "new_string": "new"}, {"old_string": "new", "new_string": "NEW"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Errorf("batch edit changed perm from %o to %o", before.Mode().Perm(), after.Mode().Perm())
+	}
+	if os.SameFile(before, after) {
+		t.Error("file was rewritten in place, want atomic rename")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "NEW" {
+		t.Fatalf("content = %q, want NEW", got)
+	}
+}
+
+// TestEditFileRejectsEmptyOldString pins the review fix: old_string is
+// optional in the schema (batch mode uses edits), but an empty old_string
+// must be rejected explicitly — strings.ReplaceAll(content, "", new) would
+// attempt an allocation proportional to len(content)*len(new) and the
+// resulting "appears N times" error is confusing.
+func TestEditFileRejectsEmptyOldString(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("abc"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Single-edit form, plain and with replace_all.
+	for _, tc := range []struct {
+		name string
+		in   map[string]any
+		want string
+	}{
+		{name: "missing old_string", in: map[string]any{"path": path, "new_string": "x"}, want: "old_string is required"},
+		{name: "empty old_string replace_all", in: map[string]any{"path": path, "old_string": "", "new_string": "x", "replace_all": true}, want: "old_string is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+			if got, _ := os.ReadFile(path); string(got) != "abc" {
+				t.Fatalf("file changed to %q", got)
+			}
+		})
+	}
+	// Batch form: an edit with an empty old_string aborts the whole batch.
+	raw, err := json.Marshal(map[string]any{"path": path, "edits": []map[string]any{
+		{"old_string": "a", "new_string": "A"},
+		{"old_string": "", "new_string": "x"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, EditFile{}, string(raw)); err == nil || !strings.Contains(err.Error(), "old_string must not be empty") {
+		t.Fatalf("batch error = %v, want old_string-must-not-be-empty", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "abc" {
+		t.Fatalf("batch changed file to %q", got)
+	}
+}
+
+// TestFileToolsConcurrent pins the tool.Tool contract for the #256 tools:
+// read_file (ranged), list_files, and edit_file (batch) must be safe for
+// concurrent invocation. Run under -race.
+func TestFileToolsConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shared.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readInput := fmt.Sprintf(`{"path":%q,"offset":2,"limit":1}`, path)
+	listInput := fmt.Sprintf(`{"path":%q}`, dir)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 96)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if out, err := run(t, ReadFile{}, readInput); err != nil || !strings.Contains(out, "2: beta") {
+				errs <- fmt.Errorf("ranged read: %q %v", out, err)
+				return
+			}
+			if out, err := run(t, ListFiles{}, listInput); err != nil || !strings.Contains(out, "shared.txt\tfile\t") {
+				errs <- fmt.Errorf("list_files: %q %v", out, err)
+				return
+			}
+			// Concurrent edits use distinct files: same-file concurrent writes
+			// are user error, but shared state between calls must still be
+			// race-free (distinct files exercise that without lost updates).
+			editPath := filepath.Join(dir, fmt.Sprintf("edit-%03d.txt", i))
+			if err := os.WriteFile(editPath, []byte("a b"), 0o600); err != nil {
+				errs <- err
+				return
+			}
+			raw, _ := json.Marshal(map[string]any{"path": editPath, "edits": []map[string]any{{"old_string": "a", "new_string": "1"}, {"old_string": "b", "new_string": "2"}}})
+			if out, err := run(t, EditFile{}, string(raw)); err != nil || !strings.Contains(out, "applied 2 edit(s)") {
+				errs <- fmt.Errorf("batch edit: %q %v", out, err)
+				return
+			}
+			if got, _ := os.ReadFile(editPath); string(got) != "1 2" {
+				errs <- fmt.Errorf("batch edit content = %q", got)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
