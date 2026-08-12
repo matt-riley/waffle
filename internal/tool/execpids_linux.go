@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -116,10 +117,36 @@ func delegatedCgroupPath() (string, error) {
 	return path, nil
 }
 
+const (
+	cgroupCleanupAttempts = 50
+	cgroupCleanupInterval = 10 * time.Millisecond
+)
+
 func cleanupBashCgroup(path string) {
 	// cgroup.kill is v2-specific and makes cleanup safe even if a detached
 	// grandchild retained the process group after CombinedOutput returned.
-	_ = os.WriteFile(filepath.Join(path, "cgroup.kill"), []byte("1"), 0o600)
+	// Death and removal from cgroup.procs are asynchronous, so retry until the
+	// cgroup is empty before removing it. A one-shot remove can return EBUSY and
+	// leave a stale per-command cgroup behind.
+	killPath := filepath.Join(path, "cgroup.kill")
+	procsPath := filepath.Join(path, "cgroup.procs")
+	for attempt := 0; attempt < cgroupCleanupAttempts; attempt++ {
+		if err := os.WriteFile(killPath, []byte("1"), 0o600); err != nil && os.IsNotExist(err) {
+			return
+		}
+		procs, err := os.ReadFile(procsPath)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err == nil && strings.TrimSpace(string(procs)) == "" {
+			if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+				return
+			}
+		}
+		time.Sleep(cgroupCleanupInterval)
+	}
+	// Keep the cleanup best-effort: if a host kernel still reports EBUSY after
+	// the bounded wait, do not block the command result indefinitely.
 	_ = os.Remove(path)
 }
 

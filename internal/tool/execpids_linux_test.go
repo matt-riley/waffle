@@ -5,9 +5,11 @@ package tool
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestBashProcessLimitCoversDescendants launches more children than the
@@ -64,5 +66,27 @@ printf 'spawned=%s\n' "$i"
 	}
 	if spawned <= 0 || spawned >= 32 {
 		t.Fatalf("spawned %d children, want a positive count below 32", spawned)
+	}
+}
+
+func TestCleanupBashCgroupRetriesUntilEmpty(t *testing.T) {
+	dir := t.TempDir()
+	procsPath := filepath.Join(dir, "cgroup.procs")
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(procsPath, []byte("1234\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(30 * time.Millisecond)
+		_ = os.WriteFile(procsPath, nil, 0o600)
+	}()
+	cleanupBashCgroup(dir)
+	<-done
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cgroup directory still exists: %v", err)
 	}
 }
