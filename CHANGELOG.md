@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.0](https://github.com/matt-riley/waffle/compare/v0.17.0...v0.18.0) (2026-08-13)
+
+
+### Features
+
+* **chatwire:** stable coded errors for safe-to-name workspace failures ([#385](https://github.com/matt-riley/waffle/issues/385)) ([11535b4](https://github.com/matt-riley/waffle/commit/11535b40602c248d07e65deb89ed7af5e3dcdba2))
+* **tool:** web_search, brokered so results stay inside the egress boundary ([#387](https://github.com/matt-riley/waffle/issues/387)) ([3cc4773](https://github.com/matt-riley/waffle/commit/3cc4773033759091aa84d1144c78797bddedbe24))
+
+
+### Bug Fixes
+
+* **broker:** meter tunnelled egress bytes per session, not per CONNECT ([#386](https://github.com/matt-riley/waffle/issues/386)) ([24dcd92](https://github.com/matt-riley/waffle/commit/24dcd92d5b335a3a1b0c19353ac263672f547250))
+* **ci:** pin request-infra-deploy to the string artifact-run-id fix ([#383](https://github.com/matt-riley/waffle/issues/383)) ([462e7e8](https://github.com/matt-riley/waffle/commit/462e7e865585bd3b6cb92c84b878920eb2f54c5d))
+
 ## [0.17.0](https://github.com/matt-riley/waffle/compare/v0.16.0...v0.17.0) (2026-08-12)
 
 
