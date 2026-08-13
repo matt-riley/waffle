@@ -287,7 +287,7 @@ func newWorkspaceManager(cfg config.Config, st *store.Store, b *broker.Broker) *
 
 func brokerLimits(cfg config.Config, group string) usagepkg.Limits {
 	l := cfg.LimitsFor(group)
-	return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
+	return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent, TunnelBytesPerSession: l.TunnelBytesPerSession}
 }
 
 func workspaceHooksFromConfig(cfg config.Config) hooks.Config {

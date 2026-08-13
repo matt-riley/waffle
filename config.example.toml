@@ -277,3 +277,18 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 # url = "https://api.github.com/mcp"
 # groups = ["main"]
 # egress = "broker"
+
+# Safety budgets ([limits]). Zero means unlimited. tokens_per_day and
+# requests_per_hour bound provider usage; tunnel_bytes_per_session bounds
+# broker CONNECT tunnels (#244) — the broker relays tunnel bytes without
+# inspection, so it cannot count requests inside a tunnel; the relay's byte
+# count is charged against this rolling-day budget instead, so one CONNECT
+# cannot bypass requests_per_hour with unbounded traffic. Both relay
+# directions count (client↔upstream), so the budget bounds total tunnel
+# traffic, not just egress bytes. Per-group overrides live under
+# [limits.group.<name>].
+#
+# [limits]
+# tokens_per_day = 1000000
+# requests_per_hour = 120
+# tunnel_bytes_per_session = 1073741824   # 1 GiB of total CONNECT relay bytes per session/day

@@ -34,7 +34,7 @@ func usageCmd(ctx context.Context, args []string, out, stderr io.Writer) (err er
 		return writeJSON(out, outRows)
 	}
 	for _, r := range rows {
-		fmt.Fprintf(out, "%s %s requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens, r.OutputTokens, r.ReservedTokens)
+		fmt.Fprintf(out, "%s %s requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d tunnel_bytes=%d\n", r.SessionID, r.Period, r.Requests, r.InputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens, r.OutputTokens, r.ReservedTokens, r.TunnelBytes)
 	}
 	return nil
 }
@@ -50,6 +50,7 @@ type usageRowJSON struct {
 	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
 	OutputTokens             int    `json:"output_tokens"`
 	ReservedTokens           int    `json:"reserved_tokens"`
+	TunnelBytes              int64  `json:"tunnel_bytes"`
 }
 
 func usageRowToJSON(r usagepkg.Row) usageRowJSON {
@@ -63,6 +64,7 @@ func usageRowToJSON(r usagepkg.Row) usageRowJSON {
 		CacheReadInputTokens:     r.CacheReadInputTokens,
 		OutputTokens:             r.OutputTokens,
 		ReservedTokens:           r.ReservedTokens,
+		TunnelBytes:              r.TunnelBytes,
 	}
 }
 
