@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,20 +144,15 @@ func parsePRResult(out string) (number int, htmlURL string, err error) {
 	if !ok {
 		return 0, "", fmt.Errorf("result has no repo owner/name")
 	}
-	for _, r := range num {
-		if r < '0' || r > '9' {
-			return 0, "", fmt.Errorf("result has a non-numeric PR number %q", num)
-		}
-	}
-	fmt.Sscanf(num, "%d", &number)
-	if number <= 0 {
+	n, convErr := strconv.Atoi(num)
+	if convErr != nil || n <= 0 {
 		return 0, "", fmt.Errorf("result has an invalid PR number %q", num)
 	}
 	urlStart := strings.Index(rest, "http")
 	if urlStart < 0 {
 		return 0, "", fmt.Errorf("result has no URL")
 	}
-	return number, strings.TrimSpace(rest[urlStart:]), nil
+	return n, strings.TrimSpace(rest[urlStart:]), nil
 }
 
 // assertPullRequestResolves confirms the created PR is real: the API resource
