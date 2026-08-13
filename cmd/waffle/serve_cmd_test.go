@@ -1112,3 +1112,66 @@ func TestLoggingChatBackendRecordsFailuresOnTheHost(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchFaceBuildsProviderSpecificBrokerFaces(t *testing.T) {
+	brave, meta, err := searchFace("search", config.SearchProvider{
+		Type: "brave", APIKey: "secret://search/search/api-key",
+	}, "secret-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brave.BaseURL != "https://api.search.brave.com" {
+		t.Fatalf("brave base = %q", brave.BaseURL)
+	}
+	if brave.Header != "X-Subscription-Token" || brave.Value != "secret-value" {
+		t.Fatalf("brave credential injection = %q %q", brave.Header, brave.Value)
+	}
+	if len(brave.Methods) != 1 || brave.Methods[0] != "GET" {
+		t.Fatalf("brave methods = %v", brave.Methods)
+	}
+	if len(brave.Paths) != 1 || brave.Paths[0] != "/res/v1/web/search" {
+		t.Fatalf("brave paths = %v", brave.Paths)
+	}
+	if meta.Name != "search" {
+		t.Fatalf("meta name = %q", meta.Name)
+	}
+
+	tavily, meta, err := searchFace("search", config.SearchProvider{
+		Type: "tavily", APIKey: "secret://search/search/api-key",
+	}, "secret-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tavily.BaseURL != "https://api.tavily.com" {
+		t.Fatalf("tavily base = %q", tavily.BaseURL)
+	}
+	if tavily.Header != "Authorization" || tavily.Value != "Bearer secret-value" {
+		t.Fatalf("tavily credential injection = %q %q", tavily.Header, tavily.Value)
+	}
+	if len(tavily.Methods) != 1 || tavily.Methods[0] != "POST" {
+		t.Fatalf("tavily methods = %v", tavily.Methods)
+	}
+	if len(tavily.Paths) != 1 || tavily.Paths[0] != "/search" {
+		t.Fatalf("tavily paths = %v", tavily.Paths)
+	}
+
+	if _, _, err := searchFace("x", config.SearchProvider{Type: "unknown", APIKey: "secret://search/x/api-key"}, "k"); err == nil {
+		t.Fatal("unknown provider type must error")
+	}
+}
+
+func TestSearchSpecResolvesEffectiveProviderMetadata(t *testing.T) {
+	cfg := config.Config{Search: map[string]config.SearchProvider{
+		"brave": {Type: "brave", APIKey: "secret://search/brave/api-key", MaxResults: 7},
+	}}
+	spec, err := searchSpec(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec == nil || spec.Type != "brave" || spec.Face != "brave" || spec.MaxResults != 7 {
+		t.Fatalf("searchSpec = %+v", spec)
+	}
+	if spec, err := searchSpec(config.Config{}); err != nil || spec != nil {
+		t.Fatalf("absent search spec = %+v, %v; want nil, nil", spec, err)
+	}
+}

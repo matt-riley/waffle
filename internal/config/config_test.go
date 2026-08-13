@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -2158,4 +2159,87 @@ func profilePermits(p ResolvedAgentPolicy, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestSearchEffectiveResolvesSoleDefaultAndRejectsAmbiguity(t *testing.T) {
+	cfg := Config{Search: map[string]SearchProvider{
+		"brave": {Type: "brave", APIKey: "secret://search/brave/api-key"},
+	}}
+	name, p, ok, err := cfg.SearchEffective()
+	if err != nil || !ok || name != "brave" || p.Type != "brave" {
+		t.Fatalf("sole provider = (%q, %+v, %v, %v), want brave", name, p, ok, err)
+	}
+
+	cfg = Config{Search: map[string]SearchProvider{
+		"a":       {Type: "brave", APIKey: "secret://search/a/api-key"},
+		"default": {Type: "tavily", APIKey: "secret://search/default/api-key"},
+	}}
+	name, p, ok, err = cfg.SearchEffective()
+	if err != nil || !ok || name != "default" || p.Type != "tavily" {
+		t.Fatalf("default-named provider = (%q, %+v, %v, %v), want default/tavily", name, p, ok, err)
+	}
+
+	cfg = Config{Search: map[string]SearchProvider{
+		"a": {Type: "brave", APIKey: "secret://search/a/api-key"},
+		"b": {Type: "tavily", APIKey: "secret://search/b/api-key"},
+	}}
+	if _, _, _, err := cfg.SearchEffective(); err == nil {
+		t.Fatal("multiple providers without default must be an error")
+	}
+
+	if _, _, ok, err := (Config{}).SearchEffective(); err != nil || ok {
+		t.Fatalf("absent search = ok=%v err=%v, want false/nil", ok, err)
+	}
+}
+
+func TestValidateSearchRejectsPermissiveOrMalformedConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		p    map[string]SearchProvider
+	}{
+		{"literal key", map[string]SearchProvider{"s": {Type: "brave", APIKey: "sk-live-123"}}},
+		{"unknown type", map[string]SearchProvider{"s": {Type: "google", APIKey: "secret://search/s/api-key"}}},
+		{"bad slug", map[string]SearchProvider{"Bad Name": {Type: "brave", APIKey: "secret://search/s/api-key"}}},
+		{"bad base url", map[string]SearchProvider{"s": {Type: "brave", BaseURL: "not a url", APIKey: "secret://search/s/api-key"}}},
+		{"too many results", map[string]SearchProvider{"s": {Type: "brave", MaxResults: 11, APIKey: "secret://search/s/api-key"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateSearch(tc.p); err == nil {
+				t.Fatalf("validateSearch(%+v) accepted", tc.p)
+			}
+		})
+	}
+	if err := validateSearch(map[string]SearchProvider{
+		"s": {Type: "brave", BaseURL: "https://api.example.com", MaxResults: 10, APIKey: "secret://search/s/api-key"},
+	}); err != nil {
+		t.Fatalf("valid search config rejected: %v", err)
+	}
+}
+
+func TestWebSearchIsAKnownProfileToolAndDeniedForRestrictedTiersByDefault(t *testing.T) {
+	if !ValidProfileTool("web_search") {
+		t.Fatal("web_search must be a known profile tool")
+	}
+	if !slices.Contains(ProfileToolNames(), "web_search") {
+		t.Fatal("web_search must appear in ProfileToolNames")
+	}
+	for _, group := range []string{GroupCron, GroupIssue, GroupGroup} {
+		pol := (Config{}).AgentPolicy(group)
+		if !slices.Contains(pol.Deny, "web_search") {
+			t.Fatalf("group %s must deny web_search by default; policy=%+v", group, pol.Deny)
+		}
+	}
+	// The main tier keeps it (empty allow = everything, no deny).
+	pol := (Config{}).AgentPolicy(GroupMain)
+	if slices.Contains(pol.Deny, "web_search") {
+		t.Fatalf("main tier must not deny web_search by default")
+	}
+	// An explicit tools.allow for a restricted group opts back in.
+	cfg := Config{Agent: Agent{Groups: map[string]AgentGroup{
+		GroupCron: {Tools: ToolPolicy{Allow: []string{"web_search"}}},
+	}}}
+	if pol := cfg.AgentPolicy(GroupCron); slices.Contains(pol.Deny, "web_search") {
+		t.Fatalf("explicit allow must opt cron back in; policy=%+v", pol)
+	}
 }

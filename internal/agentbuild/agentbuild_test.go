@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/agent"
+	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/llm"
@@ -339,3 +340,81 @@ func (r *buildTestRuntime) Resolve(alias string) (config.ResolvedModel, error) {
 }
 
 func (r *buildTestRuntime) Redact(s string) string { return s }
+
+// web_search is offered only when [search] config exists, a broker is wired,
+// and the effective policy permits the tool (config denies it by default for
+// the restricted tiers) — matching the "absent config disables the tool"
+// contract (#245).
+func TestBuildRegistersWebSearchOnlyWithSearchConfigBrokerAndPermission(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	}()
+	cfg := config.Default()
+	cfg.Provider.APIKey = "test-key"
+	cfg.Agent.Subagents = false
+	cfg.Agent.Learn = false
+	sessions := session.New(st)
+	ws := memory.Workspace{Dir: t.TempDir()}
+	runtime := &buildTestRuntime{}
+
+	b := broker.New(st, nil)
+	b.SetAPIFaces([]broker.APIFace{{
+		Name: "brave", BaseURL: "https://api.search.brave.com",
+		Header: "X-Subscription-Token", Value: "test-key",
+		Methods: []string{"GET"}, Paths: []string{"/res/v1/web/search"},
+	}})
+	searchSpec := &tool.WebSearchSpec{Type: "brave", Face: "brave"}
+
+	build := func(spec *tool.WebSearchSpec, broker *broker.Broker, group string) *agent.Agent {
+		t.Helper()
+		a, cleanup, err := (&Builder{
+			Config: cfg, Sessions: sessions, Workspace: ws, Runtime: runtime,
+			Broker: broker, BrokerURL: "http://127.0.0.1:8421", Search: spec,
+		}).Build(ctx, group, "")
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		t.Cleanup(func() { _ = cleanup.Stop() })
+		return a
+	}
+	hasSearch := func(a *agent.Agent) bool {
+		for _, d := range a.Tools.Defs() {
+			if d.Name == "web_search" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// With search config, a broker, and main-tier permission: offered.
+	if a := build(searchSpec, b, config.GroupMain); !hasSearch(a) {
+		t.Fatal("web_search must be offered with config + broker + main tier")
+	}
+	// Absent search config: not offered.
+	if a := build(nil, b, config.GroupMain); hasSearch(a) {
+		t.Fatal("web_search must not be offered without [search] config")
+	}
+	// Absent broker: not offered.
+	if a := build(searchSpec, nil, config.GroupMain); hasSearch(a) {
+		t.Fatal("web_search must not be offered without a broker")
+	}
+	// Broker without any [[api.upstream]] faces (#387 review): web_search is
+	// still offered, and its mint uses tierLimits initialized for any broker,
+	// so the scoped token stays metered even though the apiface block never
+	// ran.
+	bare := broker.New(st, nil)
+	if a := build(searchSpec, bare, config.GroupMain); !hasSearch(a) {
+		t.Fatal("web_search must be offered with a broker even when no api faces exist")
+	}
+	// Restricted tier without explicit allow: not offered (deny-by-default).
+	if a := build(searchSpec, b, config.GroupCron); hasSearch(a) {
+		t.Fatal("web_search must be denied for cron by default")
+	}
+}

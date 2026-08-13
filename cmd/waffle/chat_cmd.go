@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 	"golang.org/x/term"
 )
 
@@ -253,14 +254,17 @@ func openConfigAndStore(ctx context.Context) (config.Config, *store.Store, error
 }
 
 // apiBrokerWiring carries the running credential broker into agent builds
-// so per-face API tools (internal/apiface, #254) can be offered. The zero
-// value disables them; surfaces that run a broker (serve, ws) set it before
-// any agent is built.
+// so per-face API tools (internal/apiface, #254) and web_search (#245) can be
+// offered. The zero value disables them; surfaces that run a broker (serve,
+// ws) set it before any agent is built.
 type apiBrokerWiring struct {
 	broker *broker.Broker
 	url    string
 	faces  []apiface.Face
 	redact func(string) string
+	// search is the effective web_search provider metadata, or nil when no
+	// [search] config exists (the tool is not offered).
+	search *tool.WebSearchSpec
 }
 
 // buildAgent assembles the agent for an agent group (docs/plan.md trust
@@ -317,6 +321,7 @@ func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config,
 		BrokerURL:    api.url,
 		APIFaces:     api.faces,
 		APIRedact:    api.redact,
+		Search:       api.search,
 	}
 	built, cleanup, err := builder.Build(ctx, group, profileName)
 	if err != nil {
