@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
@@ -60,6 +59,10 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 	if !spec.ValidName(in.Name) {
 		return "", errors.New("name must be an Agent Skills name: 1-64 chars of [a-z0-9-], no leading/trailing/consecutive hyphen")
 	}
+	description := OneLine(in.Description)
+	if description == "" || len(description) > spec.MaxDescriptionLength {
+		return "", errors.New("description must be 1-1024 characters")
+	}
 	if strings.TrimSpace(in.Body) == "" {
 		return "", errors.New("body is required")
 	}
@@ -107,6 +110,13 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 }
 
 func (w Workspace) writeSkillCandidate(c Candidate) error {
+	description := OneLine(c.Description)
+	// Refuse to write a non-conforming skill (#396): no SKILL.md is created
+	// on the failing path. The #65 injection gate (validateSkillBody) already
+	// ran in Run as a separate waffle policy layer.
+	if err := spec.Validate(c.Name, description, nil, c.Body, c.Name); err != nil {
+		return fmt.Errorf("refuse to write non-conforming skill: %w", err)
+	}
 	dir := filepath.Join(w.SkillsDir(), c.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -116,36 +126,30 @@ func (w Workspace) writeSkillCandidate(c Candidate) error {
 	if raw, err := os.ReadFile(path); err == nil && skillFrontmatterActive(string(raw)) {
 		return fmt.Errorf("cannot overwrite active skill %q without validation", c.Name)
 	}
-	// status: inactive until waffle skills activate (#65).
-	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nstatus: inactive\nprovenance: %s\nsource_id: %s\ntrust_class: %s\nsession_id: %s\nchannel: %s\nuntrusted_context: %t\n---\n\n%s\n",
-		c.Name, strconv.Quote(OneLine(c.Description)), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, c.Provenance.SessionID, c.Provenance.Channel, c.Provenance.UntrustedContext, strings.TrimSpace(c.Body))
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	// status: inactive until waffle skills activate (#65), recorded under the
+	// waffle metadata key so the file stays spec-conforming (#396). The
+	// provenance markers are dropped: they are write-only (authoritative
+	// provenance is re-derived from context and the install journal).
+	content := spec.MarshalSKILL(map[string]string{
+		"name":               c.Name,
+		"description":        description,
+		spec.WaffleStatusKey: "inactive",
+	}, c.Body)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return err
 	}
 	return nil
 }
 
 // skillFrontmatterActive reports whether SKILL.md frontmatter status is
-// active (or missing — pre-#65 skills default active).
+// active (or missing — pre-#65 skills default active). Reads the waffle
+// metadata key first, then the legacy top-level status (#396).
 func skillFrontmatterActive(raw string) bool {
-	if !strings.HasPrefix(raw, "---\n") && raw != "---" {
+	fields, _, err := spec.ParseFrontmatter(raw)
+	if err != nil {
 		return true
 	}
-	rest := strings.TrimPrefix(raw, "---\n")
-	fm, _, found := strings.Cut(rest, "\n---")
-	if !found {
-		return true
-	}
-	status := ""
-	for _, line := range strings.Split(fm, "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(key) == "status" {
-			status = strings.Trim(strings.TrimSpace(value), `"'`)
-		}
-	}
+	status := spec.StatusField(fields)
 	return status == "" || status == "active"
 }
 

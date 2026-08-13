@@ -294,7 +294,26 @@ host-executed plugin stdio binaries, unattended tiers stay deny-by-default
 unless the extension names the group, and credentials are secret-store
 references only. The `dev.mattriley.waffle/` top-level directory is reserved
 for future per-plugin files. SKILL.md `metadata` key prefixes for
-waffle-written skills align with this identifier (#396).
+waffle-written skills align with this identifier (#396): activation state
+is recorded as `metadata.waffle/status` (`spec.WaffleStatusKey`) — the
+legacy top-level `status` field is still read for existing on-disk skills
+and migrated away on write.
+
+**Write-path conformance (#396).** Every `SKILL.md` waffle writes is
+routed through the shared validator and YAML-safe writer and must validate:
+`distill_skill` and `waffle learn` refuse (with a clear tool error, no file
+created) a name failing the Agent Skills constraints or an
+empty/over-1024-char description; the skill installer's `status: inactive`
+rewrite and activate/deactivate emit `metadata.waffle/status` and never
+produce a status-only frontmatter block — frontmatter-less and
+non-conforming legacy files are left untouched (activation state is
+authoritative in the `skill_status` table). Waffle-specific frontmatter no
+longer appears as non-standard top-level keys: `status` lives under
+`metadata.waffle/status`, and the write-only provenance markers
+(`provenance`/`source_id`/`trust_class`/`session_id`/`channel`/
+`untrusted_context`) are dropped — authoritative provenance is re-derived
+from context and the install journal. The #65 injection gate stays a
+separate waffle policy layer applied before the spec validator.
 
 **Mid-run owner messaging (#253).** The gateway attaches one session-scoped
 outbound sender per run (`internal/notify`), bound to the conversation's

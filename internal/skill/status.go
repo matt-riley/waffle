@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/filecommit"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 // Skill status values.
@@ -94,7 +94,10 @@ func ActivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name st
 	if err != nil {
 		return err
 	}
-	updated := setFrontmatterStatus(string(raw), StatusActive)
+	updated, err := setFrontmatterStatus(string(raw), StatusActive)
+	if err != nil {
+		return err
+	}
 	if err := filecommit.Write(path, []byte(updated), info.Mode().Perm()); err != nil {
 		return err
 	}
@@ -112,42 +115,34 @@ func ActivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name st
 	return nil
 }
 
-func setFrontmatterStatus(raw, status string) string {
-	fm, body := splitFrontmatter(raw)
-	if fm == "" {
-		return fmt.Sprintf("---\nstatus: %s\n---\n\n%s", status, strings.TrimSpace(raw))
+// setFrontmatterStatus records activation state in a skill's frontmatter
+// under the waffle metadata key (metadata.waffle/status, #396), migrating
+// the legacy top-level status field away on write. Frontmatter-less and
+// non-conforming legacy files are left untouched — activation state is
+// authoritative in the skill_status table, and inventing a status-only
+// block would produce a non-conforming SKILL.md.
+func setFrontmatterStatus(raw, status string) (string, error) {
+	fields, body, err := spec.ParseFrontmatter(raw)
+	if err != nil {
+		return raw, nil
 	}
-	var lines []string
-	found := false
-	for _, line := range strings.Split(fm, "\n") {
-		key, _, ok := strings.Cut(line, ":")
-		if ok && strings.TrimSpace(key) == "status" {
-			lines = append(lines, "status: "+status)
-			found = true
-			continue
-		}
-		lines = append(lines, line)
+	if fields["name"] == "" || fields["description"] == "" {
+		return raw, nil
 	}
-	if !found {
-		lines = append(lines, "status: "+status)
-	}
-	return "---\n" + strings.Join(lines, "\n") + "\n---\n" + body
+	fields[spec.WaffleStatusKey] = status
+	delete(fields, "status")
+	return string(spec.MarshalSKILL(fields, body)), nil
 }
 
 // isActiveFrontmatter reports whether a skill's frontmatter status is active
-// or missing (pre-#65 skills default to active).
+// or missing (pre-#65 skills default to active). Reads the waffle metadata
+// key first, then the legacy top-level status.
 func isActiveFrontmatter(raw string) bool {
-	fm, _ := splitFrontmatter(raw)
-	status := ""
-	for _, line := range strings.Split(fm, "\n") {
-		key, value, found := strings.Cut(line, ":")
-		if !found {
-			continue
-		}
-		if strings.TrimSpace(key) == "status" {
-			status = strings.Trim(strings.TrimSpace(value), `"'`)
-		}
+	fields, _, err := spec.ParseFrontmatter(raw)
+	if err != nil {
+		return true
 	}
+	status := spec.StatusField(fields)
 	// Missing status is treated as active (pre-#65 skills).
 	return status == "" || status == StatusActive
 }

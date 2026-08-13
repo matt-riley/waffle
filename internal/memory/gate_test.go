@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 func TestRememberRecordsUntrustedFetchProvenance(t *testing.T) {
@@ -43,7 +45,6 @@ func TestLiveMemoryAndSkillRecordCompleteProvenance(t *testing.T) {
 	}
 	for path, fields := range map[string][]string{
 		ws.MemoryPath(): {"session=session-1", "channel=telegram", "untrusted=false"},
-		filepath.Join(ws.SkillsDir(), "provenance-skill", "SKILL.md"): {"session_id: session-1", "channel: telegram", "untrusted_context: false"},
 	} {
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -54,6 +55,29 @@ func TestLiveMemoryAndSkillRecordCompleteProvenance(t *testing.T) {
 				t.Errorf("%s missing %q: %s", path, field, body)
 			}
 		}
+	}
+	// The distilled SKILL.md no longer carries the write-only provenance
+	// markers (#396): authoritative provenance lives in MEMORY.md and the
+	// install journal. What waffle writes is spec-conforming — name,
+	// description, and activation state under the waffle metadata key.
+	skillBody, err := os.ReadFile(filepath.Join(ws.SkillsDir(), "provenance-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"session_id:", "channel:", "untrusted_context:", "provenance:"} {
+		if strings.Contains(string(skillBody), marker) {
+			t.Errorf("SKILL.md still carries dropped provenance marker %q:\n%s", marker, skillBody)
+		}
+	}
+	fields, _, err := spec.ParseFrontmatter(string(skillBody))
+	if err != nil {
+		t.Fatalf("distilled SKILL.md not parseable: %v\n%s", err, skillBody)
+	}
+	if fields["name"] != "provenance-skill" || fields["description"] == "" {
+		t.Errorf("distilled SKILL.md fields = %v", fields)
+	}
+	if fields[spec.WaffleStatusKey] != "inactive" {
+		t.Errorf("distilled SKILL.md status = %q, want inactive under metadata", fields[spec.WaffleStatusKey])
 	}
 }
 

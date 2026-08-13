@@ -33,6 +33,21 @@ const (
 // (refuse) enforcement; the error itself is shared.
 var ErrInvalid = errors.New("skill does not conform to the Agent Skills spec")
 
+// WaffleStatusKey is the frontmatter key under which waffle records skill
+// activation state (metadata.waffle/status), aligned with the
+// dev.mattriley.waffle extension namespace (#394, #396). The legacy
+// top-level status field is still read for existing on-disk skills.
+const WaffleStatusKey = "metadata.waffle/status"
+
+// StatusField returns the activation status from parsed frontmatter fields:
+// the waffle metadata key first, then the legacy top-level status.
+func StatusField(fields map[string]string) string {
+	if v := fields[WaffleStatusKey]; v != "" {
+		return v
+	}
+	return fields["status"]
+}
+
 // ValidName reports whether name satisfies the specification's name
 // constraints: 1–64 characters of lowercase alphanumerics and hyphens,
 // no leading or trailing hyphen, no consecutive hyphens.
@@ -422,6 +437,9 @@ func unescapeDouble(s string) (string, error) {
 	var buf strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' {
+			if s[i] == '"' {
+				return "", errors.New("unescaped double quote in double-quoted scalar")
+			}
 			buf.WriteByte(s[i])
 			continue
 		}
