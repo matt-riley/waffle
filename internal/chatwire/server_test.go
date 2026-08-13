@@ -1490,6 +1490,7 @@ type wireFakeBackend struct {
 	turnEvent      chat.Event
 	turnErr        error
 	commandEvent   chat.Event
+	commandErr     error
 	blockCommand   bool
 	commandStarted chan struct{}
 	commandOnce    sync.Once
@@ -1645,7 +1646,7 @@ func (b *wireFakeBackend) Command(ctx context.Context, _ chat.ParsedCommand, emi
 		<-ctx.Done()
 		return chat.Result{}, ctx.Err()
 	}
-	return b.commandResult, nil
+	return b.commandResult, b.commandErr
 }
 
 func (b *wireFakeBackend) waitCommandStarted(t *testing.T) {
@@ -1751,5 +1752,75 @@ func assertNoCanaries(t *testing.T, value string) {
 		if strings.Contains(value, canary) {
 			t.Fatalf("value contains canary %q: %s", canary, value)
 		}
+	}
+}
+
+// A backend error whose chain contains a chat.StableError must reach the wire
+// as that stable code and safe message, never the fallback text and never the
+// cause detail (which can name hosts, paths, or tokens) (#243).
+func TestServerSubstitutesStableErrorForGenericCommandFailure(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("stable-command-error")
+	backend.commandErr = &chat.StableError{
+		Code:    "repo_clone_failed",
+		Message: "the repository clone failed (git exited with status 128)",
+		Cause: errors.New("workspace setup: git clone -- https://secret.example/owner/repo.git /work/repo: " +
+			"error: exit status 128\nfatal: could not read from remote repository."),
+	}
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus}, nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) {
+		t.Fatalf("Command error = %#v, want a RemoteError", err)
+	}
+	if remote.Code != "repo_clone_failed" {
+		t.Fatalf("RemoteError code = %q, want the stable code", remote.Code)
+	}
+	if remote.Message != "the repository clone failed (git exited with status 128)" {
+		t.Fatalf("RemoteError message = %q, want the safe message", remote.Message)
+	}
+	for _, canary := range []string{"secret.example", "owner/repo", "exit status 128\nfatal", "/work/repo"} {
+		if strings.Contains(remote.Message, canary) {
+			t.Fatalf("stable message leaks cause detail %q: %q", canary, remote.Message)
+		}
+	}
+}
+
+// A plain backend error (no StableError in the chain) keeps the fallback
+// "chat command failed" so the generic sanitising is unchanged.
+func TestServerKeepsGenericFallbackForUnclassifiedCommandError(t *testing.T) {
+	t.Parallel()
+
+	backend := newWireFake("generic-command-error")
+	backend.commandErr = errors.New("workspace setup: git clone -- https://secret.example/owner/repo.git /work/repo: boom")
+	path, stop := startChatwireServer(t, func(context.Context) (chat.Backend, error) { return backend, nil }, nil)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Open(ctx, chat.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Command(ctx, chat.ParsedCommand{Name: chat.CommandStatus}, nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) {
+		t.Fatalf("Command error = %#v, want a RemoteError", err)
+	}
+	if remote.Code != "command_failed" || remote.Message != "chat command failed" {
+		t.Fatalf("RemoteError = %+v, want the generic fallback", remote)
 	}
 }

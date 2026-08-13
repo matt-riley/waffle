@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/repopolicy"
@@ -540,10 +541,56 @@ func (m *Manager) setup(ctx context.Context, client *sandbox.Client, ws *Workspa
 	}
 	for _, cmd := range steps {
 		if err := m.bash(ctx, client, cmd); err != nil {
+			if strings.Contains(cmd, "git clone") {
+				return classifyCloneError(err)
+			}
 			return fmt.Errorf("workspace setup: %w", err)
 		}
 	}
 	return nil
+}
+
+// exitStatusRE recovers git's exit status from the container runner's error
+// prefix ("error: exit status 128\n..."). It is applied only to the first
+// line of the error payload (runnerPrefix), never to later command output,
+// which can contain its own "exit status" text.
+var exitStatusRE = regexp.MustCompile(`error: exit status (\d+)`)
+
+// runnerPrefix returns the first line of the runner's error payload: the
+// runner prepends "error: exit status N" (after the command text) before the
+// command's own output, so everything after the first newline is untrusted
+// output that must not be searched for a status.
+func runnerPrefix(msg string) string {
+	line, _, _ := strings.Cut(msg, "\n")
+	return line
+}
+
+// classifyCloneError maps a failed `git clone` step to a chat.StableError the
+// chat client can show, keeping the raw output -- which can name the repo URL,
+// the host, or echo a credential -- on the host only (#243). The classifier
+// matches the broker's own refusal text, which is stable and safe: the egress
+// 403 body, the git-credential 403 body, and the helper's "not bound" message.
+// Anything else becomes a plain clone failure with git's exit status when the
+// runner surfaced it, never the command output.
+func classifyCloneError(err error) error {
+	msg := err.Error()
+	code, safe := "repo_clone_failed", "the repository clone failed"
+	switch {
+	case strings.Contains(msg, "egress host not allowlisted"),
+		strings.Contains(msg, "egress port not allowlisted"),
+		strings.Contains(msg, "egress requires an absolute URL"):
+		code, safe = "repo_egress_denied", "the repo host is not permitted by the egress policy"
+	case strings.Contains(msg, "not bound to a repo workspace"):
+		code, safe = "repo_not_bound", "no workspace binding for this session"
+	case strings.Contains(msg, "refusing credentials"),
+		strings.Contains(msg, "no credentials for host"),
+		strings.Contains(msg, "git-credential:"):
+		code, safe = "repo_credential_refused", "the git credential was refused for the requested repo"
+	}
+	if m := exitStatusRE.FindStringSubmatch(runnerPrefix(msg)); m != nil {
+		safe = fmt.Sprintf("%s (git exited with status %s)", safe, m[1])
+	}
+	return &chat.StableError{Code: code, Message: safe, Cause: fmt.Errorf("workspace setup: %w", err)}
 }
 
 func (m *Manager) bash(ctx context.Context, client *sandbox.Client, cmd string) error {
