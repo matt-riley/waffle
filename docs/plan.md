@@ -264,6 +264,21 @@ entry at validation time. The `BuildProcessEnv` allowlist discipline is
 unchanged — plugins never see ambient secrets — and native `[[mcp]]`
 servers are never expanded.
 
+**Component failure isolation (#393).** Plugins are loaded with spec §11.3
+boundaries: `plugin.LoadComponents` aggregates manifest + skills + mcp.json
+so only a broken manifest rejects the whole plugin; a disabled MCP component
+type, a skipped skill, or an invalid server entry is reported, never fatal.
+The agent build wires every installed plugin
+(`<waffle home>/plugins/`, `plugin.Installed`): plugin skills join the
+system-prompt index, and plugin MCP servers connect with the most
+restrictive default posture — remote servers are refused (the portable
+surface carries no credentials/egress; that is the waffle extension
+namespace, #394), docker-mode groups refuse host-executed plugin stdio
+servers, and every connect/toolbox failure is a `slog.Warn` naming plugin,
+server, and reason. Native `[[mcp]]` servers keep fail-fast; the codeintel
+optional-degrade becomes a per-server `mcp.Server.Optional` flag. `waffle
+doctor` reports rejected and partially-loaded plugins.
+
 **Mid-run owner messaging (#253).** The gateway attaches one session-scoped
 outbound sender per run (`internal/notify`), bound to the conversation's
 channel and chat id — the same adapter resolution the memory-change notifier
