@@ -594,6 +594,61 @@ func TestFilterActiveDBOverrideAndLegacyDefault(t *testing.T) {
 	}
 }
 
+// TestFilterActiveWithExtensionOverrides: the waffle extension status layer
+// (#394) sits between frontmatter and the DB — the DB still wins, and a
+// missing extension value falls back to frontmatter.
+func TestFilterActiveWithExtensionOverrides(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "override.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := SetSkillStatusRecord(ctx, st.DB, StatusRecord{
+		Name:   "db-inactive",
+		Status: StatusInactive,
+		Source: "install",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	all := []Skill{
+		// Extension says inactive; frontmatter has no status (default active).
+		{Name: "ext-inactive", raw: "---\nname: ext-inactive\n---\n"},
+		// Extension says active; frontmatter says inactive.
+		{Name: "ext-active", raw: "---\nname: ext-active\nstatus: inactive\n---\n"},
+		// DB row says inactive and wins over the extension's active.
+		{Name: "db-inactive", raw: "---\nname: db-inactive\n---\n"},
+		// No extension entry: frontmatter default applies.
+		{Name: "legacy", raw: "---\nname: legacy\n---\n"},
+	}
+	extension := map[string]string{
+		"ext-inactive": StatusInactive,
+		"ext-active":   StatusActive,
+		"db-inactive":  StatusActive, // must lose to the DB row
+	}
+	got, err := FilterActiveWithExtension(all, st.DB, extension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	if names["ext-inactive"] {
+		t.Error("extension-inactive skill must be filtered out")
+	}
+	if !names["ext-active"] {
+		t.Error("extension-active skill must stay")
+	}
+	if names["db-inactive"] {
+		t.Error("DB override must beat the extension")
+	}
+	if !names["legacy"] {
+		t.Error("legacy skill must stay active")
+	}
+}
+
 func TestScanSkillStatusRowsHappyPath(t *testing.T) {
 	rows := &fakeSkillStatusRows{
 		pairs: [][2]string{
