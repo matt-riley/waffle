@@ -16,11 +16,13 @@ type Limits struct {
 	TokensPerDay          int
 	RequestsPerHour       int
 	AlertThresholdPercent int
-	// TunnelBytesPerSession is the rolling-day byte budget for broker
-	// CONNECT tunnelled egress (#244). The broker relays tunnel bytes without
-	// inspection, so it cannot count requests inside a tunnel; the relay's
-	// io.Copy byte counts are the only meter, charged against this budget.
-	// Zero means unlimited, preserving pre-#244 behaviour.
+	// TunnelBytesPerSession is the rolling-day byte budget for broker CONNECT
+	// tunnels (#244). The broker relays tunnel bytes without inspection, so it
+	// cannot count requests inside a tunnel; the relay's io.Copy byte counts
+	// are the only meter, charged against this budget. Both relay directions
+	// count (client→upstream and upstream→client), so the budget bounds total
+	// tunnel traffic, not just egress bytes. Zero means unlimited, preserving
+	// pre-#244 behaviour.
 	TunnelBytesPerSession int64
 }
 
@@ -112,7 +114,7 @@ func (s *Store) Check(ctx context.Context, session string, l Limits, now time.Ti
 			return err
 		}
 		if used >= l.TunnelBytesPerSession {
-			return fmt.Errorf("usage limit exceeded: tunnelled egress byte budget (%d)", l.TunnelBytesPerSession)
+			return fmt.Errorf("usage limit exceeded: tunnelled relay byte budget (%d)", l.TunnelBytesPerSession)
 		}
 	}
 	return nil
@@ -366,7 +368,7 @@ func (s *Store) AddTunnelBytesAt(ctx context.Context, session string, n int64, n
 	return nil
 }
 
-// TunnelBytesAt returns the session's rolling-day tunnelled egress bytes.
+// TunnelBytesAt returns the session's rolling-day tunnelled relay bytes (both directions).
 func (s *Store) TunnelBytesAt(ctx context.Context, session string, now time.Time) (int64, error) {
 	if session == "" {
 		return 0, nil

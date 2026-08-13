@@ -147,6 +147,12 @@ type Broker struct {
 	budgets    map[string]string
 	kinds      map[string]string          // upstream name → provider type ("anthropic"/"openai")
 	faceGrants map[string]map[string]bool // session id → granted face names
+	// tunnelLive is the reserved-but-unpersisted tunnelled relay bytes per
+	// budget key (#244). A CONNECT reserves its allowance here so concurrent
+	// tunnels share one cap instead of each snapshotting the full remaining
+	// budget; the reservation is released when the tunnel's bytes are
+	// persisted. Entries are deleted once they drain to zero.
+	tunnelLive map[string]*atomic.Int64
 	Usage      *usage.Store
 	Limits     usage.Limits
 	// TokenTTL is the lifetime of minted wk_ tokens. Zero means DefaultTokenTTL.
@@ -183,6 +189,7 @@ func New(st *store.Store, upstreams []Upstream) *Broker {
 		budgets:    map[string]string{},
 		kinds:      map[string]string{},
 		faceGrants: map[string]map[string]bool{},
+		tunnelLive: map[string]*atomic.Int64{},
 	}
 
 	if st != nil {
@@ -541,7 +548,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// this, every https:// fetch from a workspace fails -- git clone, and every
 	// package manager too.
 	if r.Method == http.MethodConnect {
-		b.serveConnect(w, r, token, sessionID, limits)
+		b.serveConnect(w, r, token, sessionID, budgetKey, limits)
 		return
 	}
 	if r.URL.Path == "/git-credential" {
@@ -1522,9 +1529,9 @@ func connectTarget(r *http.Request) (host, port string) {
 // egress byte budget is consumed mid-tunnel (#244). It is never returned to
 // the client: the tunnel is cut, which is the only way to stop a relay that
 // was already established.
-var errTunnelBudgetExhausted = errors.New("tunnelled egress byte budget exhausted")
+var errTunnelBudgetExhausted = errors.New("tunnelled relay byte budget exhausted")
 
-// limitWriter aborts a CONNECT relay once the session's tunnelled egress
+// limitWriter aborts a CONNECT relay once the session's tunnelled relay
 // byte allowance is consumed (#244). The broker relays tunnel bytes without
 // inspection, so the io.Copy byte count is the only meter; the allowance is
 // shared across both relay directions, and when it is exhausted stop closes
@@ -1573,7 +1580,7 @@ func (w *limitWriter) Write(p []byte) (int, error) {
 // Bytes are relayed without inspection, so the client's TLS session runs
 // end to end: the broker never sees the request, the response, or the
 // credential the client sends.
-func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, sessionID string, limits usage.Limits) {
+func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, sessionID, budgetKey string, limits usage.Limits) {
 	host, port := connectTarget(r)
 	if host == "" {
 		http.Error(w, "connect requires a host", http.StatusBadRequest)
@@ -1607,22 +1614,36 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 
 	// #244: a tunnel is metered once per CONNECT unless the relay bytes are
 	// charged against the session budget. The Check above already refused the
-	// CONNECT when the rolling-day total reached the cap; the allowance left
-	// is the cap for this tunnel's relay, enforced mid-stream by the limiter.
+	// CONNECT when the rolling-day total reached the cap. The allowance is
+	// reserved per budget key so concurrent tunnels share one cap: each
+	// CONNECT sees persisted bytes plus other live tunnels' reservations, and
+	// the reservation is released when this tunnel's bytes are persisted.
 	budgeted := b.Usage != nil && limits.TunnelBytesPerSession > 0
 	var remaining atomic.Int64
+	var allowance int64
 	if budgeted {
-		used, err := b.Usage.TunnelBytesAt(r.Context(), sessionID, b.now())
+		persisted, err := b.Usage.TunnelBytesAt(r.Context(), budgetKey, b.now())
 		if err != nil {
 			http.Error(w, "tunnel usage check failed", http.StatusInternalServerError)
 			return
 		}
-		if used >= limits.TunnelBytesPerSession {
+		b.mu.Lock()
+		live := b.tunnelLive[budgetKey]
+		if live == nil {
+			live = &atomic.Int64{}
+			b.tunnelLive[budgetKey] = live
+		}
+		allowance = limits.TunnelBytesPerSession - persisted - live.Load()
+		if allowance > 0 {
+			live.Add(allowance)
+		}
+		b.mu.Unlock()
+		if allowance <= 0 {
 			b.record(r.Context(), token, sessionID, "denied", "connect budget "+host+":"+port)
-			http.Error(w, "usage limit exceeded: tunnelled egress byte budget", http.StatusTooManyRequests)
+			http.Error(w, "usage limit exceeded: tunnelled relay byte budget", http.StatusTooManyRequests)
 			return
 		}
-		remaining.Store(limits.TunnelBytesPerSession - used)
+		remaining.Store(allowance)
 	}
 
 	hijacker, ok := w.(http.Hijacker)
@@ -1671,7 +1692,9 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 	// With a byte budget configured, both directions relay through limitWriter
 	// sharing one allowance; when it is exhausted the relay is cut (#244). The
 	// relayed byte count is persisted after both directions finish so the next
-	// CONNECT (and the CONNECT-time Check) sees it.
+	// CONNECT (and the CONNECT-time Check) sees it, and this tunnel's share of
+	// the in-memory reservation is released so the persisted total is not
+	// double-counted against concurrent tunnels.
 	var relayed atomic.Int64
 	finished := make(chan struct{}, 2)
 	stopOnce := sync.Once{}
@@ -1699,8 +1722,23 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 	<-finished
 	<-finished
 	if b.Usage != nil {
-		if err := b.Usage.AddTunnelBytesAt(context.WithoutCancel(r.Context()), sessionID, relayed.Load(), b.now()); err != nil {
+		// Persist first, then release the reservation: between the two the
+		// account briefly over-counts (conservative — a concurrent CONNECT may
+		// be refused early, never allowed to overrun), and after the release
+		// the persisted total plus the remaining live reservations exactly
+		// equal the bytes actually relayed.
+		if err := b.Usage.AddTunnelBytesAt(context.WithoutCancel(r.Context()), budgetKey, relayed.Load(), b.now()); err != nil {
 			slog.Default().Error("broker tunnel usage record failed", "err", err, "session", sessionID)
+		}
+		if budgeted {
+			b.mu.Lock()
+			if live := b.tunnelLive[budgetKey]; live != nil {
+				live.Add(-allowance)
+				if live.Load() == 0 {
+					delete(b.tunnelLive, budgetKey)
+				}
+			}
+			b.mu.Unlock()
 		}
 	}
 }

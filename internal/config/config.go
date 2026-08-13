@@ -1182,10 +1182,12 @@ type Limits struct {
 	RequestsPerHour       int `toml:"requests_per_hour"`
 	AlertThresholdPercent int `toml:"alert_threshold_percent"`
 	// TunnelBytesPerSession is the rolling-day byte budget for broker CONNECT
-	// tunnelled egress (#244). The broker relays tunnel bytes without
-	// inspection, so a tunnel cannot be metered per request; the relay's
-	// io.Copy byte counts are charged against this budget instead, so one
-	// CONNECT cannot bypass RequestsPerHour with unbounded traffic.
+	// tunnels (#244). The broker relays tunnel bytes without inspection, so a
+	// tunnel cannot be metered per request; the relay's io.Copy byte counts
+	// are charged against this budget instead, so one CONNECT cannot bypass
+	// RequestsPerHour with unbounded traffic. Both relay directions count
+	// (client→upstream and upstream→client), so the budget bounds total tunnel
+	// traffic, not just egress bytes.
 	TunnelBytesPerSession int64             `toml:"tunnel_bytes_per_session"`
 	Groups                map[string]Limits `toml:"group"`
 }

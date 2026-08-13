@@ -1996,3 +1996,92 @@ func TestConnectRecordsTunnelBytesWithoutABudget(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// Concurrent tunnels must share one session cap (#386 review): each CONNECT
+// previously snapshotted (cap − used) into its own allowance, so two live
+// tunnels could each relay the full remaining budget and collectively exceed
+// it. The allowance is now reserved per budget key, so a second CONNECT while
+// the first tunnel holds the reservation is refused, and after the first
+// tunnel closes and persists its bytes the remaining allowance is available
+// again.
+func TestConnectConcurrentTunnelsShareTheSessionBudget(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn)
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	const budget int64 = 64
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TunnelBytesPerSession: budget}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	// First tunnel is established and holds the reservation.
+	status, first := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	if !strings.Contains(status, "200") {
+		t.Fatalf("first CONNECT status = %q, want 200", status)
+	}
+	// A concurrent second CONNECT is refused: the whole remaining allowance is
+	// reserved by the first tunnel, so it cannot collectively overrun the cap.
+	status, second := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	defer func() { _ = second.Close() }()
+	if !strings.Contains(status, "429") {
+		t.Fatalf("concurrent CONNECT status = %q, want 429 (shared budget)", status)
+	}
+
+	// The first tunnel relays 16 bytes and closes; the bytes are persisted and
+	// the reservation released.
+	if _, err := first.Write([]byte("0123456789abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply := make([]byte, 16)
+	if _, err := io.ReadFull(first, reply); err != nil {
+		t.Fatalf("first tunnel relay failed: %v", err)
+	}
+	_ = first.Close()
+
+	// After the reservation is released and the 16 bytes persisted, a new
+	// tunnel fits in the remaining allowance.
+	usageStore := usage.New(st)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n, err := usageStore.TunnelBytesAt(context.Background(), "budget", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n >= 32 { // 16 client bytes + 16 echoed bytes
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel bytes not recorded; got %d", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	status, third := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	defer func() { _ = third.Close() }()
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT after release status = %q, want 200", status)
+	}
+}
