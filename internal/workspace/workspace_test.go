@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/hooks"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/repopolicy"
@@ -2699,5 +2700,68 @@ func TestResumeDoesNotPersistUnenforcedEgress(t *testing.T) {
 	}
 	if len(rt.opts) == 0 || rt.opts[len(rt.opts)-1].Network != WorkspaceBrokerNetwork {
 		t.Fatalf("final container network = %+v, want the netlocked bridge", rt.opts)
+	}
+}
+
+func TestClassifyCloneErrorMapsSafeStableCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		code string
+		want string
+	}{
+		{
+			name: "egress denied",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: error: exit status 128\nfatal: unable to access: egress host not allowlisted",
+			code: "repo_egress_denied",
+			want: "the repo host is not permitted by the egress policy (git exited with status 128)",
+		},
+		{
+			name: "credential refused",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: error: exit status 128\ngit-credential: broker: 403 Forbidden: session is scoped to \"o/r\"; refusing credentials for \"other/r\"",
+			code: "repo_credential_refused",
+			want: "the git credential was refused for the requested repo (git exited with status 128)",
+		},
+		{
+			name: "no binding",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: error: exit status 128\nsession is not bound to a repo workspace; refusing git credentials",
+			code: "repo_not_bound",
+			want: "no workspace binding for this session (git exited with status 128)",
+		},
+		{
+			name: "plain clone failure carries exit status",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: error: exit status 128\nfatal: could not read from remote repository.",
+			code: "repo_clone_failed",
+			want: "the repository clone failed (git exited with status 128)",
+		},
+		{
+			name: "clone failure without a status stays generic",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: boom",
+			code: "repo_clone_failed",
+			want: "the repository clone failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyCloneError(errors.New(tc.msg))
+			var stable *chat.StableError
+			if !errors.As(err, &stable) {
+				t.Fatalf("classifyCloneError(%q) = %v, want a chat.StableError", tc.msg, err)
+			}
+			if stable.Code != tc.code {
+				t.Fatalf("code = %q, want %q", stable.Code, tc.code)
+			}
+			if stable.SafeMessage() != tc.want {
+				t.Fatalf("SafeMessage = %q, want %q", stable.SafeMessage(), tc.want)
+			}
+			// The raw output stays reachable on the host via Error/Unwrap,
+			// but never in the safe message.
+			if strings.Contains(stable.SafeMessage(), "github.com") || strings.Contains(stable.SafeMessage(), "/work/repo") {
+				t.Fatalf("safe message leaks clone detail: %q", stable.SafeMessage())
+			}
+			if !strings.Contains(err.Error(), tc.msg) {
+				t.Fatalf("host Error() lost the raw cause: %q", err.Error())
+			}
+		})
 	}
 }
