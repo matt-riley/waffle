@@ -56,6 +56,11 @@ type Config struct {
 	CodeIntel CodeIntel `toml:"codeintel"`
 	// API configures credentialed API faces (#254).
 	API API `toml:"api"`
+	// Search configures the optional web_search tool (#245). Each key is a
+	// named search provider the broker fronts; the effective provider is the
+	// sole entry, or the entry named "default". Absent config disables the
+	// tool.
+	Search map[string]SearchProvider `toml:"search"`
 
 	// legacyProviderNormalized records that Providers and Models were derived
 	// from the compatibility [provider] table. It keeps historical secret-value
@@ -432,6 +437,10 @@ func (c Config) AgentPolicy(group string) ResolvedAgentPolicy {
 		r.Deny = AppendUnique(r.Deny, "distill_skill")
 		// Working-set mutation is owner-session only by default (#67).
 		r.Deny = AppendUnique(r.Deny, "workspace_update")
+		// web_search (#245): search results are attacker-influenceable text
+		// pulled into exactly the unattended/multi-party tiers, so it is
+		// deny-by-default there; an explicit tools.allow for the group opts in.
+		r.Deny = AppendUnique(r.Deny, "web_search")
 		// Public, permanent publish actions stay denied for unattended tiers
 		// by default (#252): an injected issue body must not be able to
 		// produce a public GitHub comment with no human in the loop.
@@ -540,6 +549,11 @@ var knownProfileTools = map[string]bool{
 	// builtins
 	"bash": true, "read_file": true, "write_file": true, "edit_file": true,
 	"fetch": true, "search": true, "list_files": true,
+	// web_search (#245): a host-side builtin routed through the broker's
+	// credentialed API faces, offered only when [search] config exists. The
+	// restricted tiers deny it by default (search pulls attacker-influenceable
+	// text into untrusted contexts; an explicit tools.allow opts in).
+	"web_search": true,
 	// host memory / session / workset / spill
 	"remember": true, "memory_update": true, "recall": true, "distill_skill": true,
 	"workspace_update": true, "expand_output": true, "expand_context": true,
@@ -997,6 +1011,78 @@ type API struct {
 	Upstream []APIUpstream `toml:"upstream"`
 }
 
+// SearchProvider is one configured web_search provider (#245). The
+// credential is always a secret:// reference resolved host-side; the broker
+// injects it and a sandbox never holds it.
+type SearchProvider struct {
+	// Type is the provider: "brave" or "tavily".
+	Type string `toml:"type"`
+	// BaseURL overrides the provider's API root; empty uses the provider
+	// default.
+	BaseURL string `toml:"base_url"`
+	// APIKey is the credential reference, for example
+	// "secret://search/brave/api-key". Literal credentials are rejected.
+	APIKey string `toml:"api_key"`
+	// MaxResults caps the ranked rows web_search returns (1..10, default 5).
+	MaxResults int `toml:"max_results"`
+}
+
+// SearchDefaultMaxResults is the row cap when max_results is unset.
+const SearchDefaultMaxResults = 5
+
+// SearchMaxResults is the hard row cap.
+const SearchMaxResults = 10
+
+// SearchEffective resolves the provider the web_search tool uses: the sole
+// configured provider, or the one named "default". Multiple providers without
+// a "default" entry are an error — strict config, no permissive fallback
+// (#245). ok is false when no search provider is configured.
+func (c Config) SearchEffective() (name string, p SearchProvider, ok bool, err error) {
+	if len(c.Search) == 0 {
+		return "", SearchProvider{}, false, nil
+	}
+	if p, ok := c.Search["default"]; ok {
+		return "default", p, true, nil
+	}
+	if len(c.Search) == 1 {
+		for name, p := range c.Search {
+			return name, p, true, nil
+		}
+	}
+	names := make([]string, 0, len(c.Search))
+	for name := range c.Search {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return "", SearchProvider{}, false, fmt.Errorf("multiple [search] providers configured (%s) but none is named \"default\"; name one \"default\" or keep a single provider", strings.Join(names, ", "))
+}
+
+func validateSearch(search map[string]SearchProvider) error {
+	for name, p := range search {
+		if !slugNameRE.MatchString(name) {
+			return fmt.Errorf("[search] provider name %q is not a valid slug (want [a-z0-9-])", name)
+		}
+		switch p.Type {
+		case "brave", "tavily":
+		default:
+			return fmt.Errorf("[search.%s]: type must be \"brave\" or \"tavily\", got %q", name, p.Type)
+		}
+		if !strings.HasPrefix(p.APIKey, "secret://") {
+			return fmt.Errorf("[search.%s]: api_key must be a secret:// reference (store it with `waffle secret set %s`); literal credentials are rejected", name, "search/"+name+"/api-key")
+		}
+		if p.BaseURL != "" {
+			u, err := url.Parse(p.BaseURL)
+			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+				return fmt.Errorf("[search.%s]: base_url must be a valid http(s) URL, got %q", name, p.BaseURL)
+			}
+		}
+		if p.MaxResults < 0 || p.MaxResults > SearchMaxResults {
+			return fmt.Errorf("[search.%s]: max_results must be 0 (default %d) or 1..%d, got %d", name, SearchDefaultMaxResults, SearchMaxResults, p.MaxResults)
+		}
+	}
+	return nil
+}
+
 // APIUpstream is one named credentialed API face (#254). The broker injects
 // the resolved credential host-side and the caller never holds it, but the
 // face is deny-by-default: both allowlists are required (a face missing
@@ -1334,6 +1420,12 @@ func Load(path string) (Config, error) {
 	}
 	if err := validateFetch(cfg.Tools.Fetch); err != nil {
 		return Config{}, fmt.Errorf("tools.fetch: %w", err)
+	}
+	if err := validateSearch(cfg.Search); err != nil {
+		return Config{}, err
+	}
+	if _, _, _, err := cfg.SearchEffective(); err != nil {
+		return Config{}, err
 	}
 
 	if cfg.Jobs.MaxAttempts < 1 {

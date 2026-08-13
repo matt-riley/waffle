@@ -42,6 +42,7 @@ import (
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
 	"github.com/matt-riley/waffle/internal/workset"
 	"github.com/matt-riley/waffle/internal/workspace"
@@ -248,6 +249,11 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			return err
 		}
 		b.SetAPIFaces(apiFaces)
+		searchMeta, err := searchSpec(cfg)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
 		var brokerRedact func(string) string
 		if redactor, redactorErr := brokerRedactor(); redactorErr == nil && redactor != nil {
 			b.Redact = redactor.Redact
@@ -259,6 +265,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			url:    hostBrokerURL(cfg.Broker.Listen),
 			faces:  faceMetas,
 			redact: brokerRedact,
+			search: searchMeta,
 		}
 		done := make(chan struct{})
 		brokerDone = done
@@ -863,11 +870,12 @@ func (ads adapterDeliverer) Deliver(ctx context.Context, target, text string) er
 	return fmt.Errorf("no channel %q for delivery", name)
 }
 
-// brokerAPIFaces resolves [[api.upstream]] (#254) into broker faces — the
-// credential resolved host-side exactly once, at startup — and their
-// credential-free metadata for agent tools. A face whose credential cannot
-// be resolved is a startup error: silently dropping a configured face would
-// deny-by-default with no signal to the operator.
+// brokerAPIFaces resolves [[api.upstream]] (#254) and the effective [search]
+// provider (#245) into broker faces — the credential resolved host-side
+// exactly once, at startup — and their credential-free metadata for agent
+// tools. A face whose credential cannot be resolved is a startup error:
+// silently dropping a configured face would deny-by-default with no signal to
+// the operator.
 func brokerAPIFaces(cfg config.Config) ([]broker.APIFace, []apiface.Face, error) {
 	faces := make([]broker.APIFace, 0, len(cfg.API.Upstream))
 	metas := make([]apiface.Face, 0, len(cfg.API.Upstream))
@@ -885,7 +893,77 @@ func brokerAPIFaces(cfg config.Config) ([]broker.APIFace, []apiface.Face, error)
 		})
 		metas = append(metas, apiface.Face{Name: f.Name, Methods: f.Methods, Paths: f.Paths})
 	}
+	sf, sm, err := searchFaces(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	faces = append(faces, sf...)
+	metas = append(metas, sm...)
 	return faces, metas, nil
+}
+
+// searchFaces resolves the effective [search] provider into a broker API face
+// (#245) and its credential-free metadata. The face's method and path
+// allowlists are the exact provider endpoints the web_search tool calls, so
+// the face can never be aimed elsewhere.
+func searchFaces(cfg config.Config) ([]broker.APIFace, []apiface.Face, error) {
+	name, p, ok, err := cfg.SearchEffective()
+	if err != nil || !ok {
+		return nil, nil, err
+	}
+	value, err := resolveSecretValue(p.APIKey, "")
+	if err != nil {
+		return nil, nil, fmt.Errorf("[search.%s]: resolve credential: %w", name, err)
+	}
+	if value == "" {
+		return nil, nil, fmt.Errorf("[search.%s]: credential resolved empty (store the secret with `waffle secret set %s`)", name, strings.TrimPrefix(p.APIKey, "secret://"))
+	}
+	face, meta, err := searchFace(name, p, value)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []broker.APIFace{face}, []apiface.Face{meta}, nil
+}
+
+// searchFace builds the broker face and agent metadata for one provider.
+func searchFace(name string, p config.SearchProvider, key string) (broker.APIFace, apiface.Face, error) {
+	face := broker.APIFace{Name: name, Value: key}
+	meta := apiface.Face{Name: name}
+	switch p.Type {
+	case "brave":
+		face.BaseURL = p.BaseURL
+		if face.BaseURL == "" {
+			face.BaseURL = "https://api.search.brave.com"
+		}
+		face.Header = "X-Subscription-Token"
+		face.Methods = []string{"GET"}
+		face.Paths = []string{"/res/v1/web/search"}
+	case "tavily":
+		face.BaseURL = p.BaseURL
+		if face.BaseURL == "" {
+			face.BaseURL = "https://api.tavily.com"
+		}
+		face.Header = "Authorization"
+		face.Value = "Bearer " + key
+		face.Methods = []string{"POST"}
+		face.Paths = []string{"/search"}
+	default:
+		return broker.APIFace{}, apiface.Face{}, fmt.Errorf("[search.%s]: unsupported provider type %q", name, p.Type)
+	}
+	meta.Methods = append([]string(nil), face.Methods...)
+	meta.Paths = append([]string(nil), face.Paths...)
+	return face, meta, nil
+}
+
+// searchSpec resolves the effective [search] provider into the credential-free
+// metadata the agent build needs to offer web_search. nil means no search
+// config (the tool is not offered).
+func searchSpec(cfg config.Config) (*tool.WebSearchSpec, error) {
+	name, p, ok, err := cfg.SearchEffective()
+	if err != nil || !ok {
+		return nil, err
+	}
+	return &tool.WebSearchSpec{Type: p.Type, Face: name, MaxResults: p.MaxResults}, nil
 }
 
 // brokerRedactor builds a store-wide secret redactor for the broker, or

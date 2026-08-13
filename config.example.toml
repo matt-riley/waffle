@@ -132,6 +132,31 @@ enabled = false
 # [agent.profile.main.tools]
 # allow = ["*", "api_weather"]
 
+# Optional web search (#245). Each key under [search] is a named provider the
+# broker fronts; the web_search tool is offered to tiers whose tool policy
+# permits it (empty allow or "*" grants it for main; the cron/issue/group
+# tiers deny it by default and opt in with an explicit tools.allow entry).
+# Absent [search] config disables the tool entirely.
+#
+# The credential is a secret:// reference resolved host-side; the broker
+# injects it on every request, and every search is an audit row metered
+# against the session budget. The tool returns ranked title/url/snippet rows
+# only — it never returns page bodies; pair it with fetch to read a result.
+#
+#   [search.brave]
+#   type = "brave"                 # brave or tavily
+#   # base_url is optional; the provider default is used when unset.
+#   # base_url = "https://api.search.brave.com"
+#   api_key = "secret://search/brave/api-key"
+#   max_results = 5                 # 1..10, default 5
+#
+# Store the credential first:
+#   printf '%s' VALUE | waffle secret set search/brave/api-key
+# With multiple providers, name one "default":
+#   [search.default]
+#   type = "tavily"
+#   api_key = "secret://search/default/api-key"
+
 # Optional GitHub App for repo workspaces. Waffle mints short-lived
 # installation tokens scoped to the single repo a session is bound to: the git
 # credential a container receives carries contents:write only, while the

@@ -96,6 +96,10 @@ type Builder struct {
 	// APIRedact, when set, scrubs credential material from API tool output
 	// and errors; nil falls back to Runtime.Redact.
 	APIRedact func(string) string
+	// Search, when set, describes the effective web_search provider (#245).
+	// The tool is offered only when a broker is wired and the effective tool
+	// policy permits "web_search"; absent Search disables it.
+	Search *tool.WebSearchSpec
 }
 
 // Build assembles the agent for one agent group/profile. The returned
@@ -266,8 +270,9 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	// entry; the "*" wildcard does not grant faces). The same policy
 	// decision drives the broker token grants, so the model-facing toolbox
 	// and the broker's per-session enforcement cannot drift.
+	var tierLimits usagepkg.Limits
 	if b.Broker != nil && len(b.APIFaces) > 0 {
-		tierLimits := usagepkg.Limits{
+		tierLimits = usagepkg.Limits{
 			TokensPerDay:          b.Config.LimitsFor(group).TokensPerDay,
 			RequestsPerHour:       b.Config.LimitsFor(group).RequestsPerHour,
 			AlertThresholdPercent: b.Config.LimitsFor(group).AlertThresholdPercent,
@@ -286,6 +291,26 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 			Redact: redact,
 		}
 		hostToolList = append(hostToolList, client.ToolsFor(toolPolicy)...)
+	}
+
+	// web_search (#245): a host-side tool routed through the broker's
+	// credentialed API faces, offered only when [search] config exists, a
+	// broker is wired, and the effective policy permits the tool. Unlike the
+	// api_<name> faces, the normal allow semantics apply (an empty allow list
+	// or "*" grants it for the main tier); the restricted tiers deny it by
+	// default in config.AgentPolicy and opt in explicitly.
+	if b.Search != nil && b.Broker != nil && b.BrokerURL != "" && toolPolicy.Permits("web_search") {
+		hostToolList = append(hostToolList, &tool.WebSearch{
+			Type:       b.Search.Type,
+			Face:       b.Search.Face,
+			MaxResults: b.Search.MaxResults,
+			BrokerURL:  b.BrokerURL,
+			Mint: func(ctx context.Context, sessionID string, faces []string) (string, error) {
+				return b.Broker.MintScopedFaces(ctx, sessionID, sessionID, tierLimits, faces)
+			},
+			Revoke:    b.Broker.Revoke,
+			SessionID: session.IDFromContext,
+		})
 	}
 
 	hostTools := tool.NewRegistry(hostToolList...)
