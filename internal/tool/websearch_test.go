@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,9 +71,10 @@ func TestWebSearchTavilyPostsAndParsesContent(t *testing.T) {
 		method = r.Method
 		contentType = r.Header.Get("Content-Type")
 		if r.Body != nil {
-			buf := make([]byte, 4096)
-			if n, _ := r.Body.Read(buf); n > 0 {
-				sentBody = string(buf[:n])
+			// Read to EOF: a single Read may return a partial prefix of the
+			// JSON payload and make the assertions flaky (#387 review).
+			if b, err := io.ReadAll(r.Body); err == nil {
+				sentBody = string(b)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

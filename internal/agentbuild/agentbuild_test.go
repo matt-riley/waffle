@@ -405,6 +405,14 @@ func TestBuildRegistersWebSearchOnlyWithSearchConfigBrokerAndPermission(t *testi
 	if a := build(searchSpec, nil, config.GroupMain); hasSearch(a) {
 		t.Fatal("web_search must not be offered without a broker")
 	}
+	// Broker without any [[api.upstream]] faces (#387 review): web_search is
+	// still offered, and its mint uses tierLimits initialized for any broker,
+	// so the scoped token stays metered even though the apiface block never
+	// ran.
+	bare := broker.New(st, nil)
+	if a := build(searchSpec, bare, config.GroupMain); !hasSearch(a) {
+		t.Fatal("web_search must be offered with a broker even when no api faces exist")
+	}
 	// Restricted tier without explicit allow: not offered (deny-by-default).
 	if a := build(searchSpec, b, config.GroupCron); hasSearch(a) {
 		t.Fatal("web_search must be denied for cron by default")

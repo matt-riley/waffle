@@ -270,13 +270,20 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	// entry; the "*" wildcard does not grant faces). The same policy
 	// decision drives the broker token grants, so the model-facing toolbox
 	// and the broker's per-session enforcement cannot drift.
+	//
+	// tierLimits is initialized for any broker (not just when faces exist)
+	// because web_search mints scoped tokens through the same budget and must
+	// stay metered even when no [[api.upstream]] face is configured (#387
+	// review): a zero limits value would disable usage.Check's caps entirely.
 	var tierLimits usagepkg.Limits
-	if b.Broker != nil && len(b.APIFaces) > 0 {
+	if b.Broker != nil {
 		tierLimits = usagepkg.Limits{
 			TokensPerDay:          b.Config.LimitsFor(group).TokensPerDay,
 			RequestsPerHour:       b.Config.LimitsFor(group).RequestsPerHour,
 			AlertThresholdPercent: b.Config.LimitsFor(group).AlertThresholdPercent,
 		}
+	}
+	if b.Broker != nil && len(b.APIFaces) > 0 {
 		redact := b.APIRedact
 		if redact == nil {
 			redact = b.Runtime.Redact
