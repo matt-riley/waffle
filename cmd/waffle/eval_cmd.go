@@ -20,7 +20,6 @@ var evalRegistry = eval.Registry
 // Live tier: set WAFFLE_EVAL_LIVE=1 (still skipped without a configured
 // provider). Results are recorded in the waffle DB when available.
 func evalCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	_ = stderr
 	if len(args) > 0 {
 		switch args[0] {
 		case "--history":
@@ -41,10 +40,24 @@ func evalCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	started := time.Now().UTC()
 	cases := append([]eval.Case{}, evalRegistry()...)
 	cases = append(cases, eval.LiveRegistry()...)
+
+	// Live tier, github_pr (#241): exercise the tool end to end against the
+	// real GitHub API. Opt-in like the provider tier: WAFFLE_EVAL_LIVE=1,
+	// WAFFLE_EVAL_GITHUB_REPO=owner/repo, and a configured [github.app].
+	cfg, st, cfgErr := openConfigAndStore(ctx)
+	if cfgErr == nil {
+		app, appErr := newGitHubApp(cfg)
+		if appErr != nil {
+			fmt.Fprintf(stderr, "waffle eval: github app: %v\n", appErr)
+		}
+		if live := eval.LiveGitHubPRCase(app); live != nil {
+			cases = append(cases, *live)
+		}
+	}
 	report := eval.Run(ctx, cases)
 
-	// Best-effort history persistence; missing home/db must not break CI.
-	if _, st, err := openConfigAndStore(ctx); err == nil {
+	// Best-effort history persistence; missing home/db must not fail CI.
+	if cfgErr == nil {
 		_ = eval.RecordRun(ctx, st.DB, version, started, report)
 		_ = st.Close()
 	}

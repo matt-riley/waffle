@@ -29,6 +29,14 @@ type App struct {
 	tokens                map[string]cachedToken
 }
 
+// BaseURL returns the configured API root (default https://api.github.com).
+// Exported so host-side tools and the live eval can compose verification and
+// cleanup requests against the same endpoint the App mints for.
+func (a *App) BaseURL() string { return a.baseURL }
+
+// Client returns the HTTP client the App uses for GitHub API calls.
+func (a *App) Client() *http.Client { return a.client }
+
 type cachedToken struct {
 	value   string
 	expires time.Time
