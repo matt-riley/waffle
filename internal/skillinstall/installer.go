@@ -23,6 +23,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 const stageRecordName = "manifest.json"
@@ -433,7 +434,7 @@ func ensureSkillsRoot(root string) error {
 }
 
 func ensureSkillAbsent(root, name string) error {
-	if !skillNamePattern.MatchString(name) {
+	if !spec.ValidName(name) {
 		return fmt.Errorf("%w: invalid target name", ErrAuditFailed)
 	}
 	if !cleanAbsolutePath(root) {

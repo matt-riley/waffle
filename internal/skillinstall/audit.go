@@ -16,12 +16,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
-var (
-	frontmatterKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
-	skillNamePattern      = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-)
+var frontmatterKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 func readReviewedTree(root string) (reviewedTree, error) {
 	return readReviewedTreeBound(root, maxReviewBytes)
@@ -375,8 +373,8 @@ func parseSkillFrontmatter(raw string) (string, string, error) {
 		values[key] = parsed
 	}
 	name := values["name"]
-	if !skillNamePattern.MatchString(name) {
-		return "", "", fmt.Errorf("%w: skill name %q is not a slug", ErrAuditFailed, name)
+	if !spec.ValidName(name) {
+		return "", "", fmt.Errorf("%w: skill name %q is not an Agent Skills name", ErrAuditFailed, name)
 	}
 	description := strings.TrimSpace(values["description"])
 	if description == "" || description == "|" || description == ">" ||

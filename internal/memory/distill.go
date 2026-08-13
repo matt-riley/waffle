@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 // DistillTool lets the agent turn a procedure it just worked out into a
@@ -47,8 +47,6 @@ func (t DistillTool) Def() llm.Tool {
 	}
 }
 
-var skillNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
 func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var in struct {
 		Name        string `json:"name"`
@@ -59,8 +57,8 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		return "", fmt.Errorf("bad input: %w", err)
 	}
 	in.Name = strings.TrimSpace(in.Name)
-	if !skillNameRE.MatchString(in.Name) {
-		return "", errors.New("name must be kebab-case (lowercase, digits, hyphens)")
+	if !spec.ValidName(in.Name) {
+		return "", errors.New("name must be an Agent Skills name: 1-64 chars of [a-z0-9-], no leading/trailing/consecutive hyphen")
 	}
 	if strings.TrimSpace(in.Body) == "" {
 		return "", errors.New("body is required")

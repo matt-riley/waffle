@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 var (
@@ -60,7 +62,7 @@ func validateStageRequest(request StageRequest, importRoots, gitHosts []string) 
 			return sourceSpec{}, err
 		}
 		label := filepath.Base(local.sourcePath)
-		if !skillNamePattern.MatchString(label) {
+		if !spec.ValidName(label) {
 			return sourceSpec{}, fmt.Errorf("%w: local source directory name is not a safe label", ErrSourceNotAllowed)
 		}
 		return sourceSpec{
