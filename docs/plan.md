@@ -617,6 +617,8 @@ waffle already has three extension tiers that cover most "plugin" requests.
 
 **Terminal state A (adopted):** tier map documented above; **no** Lua/JS/WASM engine dependency. Reopen only when ≥2 real owner-authored host-hook needs exist; then implement `hooks.Runner` with gopher-lua behind a waffle-defined interface (not a plugin marketplace). Distributable third-party plugins would require wazero/Extism and are explicitly *not* chosen now.
 
+**Package format (issue #389):** waffle adopts the vendor-neutral [Agent Plugins](https://github.com/agentplugins/agent-plugins-spec) 1.0.0 *package format* for the two tiers it already ships — Skills and MCP servers — while still running **no plugin marketplace**. `internal/plugin` loads a plugin directory: closed `plugin.json` schema validation, `$schema` version selection from a fixed local compatibility map (schemas are pinned and never fetched over the network), and plugin-root path containment. Installed plugins live at `<waffle home>/plugins/<name>/`, which is canonical for plugin-supplied skills; the agent-curated `<workspace>/skills` tier stays separate. This is packaging only — not a fourth in-process tool API. Component discovery (`skills/`, `mcp.json`), `PLUGIN_ROOT`/`PLUGIN_DATA`, and the waffle extension namespace are follow-up issues; install/download/registry mechanics stay out of scope.
+
 Repo-versioned `WAFFLE.md`/`AGENT.md` (#53) and container lifecycle hooks (#54) are the supported repo extensibility path; issue-tracker intake (#51) is the third intake surface (with cron and chat).
 
 ### Code intelligence (issue #79)
@@ -654,6 +656,8 @@ internal/workspace/    repo workspaces: lifecycle, devcontainer, git helper
 internal/broker/       credential broker (provider proxy, git, egress)
 internal/secret/       Store iface; age+keyring backend; redaction; audit
 internal/skill/        SKILL.md discovery, indexing, learning loop
+internal/plugin/       Agent Plugins package format (#389): plugin.json,
+                       schema selection, plugin-root containment
 internal/memory/       FTS5 store, curation, distill_skill, reflection
 internal/schedule/     cron persistence + runner
 internal/intake/       issue-tracker board intake (#51)
@@ -719,6 +723,7 @@ optional/cut items above plus anything still open on the tracker:
 | Native Gemini package | not shipped | deliberate; use OpenAI-compat |
 | Remote MCP over streamable HTTP | shipped | #249; stdio remains the default; OAuth + brokered egress required for remote servers |
 | In-process host hooks (Lua/JS) | deferred | extension-surface decision (#41) |
+| Agent Plugins client conformance | partial | #389 adopts the package format (`plugin.json`, schema selection, containment); component loading, plugin data, and the waffle extension namespace are separate issues; no marketplace |
 | Smart routing in-tree | out of scope | select explicit model aliases or use provider-hosted routing |
 
 Cross-check open GitHub issues for anything newer than this table; the
