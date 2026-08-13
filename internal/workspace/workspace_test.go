@@ -2740,6 +2740,21 @@ func TestClassifyCloneErrorMapsSafeStableCodes(t *testing.T) {
 			code: "repo_clone_failed",
 			want: "the repository clone failed",
 		},
+		{
+			// The runner prefix is the first line only; "exit status" text in
+			// the command's own output must not be mistaken for it (#385 review).
+			name: "exit status inside command output is ignored",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: fatal: helper said \"exit status 1\" and nothing else",
+			code: "repo_clone_failed",
+			want: "the repository clone failed",
+		},
+		{
+			// The runner prefix follows the command text on the first line.
+			name: "runner prefix mid-first-line is honored",
+			msg:  "git clone -- https://github.com/o/r.git /work/repo: error: exit status 128\nfatal: cannot create pipe",
+			code: "repo_clone_failed",
+			want: "the repository clone failed (git exited with status 128)",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

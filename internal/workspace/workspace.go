@@ -551,9 +551,19 @@ func (m *Manager) setup(ctx context.Context, client *sandbox.Client, ws *Workspa
 }
 
 // exitStatusRE recovers git's exit status from the container runner's error
-// prefix ("error: exit status 128\n...") without touching the command output
-// that follows it.
+// prefix ("error: exit status 128\n..."). It is applied only to the first
+// line of the error payload (runnerPrefix), never to later command output,
+// which can contain its own "exit status" text.
 var exitStatusRE = regexp.MustCompile(`error: exit status (\d+)`)
+
+// runnerPrefix returns the first line of the runner's error payload: the
+// runner prepends "error: exit status N" (after the command text) before the
+// command's own output, so everything after the first newline is untrusted
+// output that must not be searched for a status.
+func runnerPrefix(msg string) string {
+	line, _, _ := strings.Cut(msg, "\n")
+	return line
+}
 
 // classifyCloneError maps a failed `git clone` step to a chat.StableError the
 // chat client can show, keeping the raw output -- which can name the repo URL,
@@ -577,7 +587,7 @@ func classifyCloneError(err error) error {
 		strings.Contains(msg, "git-credential:"):
 		code, safe = "repo_credential_refused", "the git credential was refused for the requested repo"
 	}
-	if m := exitStatusRE.FindStringSubmatch(msg); m != nil {
+	if m := exitStatusRE.FindStringSubmatch(runnerPrefix(msg)); m != nil {
 		safe = fmt.Sprintf("%s (git exited with status %s)", safe, m[1])
 	}
 	return &chat.StableError{Code: code, Message: safe, Cause: fmt.Errorf("workspace setup: %w", err)}

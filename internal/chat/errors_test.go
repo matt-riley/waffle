@@ -20,7 +20,9 @@ func TestStableErrorContract(t *testing.T) {
 	if got := e.SafeMessage(); got != "the repository clone failed" {
 		t.Fatalf("SafeMessage = %q", got)
 	}
-	if !errors.Is(e.Cause, cause) {
+	if !errors.Is(e, cause) {
+		// errors.Is walks Unwrap, so this only passes if StableError.Unwrap
+		// really exposes Cause.
 		t.Fatal("Unwrap must expose the cause")
 	}
 	if msg := e.Error(); msg != "the repository clone failed: "+cause.Error() {
