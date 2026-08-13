@@ -159,7 +159,10 @@ func resolvedDir(dir string) (string, error) {
 
 // readManifest reads path with the same bounded discipline as
 // internal/skillinstall's stage records: a regular, non-symlink file no
-// larger than maxManifestSize holding exactly one JSON value.
+// larger than maxManifestSize holding exactly one JSON value. The read
+// itself is bounded with io.LimitReader, so a file that is swapped or
+// grows between the stat and the read cannot force an unbounded
+// allocation.
 func readManifest(path string) (Manifest, []string, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -174,7 +177,19 @@ func readManifest(path string) (Manifest, []string, error) {
 	if info.Size() > maxManifestSize {
 		return Manifest{}, nil, fmt.Errorf("%w: plugin.json exceeds %d bytes", ErrManifestInvalid, maxManifestSize)
 	}
-	body, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("read plugin.json: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("read plugin.json: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > maxManifestSize {
+		return Manifest{}, nil, fmt.Errorf("%w: plugin.json changed before read", ErrManifestInvalid)
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxManifestSize+1))
 	if err != nil {
 		return Manifest{}, nil, fmt.Errorf("read plugin.json: %w", err)
 	}
