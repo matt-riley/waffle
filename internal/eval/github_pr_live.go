@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,12 +180,23 @@ func assertPullRequestResolves(ctx context.Context, app *gitcred.App, repo, owne
 		return fmt.Errorf("pull request API resource returned %s; want 200", resp.Status)
 	}
 
-	// The html_url must be a pull URL for the repo and must resolve.
-	wantPrefix := "https://github.com/" + owner + "/" + name + "/pull/"
-	if !strings.HasPrefix(htmlURL, wantPrefix) {
-		return fmt.Errorf("returned URL %q does not name %s", htmlURL, wantPrefix)
+	// The html_url must be a pull URL for the repo and must resolve. The web
+	// host is derived from the App's API root so GitHub Enterprise deployments
+	// (api.<host> → <host>) work instead of hardcoding github.com.
+	wantHost := webHostForAPI(app.BaseURL())
+	if parsed, err := url.Parse(htmlURL); err != nil || parsed.Host != wantHost ||
+		!strings.HasPrefix(parsed.Path, "/"+owner+"/"+name+"/pull/") {
+		return fmt.Errorf("returned URL %q does not name %s/pull/<n>", htmlURL, wantHost+"/"+owner+"/"+name)
 	}
-	res, err := http.Get(htmlURL) //nolint:gosec // opt-in live eval; the URL came from GitHub's own API
+	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err = http.NewRequestWithContext(resolveCtx, http.MethodGet, htmlURL, nil)
+	if err != nil {
+		return err
+	}
+	// Use the App's client so any custom TLS/proxy settings the operator
+	// configured on it apply; the URL came from GitHub's own API.
+	res, err := app.Client().Do(req)
 	if err != nil {
 		return fmt.Errorf("resolve returned URL %s: %w", htmlURL, err)
 	}
@@ -193,6 +205,21 @@ func assertPullRequestResolves(ctx context.Context, app *gitcred.App, repo, owne
 		return fmt.Errorf("returned URL %s resolves to 404", htmlURL)
 	}
 	return nil
+}
+
+// webHostForAPI derives the repository web host from the App's API base URL:
+// https://api.github.com → github.com (strip the api. subdomain); a GitHub
+// Enterprise base like https://ghe.example.com/api/v3 keeps its own host.
+func webHostForAPI(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if strings.HasPrefix(host, "api.") {
+		return strings.TrimPrefix(host, "api.")
+	}
+	return host
 }
 
 // failOnUseTransport fails the eval the moment any HTTP request is made: the
@@ -216,7 +243,10 @@ func pushEvalBranch(ctx context.Context, repo, user, token, branch string) error
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			// Never echo the raw arguments on failure: the push URL carries the
+			// installation token in its userinfo. Mask it, then include the
+			// output (git's own diagnostics never repeat the credential).
+			return fmt.Errorf("git %s: %w: %s", maskGitArgs(args), err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
@@ -241,6 +271,25 @@ func pushEvalBranch(ctx context.Context, repo, user, token, branch string) error
 	}
 	pushURL := "https://" + user + ":" + token + "@github.com/" + repo + ".git"
 	return git("push", "-q", pushURL, "HEAD:refs/heads/"+branch)
+}
+
+// maskGitArgs redacts credential-bearing userinfo from git arguments before
+// they reach an error message: the push URL embeds the installation token
+// (https://x-access-token:<token>@host/repo.git) and must never be logged.
+func maskGitArgs(args []string) string {
+	masked := make([]string, len(args))
+	for i, arg := range args {
+		u, err := url.Parse(arg)
+		if err == nil && u.Scheme != "" && u.Host != "" && u.User != nil {
+			// Drop the userinfo wholesale: percent-encoding a placeholder
+			// (%2A%2A%2A) would be misleading.
+			u.User = nil
+			masked[i] = u.String()
+			continue
+		}
+		masked[i] = arg
+	}
+	return strings.Join(masked, " ")
 }
 
 // defaultBranch reads the repository's default branch with a pull_requests
