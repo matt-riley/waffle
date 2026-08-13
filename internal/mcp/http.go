@@ -60,6 +60,12 @@ type HTTPOpts struct {
 	// Re-invoked when the proxy answers 407 so a long-running gateway can
 	// re-mint after the broker token TTL. Nil means no proxy credential.
 	ProxyAuth func() (string, error)
+	// Headers are fixed extra HTTP headers sent on every request, from a
+	// portable plugin's mcp.json headers object. Client-generated headers
+	// (Content-Type, Accept, User-Agent, Mcp-Session-Id, Authorization,
+	// Proxy-Authorization) take precedence over same-name entries, per the
+	// Agent Plugins spec; nil means no extra headers.
+	Headers http.Header
 	// ConnectTimeout bounds the initialize handshake. Zero uses 30s.
 	ConnectTimeout time.Duration
 }
@@ -73,6 +79,8 @@ type HTTPClient struct {
 	http   *http.Client
 	token  *TokenManager
 	bearer string
+	// headers are fixed extra headers from a portable plugin's mcp.json.
+	headers http.Header
 	// proxyURL/proxyAuth are set when egress routes through the broker.
 	proxyURL  string
 	proxyAuth func() (string, error)
@@ -98,6 +106,7 @@ func ConnectHTTP(ctx context.Context, name, url string, opts HTTPOpts) (*HTTPCli
 		bearer:    opts.BearerToken,
 		proxyURL:  opts.ProxyURL,
 		proxyAuth: opts.ProxyAuth,
+		headers:   opts.Headers,
 	}
 	// A proxy client must be built from ProxyURL: an injected in-process
 	// client would dial the target directly and bypass the broker entirely.
@@ -330,6 +339,16 @@ func (h *HTTPClient) doPost(ctx context.Context, body []byte) (*http.Response, e
 	if err != nil {
 		return nil, fmt.Errorf("mcp %s: %w", h.name, err)
 	}
+	// Portable plugin headers first: client-generated headers below take
+	// precedence over same-name entries (Agent Plugins §7.2.1). Session and
+	// credential headers are never plugin-controlled: a plugin cannot spoof
+	// the MCP session, bearer auth, or the broker proxy credential.
+	for name, values := range h.headers {
+		req.Header[name] = values
+	}
+	delete(req.Header, "Mcp-Session-Id")
+	delete(req.Header, "Authorization")
+	delete(req.Header, "Proxy-Authorization")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "waffle-mcp/0")

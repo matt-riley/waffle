@@ -48,6 +48,17 @@ type Server struct {
 	Command string
 	Args    []string
 	Env     []string // allowlisted parent environment variable names
+	// EnvVars are explicit name→value environment pairs overlaid on the
+	// BuildProcessEnv base at launch. They come from portable plugin
+	// mcp.json env objects (internal/pluginmcp); native [[mcp]] config does
+	// not set them. Values replace same-name allowlisted entries (POSIX
+	// last-wins); PLUGIN_ROOT/PLUGIN_DATA are reserved by the Agent Plugins
+	// spec and added after this overlay (#392).
+	EnvVars map[string]string
+	// Cwd is the child working directory, used when RestrictOpts.Dir is
+	// empty. Portable plugin servers default it to the plugin root;
+	// native [[mcp]] servers leave it empty (caller supplies opts.Dir).
+	Cwd string
 	// URL is a remote MCP streamable HTTP endpoint. Mutually exclusive with
 	// Command. Remote servers have no process to restrict; their network
 	// posture (broker egress vs direct) and credential handling are decided
@@ -235,8 +246,15 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	procCtx, procCancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(procCtx, s.Command, s.Args...)
 	cmd.Env = BuildProcessEnv(s.Env)
+	// Portable plugin servers carry explicit name→value pairs that overlay
+	// the allowlisted base (and replace same-name entries, POSIX last-wins).
+	for name, value := range s.EnvVars {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
+	} else if s.Cwd != "" {
+		cmd.Dir = s.Cwd
 	}
 	// os/exec does not pass ExtraFiles, so only stdin/stdout/stderr are
 	// inherited — ambient gateway FDs/secrets cannot leak via open descriptors.
