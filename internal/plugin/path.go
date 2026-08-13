@@ -69,6 +69,27 @@ func PluginsDir(home string) string {
 	return filepath.Join(home, "plugins")
 }
 
+// PluginsDataDir returns the per-plugin writable data root under the waffle
+// state directory home: <home>/plugins-data. PLUGIN_DATA (spec §9.1) lives
+// outside the plugin root so it survives plugin updates that replace the
+// root, and is preserved across them (#392).
+func PluginsDataDir(home string) string {
+	return filepath.Join(home, "plugins-data")
+}
+
+// PluginDataDir returns the conventional data directory for the named
+// plugin: <home>/plugins-data/<name>. The client creates it (0700) before
+// launching the plugin's stdio servers.
+func PluginDataDir(home, name string) (string, error) {
+	if home == "" {
+		return "", errors.New("plugin data root requires the waffle home directory")
+	}
+	if !ValidName(name) {
+		return "", rejectName(name)
+	}
+	return filepath.Join(PluginsDataDir(home), name), nil
+}
+
 // InstallRoot returns the conventional installed location of the named
 // plugin: <home>/plugins/<name>. Plugin-supplied skills are canonical
 // under this root; the agent-curated <workspace>/skills tier stays

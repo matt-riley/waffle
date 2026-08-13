@@ -247,6 +247,14 @@ func parseMCPServerStdio(name string, fields map[string]json.RawMessage, server 
 		if reason != "" {
 			return skip("%s", reason)
 		}
+		for key := range env {
+			if key == "PLUGIN_ROOT" || key == "PLUGIN_DATA" {
+				// Spec §9.1: these are reserved; the client supplies them
+				// itself after the overlay. Such an entry invalidates the
+				// server config.
+				return skip("env must not define reserved variable %q", key)
+			}
+		}
 		server.Env = env
 	}
 	if raw, ok := fields["cwd"]; ok {

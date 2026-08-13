@@ -59,6 +59,17 @@ type Server struct {
 	// empty. Portable plugin servers default it to the plugin root;
 	// native [[mcp]] servers leave it empty (caller supplies opts.Dir).
 	Cwd string
+	// PluginRoot, when non-empty, marks this server as plugin-sourced
+	// (Agent Plugins §9): at launch, args, env values, and cwd undergo
+	// ${PLUGIN_ROOT}/${PLUGIN_DATA} expansion, and the child receives
+	// PLUGIN_ROOT/PLUGIN_DATA after the configured env overlay (the
+	// client's values always win). Native [[mcp]] servers leave it empty
+	// and keep verbatim behavior.
+	PluginRoot string
+	// PluginData is the client-managed per-plugin writable data directory
+	// (spec §9.1): created 0700 before launch, preserved across plugin
+	// updates. Empty when the server is not plugin-sourced.
+	PluginData string
 	// URL is a remote MCP streamable HTTP endpoint. Mutually exclusive with
 	// Command. Remote servers have no process to restrict; their network
 	// posture (broker egress vs direct) and credential handling are decided
@@ -130,6 +141,66 @@ func BuildProcessEnv(allowlist []string) []string {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
 		}
+	}
+	return env
+}
+
+// ExpandPlaceholders performs the Agent Plugins §9.2 expansion on s:
+// every exact occurrence of ${PLUGIN_ROOT} and ${PLUGIN_DATA} is replaced
+// once, in a single left-to-right pass, and text introduced by a
+// replacement is never scanned again (non-recursive). Unrecognized
+// placeholder-like text — $PLUGIN_ROOT, ${PLUGIN_ROOTX}, ${FOO}, an
+// unclosed ${PLUGIN_ROOT — stays literal.
+func ExpandPlaceholders(s, root, data string) string {
+	const (
+		rootToken = "${PLUGIN_ROOT}"
+		dataToken = "${PLUGIN_DATA}"
+	)
+	var b strings.Builder
+	for {
+		rootAt := strings.Index(s, rootToken)
+		dataAt := strings.Index(s, dataToken)
+		if rootAt < 0 && dataAt < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		if dataAt < 0 || rootAt >= 0 && rootAt < dataAt {
+			b.WriteString(s[:rootAt])
+			b.WriteString(root)
+			s = s[rootAt+len(rootToken):]
+		} else {
+			b.WriteString(s[:dataAt])
+			b.WriteString(data)
+			s = s[dataAt+len(dataToken):]
+		}
+	}
+}
+
+// buildChildEnv assembles the child environment per the #79/#77 posture
+// and the Agent Plugins §9 runtime contract: the BuildProcessEnv
+// allowlisted base, the explicit EnvVars overlay (expanded for
+// plugin-sourced servers), and then — plugin-sourced only — the reserved
+// PLUGIN_ROOT/PLUGIN_DATA variables appended last so the client's values
+// always win over any same-name entry (spec §9.1).
+// buildChildEnv assembles the child environment per the #79/#77 posture
+// and the Agent Plugins §9 runtime contract: the BuildProcessEnv
+// allowlisted base, the explicit EnvVars overlay (expanded for
+// plugin-sourced servers), and then — plugin-sourced only — the reserved
+// PLUGIN_ROOT/PLUGIN_DATA variables appended last so the client's values
+// always win over any same-name entry (spec §9.1). Same-name allowlisted
+// entries are replaced, never duplicated (#400).
+func (s Server) buildChildEnv() []string {
+	env := BuildProcessEnv(s.Env)
+	overlay := make(map[string]string, len(s.EnvVars))
+	for name, value := range s.EnvVars {
+		if s.PluginRoot != "" {
+			value = ExpandPlaceholders(value, s.PluginRoot, s.PluginData)
+		}
+		overlay[name] = value
+	}
+	env = overlayEnv(env, overlay)
+	if s.PluginRoot != "" {
+		env = append(env, "PLUGIN_ROOT="+s.PluginRoot, "PLUGIN_DATA="+s.PluginData)
 	}
 	return env
 }
@@ -206,7 +277,9 @@ func WrapDocker(s Server, opts DockerWrapOpts) Server {
 	if opts.WorkDir != "" {
 		args = append(args, "-v", opts.WorkDir+":/work", "-w", "/work")
 	}
-	for _, e := range BuildProcessEnv(s.Env) {
+	// The container receives the same restricted child environment the host
+	// path would: allowlisted base + EnvVars overlay + reserved plugin vars.
+	for _, e := range s.buildChildEnv() {
 		args = append(args, "-e", e)
 	}
 	args = append(args, opts.Image, s.Command)
@@ -258,8 +331,10 @@ func Connect(ctx context.Context, s Server) (*Client, error) {
 }
 
 // ConnectRestricted launches the MCP server with #77-compliant isolation:
-//   - Environment is ONLY BuildProcessEnv(s.Env) — never os.Environ()
-//   - Working directory set to opts.Dir when non-empty
+//   - Environment is buildChildEnv(s) — the BuildProcessEnv allowlisted
+//     base plus explicit EnvVars, never os.Environ()
+//   - Working directory set to opts.Dir when non-empty, else s.Cwd
+//     (expanded for plugin-sourced servers)
 //   - Extra file descriptors are not inherited (os/exec default; no ExtraFiles)
 //
 // Same handshake as Connect. opts.Mode defaults to "restricted" (audit label).
@@ -267,21 +342,37 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	if opts.Mode == "" {
 		opts.Mode = "restricted"
 	}
+	// Plugin-sourced servers (#392): ensure the client-managed PLUGIN_DATA
+	// directory exists (0700, writable) before launch (spec §9.1), and
+	// expand ${PLUGIN_ROOT}/${PLUGIN_DATA} in args, env values, and cwd
+	// (§9.2). command and env keys are never expanded.
+	if s.PluginRoot != "" && s.PluginData != "" {
+		if err := os.MkdirAll(s.PluginData, 0o700); err != nil {
+			return nil, fmt.Errorf("mcp %s: create plugin data dir: %w", s.Name, err)
+		}
+		if err := os.Chmod(s.PluginData, 0o700); err != nil {
+			return nil, fmt.Errorf("mcp %s: secure plugin data dir: %w", s.Name, err)
+		}
+	}
 	// procCtx lives until Close, not until the caller's ctx ends: the caller's
 	// ctx only bounds the handshake, but the child must still be killable
 	// afterward (and must die if Close is invoked).
 	procCtx, procCancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(procCtx, s.Command, s.Args...)
-	cmd.Env = BuildProcessEnv(s.Env)
-	// Portable plugin servers carry explicit name→value pairs that overlay
-	// the allowlisted base: same-name entries are replaced (deduplicated),
-	// never duplicated in the array — duplicate NAME= entries have
-	// unspecified precedence across platforms.
-	cmd.Env = overlayEnv(cmd.Env, s.EnvVars)
+	args := s.Args
+	dir := s.Cwd
+	if s.PluginRoot != "" {
+		args = make([]string, len(s.Args))
+		for i, a := range s.Args {
+			args[i] = ExpandPlaceholders(a, s.PluginRoot, s.PluginData)
+		}
+		dir = ExpandPlaceholders(s.Cwd, s.PluginRoot, s.PluginData)
+	}
+	cmd := exec.CommandContext(procCtx, s.Command, args...)
+	cmd.Env = s.buildChildEnv()
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
-	} else if s.Cwd != "" {
-		cmd.Dir = s.Cwd
+	} else if dir != "" {
+		cmd.Dir = dir
 	}
 	// os/exec does not pass ExtraFiles, so only stdin/stdout/stderr are
 	// inherited — ambient gateway FDs/secrets cannot leak via open descriptors.
