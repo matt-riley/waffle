@@ -1373,7 +1373,7 @@ func TestChatRuntimeCommandResults(t *testing.T) {
 			},
 			check: func(t *testing.T, got chatpkg.Result, _ *chatRuntime) {
 				t.Helper()
-				want := "Current session totals: requests=2 input=4 cache_write=0 cache_read=0 output=6 reserved=0\nPersisted aggregate totals: requests=4 input=12 cache_write=0 cache_read=0 output=16 reserved=0"
+				want := "Current session totals: requests=2 input=4 cache_write=0 cache_read=0 output=6 reserved=0 tunnel_bytes=0\nPersisted aggregate totals: requests=4 input=12 cache_write=0 cache_read=0 output=16 reserved=0 tunnel_bytes=0"
 				if got.Title != "Usage" || len(got.Usage) != 6 || got.Text != want {
 					t.Fatalf("usage result = %+v\ntext=%q", got, got.Text)
 				}

@@ -1178,9 +1178,15 @@ type Log struct {
 
 // Limits are optional safety budgets. Zero means unlimited.
 type Limits struct {
-	TokensPerDay          int               `toml:"tokens_per_day"`
-	RequestsPerHour       int               `toml:"requests_per_hour"`
-	AlertThresholdPercent int               `toml:"alert_threshold_percent"`
+	TokensPerDay          int `toml:"tokens_per_day"`
+	RequestsPerHour       int `toml:"requests_per_hour"`
+	AlertThresholdPercent int `toml:"alert_threshold_percent"`
+	// TunnelBytesPerSession is the rolling-day byte budget for broker CONNECT
+	// tunnelled egress (#244). The broker relays tunnel bytes without
+	// inspection, so a tunnel cannot be metered per request; the relay's
+	// io.Copy byte counts are charged against this budget instead, so one
+	// CONNECT cannot bypass RequestsPerHour with unbounded traffic.
+	TunnelBytesPerSession int64             `toml:"tunnel_bytes_per_session"`
 	Groups                map[string]Limits `toml:"group"`
 }
 
@@ -1188,7 +1194,7 @@ func (c Config) LimitsFor(group string) Limits {
 	if l, ok := c.Limits.Groups[group]; ok {
 		return l
 	}
-	return Limits{TokensPerDay: c.Limits.TokensPerDay, RequestsPerHour: c.Limits.RequestsPerHour, AlertThresholdPercent: c.Limits.AlertThresholdPercent}
+	return Limits{TokensPerDay: c.Limits.TokensPerDay, RequestsPerHour: c.Limits.RequestsPerHour, AlertThresholdPercent: c.Limits.AlertThresholdPercent, TunnelBytesPerSession: c.Limits.TunnelBytesPerSession}
 }
 
 // Default returns the configuration waffle runs with when no file exists.
@@ -1545,6 +1551,9 @@ var repoRE = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 func validateLimits(l Limits) error {
 	if l.TokensPerDay < 0 || l.RequestsPerHour < 0 {
 		return errors.New("limits must be zero (unlimited) or positive")
+	}
+	if l.TunnelBytesPerSession < 0 {
+		return errors.New("limits.tunnel_bytes_per_session must be zero (unlimited) or positive")
 	}
 	if l.AlertThresholdPercent < 0 || l.AlertThresholdPercent > 100 {
 		return errors.New("alert_threshold_percent must be between 0 and 100")

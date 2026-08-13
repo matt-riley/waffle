@@ -271,6 +271,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 			TokensPerDay:          b.Config.LimitsFor(group).TokensPerDay,
 			RequestsPerHour:       b.Config.LimitsFor(group).RequestsPerHour,
 			AlertThresholdPercent: b.Config.LimitsFor(group).AlertThresholdPercent,
+			TunnelBytesPerSession: b.Config.LimitsFor(group).TunnelBytesPerSession,
 		}
 		redact := b.APIRedact
 		if redact == nil {
@@ -467,7 +468,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	usageStore := usagepkg.New(&store.Store{DB: b.Sessions.DB()})
 	limits := func() usagepkg.Limits {
 		l := b.Config.LimitsFor(group)
-		return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent}
+		return usagepkg.Limits{TokensPerDay: l.TokensPerDay, RequestsPerHour: l.RequestsPerHour, AlertThresholdPercent: l.AlertThresholdPercent, TunnelBytesPerSession: l.TunnelBytesPerSession}
 	}()
 
 	// Remote MCP servers contribute their credentials to the transcript

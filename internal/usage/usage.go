@@ -16,6 +16,12 @@ type Limits struct {
 	TokensPerDay          int
 	RequestsPerHour       int
 	AlertThresholdPercent int
+	// TunnelBytesPerSession is the rolling-day byte budget for broker
+	// CONNECT tunnelled egress (#244). The broker relays tunnel bytes without
+	// inspection, so it cannot count requests inside a tunnel; the relay's
+	// io.Copy byte counts are the only meter, charged against this budget.
+	// Zero means unlimited, preserving pre-#244 behaviour.
+	TunnelBytesPerSession int64
 }
 
 type Store struct{ db *sql.DB }
@@ -98,6 +104,15 @@ func (s *Store) Check(ctx context.Context, session string, l Limits, now time.Ti
 		}
 		if n >= l.RequestsPerHour {
 			return fmt.Errorf("usage limit exceeded: hourly request budget (%d)", l.RequestsPerHour)
+		}
+	}
+	if l.TunnelBytesPerSession > 0 {
+		used, err := s.TunnelBytesAt(ctx, session, now)
+		if err != nil {
+			return err
+		}
+		if used >= l.TunnelBytesPerSession {
+			return fmt.Errorf("usage limit exceeded: tunnelled egress byte budget (%d)", l.TunnelBytesPerSession)
 		}
 	}
 	return nil
@@ -329,6 +344,39 @@ func (s *Store) AddTokensAt(ctx context.Context, session string, u llm.Usage, no
 	return nil
 }
 
+// AddTunnelBytesAt records bytes relayed by a broker CONNECT tunnel for a
+// session (#244). The relay sees io.Copy byte counts, never the tunnelled
+// requests themselves, so bytes are the only meter. Rows carry provider
+// 'tunnel' and zero requests, so they never collide with provider token rows
+// and never count toward token budgets.
+func (s *Store) AddTunnelBytesAt(ctx context.Context, session string, n int64, now time.Time) error {
+	if session == "" || n <= 0 {
+		return nil
+	}
+	now = now.UTC()
+	for _, p := range usagePeriods {
+		_, err := s.db.ExecContext(ctx, `INSERT INTO usage(session_id,period,period_start,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,tunnel_bytes,provider)
+			VALUES (?, ?, ?, 0, 0, 0, 0, 0, ?, 'tunnel')
+			ON CONFLICT(session_id,period,period_start,provider) DO UPDATE SET tunnel_bytes=tunnel_bytes+excluded.tunnel_bytes`,
+			session, p.name, period(now, p.d), n)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TunnelBytesAt returns the session's rolling-day tunnelled egress bytes.
+func (s *Store) TunnelBytesAt(ctx context.Context, session string, now time.Time) (int64, error) {
+	if session == "" {
+		return 0, nil
+	}
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(tunnel_bytes),0) FROM usage WHERE session_id=? AND period='day' AND period_start=?`,
+		session, period(now, 24*time.Hour)).Scan(&n)
+	return n, err
+}
+
 // Alert delivers one notice when a configured budget reaches 80 percent.
 // A durable flag suppresses repeat notices for the same session and period.
 func (s *Store) Alert(ctx context.Context, session string, l Limits, now time.Time, deliver func(context.Context, string) error) error {
@@ -370,10 +418,11 @@ type Row struct {
 	Provider                                            string
 	Requests, InputTokens, OutputTokens, ReservedTokens int
 	CacheCreationInputTokens, CacheReadInputTokens      int
+	TunnelBytes                                         int64
 }
 
 func (s *Store) List(ctx context.Context, session string) (out []Row, err error) {
-	q := `SELECT session_id,period,period_start,provider,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,reserved_tokens FROM usage`
+	q := `SELECT session_id,period,period_start,provider,requests,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,reserved_tokens,tunnel_bytes FROM usage`
 	args := []any{}
 	if session != "" {
 		q += ` WHERE session_id=?`
@@ -391,7 +440,7 @@ func (s *Store) List(ctx context.Context, session string) (out []Row, err error)
 	}()
 	for rows.Next() {
 		var r Row
-		if err := rows.Scan(&r.SessionID, &r.Period, &r.PeriodStart, &r.Provider, &r.Requests, &r.InputTokens, &r.OutputTokens, &r.CacheCreationInputTokens, &r.CacheReadInputTokens, &r.ReservedTokens); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.Period, &r.PeriodStart, &r.Provider, &r.Requests, &r.InputTokens, &r.OutputTokens, &r.CacheCreationInputTokens, &r.CacheReadInputTokens, &r.ReservedTokens, &r.TunnelBytes); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

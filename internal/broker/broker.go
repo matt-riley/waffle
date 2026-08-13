@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/id"
@@ -539,7 +541,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// this, every https:// fetch from a workspace fails -- git clone, and every
 	// package manager too.
 	if r.Method == http.MethodConnect {
-		b.serveConnect(w, r, token, sessionID)
+		b.serveConnect(w, r, token, sessionID, limits)
 		return
 	}
 	if r.URL.Path == "/git-credential" {
@@ -1516,6 +1518,49 @@ func connectTarget(r *http.Request) (host, port string) {
 	return strings.ToLower(host), port
 }
 
+// tunnelBudgetExhausted stops an io.Copy relay when a session's tunnelled
+// egress byte budget is consumed mid-tunnel (#244). It is never returned to
+// the client: the tunnel is cut, which is the only way to stop a relay that
+// was already established.
+var errTunnelBudgetExhausted = errors.New("tunnelled egress byte budget exhausted")
+
+// limitWriter aborts a CONNECT relay once the session's tunnelled egress
+// byte allowance is consumed (#244). The broker relays tunnel bytes without
+// inspection, so the io.Copy byte count is the only meter; the allowance is
+// shared across both relay directions, and when it is exhausted stop closes
+// both connections so the peer direction's relay returns too.
+type limitWriter struct {
+	dst       io.Writer
+	remaining *atomic.Int64 // bytes left in the session's rolling-day budget
+	stop      func()
+}
+
+func (w *limitWriter) Write(p []byte) (int, error) {
+	for {
+		r := w.remaining.Load()
+		if r <= 0 {
+			w.stop()
+			return 0, errTunnelBudgetExhausted
+		}
+		n := int64(len(p))
+		if n > r {
+			n = r
+		}
+		if !w.remaining.CompareAndSwap(r, r-n) {
+			continue
+		}
+		written, err := w.dst.Write(p[:n])
+		if err == nil && (n < int64(len(p)) || r-n == 0) {
+			// The allowance is consumed by this write: stop both directions
+			// now, otherwise the peer direction could block forever waiting
+			// for data that will never come.
+			w.stop()
+			return written, errTunnelBudgetExhausted
+		}
+		return written, err
+	}
+}
+
 // serveConnect tunnels a TLS connection to an allowlisted egress host.
 //
 // Authorisation is the same host allowlist the rewriting path uses, which is
@@ -1528,7 +1573,7 @@ func connectTarget(r *http.Request) (host, port string) {
 // Bytes are relayed without inspection, so the client's TLS session runs
 // end to end: the broker never sees the request, the response, or the
 // credential the client sends.
-func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, sessionID string) {
+func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, sessionID string, limits usage.Limits) {
 	host, port := connectTarget(r)
 	if host == "" {
 		http.Error(w, "connect requires a host", http.StatusBadRequest)
@@ -1558,6 +1603,26 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 		b.record(r.Context(), token, sessionID, "denied", "connect port "+host+":"+port)
 		http.Error(w, "egress port not allowlisted", http.StatusForbidden)
 		return
+	}
+
+	// #244: a tunnel is metered once per CONNECT unless the relay bytes are
+	// charged against the session budget. The Check above already refused the
+	// CONNECT when the rolling-day total reached the cap; the allowance left
+	// is the cap for this tunnel's relay, enforced mid-stream by the limiter.
+	budgeted := b.Usage != nil && limits.TunnelBytesPerSession > 0
+	var remaining atomic.Int64
+	if budgeted {
+		used, err := b.Usage.TunnelBytesAt(r.Context(), sessionID, b.now())
+		if err != nil {
+			http.Error(w, "tunnel usage check failed", http.StatusInternalServerError)
+			return
+		}
+		if used >= limits.TunnelBytesPerSession {
+			b.record(r.Context(), token, sessionID, "denied", "connect budget "+host+":"+port)
+			http.Error(w, "usage limit exceeded: tunnelled egress byte budget", http.StatusTooManyRequests)
+			return
+		}
+		remaining.Store(limits.TunnelBytesPerSession - used)
 	}
 
 	hijacker, ok := w.(http.Hijacker)
@@ -1602,9 +1667,28 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 	// full close would tear down the peer's side too, so a client that finishes
 	// writing before the origin has flushed its response would lose the rest of
 	// it. Half-close signals EOF and lets the other direction drain.
+	//
+	// With a byte budget configured, both directions relay through limitWriter
+	// sharing one allowance; when it is exhausted the relay is cut (#244). The
+	// relayed byte count is persisted after both directions finish so the next
+	// CONNECT (and the CONNECT-time Check) sees it.
+	var relayed atomic.Int64
 	finished := make(chan struct{}, 2)
+	stopOnce := sync.Once{}
+	stop := func() {
+		stopOnce.Do(func() {
+			_ = client.Close()
+			_ = upstream.Close()
+		})
+	}
 	relay := func(dst io.Writer, src io.Reader, closeWrite net.Conn) {
-		_, _ = io.Copy(dst, src)
+		var n int64
+		if budgeted {
+			n, _ = io.Copy(&limitWriter{dst: dst, remaining: &remaining, stop: stop}, src)
+		} else {
+			n, _ = io.Copy(dst, src)
+		}
+		relayed.Add(n)
 		if tcp, ok := closeWrite.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}
@@ -1614,4 +1698,9 @@ func (b *Broker) serveConnect(w http.ResponseWriter, r *http.Request, token, ses
 	go relay(client, upstream, client)
 	<-finished
 	<-finished
+	if b.Usage != nil {
+		if err := b.Usage.AddTunnelBytesAt(context.WithoutCancel(r.Context()), sessionID, relayed.Load(), b.now()); err != nil {
+			slog.Default().Error("broker tunnel usage record failed", "err", err, "session", sessionID)
+		}
+	}
 }

@@ -46,6 +46,8 @@ type UsageRow struct {
 	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
 	OutputTokens             int    `json:"output_tokens"`
 	ReservedTokens           int    `json:"reserved_tokens"`
+	// TunnelBytes is the tunnelled egress byte total for this row (#244).
+	TunnelBytes int64 `json:"tunnel_bytes"`
 }
 
 // PermissionView describes effective sandbox and tool policy without any

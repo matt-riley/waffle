@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -1845,5 +1846,153 @@ func TestOpenAIKindCacheUsageBindsOnHalfRate(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("upstream calls=%d, want 1 (follow-up refused before dispatch)", got)
+	}
+}
+
+// A tunnel is metered once per CONNECT unless the relay bytes are charged
+// against the session budget (#244). With a byte budget configured, a
+// tunnelled session that relays more than the budget has its tunnel cut, the
+// bytes are persisted, and the next CONNECT is refused.
+func TestConnectRelayBytesAreMeteredAgainstTheSessionBudget(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn) // echo back whatever is relayed
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	const budget int64 = 32
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Usage = usage.New(st)
+	b.Limits = usage.Limits{TunnelBytesPerSession: budget}
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+	addr := strings.TrimPrefix(front.URL, "http://")
+
+	status, conn := connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	// A payload far larger than the budget: the relay must cut the tunnel
+	// instead of relaying it all.
+	if _, err := conn.Write(bytes.Repeat([]byte("x"), 4096)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply := make([]byte, 4096)
+	if n, err := conn.Read(reply); err == nil {
+		t.Fatalf("tunnel relayed %d bytes back despite a %d-byte budget", n, budget)
+	}
+	_ = conn.Close()
+
+	// The relayed bytes are persisted, so the next CONNECT sees them. The
+	// recording happens after both relay directions finish, so poll briefly.
+	usageStore := usage.New(st)
+	deadline := time.Now().Add(2 * time.Second)
+	var relayed int64
+	for {
+		relayed, err = usageStore.TunnelBytesAt(context.Background(), "budget", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if relayed > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel bytes were never recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if relayed > budget {
+		t.Fatalf("relayed %d bytes, want <= the %d-byte budget", relayed, budget)
+	}
+
+	// The budget is consumed: a second CONNECT is refused before any byte
+	// flows, and the refusal is audited (denied connect budget).
+	status, conn = connectThroughBroker(t, addr, "localhost:"+originPort, token)
+	defer func() { _ = conn.Close() }()
+	if !strings.Contains(status, "429") {
+		t.Fatalf("CONNECT status = %q, want 429 once the byte budget is exhausted", status)
+	}
+}
+
+// Without a configured byte budget the relay is unlimited and the session's
+// tunnel bytes are still recorded for reporting.
+func TestConnectRecordsTunnelBytesWithoutABudget(t *testing.T) {
+	origin, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = origin.Close() }()
+	go func() {
+		conn, acceptErr := origin.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn)
+	}()
+	_, originPort, _ := net.SplitHostPort(origin.Addr().String())
+
+	st := openStore(t)
+	b := New(st, nil)
+	token, err := b.Mint(context.Background(), "budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Usage = usage.New(st)
+	b.SetEgress([]EgressTarget{{Host: "localhost", BaseURL: "http://localhost:" + originPort}})
+	b.DialEgress = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	front := httptest.NewServer(b)
+	defer front.Close()
+
+	status, conn := connectThroughBroker(t, strings.TrimPrefix(front.URL, "http://"), "localhost:"+originPort, token)
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, len("hello"))
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("tunnel relay failed: %v", err)
+	}
+	if string(reply) != "hello" {
+		t.Fatalf("tunnel payload = %q, want %q", reply, "hello")
+	}
+	_ = conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n, err := usage.New(st).TunnelBytesAt(context.Background(), "budget", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n >= 10 { // 5 client bytes + 5 echoed bytes
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel bytes not recorded; got %d", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

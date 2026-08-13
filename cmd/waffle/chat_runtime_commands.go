@@ -392,9 +392,9 @@ func (r *chatRuntime) commandUsage(ctx context.Context) (chatpkg.Result, error) 
 	currentTotals := totalUsageRows(current)
 	aggregateTotals := totalUsageRows(aggregate)
 	text := fmt.Sprintf(
-		"Current session totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d\nPersisted aggregate totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d",
-		currentTotals.Requests, currentTotals.InputTokens, currentTotals.CacheCreationInputTokens, currentTotals.CacheReadInputTokens, currentTotals.OutputTokens, currentTotals.ReservedTokens,
-		aggregateTotals.Requests, aggregateTotals.InputTokens, aggregateTotals.CacheCreationInputTokens, aggregateTotals.CacheReadInputTokens, aggregateTotals.OutputTokens, aggregateTotals.ReservedTokens,
+		"Current session totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d tunnel_bytes=%d\nPersisted aggregate totals: requests=%d input=%d cache_write=%d cache_read=%d output=%d reserved=%d tunnel_bytes=%d",
+		currentTotals.Requests, currentTotals.InputTokens, currentTotals.CacheCreationInputTokens, currentTotals.CacheReadInputTokens, currentTotals.OutputTokens, currentTotals.ReservedTokens, currentTotals.TunnelBytes,
+		aggregateTotals.Requests, aggregateTotals.InputTokens, aggregateTotals.CacheCreationInputTokens, aggregateTotals.CacheReadInputTokens, aggregateTotals.OutputTokens, aggregateTotals.ReservedTokens, aggregateTotals.TunnelBytes,
 	)
 	return chatpkg.Result{Title: "Usage", Text: text, Usage: rows}, nil
 }
@@ -409,6 +409,7 @@ func chatUsageRows(rows []usagepkg.Row) []chatpkg.UsageRow {
 			CacheReadInputTokens:     row.CacheReadInputTokens,
 			OutputTokens:             row.OutputTokens,
 			ReservedTokens:           row.ReservedTokens,
+			TunnelBytes:              row.TunnelBytes,
 		}
 	}
 	return out
@@ -423,6 +424,7 @@ func totalUsageRows(rows []usagepkg.Row) usagepkg.Row {
 		total.CacheReadInputTokens += row.CacheReadInputTokens
 		total.OutputTokens += row.OutputTokens
 		total.ReservedTokens += row.ReservedTokens
+		total.TunnelBytes += row.TunnelBytes
 	}
 	return total
 }

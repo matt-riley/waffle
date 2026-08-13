@@ -823,3 +823,80 @@ func TestMixedProviderReserveReconcilePricesEachProvider(t *testing.T) {
 		t.Fatalf("budget bound too early at combined per-provider true cost 800: %v", err)
 	}
 }
+
+func TestTunnelBytesPersistAndBoundTheSession(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+
+	if n, err := u.TunnelBytesAt(ctx, "s1", now); err != nil || n != 0 {
+		t.Fatalf("fresh session TunnelBytesAt = %d, %v; want 0, nil", n, err)
+	}
+	// Unlimited by default: a tunneled session with no budget configured
+	// passes the check regardless of volume.
+	limits := Limits{}
+	if err := u.Check(ctx, "s1", limits, now); err != nil {
+		t.Fatalf("unlimited Check refused: %v", err)
+	}
+	if err := u.AddTunnelBytesAt(ctx, "s1", 4096, now); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := u.TunnelBytesAt(ctx, "s1", now); err != nil || n != 4096 {
+		t.Fatalf("TunnelBytesAt after add = %d, %v; want 4096, nil", n, err)
+	}
+	// A second tunnel pushes the session over a 4KiB budget. Boundary
+	// semantics match requests_per_hour: reaching the cap refuses.
+	limits = Limits{TunnelBytesPerSession: 4096}
+	if err := u.Check(ctx, "s1", Limits{TunnelBytesPerSession: 4097}, now); err != nil {
+		t.Fatalf("Check under the budget should pass: %v", err)
+	}
+	if err := u.Check(ctx, "s1", limits, now); err == nil {
+		t.Fatal("Check at exactly the budget must refuse")
+	}
+	if err := u.AddTunnelBytesAt(ctx, "s1", 1, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Check(ctx, "s1", limits, now); err == nil {
+		t.Fatal("Check past the budget must refuse")
+	}
+}
+
+func TestTunnelBytesRollWithTheDayAndIgnoreTokenBudget(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	u := New(st)
+	day1 := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	day2 := day1.Add(24 * time.Hour)
+
+	if err := u.AddTunnelBytesAt(ctx, "s1", 100, day1); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := u.TunnelBytesAt(ctx, "s1", day2); err != nil || n != 0 {
+		t.Fatalf("next day TunnelBytesAt = %d, %v; want 0 (day-rolling)", n, err)
+	}
+	// Tunnel rows must not disturb the token day-sum that budget binding
+	// reads: provider 'tunnel' rows are grouped out, so a token budget
+	// still sees only token rows, and token usage does not consume the
+	// tunnel budget.
+	if err := u.Check(ctx, "s1", Limits{TokensPerDay: 10, TunnelBytesPerSession: 1_000_000_000}, day1); err != nil {
+		t.Fatalf("tunnel bytes leaked into the token budget: %v", err)
+	}
+	if err := u.Check(ctx, "s1", Limits{TunnelBytesPerSession: 100}, day1); err == nil {
+		t.Fatal("tunnel budget of 100 should be exhausted by 100 tunnel bytes")
+	}
+	if err := u.AddRequestAt(ctx, "s1", llm.Usage{InputTokens: 10}, day1); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Check(ctx, "s1", Limits{TokensPerDay: 10, TunnelBytesPerSession: 100}, day1); err == nil {
+		t.Fatal("both budgets exhausted should refuse")
+	}
+}
