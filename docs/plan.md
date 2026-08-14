@@ -501,7 +501,13 @@ cannot read another repo, another session's secrets, or any raw key.
   `reflect_every_turns`, and idle reflection under `serve` when
   `[memory] reflect_after` is set (use `"0"` to disable idle). Idle
   reflection serializes on the same per-conversation group lock as message
-  handling and does not re-reflect when a summary is already present.
+  handling, and a summary watermark records the highest turn sequence a
+  summary covers: an unchanged session is never reflected twice, while a
+  resumed session with new turns is re-reflected after the next quiet period
+  (once per quiet period, incrementally — the prior summary plus only the
+  uncovered turns, never repeated full-history cost). Reflection metadata
+  never bumps the session's conversation-activity timestamp, so idle timing
+  stays based on user/assistant activity (#411).
 - System injection: `MEMORY.md` notes are selected under
   `[memory] inject_budget` (default 8KiB) — pinned first, then newest;
   elided notes report a count and point at `recall`. Archive is never

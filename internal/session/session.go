@@ -53,6 +53,13 @@ type Session struct {
 	ModelAliasVersion int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	// SummaryWatermark is the highest turn sequence the Summary covers (#411).
+	// A resumed session with new turns is eligible for idle reflection again
+	// even though a summary already exists.
+	SummaryWatermark int64
+	// ReflectedAt is when the summary was last written. It is metadata only;
+	// idle timing is based on UpdatedAt (conversation activity), never this.
+	ReflectedAt time.Time
 }
 
 // ModelAliasChange records one exact session choice transition. The removal
@@ -116,10 +123,26 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 	return nil
 }
 
-// SetSummary records the reflection pass's summary.
+// SetSummary records the reflection pass's summary and marks it as covering
+// every turn the session has today (the current max turn sequence). It does
+// not touch updated_at: idle reflection timing stays based on conversation
+// activity, not summary writes (#411).
 func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
+	count, err := s.TurnCount(ctx, id)
+	if err != nil {
+		return err
+	}
+	return s.SetSummaryWatermark(ctx, id, summary, int64(count))
+}
+
+// SetSummaryWatermark records a summary with an explicit coverage watermark:
+// the highest turn sequence the summary actually includes (#411). It never
+// bumps updated_at, so appending a new turn after reflection leaves the
+// session eligible again after the configured idle period.
+func (s *Store) SetSummaryWatermark(ctx context.Context, id, summary string, coveredThrough int64) error {
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`, summary, s.nowStr(), id)
+		`UPDATE sessions SET summary = ?, summary_watermark = ?, reflected_at = ? WHERE id = ?`,
+		summary, coveredThrough, s.nowStr(), id)
 	if err != nil {
 		return fmt.Errorf("set session summary: %w", err)
 	}
@@ -302,8 +325,8 @@ func (s *Store) RestoreModelAliases(ctx context.Context, changes []ModelAliasCha
 // Get loads one session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
-	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated)
+	var created, updated, reflected string
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -316,6 +339,11 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	}
 	if sess.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updated); parseErr != nil && updated != "" {
 		return nil, parseErr
+	}
+	if reflected != "" {
+		if sess.ReflectedAt, parseErr = time.Parse(time.RFC3339Nano, reflected); parseErr != nil {
+			return nil, parseErr
+		}
 	}
 	return &sess, nil
 }
@@ -399,7 +427,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -411,8 +439,8 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	}()
 	for rows.Next() {
 		var sess Session
-		var created, updated string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated); err != nil {
+		var created, updated, reflected string
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)
@@ -425,6 +453,11 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 			return nil, fmt.Errorf("parse session updated_at: %w", err)
 		}
 		sess.UpdatedAt = updatedAt
+		if reflected != "" {
+			if sess.ReflectedAt, err = time.Parse(time.RFC3339Nano, reflected); err != nil {
+				return nil, fmt.Errorf("parse session reflected_at: %w", err)
+			}
+		}
 		out = append(out, sess)
 	}
 	return out, rows.Err()
