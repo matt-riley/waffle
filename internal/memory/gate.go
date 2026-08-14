@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +53,9 @@ type Candidate struct {
 	DeniedBy   string     `json:"denied_by,omitempty"`
 	DeniedAt   *time.Time `json:"denied_at,omitempty"`
 	DenyReason string     `json:"deny_reason,omitempty"`
+	// ReviewHint is the exact command (or safe deep link) an operator uses to
+	// inspect this candidate (#416).
+	ReviewHint string `json:"review_hint,omitempty"`
 }
 
 // Gate is the common write gate for memory and skill candidates.
@@ -100,6 +105,7 @@ func (g *Gate) decide(c Candidate) (Candidate, error) {
 		c.Provenance.TrustClass == "untrusted_derived"
 	if pending {
 		c.Status = "pending"
+		c.ReviewHint = "waffle candidates show " + c.ID
 		if err := os.MkdirAll(filepath.Dir(g.pendingPath(c.ID)), 0o700); err != nil {
 			return c, err
 		}
@@ -193,6 +199,7 @@ func (g *Gate) SubmitForReview(c Candidate) (Candidate, error) {
 	if c.Provenance.TrustClass == "" {
 		c.Provenance.TrustClass = "untrusted_derived"
 	}
+	c.ReviewHint = "waffle candidates show " + c.ID
 	if err := os.MkdirAll(filepath.Dir(g.pendingPath(c.ID)), 0o700); err != nil {
 		return c, err
 	}
@@ -214,9 +221,27 @@ func (g *Gate) SubmitForReview(c Candidate) (Candidate, error) {
 func (g *Gate) Approve(id, approver string) (Candidate, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.approveLocked(id, approver, "")
+}
+
+// ApproveWithDigest is Approve with an inspection-time file digest check
+// (#416): the pending file must still match the digest the operator saw when
+// they inspected the candidate, so an edited queue file cannot be approved
+// silently. Empty digest skips the check.
+func (g *Gate) ApproveWithDigest(id, approver, fileDigest string) (Candidate, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.approveLocked(id, approver, fileDigest)
+}
+
+// approveLocked runs under g.mu.
+func (g *Gate) approveLocked(id, approver, fileDigest string) (Candidate, error) {
 	b, err := os.ReadFile(g.pendingPath(id))
 	if err != nil {
 		return Candidate{}, err
+	}
+	if fileDigest != "" && fileDigestOf(b) != fileDigest {
+		return Candidate{}, fmt.Errorf("candidate %s changed since inspection (file digest mismatch); re-inspect with `waffle candidates show %s`", id, id)
 	}
 	var c Candidate
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -267,9 +292,24 @@ func (g *Gate) Approve(id, approver string) (Candidate, error) {
 func (g *Gate) Deny(id, approver, reason string) (Candidate, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.denyLocked(id, approver, reason, "")
+}
+
+// DenyWithDigest is Deny with the inspection-time file digest check (#416).
+func (g *Gate) DenyWithDigest(id, approver, reason, fileDigest string) (Candidate, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.denyLocked(id, approver, reason, fileDigest)
+}
+
+// denyLocked runs under g.mu.
+func (g *Gate) denyLocked(id, approver, reason, fileDigest string) (Candidate, error) {
 	b, err := os.ReadFile(g.pendingPath(id))
 	if err != nil {
 		return Candidate{}, err
+	}
+	if fileDigest != "" && fileDigestOf(b) != fileDigest {
+		return Candidate{}, fmt.Errorf("candidate %s changed since inspection (file digest mismatch); re-inspect with `waffle candidates show %s`", id, id)
 	}
 	var c Candidate
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -285,4 +325,12 @@ func (g *Gate) Deny(id, approver, reason string) (Candidate, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// fileDigestOf is the inspection-time digest of a pending file: sha256 over
+// the raw bytes the operator saw (#416).
+func fileDigestOf(b []byte) string {
+	h := sha256.New()
+	_, _ = h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
 }

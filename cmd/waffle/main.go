@@ -179,6 +179,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return skillsCmd(ctx, args[1:], stdout, stderr)
 	case "learn":
 		return learnCmd(ctx, args[1:], stdout, stderr)
+	case "candidates":
+		return candidatesCmd(ctx, args[1:], stdout)
 	case "upgrade":
 		return upgradeCmd(ctx, args[1:], stdout, stderr)
 	case "rollback":
