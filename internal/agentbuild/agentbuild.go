@@ -34,6 +34,7 @@ import (
 	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/notify"
+	"github.com/matt-riley/waffle/internal/plugin"
 	"github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -443,7 +444,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 			}
 		}
 
-		srv := mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env}
+		srv := mcp.Server{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env, Optional: isCodeIntel}
 		network := b.Config.Sandbox.Network
 		if network == "" {
 			network = "none"
@@ -454,7 +455,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		if err != nil {
 			// Codeintel MCP is optional unless required: degrade to go/parser
 			// fallback already registered above. Other servers fail closed.
-			if isCodeIntel && !b.Config.CodeIntel.Required {
+			if srv.Optional && !b.Config.CodeIntel.Required {
 				continue
 			}
 			return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
@@ -468,12 +469,51 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		tb, err := client.Toolbox(ctx)
 		if err != nil {
 			_ = client.Close()
-			if isCodeIntel && !b.Config.CodeIntel.Required {
+			if srv.Optional && !b.Config.CodeIntel.Required {
 				continue
 			}
 			return nil, cleanup, fmt.Errorf("mcp %q tools: %w", s.Name, err)
 		}
 		boxes = append(boxes, tb)
+	}
+
+	// Plugin components (#393): every installed plugin contributes its
+	// skills and MCP servers with spec §11.3 failure isolation — a rejected
+	// plugin, a disabled component type, or a failed server is skipped and
+	// reported, never fatal to the build. Native [[mcp]] servers above keep
+	// fail-fast (operator config errors stay loud); plugin data is
+	// untrusted package content and degrades per-entry.
+	var pluginSkills []skill.Skill
+	if home, herr := config.Home(); herr != nil {
+		slog.Warn("plugin components: resolve waffle home", "reason", herr)
+	} else if installed, rejects, ierr := plugin.Installed(home); ierr != nil {
+		slog.Warn("plugin components: enumerate installed plugins", "reason", ierr)
+	} else {
+		for _, reject := range rejects {
+			slog.Warn("plugin rejected", "dir", reject.Dir, "reason", reject.Reason)
+		}
+		for _, result := range installed {
+			pluginName := result.Plugin.Manifest.Name
+			for _, skip := range result.SkillSkips {
+				slog.Warn("plugin skill skipped", "plugin", pluginName, "skill", skip.Dir, "reason", skip.Reason)
+			}
+			for _, s := range result.Skills {
+				pluginSkills = append(pluginSkills, skill.Skill{
+					Name:        s.Name,
+					Description: s.Description,
+					Path:        s.Path,
+				})
+			}
+			if result.MCP.Disabled != "" {
+				slog.Warn("plugin mcp disabled", "plugin", pluginName, "reason", result.MCP.Disabled)
+			}
+			for _, skip := range result.MCP.Skips {
+				slog.Warn("plugin mcp server skipped", "plugin", pluginName, "server", skip.Name, "reason", skip.Reason)
+			}
+			for _, srv := range result.MCP.Servers {
+				b.wirePluginMCPServer(ctx, &boxes, &closers, result, srv, home, sandboxMode)
+			}
+		}
 	}
 	if codeTools != nil {
 		boxes = append(boxes, codeTools)
@@ -550,7 +590,13 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 
 	toolbox := tool.Restrict(tool.Combine(boxes...), toolPolicy)
 
-	sys, err := systemPrompt(ws, b.Skills)
+	var sys string
+	if len(pluginSkills) > 0 {
+		skills := append(append([]skill.Skill{}, b.Skills...), pluginSkills...)
+		sys, err = systemPrompt(ws, skills)
+	} else {
+		sys, err = systemPrompt(ws, b.Skills)
+	}
 	if err != nil {
 		return nil, cleanup, err
 	}

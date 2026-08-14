@@ -23,6 +23,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
+	"github.com/matt-riley/waffle/internal/plugin"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/secret"
 	"github.com/matt-riley/waffle/internal/store"
@@ -289,6 +290,39 @@ func Doctor(ctx context.Context) ([]Check, bool, error) {
 		} else {
 			for _, s := range cfg.MCP {
 				add("mcp "+s.Name+" authority", nil, formatMCPDoctorInfo(s))
+			}
+		}
+
+		// Plugin components (#393): load installed plugins and report rejected
+		// plugins and partially-loaded ones (skill/MCP skips, disabled MCP) so
+		// spec §11.3 degradation is visible, never silent. A whole-plugin
+		// rejection is an error; component skips are informational.
+		home, herr := config.Home()
+		if herr != nil {
+			add("plugin components", herr, "resolve waffle home")
+		} else if results, rejects, ierr := plugin.Installed(home); ierr != nil {
+			add("plugin components", ierr, "read installed plugins")
+		} else if len(results) == 0 && len(rejects) == 0 {
+			add("plugin components", nil, "no plugins installed")
+		} else {
+			for _, reject := range rejects {
+				name := filepath.Base(reject.Dir)
+				add("plugin "+name+" rejected", errors.New(reject.Reason), reject.Reason)
+			}
+			for _, result := range results {
+				name := result.Plugin.Manifest.Name
+				parts := []string{fmt.Sprintf("%d skills", len(result.Skills))}
+				if result.MCP.Disabled != "" {
+					parts = append(parts, "mcp disabled")
+				}
+				if len(result.MCP.Servers) > 0 {
+					parts = append(parts, fmt.Sprintf("%d mcp servers", len(result.MCP.Servers)))
+				}
+				skips := len(result.SkillSkips) + len(result.MCP.Skips)
+				if skips > 0 {
+					parts = append(parts, fmt.Sprintf("%d skips", skips))
+				}
+				add("plugin "+name, nil, strings.Join(parts, ", "))
 			}
 		}
 	}
