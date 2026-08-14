@@ -57,15 +57,116 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: mise run dashboard-check
 
+  # The universal-ci reusable workflow ran build, test, and vet serially in one
+  # job, and `go test -race ./...` is ~97% of that job's wall time. CI now runs
+  # the race suite split across three parallel runners (scripts/ci-test-shard.sh
+  # partitions by measured package weight), with the cheap build/vet/dashboard/
+  # eval work in a separate parallel job. Caches are still saved on main by
+  # ci-cache-save so every other run keeps restoring warm caches.
   ci:
-    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@3a7b18fc7be1a2b7ee2de806f2c631ca661ea6a9
-    with:
-      build: true
-      vet: true
-      test: true
-      save-cache: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+    name: ci (test shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-shard-${{ matrix.shard }}
       cancel-in-progress: true
-      concurrency-suffix: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
+          cache_save: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
+      - run: bash scripts/ci-test-shard.sh ${{ matrix.shard }} 3
+
+  ci-aux:
+    name: ci build, vet, dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-aux
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
+          cache_save: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
+      - run: mise run build
+      - run: mise run vet
+      - name: Dashboard generate and client tests
+        run: |
+          mise run dashboard-generate
+          git diff --exit-code -- internal/dashboard/ui/*_templ.go
+          mise run dashboard-client-test
+
+  ci-cache-save:
+    name: save CI caches
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs: [ci, ci-aux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-cache-save
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
+          cache_save: false
+      - name: Detect Go cache metadata
+        id: metadata
+        shell: bash
+        run: |
+          {
+            echo "version=$(go env GOVERSION)"
+            echo "module_cache=$(go env GOMODCACHE)"
+            echo "build_cache=$(go env GOCACHE)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore Go module cache
+        id: restore-go-modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.metadata.outputs.module_cache }}
+          key: go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-
+      - name: Restore Go build cache
+        id: restore-go-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.metadata.outputs.build_cache }}
+          key: go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.metadata.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}-
+      - name: Save Go module cache
+        if: steps.restore-go-modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.metadata.outputs.module_cache }}
+          key: ${{ steps.restore-go-modules.outputs.cache-primary-key }}
+      - name: Save Go build cache
+        if: steps.restore-go-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.metadata.outputs.build_cache }}
+          key: ${{ steps.restore-go-build.outputs.cache-primary-key }}
 
   lint:
     uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@3a7b18fc7be1a2b7ee2de806f2c631ca661ea6a9
@@ -87,7 +188,7 @@ jobs:
     # every main run. The repro gate moves to request-infra-deploy instead, so
     # no deploy is dispatched for a run whose artifact is not reproducible
     # (#335).
-    needs: [deterministic-eval, dashboard-browser, ci, lint, security]
+    needs: [deterministic-eval, dashboard-browser, ci, ci-aux, lint, security]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}

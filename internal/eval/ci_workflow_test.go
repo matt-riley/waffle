@@ -43,8 +43,10 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
 		// #335: the artifact build runs in parallel with the repro check (the
 		// repro gate moves to the deploy dispatch, asserted by
-		// TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly).
-		"needs: [deterministic-eval, dashboard-browser, ci, lint, security]",
+		// TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly). ci-aux
+		// carries the build/vet/dashboard/eval work that used to run serially
+		// inside the old universal-ci job, so it gates the artifact build too.
+		"needs: [deterministic-eval, dashboard-browser, ci, ci-aux, lint, security]",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("workflow missing %q:\n%s", want, workflow)
