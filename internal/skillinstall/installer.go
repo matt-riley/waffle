@@ -636,7 +636,9 @@ func setInactiveStatus(raw string) (string, error) {
 	// Agent-Skills-conforming (#396).
 	fields, body, err := spec.ParseFrontmatter(raw)
 	if err != nil {
-		return "", err
+		// Keep the installer's error classification: every frontmatter
+		// failure on this path is an audit failure (#404 review).
+		return "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
 	}
 	if err := spec.Validate(fields["name"], fields["description"], fields, body, ""); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
