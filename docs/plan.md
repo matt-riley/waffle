@@ -558,8 +558,25 @@ The pipeline, using only machinery that already exists by Phase 5:
    self-modification is therefore a commit that can be read, reverted, and
    merged with upstream. `waffle upgrade --no-verify` is an explicitly unsafe
    escape hatch for emergency recovery; it does not bypass review.
-4. **Deploy.** `waffle upgrade` builds the new binary from the approved
-   ref, runs `waffle doctor` against it (self-check: config parses, DB
+
+   `approval = "ci"` adds a hard, commit-bound gate: the upgrade queries the
+   repository's check runs for the exact immutable candidate SHA through the
+   scoped GitHub App (a `checks:read` installation token, never ambient
+   credentials) and requires every name in `selfdev.required_checks` to be
+   completed with conclusion `success` on that SHA. Missing, failed,
+   cancelled, timed-out, action-required, stale (another SHA), pending,
+   skipped, or neutral required checks fail closed with the check name and
+   URL; network/API errors are a distinct closed failure. The chosen SHA
+   semantics are exact-commit: a force-push after verification cannot change
+   what is built, because the build remains bound to the already-resolved
+   SHA. CI evidence is persisted with the review/artifact record in
+   `$WAFFLE_HOME/selfdev-upgrades.jsonl`. CI approval is additional evidence
+   — it never skips the local verify/doctor gates.
+4. **Deploy.** `waffle upgrade` resolves one immutable commit SHA (no-ref
+   resolves HEAD), reviews it, verifies it, and builds it in an isolated
+   detached worktree created from that SHA — the configured checkout is never
+   modified and unreviewed local edits can never enter the binary. It runs
+   `waffle doctor` against the new binary (self-check: config parses, DB
    migrates on a copy, secret store round-trips, providers reachable), then
    atomically swaps and re-execs the gateway. The previous binary is kept;
    `waffle rollback` is one command and no thought.

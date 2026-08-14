@@ -668,6 +668,39 @@ func TestSelfdevDefaultsAndApproval(t *testing.T) {
 	}
 }
 
+// TestRequiredChecksRejectUnknownAtLoad proves selfdev.required_checks rejects
+// malformed, empty, and duplicate names so approval=ci's gate cannot be
+// silently weakened by a typo (#415).
+func TestRequiredChecksRejectUnknownAtLoad(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		toml string
+	}{
+		{"empty name", "[selfdev]\nrequired_checks = [\"\"]\n"},
+		{"malformed name", "[selfdev]\nrequired_checks = [\"ci; rm -rf /\"]\n"},
+		{"duplicate", "[selfdev]\nrequired_checks = [\"ci\", \"ci\"]\n"},
+		{"path-like traversal", "[selfdev]\nrequired_checks = [\"../ci\"]\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tc.toml)
+			if _, err := Load(path); err == nil {
+				t.Fatalf("Load accepted %s", tc.toml)
+			}
+		})
+	}
+	// A well-formed explicit list loads fine.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[selfdev]\napproval = \"ci\"\nrequired_checks = [\"ci\", \"deterministic agent evals\"]\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load valid required_checks: %v", err)
+	}
+	if len(cfg.Selfdev.RequiredChecks) != 2 {
+		t.Fatalf("RequiredChecks = %v", cfg.Selfdev.RequiredChecks)
+	}
+}
+
 func TestHomeRespectsEnv(t *testing.T) {
 	t.Setenv("WAFFLE_HOME", "/tmp/waffle-test-home")
 	h, err := Home()

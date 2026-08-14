@@ -96,6 +96,33 @@ enabled = false
 # Untrusted-derived writes (e.g. fetched web content) are always queued for
 # review regardless of write_gate. Skill approval writes the skill inactive;
 # activation stays explicit (`waffle skills activate <name>`).
+
+# Self-development approval and verification (#413, #415).
+#
+# [selfdev]
+# approval = "manual"       # manual (default) | ci | auto-patch
+# verify = true             # vet + tests + lint + zero-network eval gate
+# protected = []            # extra auto-patch protected path prefixes
+# required_checks = ["ci"]  # exact check names approval=ci verifies
+
+# approval=ci requires the scoped GitHub App (below) and verifies, for the
+# exact immutable candidate SHA, that every required check is completed with
+# conclusion success. Missing, failed, pending, skipped, neutral, cancelled,
+# timed-out, action-required, or stale (another SHA) checks fail closed with
+# the check name and URL; network/API errors are a distinct closed failure.
+# Every upgrade resolves one commit SHA and verifies and builds it in an
+# isolated detached worktree, so the configured checkout is never modified
+# and uncommitted local edits can never enter the built binary. The audit
+# record selfdev-upgrades.jsonl binds base SHA, candidate SHA, tree hash,
+# and the installed artifact's SHA-256.
+
+# Scoped GitHub App used for workspace git credentials and approval=ci's
+# checks:read verification. private_key is a secret:// reference.
+# [github.app]
+# app_id = 0
+# installation_id = 0
+# private_key = "secret://github/app-key"
+# base_url = "https://api.github.com"
 # enabled = true
 # The exact MagicDNS name Serve answers on. A bare DNS name, never an IP or port.
 # serve_host = "waffle.example-tailnet.ts.net"
