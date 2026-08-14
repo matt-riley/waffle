@@ -2,6 +2,7 @@ package spec
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -52,7 +53,7 @@ func TestValidate(t *testing.T) {
 		{name: "renamed", description: "ok", dirName: "directory-name", wantSub: "directory"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%q", tc.name), func(t *testing.T) {
 			err := Validate(tc.name, tc.description, tc.fields, "body", tc.dirName)
 			if err == nil {
 				t.Fatalf("Validate accepted, want error naming %q", tc.wantSub)
@@ -74,6 +75,19 @@ func TestValidate(t *testing.T) {
 	// Empty dirName skips the directory-match rule.
 	if err := Validate("any-name", "ok", nil, "b", ""); err != nil {
 		t.Errorf("dir-less validation rejected: %v", err)
+	}
+	// Whitespace-only description is empty (review fix).
+	if err := Validate("ok", "   \t  ", nil, "b", ""); err == nil {
+		t.Error("whitespace-only description accepted")
+	}
+	// Limits are characters, not bytes: a 1024-rune multi-byte description
+	// is valid; 1025 runes are not (review fix).
+	multiByte := strings.Repeat("é", 1024)
+	if err := Validate("ok", multiByte, nil, "b", ""); err != nil {
+		t.Errorf("1024-rune multi-byte description rejected: %v", err)
+	}
+	if err := Validate("ok", strings.Repeat("é", 1025), nil, "b", ""); err == nil {
+		t.Error("1025-rune description accepted")
 	}
 }
 
@@ -105,6 +119,12 @@ func TestParseFrontmatter(t *testing.T) {
 	}
 	if fields["metadata.x-waffle/status"] != "inactive" || fields["metadata.author"] != "example-org" {
 		t.Errorf("metadata fields = %v", fields)
+	}
+
+	// Empty frontmatter block closes cleanly: the error is about missing
+	// fields, not an unclosed block (review fix).
+	if _, _, err := ParseFrontmatter("---\n---\n\nBody\n"); err != nil {
+		t.Errorf("empty frontmatter = %v, want parseable", err)
 	}
 
 	cases := []struct {
@@ -169,6 +189,19 @@ func TestMarshalSKILLRoundTrip(t *testing.T) {
 		}
 		if body != "# Body with 'quotes'\nand : colon\n" {
 			t.Errorf("body round-trip = %q", body)
+		}
+	}
+
+	// YAML 1.1 keywords and numeric-looking strings are double-quoted so
+	// other clients never parse them as bools/null/numbers (review fix).
+	for _, keyword := range []string{"true", "false", "null", "~", "yes", "on", "123", "1.5", "-3e2", "0x1F"} {
+		raw := string(MarshalSKILL(map[string]string{"name": "n", "description": keyword}, ""))
+		if !strings.Contains(raw, `description: "`+keyword+`"`) {
+			t.Errorf("keyword %q not quoted: %s", keyword, raw)
+		}
+		got, _, err := ParseFrontmatter(raw)
+		if err != nil || got["description"] != keyword {
+			t.Errorf("keyword %q round-trip = %q, %v", keyword, got["description"], err)
 		}
 	}
 

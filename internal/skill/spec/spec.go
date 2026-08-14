@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Field length limits from the specification's frontmatter table.
@@ -67,16 +68,20 @@ func Validate(name, description string, fields map[string]string, body, dirName 
 	if dirName != "" && name != dirName {
 		return fmt.Errorf("%w: name %q must match the parent directory name %q", ErrInvalid, name, dirName)
 	}
+	// The spec's limits are in characters, not bytes, and a whitespace-only
+	// description is empty: trim first, then count runes.
+	description = strings.TrimSpace(description)
 	if description == "" {
 		return fmt.Errorf("%w: description is required and must not be empty", ErrInvalid)
 	}
-	if len(description) > MaxDescriptionLength {
-		return fmt.Errorf("%w: description must be at most %d characters, got %d", ErrInvalid, MaxDescriptionLength, len(description))
+	if runes := utf8.RuneCountInString(description); runes > MaxDescriptionLength {
+		return fmt.Errorf("%w: description must be at most %d characters, got %d", ErrInvalid, MaxDescriptionLength, runes)
 	}
-	if compatibility := strings.TrimSpace(fields["compatibility"]); compatibility != "" &&
-		len(compatibility) > MaxCompatibilityLength {
-		return fmt.Errorf("%w: compatibility must be at most %d characters, got %d",
-			ErrInvalid, MaxCompatibilityLength, len(compatibility))
+	if compatibility := strings.TrimSpace(fields["compatibility"]); compatibility != "" {
+		if runes := utf8.RuneCountInString(compatibility); runes > MaxCompatibilityLength {
+			return fmt.Errorf("%w: compatibility must be at most %d characters, got %d",
+				ErrInvalid, MaxCompatibilityLength, runes)
+		}
 	}
 	for key := range fields {
 		if strings.HasPrefix(key, "metadata.") {
@@ -103,7 +108,14 @@ func ParseFrontmatter(raw string) (fields map[string]string, body string, err er
 	}
 	rest := strings.TrimPrefix(raw, "---\n")
 	end := strings.Index(rest, "\n---")
-	if end < 0 {
+	switch {
+	case end >= 0:
+	case strings.HasPrefix(rest, "---\n"):
+		// Empty frontmatter block: the closing "---" is the first line, so
+		// the \n--- delimiter does not occur inside rest. Detect it so the
+		// caller sees "missing required fields" rather than "not closed".
+		end = 0
+	default:
 		return nil, "", fmt.Errorf("%w: SKILL.md frontmatter is not closed", ErrInvalid)
 	}
 	after := rest[end+4:]
@@ -288,7 +300,63 @@ func plainSafe(value string) bool {
 			return false
 		}
 	}
-	return true
+	// YAML 1.1 reserves these bare words as booleans and null (and ~ is
+	// null); unquoted, another client would parse a string value like
+	// "true" as a boolean rather than text. Numeric-looking strings get
+	// the same treatment so "123" round-trips as a string everywhere.
+	switch strings.ToLower(value) {
+	case "true", "false", "yes", "no", "on", "off", "y", "n", "null", "~":
+		return false
+	}
+	return !looksNumeric(value)
+}
+
+// looksNumeric reports whether value parses as a YAML 1.1 int or float
+// (decimal with optional sign, fraction, exponent, and digit underscores,
+// plus the 0x/0o/0b prefixed integer forms). Such strings are quoted by
+// yamlScalar so they stay strings when read by other clients.
+func looksNumeric(value string) bool {
+	s := value
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	digits := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '_') {
+		if s[i] >= '0' && s[i] <= '9' {
+			digits++
+		}
+		i++
+	}
+	if digits == 0 {
+		return false
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '_') {
+			i++
+		}
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		exponent := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			exponent++
+			i++
+		}
+		if exponent == 0 {
+			return false
+		}
+	}
+	if i == len(s) {
+		return true
+	}
+	// Prefixed integer forms: 0x1F, 0o17, 0b101.
+	return s[0] == '0' && (s[1] == 'x' || s[1] == 'X' || s[1] == 'o' || s[1] == 'O' ||
+		s[1] == 'b' || s[1] == 'B')
 }
 
 // yamlEscape escapes value for a YAML double-quoted scalar. Only the escapes
