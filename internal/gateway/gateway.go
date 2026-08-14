@@ -383,24 +383,17 @@ func (g *Gateway) ReflectSession(ctx context.Context, sessionID string) (wrote b
 
 // reflectSessionLocked assumes the caller holds the conversation lock (or none
 // is needed). history/provider/model may be provided by the turn path to avoid
-// reloading; empty history reloads from the store. When onlyIfEmpty is true,
-// an existing summary is left alone (idle / quiet-period path).
+// reloading; empty history reloads from the store. When onlyIfEmpty is true
+// (idle / quiet-period path), an existing summary that already covers the
+// latest turn is left alone; a resumed session with newer turns is reflected
+// again with the prior summary plus only the uncovered turns (#411).
 func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, history []llm.Message, model string, onlyIfEmpty bool) (bool, error) {
 	log := g.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	if onlyIfEmpty {
-		sess, err := g.Sessions.Get(ctx, sessionID)
-		if err != nil {
-			return false, err
-		}
-		if strings.TrimSpace(sess.Summary) != "" {
-			return false, nil
-		}
-	}
-	var err error
 	if history == nil {
+		var err error
 		history, err = g.Sessions.Turns(ctx, sessionID)
 		if err != nil {
 			return false, err
@@ -409,6 +402,20 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 	if len(history) < 2 {
 		return false, nil
 	}
+	var prior string
+	if onlyIfEmpty {
+		sess, err := g.Sessions.Get(ctx, sessionID)
+		if err != nil {
+			return false, err
+		}
+		if sess.SummaryWatermark >= int64(len(history)) {
+			return false, nil
+		}
+		if sess.SummaryWatermark > 0 && int64(len(history)) > sess.SummaryWatermark {
+			prior = sess.Summary
+			history = history[sess.SummaryWatermark:]
+		}
+	}
 	provider, reflectModel := g.providerForSession(ctx, sessionID)
 	if model != "" {
 		reflectModel = model
@@ -416,7 +423,7 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 	if provider == nil {
 		return false, nil
 	}
-	summary, err := session.Reflect(ctx, provider, history, session.ReflectOptions{Model: reflectModel})
+	summary, err := session.Reflect(ctx, provider, history, session.ReflectOptions{Model: reflectModel, PriorSummary: prior})
 	if err != nil {
 		log.Warn("session reflection failed", "session_id", sessionID, "err", err)
 		return false, err

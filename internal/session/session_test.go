@@ -476,11 +476,17 @@ func TestSearchSummariesPopulatesUpdatedAt(t *testing.T) {
 	}
 	olderUpdatedAt := clock.Add(time.Hour)
 	newerUpdatedAt := clock.Add(2 * time.Hour)
-	clock = olderUpdatedAt
+	// updated_at is conversation activity only (#411): reflection metadata
+	// never bumps it, so recency comes from appending turns, not summaries.
+	if _, err := sessions.db.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, olderUpdatedAt.Format(time.RFC3339Nano), older.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.db.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, newerUpdatedAt.Format(time.RFC3339Nano), newer.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := sessions.SetSummary(ctx, older.ID, "security summary older"); err != nil {
 		t.Fatal(err)
 	}
-	clock = newerUpdatedAt
 	if err := sessions.SetSummary(ctx, newer.ID, "security summary newer"); err != nil {
 		t.Fatal(err)
 	}
