@@ -59,11 +59,12 @@ func runLearn(ctx context.Context, cfg config.Config, st *store.Store, stdout io
 		return err
 	}
 	fmt.Fprintln(stdout, "waffle learn digest")
-	fmt.Fprintf(stdout, "run=%s patterns=%d proposals=%d accepted=%d rejected=%d provider_calls=%d\n",
-		res.ID, len(res.Patterns), len(res.Proposals), res.Accepted, res.Rejected, res.ProviderCalls)
+	fmt.Fprintf(stdout, "run=%s patterns=%d proposals=%d accepted=%d rejected=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
+		res.ID, len(res.Patterns), len(res.Proposals), res.Accepted, res.Rejected, res.ProviderCalls, res.ScannedSessions, res.Pages)
 	if res.SinceAt != "" {
 		fmt.Fprintf(stdout, "since=%s\n", res.SinceAt)
 	}
+	fmt.Fprintf(stdout, "cursor=%s/%s\n", res.Cursor.UpdatedAt, res.Cursor.SessionID)
 	for _, p := range res.Patterns {
 		fmt.Fprintf(stdout, "  (%d×) %s\n", p.Count, p.Class)
 		if p.Attribution != "" {
