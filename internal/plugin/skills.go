@@ -88,7 +88,7 @@ func DiscoverSkills(root string) (skills []Skill, skips []SkillSkip, err error) 
 		if err != nil || !info.IsDir() {
 			continue // a plain file in skills/ is not a skill (§7.1)
 		}
-		skill, skip := discoverOneSkill(resolvedRoot, skillsDir, name)
+		skill, skip := discoverOneSkill(resolvedRoot, name)
 		if skip != nil {
 			skips = append(skips, *skip)
 			continue
@@ -101,7 +101,7 @@ func DiscoverSkills(root string) (skills []Skill, skips []SkillSkip, err error) 
 
 // discoverOneSkill resolves and validates one skills/<name> entry. A nil
 // return with a non-nil skip means the entry is skipped per §7.1/§4.1.
-func discoverOneSkill(resolvedRoot, skillsDir, name string) (*Skill, *SkillSkip) {
+func discoverOneSkill(resolvedRoot, name string) (*Skill, *SkillSkip) {
 	skip := func(reason string) (*Skill, *SkillSkip) {
 		return nil, &SkillSkip{Dir: filepath.Join("skills", name), Reason: reason}
 	}
