@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/skill/spec"
@@ -60,7 +61,7 @@ func (t DistillTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		return "", errors.New("name must be an Agent Skills name: 1-64 chars of [a-z0-9-], no leading/trailing/consecutive hyphen")
 	}
 	description := OneLine(in.Description)
-	if description == "" || len(description) > spec.MaxDescriptionLength {
+	if description == "" || utf8.RuneCountInString(description) > spec.MaxDescriptionLength {
 		return "", errors.New("description must be 1-1024 characters")
 	}
 	if strings.TrimSpace(in.Body) == "" {
