@@ -59,8 +59,8 @@ func runLearn(ctx context.Context, cfg config.Config, st *store.Store, stdout io
 		return err
 	}
 	fmt.Fprintln(stdout, "waffle learn digest")
-	fmt.Fprintf(stdout, "run=%s patterns=%d proposals=%d accepted=%d rejected=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
-		res.ID, len(res.Patterns), len(res.Proposals), res.Accepted, res.Rejected, res.ProviderCalls, res.ScannedSessions, res.Pages)
+	fmt.Fprintf(stdout, "run=%s patterns=%d proposals=%d accepted=%d rejected=%d pending=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
+		res.ID, len(res.Patterns), len(res.Proposals), res.Accepted, res.Rejected, res.Pending, res.ProviderCalls, res.ScannedSessions, res.Pages)
 	if res.SinceAt != "" {
 		fmt.Fprintf(stdout, "since=%s\n", res.SinceAt)
 	}

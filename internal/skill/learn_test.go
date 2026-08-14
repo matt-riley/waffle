@@ -301,12 +301,46 @@ func TestDefaultValidateHeldOutStableAccept(t *testing.T) {
 		PatternSig: "permission denied",
 		Body:       "1. fix permissions carefully with chmod\n2. re-run the command",
 	}
-	improve, regress, audit := DefaultValidate(context.Background(), score, baseline, prop, []string{"in"}, []string{"out"})
-	if !improve || regress {
-		t.Fatalf("improve=%v regress=%v audit=%q", improve, regress, audit)
+	result, audit := DefaultValidate(context.Background(), score, baseline, prop, []string{"in"}, []string{"out"})
+	if !result.Promotable() {
+		t.Fatalf("result=%+v audit=%q", result, audit)
 	}
-	if !DefaultPromote(improve, regress) {
-		t.Fatal("expected promote")
+	if result.HeldInBefore != 3 || result.HeldInAfter != 1 || result.HeldOutBefore != 2 || result.HeldOutAfter != 2 {
+		t.Fatalf("counts = %+v", result)
+	}
+}
+
+// TestDefaultValidateNoBaselineFailsClosed is the #414 regression: a nil
+// baseline must never produce an auto-promotable result, no matter how
+// substantial the body or how much evidence exists.
+func TestDefaultValidateNoBaselineFailsClosed(t *testing.T) {
+	score := func(_ context.Context, id, _ string) (int, error) { return 0, nil }
+	prop := Proposal{
+		PatternSig: "permission denied",
+		Body:       "1. fix permissions carefully with chmod\n2. re-run the command",
+	}
+	result, audit := DefaultValidate(context.Background(), score, nil, prop, []string{"in"}, nil)
+	if result.Evaluated || result.Promotable() {
+		t.Fatalf("no-baseline result = %+v, want unevaluated and not promotable", result)
+	}
+	if !strings.Contains(audit, "no baseline") {
+		t.Fatalf("audit = %q, want no-baseline explanation", audit)
+	}
+}
+
+// TestDefaultValidateScorerErrorFailsClosed verifies a scorer error aborts the
+// measurement and can never convert missing evidence into a green result.
+func TestDefaultValidateScorerErrorFailsClosed(t *testing.T) {
+	boom := errors.New("index unavailable")
+	baseline := func(_ context.Context, id, _ string) (int, error) { return 3, nil }
+	score := func(_ context.Context, id, _ string) (int, error) { return 0, boom }
+	prop := Proposal{PatternSig: "permission denied", Body: "1. fix permissions carefully with chmod\n2. re-run the command"}
+	result, audit := DefaultValidate(context.Background(), score, baseline, prop, []string{"in"}, []string{"out"})
+	if result.Err == nil || !errors.Is(result.Err, boom) || result.Promotable() {
+		t.Fatalf("scorer-error result = %+v audit=%q", result, audit)
+	}
+	if !strings.Contains(audit, "scoring failed") {
+		t.Fatalf("audit = %q, want scoring-failed", audit)
 	}
 }
 
@@ -332,18 +366,18 @@ func TestDefaultValidateScoresSessionTurns(t *testing.T) {
 		PatternSig: "permission denied",
 		Body:       "1. fix permissions carefully with chmod\n2. re-run the command",
 	}
-	improve, regress, audit := DefaultValidate(ctx, score, baseline, prop, []string{inID}, []string{outID})
-	if !improve || regress {
-		t.Fatalf("improve=%v regress=%v audit=%q", improve, regress, audit)
+	result, audit := DefaultValidate(ctx, score, baseline, prop, []string{inID}, []string{outID})
+	if !result.Promotable() {
+		t.Fatalf("result=%+v audit=%q", result, audit)
 	}
 	// Rigged regress on held-out.
 	after[outID] = 9
-	improve, regress, audit = DefaultValidate(ctx, score, baseline, prop, []string{inID}, []string{outID})
-	if !improve || !regress {
-		t.Fatalf("want improve+regress, got improve=%v regress=%v audit=%q", improve, regress, audit)
+	result, audit = DefaultValidate(ctx, score, baseline, prop, []string{inID}, []string{outID})
+	if result.Promotable() {
+		t.Fatalf("must not promote when held-out regresses: %+v audit=%q", result, audit)
 	}
-	if DefaultPromote(improve, regress) {
-		t.Fatal("must not promote when held-out regresses")
+	if result.HeldOutAfter <= result.HeldOutBefore {
+		t.Fatalf("held-out regress not captured: %+v", result)
 	}
 }
 
