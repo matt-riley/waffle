@@ -38,6 +38,19 @@ type Candidate struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ApprovedBy  string     `json:"approved_by,omitempty"`
 	ApprovedAt  *time.Time `json:"approved_at,omitempty"`
+	// TargetID, Action, Digest, and Current describe a memory_update candidate
+	// (#417): supersede/forget mutations of an existing note. TargetID is the
+	// note being mutated, Digest is the digest of its text at proposal time so
+	// approval can compare-and-swap, and Current is the live text for review.
+	// Action is one of "append", "supersede", or "forget"; "" means append.
+	TargetID string `json:"target_id,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Digest   string `json:"digest,omitempty"`
+	Current  string `json:"current,omitempty"`
+	// Denial audit (#416): who denied, when, and why. Never mutates live state.
+	DeniedBy   string     `json:"denied_by,omitempty"`
+	DeniedAt   *time.Time `json:"denied_at,omitempty"`
+	DenyReason string     `json:"deny_reason,omitempty"`
 }
 
 // Gate is the common write gate for memory and skill candidates.
@@ -113,10 +126,14 @@ func (g *Gate) submit(ctx context.Context, c Candidate, apply func() error) (Can
 	if err := apply(); err != nil {
 		return c, err
 	}
-	if c.Kind == "skill" {
-		c.Diff = "+ skill " + c.Name + "\n+ " + c.Body
-	} else {
-		c.Diff = "+ " + c.Body
+	// Update candidates carry a human-readable diff built at proposal time
+	// (#417); only synthesize one for plain appends and skills.
+	if c.Diff == "" {
+		if c.Kind == "skill" {
+			c.Diff = "+ skill " + c.Name + "\n+ " + c.Body
+		} else {
+			c.Diff = "+ " + c.Body
+		}
 	}
 	if g.Mode == "notify" && g.Notify != nil {
 		g.Notify(c)
@@ -190,6 +207,10 @@ func (g *Gate) SubmitForReview(c Candidate) (Candidate, error) {
 }
 
 // Approve applies one pending candidate. approver is recorded for audit.
+// Memory update candidates (supersede/forget, #417) are applied through the
+// shared lock with a compare-and-swap on the target digest: if the target
+// note changed after proposal, approval fails stale and never mutates the
+// newer note.
 func (g *Gate) Approve(id, approver string) (Candidate, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -205,14 +226,60 @@ func (g *Gate) Approve(id, approver string) (Candidate, error) {
 		return c, errors.New("candidate is not pending")
 	}
 	if c.Kind == "memory" {
-		if _, err := g.WS.appendCandidate(c); err != nil {
-			return c, err
+		switch c.Action {
+		case "":
+			// Append candidates must not carry update-only fields: a corrupt
+			// pending file must never smuggle mutation state into an append.
+			if c.TargetID != "" || c.Digest != "" || c.Current != "" {
+				return c, fmt.Errorf("candidate %s is an append but carries update fields (target_id/digest/current)", id)
+			}
+			if _, err := g.WS.appendCandidate(c); err != nil {
+				return c, err
+			}
+		case "forget":
+			if err := g.WS.ForgetNoteCAS(c.TargetID, c.Digest); err != nil {
+				return c, err
+			}
+		case "supersede":
+			if _, err := g.WS.SupersedeNoteCAS(c.TargetID, c.Body, c.Provenance, c.Digest); err != nil {
+				return c, err
+			}
+		default:
+			// Fail closed: an unknown action must never silently apply as an
+			// append, which would mutate the wrong thing (#417 review).
+			return c, fmt.Errorf("candidate %s has unknown memory action %q; refusing to apply", id, c.Action)
 		}
 	} else if err := g.WS.writeSkillCandidate(c); err != nil {
 		return c, err
 	}
 	now := time.Now().UTC()
 	c.Status, c.ApprovedBy, c.ApprovedAt = "applied", approver, &now
+	b, _ = json.MarshalIndent(c, "", "  ")
+	if err := os.WriteFile(g.pendingPath(id), b, 0o600); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// Deny records a decision without ever mutating live memory or skills. The
+// pending file keeps the full candidate plus approver/time/reason so the
+// queue maintains a durable audit trail (#416).
+func (g *Gate) Deny(id, approver, reason string) (Candidate, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	b, err := os.ReadFile(g.pendingPath(id))
+	if err != nil {
+		return Candidate{}, err
+	}
+	var c Candidate
+	if err := json.Unmarshal(b, &c); err != nil {
+		return c, err
+	}
+	if c.Status != "pending" {
+		return c, errors.New("candidate is not pending")
+	}
+	now := time.Now().UTC()
+	c.Status, c.DeniedBy, c.DeniedAt, c.DenyReason = "denied", approver, &now, reason
 	b, _ = json.MarshalIndent(c, "", "  ")
 	if err := os.WriteFile(g.pendingPath(id), b, 0o600); err != nil {
 		return c, err

@@ -225,7 +225,10 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		// no-op it — the gateway is the only place a sender is attached.
 		notify.Tool{Log: slog.Default()},
 		memory.RememberTool{WS: ws, Notes: notesIdx, Gate: &memory.Gate{Mode: b.Config.Memory.WriteGate, WS: ws}, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
-		memory.MemoryUpdateTool{WS: ws, Notes: notesIdx, Provenance: memory.Provenance{TrustClass: "owner_stated"}},
+		// Model-invoked memory updates cross the same gate as remember (#417).
+		// No owner_stated claim here: provenance is derived from the run context
+		// and defaults to model_derived unless the context is untrusted.
+		memory.MemoryUpdateTool{WS: ws, Notes: notesIdx, Gate: &memory.Gate{Mode: b.Config.Memory.WriteGate, WS: ws}},
 		memory.RecallTool{Sessions: b.Sessions, WS: ws, Notes: notesIdx, Spills: spillStore},
 		workset.UpdateTool{Store: wsStore},
 		spill.ExpandTool{Store: spillStore},

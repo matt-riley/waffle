@@ -5,6 +5,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -609,14 +611,40 @@ func (w Workspace) archiveLine(line string) error {
 	return appendFileLine(w.ArchivePath(), line)
 }
 
+// noteDigest is the compare-and-swap key for a note at proposal time: a hash
+// of the note's raw line. Approval of a pending update requires the target's
+// current digest to match (#417).
+func noteDigest(n note) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(n.raw))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // ForgetNote moves the note with id to MEMORY.archive.md and removes it
 // from MEMORY.md. Localized line edit only.
 func (w Workspace) ForgetNote(noteID string) error {
+	return w.ForgetNoteCAS(noteID, "")
+}
+
+// ForgetNoteCAS is ForgetNote with a compare-and-swap guard: when digest is
+// non-empty, the note must still match it or the forget fails stale without
+// mutating anything (#417).
+func (w Workspace) ForgetNoteCAS(noteID, digest string) error {
 	unlock, err := lockMemoryFile(w.MemoryPath())
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	target, err := w.findNoteByID(noteID)
+	if err != nil {
+		if digest != "" {
+			return fmt.Errorf("memory note %q changed since proposal (stale digest): %w", noteID, err)
+		}
+		return err
+	}
+	if digest != "" && noteDigest(target) != digest {
+		return fmt.Errorf("memory note %q changed since proposal (stale digest); approve again against the current text", noteID)
+	}
 	removed, err := w.removeNoteByID(noteID)
 	if err != nil {
 		return err
@@ -631,6 +659,13 @@ func (w Workspace) ForgetNote(noteID string) error {
 // SupersedeNote archives the old note and appends a replacement with a new
 // ID, today's date, and a (supersedes #old) marker.
 func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, error) {
+	return w.SupersedeNoteCAS(oldID, body, p, "")
+}
+
+// SupersedeNoteCAS is SupersedeNote with a compare-and-swap guard: when
+// digest is non-empty, the old note must still match it or the supersede
+// fails stale without mutating anything (#417).
+func (w Workspace) SupersedeNoteCAS(oldID, body string, p Provenance, digest string) (string, error) {
 	if strings.TrimSpace(body) == "" {
 		return "", errors.New("note is required")
 	}
@@ -639,8 +674,15 @@ func (w Workspace) SupersedeNote(oldID, body string, p Provenance) (string, erro
 		return "", err
 	}
 	defer unlock()
-	if _, err := w.findNoteByID(oldID); err != nil {
+	target, err := w.findNoteByID(oldID)
+	if err != nil {
+		if digest != "" {
+			return "", fmt.Errorf("memory note %q changed since proposal (stale digest): %w", oldID, err)
+		}
 		return "", err
+	}
+	if digest != "" && noteDigest(target) != digest {
+		return "", fmt.Errorf("memory note %q changed since proposal (stale digest); approve again against the current text", oldID)
 	}
 	removed, err := w.removeNoteByID(oldID)
 	if err != nil {
@@ -748,10 +790,13 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 }
 
 // MemoryUpdateTool maintains existing notes by stable ID (localized edits).
-// Updates apply immediately: supersede/forget are maintenance of notes that
-// already passed the write gate (or were written by the owner).
+// Supersede and forget are prompt-level self-modification, so they cross the
+// same write gate as remember (#417): review mode and untrusted-derived
+// writes stay pending for owner approval, and approval applies the exact
+// reviewed mutation under a compare-and-swap digest check.
 type MemoryUpdateTool struct {
 	WS         Workspace
+	Gate       *Gate
 	Provenance Provenance
 	Notes      *NotesIndex
 }
@@ -794,25 +839,91 @@ func (t MemoryUpdateTool) Run(ctx context.Context, input json.RawMessage) (strin
 	if in.ID == "" {
 		return "", errors.New("id is required")
 	}
-	ws := t.workspace()
-	switch in.Action {
-	case "forget":
-		if err := ws.ForgetNote(in.ID); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("forgot note %s (archived)", in.ID), nil
-	case "supersede":
-		if strings.TrimSpace(in.Note) == "" {
-			return "", errors.New("note is required for supersede")
-		}
-		newID, err := ws.SupersedeNote(in.ID, in.Note, t.Provenance)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("superseded #%s → id=%s", in.ID, newID), nil
-	default:
+	if in.Action != "forget" && in.Action != "supersede" {
 		return "", fmt.Errorf("unknown action %q (want supersede or forget)", in.Action)
 	}
+	if in.Action == "supersede" && strings.TrimSpace(in.Note) == "" {
+		return "", errors.New("note is required for supersede")
+	}
+	ws := t.workspace()
+	// Model-invoked updates derive provenance from context exactly like
+	// remember: the default trust class is model_derived, never owner_stated
+	// unless an explicit owner-origin path claims it (#417).
+	p := provenanceFromContext(ctx, t.Provenance)
+	// Snapshot the target for the pending file and the approve-time CAS.
+	target, err := ws.noteSnapshot(in.ID)
+	if err != nil {
+		return "", err
+	}
+	gate := t.Gate
+	if gate == nil {
+		gate = &Gate{Mode: "auto", WS: ws}
+	}
+	c := Candidate{
+		Kind:       "memory",
+		Action:     in.Action,
+		TargetID:   in.ID,
+		Digest:     target.digest,
+		Current:    target.text,
+		Body:       in.Note,
+		Provenance: p,
+		Diff:       updateDiff(in.Action, in.ID, target.text, in.Note),
+	}
+	var newID string
+	applied, err := gate.submit(ctx, c, func() error {
+		var err error
+		switch in.Action {
+		case "forget":
+			err = ws.ForgetNoteCAS(in.ID, target.digest)
+		case "supersede":
+			newID, err = ws.SupersedeNoteCAS(in.ID, in.Note, p, target.digest)
+		}
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	if applied.Status == "pending" {
+		return fmt.Sprintf("memory %s of note %s is pending owner approval (%s); it has not changed live memory", in.Action, in.ID, applied.ID), nil
+	}
+	switch in.Action {
+	case "forget":
+		return fmt.Sprintf("forgot note %s (archived)", in.ID), nil
+	case "supersede":
+		return fmt.Sprintf("superseded #%s → id=%s", in.ID, newID), nil
+	}
+	return "", nil
+}
+
+// noteSnapshot is the proposal-time view of a note used for review and CAS.
+type noteSnapshot struct {
+	text   string
+	digest string
+}
+
+// noteSnapshot reads a note's current text and digest under the memory lock.
+func (w Workspace) noteSnapshot(noteID string) (noteSnapshot, error) {
+	unlock, err := lockMemoryFile(w.MemoryPath())
+	if err != nil {
+		return noteSnapshot{}, err
+	}
+	defer unlock()
+	n, err := w.findNoteByID(noteID)
+	if err != nil {
+		return noteSnapshot{}, err
+	}
+	return noteSnapshot{text: n.raw, digest: noteDigest(n)}, nil
+}
+
+// updateDiff renders the human-readable diff stored on a pending update
+// candidate (#417): the target line, the action, and the proposed replacement
+// (or deletion) for forget.
+func updateDiff(action, targetID, current, replacement string) string {
+	if action == "forget" {
+		return fmt.Sprintf("- %s (forget)\n  current: %s", targetID, strings.TrimSpace(current))
+	}
+	return fmt.Sprintf("- %s (supersede)\n  current: %s\n+ proposed: %s",
+		targetID, strings.TrimSpace(current), strings.TrimSpace(replacement))
 }
 
 // RecallTool multi-tier search: turns FTS, session summaries, MEMORY.md
