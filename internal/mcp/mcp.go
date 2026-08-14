@@ -72,8 +72,10 @@ type Server struct {
 	PluginData string
 	// Optional marks a server whose connect/toolbox failure degrades
 	// gracefully (skipped with a report) instead of failing the whole agent
-	// build (#393). Native codeintel servers set it via the #79 heuristics;
-	// plugin-sourced servers are always optional (spec §11.3).
+	// build (#393). Only native codeintel servers set it (via the #79
+	// heuristics): plugin-sourced servers are always optional, enforced by
+	// the agent-build plugin wiring path (wirePluginMCPServer), not by this
+	// flag (#402 review).
 	Optional bool
 	// URL is a remote MCP streamable HTTP endpoint. Mutually exclusive with
 	// Command. Remote servers have no process to restrict; their network

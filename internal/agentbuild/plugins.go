@@ -42,9 +42,15 @@ func (b *Builder) wirePluginMCPServer(ctx context.Context, boxes *[]tool.Toolbox
 			return
 		}
 		mapped.PluginRoot = result.Plugin.Root
-		if dataDir, derr := plugin.PluginDataDir(home, pluginName); derr == nil {
-			mapped.PluginData = dataDir
+		dataDir, derr := plugin.PluginDataDir(home, pluginName)
+		if derr != nil {
+			// A plugin-sourced server without a derived PLUGIN_DATA would
+			// launch with an empty data path (spec §9.1 contract broken):
+			// skip it with a report instead (#402 review).
+			slog.Warn("plugin mcp server skipped", "plugin", pluginName, "server", srv.Name, "reason", derr)
+			return
 		}
+		mapped.PluginData = dataDir
 		client, err := mcp.ConnectRestricted(ctx, mapped, mcp.RestrictOpts{Mode: "restricted"})
 		if err != nil {
 			slog.Warn("plugin mcp server failed", "plugin", pluginName, "server", srv.Name, "reason", err)

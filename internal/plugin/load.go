@@ -32,13 +32,16 @@ func LoadComponents(root string) (LoadResult, error) {
 		return LoadResult{}, err
 	}
 	version := supportedSchemas[p.Manifest.Schema]
+	// Component failures are contained per §11.3: only the manifest rejects
+	// the whole plugin. A component-level read failure disables that
+	// component (reported) instead of taking down the other components.
 	skills, skillSkips, err := DiscoverSkills(root)
 	if err != nil {
-		return LoadResult{}, err
+		skillSkips = append(skillSkips, SkillSkip{Dir: "skills", Reason: err.Error()})
 	}
 	mcpResult, err := LoadMCP(root, version)
 	if err != nil {
-		return LoadResult{}, err
+		mcpResult = MCPResult{Disabled: err.Error()}
 	}
 	return LoadResult{Plugin: p, Skills: skills, SkillSkips: skillSkips, MCP: mcpResult}, nil
 }
