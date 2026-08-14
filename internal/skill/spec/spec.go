@@ -61,6 +61,12 @@ func isNameChar(c byte) bool {
 // spec places no format restrictions on it). The error names the offending
 // field.
 func Validate(name, description string, fields map[string]string, body, dirName string) error {
+	// Nil maps are treated as empty so callers may pass nil; Go map reads
+	// are already nil-safe, but making the contract explicit avoids relying
+	// on that for a validation entry point.
+	if fields == nil {
+		fields = map[string]string{}
+	}
 	if !ValidName(name) {
 		return fmt.Errorf("%w: name %q must be 1-%d chars of [a-z0-9-], not start/end with a hyphen, and contain no consecutive hyphens",
 			ErrInvalid, name, MaxNameLength)
