@@ -279,6 +279,23 @@ server, and reason. Native `[[mcp]]` servers keep fail-fast; the codeintel
 optional-degrade becomes a per-server `mcp.Server.Optional` flag. `waffle
 doctor` reports rejected and partially-loaded plugins.
 
+**Waffle client-extension namespace (#394).** waffle reserves the stable
+reverse-domain namespace `dev.mattriley.waffle` (`plugin.Namespace`) for all
+waffle-specific plugin data, per spec §8 — the only channel; no new
+`plugin.json` top-level fields are ever introduced. Foreign namespaces are
+ignored without validating their values; malformed waffle-namespace data is
+reported and ignored, never fatal. The namespace carries per-skill
+activation overrides (`extensions.dev.mattriley.waffle.skills.<name>.status`,
+applied between frontmatter and the `skill_status` table, which wins) and
+per-server MCP policy (`mcp.<name>.<execution|egress|groups|token>`) that
+may grant more than the portable default but can never bypass the
+#77/#79/#249 posture — docker-mode groups still refuse `egress=direct` and
+host-executed plugin stdio binaries, unattended tiers stay deny-by-default
+unless the extension names the group, and credentials are secret-store
+references only. The `dev.mattriley.waffle/` top-level directory is reserved
+for future per-plugin files. SKILL.md `metadata` key prefixes for
+waffle-written skills align with this identifier (#396).
+
 **Mid-run owner messaging (#253).** The gateway attaches one session-scoped
 outbound sender per run (`internal/notify`), bound to the conversation's
 channel and chat id — the same adapter resolution the memory-change notifier

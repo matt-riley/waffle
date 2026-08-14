@@ -11,8 +11,10 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/memory"
+	"github.com/matt-riley/waffle/internal/plugin"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
+	"github.com/matt-riley/waffle/internal/tool"
 )
 
 // captureLog redirects slog to a text handler over a buffer so tests can
@@ -163,6 +165,74 @@ func TestBuildRefusesPluginRemoteAndDockerStdio(t *testing.T) {
 	}
 	if !capture.contains("plugin remote mcp server refused") {
 		t.Errorf("remote plugin server not refused with report:\n%s", capture.String())
+	}
+}
+
+// TestBuildExtensionSkillActivation: the waffle extension's per-skill status
+// override is respected when indexing plugin skills — an extension-inactive
+// skill is left out of the system prompt.
+func TestBuildExtensionSkillActivation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	writeTestPlugin(t, home, "gated", map[string]string{
+		"plugin.json":            `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"gated","extensions":{"dev.mattriley.waffle":{"skills":{"deploy":{"status":"inactive"},"lint":{"status":"active"}}}}}`,
+		"skills/deploy/SKILL.md": "---\nname: deploy\ndescription: Deploys a build.\n---\n\nBody.\n",
+		"skills/lint/SKILL.md":   "---\nname: lint\ndescription: Lints the code.\n---\n\nBody.\n",
+	})
+
+	b := newPluginTestBuilder(t)
+	agent, cleanup, err := b.Build(context.Background(), config.GroupMain, "")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	defer func() { _ = cleanup.Stop() }()
+	if strings.Contains(agent.System, "Deploys a build") {
+		t.Errorf("extension-inactive plugin skill indexed:\n%s", agent.System)
+	}
+	if !strings.Contains(agent.System, "Lints the code") {
+		t.Errorf("extension-active plugin skill missing:\n%s", agent.System)
+	}
+}
+
+// TestExtensionMCPPolicyCannotBypassPosture: extension-declared egress still
+// cannot bypass the #249 posture — a docker-mode group refuses egress=direct
+// with a report, without dialing anything; a stdio server whose extension
+// groups exclude the build's group is skipped.
+func TestExtensionMCPPolicyCannotBypassPosture(t *testing.T) {
+	capture := newCaptureLog(t)
+	b := newPluginTestBuilder(t)
+	result := plugin.LoadResult{
+		Plugin: plugin.Plugin{Root: t.TempDir(), Manifest: plugin.Manifest{Name: "policy"}},
+		MCP: plugin.MCPResult{Servers: []plugin.MCPServer{
+			{Name: "api", Type: plugin.MCPTypeStreamableHTTP, URL: "https://example.com/mcp"},
+		}},
+	}
+	var boxes []tool.Toolbox
+	var closers []Cleanup
+	var redactors []func(string) string
+	// A plugin remote server without an explicit secret:// token is refused
+	// outright — connectRemoteMCP would otherwise fall back to OAuth tokens
+	// keyed by server name, which a malicious plugin could exfiltrate by
+	// choosing a matching name and URL (#403 security review).
+	b.wirePluginMCPServer(context.Background(), &boxes, &closers, &redactors, result, result.MCP.Servers[0],
+		plugin.WaffleMCPPolicy{Egress: "broker"}, t.TempDir(), "docker", config.GroupMain)
+	if len(boxes) != 0 {
+		t.Fatalf("boxes = %d, want none", len(boxes))
+	}
+	if !capture.contains("require an explicit secret:// token") {
+		t.Errorf("tokenless plugin remote server not refused:\n%s", capture.String())
+	}
+	if len(closers) != 0 {
+		t.Errorf("closers = %d, want none (nothing connected)", len(closers))
+	}
+
+	// Even with a token, egress=direct in docker mode is refused by
+	// connectRemoteMCP before any dial (#249 posture cannot be bypassed).
+	capture2 := newCaptureLog(t)
+	b.wirePluginMCPServer(context.Background(), &boxes, &closers, &redactors, result, result.MCP.Servers[0],
+		plugin.WaffleMCPPolicy{Egress: "direct", Token: "secret://mcp/api/access-token"}, t.TempDir(), "docker", config.GroupMain)
+	if !capture2.contains("egress=direct is refused") {
+		t.Errorf("extension egress=direct with token not refused in docker mode:\n%s", capture2.String())
 	}
 }
 

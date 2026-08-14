@@ -134,7 +134,7 @@ func TestConnectRemoteMCPRefusesUnsafePosturesNamingServer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := b.connectRemoteMCP(context.Background(), tc.server, "main", tc.sandboxMode)
+			_, _, _, err := b.connectRemoteMCP(context.Background(), tc.server, "main", tc.sandboxMode, nil)
 			if err == nil {
 				t.Fatal("connectRemoteMCP succeeded, want refusal")
 			}
@@ -178,7 +178,7 @@ func TestDockerModeRemoteMCPRoutesThroughBrokerWithAuditAndRedaction(t *testing.
 	}
 	builder := &Builder{Secrets: secrets, RemoteEgress: egress}
 	server := remoteMCPServer("github", "http://localhost/", "") // default → broker for docker
-	tb, closer, redact, err := builder.connectRemoteMCP(context.Background(), server, "main", "docker")
+	tb, closer, redact, err := builder.connectRemoteMCP(context.Background(), server, "main", "docker", nil)
 	if err != nil {
 		t.Fatalf("connectRemoteMCP: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestHostModeRemoteMCPConnectsDirectlyWithoutBroker(t *testing.T) {
 	srv := fakeRemoteMCP(t)
 	builder := &Builder{}
 	server := remoteMCPServer("github", srv.URL, "direct")
-	tb, closer, _, err := builder.connectRemoteMCP(context.Background(), server, "main", "host")
+	tb, closer, _, err := builder.connectRemoteMCP(context.Background(), server, "main", "host", nil)
 	if err != nil {
 		t.Fatalf("connectRemoteMCP: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestDockerModeOAuthRefreshRoutesThroughBrokerEgress(t *testing.T) {
 	}
 	builder := &Builder{Secrets: secrets, RemoteEgress: egress}
 	server := remoteMCPServer("github", "http://localhost/", "") // default → broker for docker
-	tb, closer, _, err := builder.connectRemoteMCP(context.Background(), server, "main", "docker")
+	tb, closer, _, err := builder.connectRemoteMCP(context.Background(), server, "main", "docker", nil)
 	if err != nil {
 		t.Fatalf("connectRemoteMCP: %v", err)
 	}

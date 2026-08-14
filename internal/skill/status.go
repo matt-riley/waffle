@@ -175,6 +175,15 @@ func DiscoverActive(dir string, db *sql.DB) ([]Skill, error) {
 // rows.Err is an error — no skill is reported active when the override table
 // cannot be read (deny-by-default).
 func FilterActive(all []Skill, db *sql.DB) ([]Skill, error) {
+	return FilterActiveWithExtension(all, db, nil)
+}
+
+// FilterActiveWithExtension is FilterActive with an additional plugin
+// extension status override layer (#394): for plugin-discovered skills, the
+// waffle client extension may carry per-skill activation state. Precedence
+// is skill_status table (operator, wins) > extension (plugin-authored) >
+// frontmatter status (missing defaults to active, #65).
+func FilterActiveWithExtension(all []Skill, db *sql.DB, extension map[string]string) ([]Skill, error) {
 	statusOverride, err := loadSkillStatusOverrides(db)
 	if err != nil {
 		return nil, err
@@ -182,6 +191,9 @@ func FilterActive(all []Skill, db *sql.DB) ([]Skill, error) {
 	var out []Skill
 	for _, s := range all {
 		st := statusOverride[s.Name]
+		if st == "" {
+			st = extension[s.Name]
+		}
 		if st == "" {
 			if isActiveFrontmatter(s.raw) {
 				st = StatusActive

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -414,7 +415,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 				// group explicitly.
 				continue
 			}
-			tb, closer, redact, err := b.connectRemoteMCP(ctx, s, group, sandboxMode)
+			tb, closer, redact, err := b.connectRemoteMCP(ctx, s, group, sandboxMode, nil)
 			if err != nil {
 				return nil, cleanup, fmt.Errorf("mcp %q: %w", s.Name, err)
 			}
@@ -494,6 +495,10 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 		}
 		for _, result := range installed {
 			pluginName := result.Plugin.Manifest.Name
+			ext, extWarnings, _ := plugin.LoadWaffleExtension(result.Plugin.Manifest)
+			for _, w := range extWarnings {
+				slog.Warn("plugin waffle extension", "plugin", pluginName, "reason", w)
+			}
 			for _, skip := range result.SkillSkips {
 				slog.Warn("plugin skill skipped", "plugin", pluginName, "skill", skip.Dir, "reason", skip.Reason)
 			}
@@ -504,6 +509,22 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 					Path:        s.Path,
 				})
 			}
+			// Waffle-extension activation overrides for plugin skills; the
+			// skill_status table still wins, and a failed override read is
+			// fail-closed (deny-by-default, matching the workspace path).
+			if len(ext.Skills) > 0 {
+				overrides := make(map[string]string, len(ext.Skills))
+				for name, policy := range ext.Skills {
+					overrides[name] = policy.Status
+				}
+				filtered, err := skill.FilterActiveWithExtension(pluginSkills, b.Sessions.DB(), overrides)
+				if err != nil {
+					slog.Warn("plugin skill activation", "plugin", pluginName, "reason", err)
+					pluginSkills = nil
+				} else {
+					pluginSkills = filtered
+				}
+			}
 			if result.MCP.Disabled != "" {
 				slog.Warn("plugin mcp disabled", "plugin", pluginName, "reason", result.MCP.Disabled)
 			}
@@ -511,7 +532,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 				slog.Warn("plugin mcp server skipped", "plugin", pluginName, "server", skip.Name, "reason", skip.Reason)
 			}
 			for _, srv := range result.MCP.Servers {
-				b.wirePluginMCPServer(ctx, &boxes, &closers, result, srv, home, sandboxMode)
+				b.wirePluginMCPServer(ctx, &boxes, &closers, &mcpRedactors, result, srv, ext.MCP[srv.Name], home, sandboxMode, group)
 			}
 		}
 	}
@@ -642,7 +663,9 @@ func (c Cleanup) Stop() error {
 // egress posture first (docker-mode groups go through the broker or are
 // refused), then credential resolution (static secret:// token or OAuth
 // tokens from `waffle mcp login`), then the streamable-HTTP handshake.
-func (b *Builder) connectRemoteMCP(ctx context.Context, s config.MCPServer, group, sandboxMode string) (tool.Toolbox, Cleanup, func(string) string, error) {
+// headers carries fixed extra headers for plugin-sourced servers; nil for
+// native config servers.
+func (b *Builder) connectRemoteMCP(ctx context.Context, s config.MCPServer, group, sandboxMode string, headers http.Header) (tool.Toolbox, Cleanup, func(string) string, error) {
 	// Egress posture. "broker" is the default for docker-mode groups: their
 	// remote MCP traffic must traverse the broker (allowlist + audit) — an
 	// unaudited direct side channel out of a sandboxed tier is refused.
@@ -683,6 +706,7 @@ func (b *Builder) connectRemoteMCP(ctx context.Context, s config.MCPServer, grou
 	opts := mcp.HTTPOpts{
 		ProxyURL:  egressURLFor(egress, b.RemoteEgress),
 		ProxyAuth: proxyAuth,
+		Headers:   headers,
 	}
 	if s.Token != "" {
 		if b.Secrets == nil {
