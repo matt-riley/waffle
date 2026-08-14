@@ -79,6 +79,11 @@ func TestConnectEnvVarsOverlay(t *testing.T) {
 	if !strings.Contains(body, "OVERRIDDEN=plugin-value") {
 		t.Errorf("EnvVars overlay missing (want plugin-value to win):\n%s", body)
 	}
+	if strings.Contains(body, "OVERRIDDEN=host-value") {
+		// Duplicate NAME= entries have unspecified precedence; the overlay
+		// must replace the allowlisted entry, not append beside it (#400).
+		t.Errorf("allowlisted OVERRIDDEN=host-value survived the overlay:\n%s", body)
+	}
 	if !strings.Contains(body, "PLUGIN_ONLY=from-plugin") {
 		t.Errorf("EnvVars pair missing:\n%s", body)
 	}
@@ -154,6 +159,11 @@ func TestHTTPHeadersApplied(t *testing.T) {
 			"User-Agent":     {"plugin-tries"},
 			"Content-Type":   {"plugin-tries"},
 			"Mcp-Session-Id": {"plugin-tries"},
+			// Case variants must be canonicalized and never survive as a
+			// second wire header (#400).
+			"x-tenant":       {"lowercase-dup"},
+			"mcp-session-id": {"lowercase-spoof"},
+			"authorization":  {"bearer spoof"},
 		},
 	}
 	client, err := ConnectHTTP(context.Background(), "remote", srv.URL, opts)
@@ -169,6 +179,12 @@ func TestHTTPHeadersApplied(t *testing.T) {
 	defer mu.Unlock()
 	if gotHeader.Get("X-Tenant") != "public-tenant" || gotHeader.Get("X-Custom") != "kept" {
 		t.Errorf("plugin headers missing: %v", gotHeader)
+	}
+	if len(gotHeader.Values("X-Tenant")) != 1 {
+		t.Errorf("case-variant X-Tenant duplicated on the wire: %v", gotHeader.Values("X-Tenant"))
+	}
+	if gotHeader.Get("Authorization") != "" {
+		t.Errorf("plugin Authorization header survived (case-insensitive strip failed): %v", gotHeader)
 	}
 	if gotHeader.Get("User-Agent") != "waffle-mcp/0" {
 		t.Errorf("client User-Agent should win, got %q", gotHeader.Get("User-Agent"))

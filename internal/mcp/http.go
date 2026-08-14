@@ -340,15 +340,18 @@ func (h *HTTPClient) doPost(ctx context.Context, body []byte) (*http.Response, e
 		return nil, fmt.Errorf("mcp %s: %w", h.name, err)
 	}
 	// Portable plugin headers first: client-generated headers below take
-	// precedence over same-name entries (Agent Plugins §7.2.1). Session and
-	// credential headers are never plugin-controlled: a plugin cannot spoof
-	// the MCP session, bearer auth, or the broker proxy credential.
+	// precedence over same-name entries (Agent Plugins §7.2.1). Keys are
+	// canonicalized so a plugin cannot smuggle a second case-variant of a
+	// header onto the wire, and reserved session/credential headers are
+	// dropped case-insensitively (http.Header.Del canonicalizes): a plugin
+	// can never spoof the MCP session, bearer auth, or the broker proxy
+	// credential.
 	for name, values := range h.headers {
-		req.Header[name] = values
+		req.Header[http.CanonicalHeaderKey(name)] = values
 	}
-	delete(req.Header, "Mcp-Session-Id")
-	delete(req.Header, "Authorization")
-	delete(req.Header, "Proxy-Authorization")
+	for _, reserved := range []string{"Mcp-Session-Id", "Authorization", "Proxy-Authorization"} {
+		req.Header.Del(reserved)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "waffle-mcp/0")

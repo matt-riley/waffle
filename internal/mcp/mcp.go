@@ -134,6 +134,33 @@ func BuildProcessEnv(allowlist []string) []string {
 	return env
 }
 
+// overlayEnv replaces same-name entries in base with the explicit name→value
+// pairs, deduplicating so no NAME= entry appears twice (duplicate entries
+// have unspecified precedence across platforms). Unknown names are appended.
+func overlayEnv(base []string, pairs map[string]string) []string {
+	if len(pairs) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base)+len(pairs))
+	seen := make(map[string]bool, len(base)+len(pairs))
+	for _, item := range base {
+		name, _, _ := strings.Cut(item, "=")
+		if _, replaced := pairs[name]; replaced {
+			continue // dropped; the explicit pair below wins
+		}
+		seen[name] = true
+		out = append(out, item)
+	}
+	for name, value := range pairs {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name+"="+value)
+	}
+	return out
+}
+
 // RestrictOpts configures #77-compliant isolation for an MCP child process.
 type RestrictOpts struct {
 	// Dir is the working directory for the child (workspace root when known).
@@ -247,10 +274,10 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	cmd := exec.CommandContext(procCtx, s.Command, s.Args...)
 	cmd.Env = BuildProcessEnv(s.Env)
 	// Portable plugin servers carry explicit name→value pairs that overlay
-	// the allowlisted base (and replace same-name entries, POSIX last-wins).
-	for name, value := range s.EnvVars {
-		cmd.Env = append(cmd.Env, name+"="+value)
-	}
+	// the allowlisted base: same-name entries are replaced (deduplicated),
+	// never duplicated in the array — duplicate NAME= entries have
+	// unspecified precedence across platforms.
+	cmd.Env = overlayEnv(cmd.Env, s.EnvVars)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	} else if s.Cwd != "" {

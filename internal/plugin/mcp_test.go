@@ -201,6 +201,8 @@ func TestLoadMCPSkipsInvalidServers(t *testing.T) {
 		"parent-cmd":   map[string]any{"type": "stdio", "command": "../bin/server"},
 		"multi-cmd":    map[string]any{"type": "stdio", "command": "node server.js"},
 		"rel-cmd":      map[string]any{"type": "stdio", "command": "bin/server"},
+		"win-abs-cmd":  map[string]any{"type": "stdio", "command": "C:\\bin\\server"},
+		"win-rel-cmd":  map[string]any{"type": "stdio", "command": "..\\bin\\server"},
 		// Bad cwd.
 		"bad-cwd": map[string]any{"type": "stdio", "command": "npx", "cwd": "/etc"},
 		// Bad urls.
@@ -220,12 +222,30 @@ func TestLoadMCPSkipsInvalidServers(t *testing.T) {
 	if len(result.Servers) != 1 || result.Servers[0].Name != "good" {
 		t.Errorf("Servers = %+v, want only good", result.Servers)
 	}
-	if len(result.Skips) != 17 {
-		t.Fatalf("Skips = %d, want 17: %+v", len(result.Skips), result.Skips)
+	if len(result.Skips) != 19 {
+		t.Fatalf("Skips = %d, want 19: %+v", len(result.Skips), result.Skips)
 	}
 	for _, skip := range result.Skips {
 		if skip.Name == "good" {
 			t.Errorf("good was skipped: %+v", skip)
+		}
+	}
+}
+
+func TestLoadMCPLoopbackURLValidation(t *testing.T) {
+	root := t.TempDir()
+	result := loadMCP(t, root, mcpServersBody(t, map[string]any{
+		"ok-v4":        map[string]any{"type": "streamable-http", "url": "http://127.0.0.1:8080/mcp"},
+		"ok-localhost": map[string]any{"type": "streamable-http", "url": "http://localhost/mcp"},
+		"bad-v4":       map[string]any{"type": "streamable-http", "url": "http://127.999.999.999/mcp"},
+		"bad-octet":    map[string]any{"type": "streamable-http", "url": "http://127.0.0.256/mcp"},
+	}))
+	if len(result.Servers) != 2 || len(result.Skips) != 2 {
+		t.Fatalf("Servers=%+v Skips=%+v, want 2 ok / 2 invalid", result.Servers, result.Skips)
+	}
+	for _, skip := range result.Skips {
+		if !strings.Contains(skip.Reason, "url") {
+			t.Errorf("skip reason = %q, want url validation report", skip.Reason)
 		}
 	}
 }

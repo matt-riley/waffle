@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -338,7 +339,10 @@ func validCommandForm(command string) bool {
 	if strings.HasPrefix(command, "./") {
 		return true
 	}
-	return !strings.Contains(command, "/")
+	// A bare name has no path separator on any platform; reject both /
+	// and \ so a Windows-style "..\\bin\\server" or "C:\\bin\\server"
+	// cannot bypass the bare-name-or-./ rule.
+	return !strings.ContainsAny(command, "/\\")
 }
 
 // validCwdForm checks the §7.2.1 cwd rule: ./-relative, ${PLUGIN_ROOT}...,
@@ -385,25 +389,15 @@ func isLoopbackHost(host string) bool {
 	if host == "::1" || host == "0:0:0:0:0:0:0:1" {
 		return true
 	}
-	// 127.0.0.0/8: four dot-separated numeric parts with a leading 127.
+	// 127.0.0.0/8: four dot-separated numeric parts with a leading 127,
+	// each octet 0–255 so "127.999.999.999" is not treated as loopback.
 	parts := strings.Split(host, ".")
 	if len(parts) != 4 || parts[0] != "127" {
 		return false
 	}
 	for _, part := range parts {
-		if !isDecimal(part) {
-			return false
-		}
-	}
-	return true
-}
-
-func isDecimal(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 || n > 255 {
 			return false
 		}
 	}
