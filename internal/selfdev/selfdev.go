@@ -9,6 +9,8 @@ package selfdev
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -492,9 +495,24 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 	return UpgradeWithOptions(ctx, repoDir, ref, stderr, true, "", nil)
 }
 
+// emptyTreeSHA is the well-known git empty-tree object, used as the review
+// base when upgrading a root commit with no parent (#413).
+const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+// upgradeSwapMu serializes the install/swap section of concurrent upgrades.
+// Worktrees are distinct per upgrade; only the swap of the shared binary is
+// exclusive (#413).
+var upgradeSwapMu sync.Mutex
+
 // UpgradeWithOptions is Upgrade with an explicit verification and approval
 // policy. Verification is intentionally opt-out only: callers should make
 // the unsafe choice visible in their own CLI.
+//
+// Every upgrade resolves one immutable commit SHA (including the no-ref/HEAD
+// path), reviews that exact commit, and verifies and builds it in an isolated
+// detached worktree created from the SHA. The configured checkout branch,
+// index, and working tree are never touched, and dirty bytes in the checkout
+// can never enter the artifact (#413).
 func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writer, verify bool, approval string, protected []string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -509,53 +527,230 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		if err := validateRef(ref); err != nil {
 			return "", err
 		}
-		if approval == "auto-patch" {
-			if err := rejectProtectedChanges(ctx, repoDir, ref, protected); err != nil {
-				return "", err
-			}
-		}
-		if err := reviewCandidate(ctx, repoDir, ref, approval); err != nil {
+	}
+	// Bind everything below to one immutable commit, before any review.
+	sha, err := resolveCommit(ctx, repoDir, ref)
+	if err != nil {
+		return "", err
+	}
+	baseSHA, err := reviewBaseSHA(ctx, repoDir, ref, sha)
+	if err != nil {
+		return "", err
+	}
+	if approval == "auto-patch" {
+		if err := rejectProtectedChanges(ctx, repoDir, baseSHA, sha, protected); err != nil {
 			return "", err
 		}
-		// Trailing "--" marks end of pathspecs; with the ref already
-		// validated it is belt-and-braces against option injection and
-		// does not change checkout semantics for a branch/tag/sha.
-		if err := run(ctx, repoDir, stderr, "git", "checkout", ref, "--"); err != nil {
-			return "", fmt.Errorf("checkout %s: %w", ref, err)
-		}
+	}
+	if err := reviewExactCommit(ctx, repoDir, baseSHA, sha, approval); err != nil {
+		return "", err
 	}
 
-	return upgradeInto(ctx, repoDir, self, stderr, verify)
+	// Isolated detached worktree at the exact SHA: the configured checkout
+	// stays untouched on success and failure, and unreviewed local edits
+	// cannot reach verification or the artifact.
+	wt, err := addDetachedTempWorktree(ctx, repoDir, sha)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = removeWorktree(ctx, repoDir, wt) }()
+	tree, err := treeHash(ctx, wt)
+	if err != nil {
+		return "", err
+	}
+	buildDir, err := os.MkdirTemp("", "waffle-upgrade-build-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(buildDir) }()
+
+	verification := "skipped"
+	if verify {
+		if err := verifyRepo(ctx, wt, stderr); err != nil {
+			_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: true, Verification: "failed", Error: err.Error()})
+			return "", err
+		}
+		verification = "ok"
+	}
+	built, ver, err := verifyAndBuild(ctx, wt, buildDir, stderr, false)
+	if err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
+		return "", err
+	}
+	// The worktree must be pristine right before install so the artifact is
+	// exactly the reviewed SHA/tree.
+	if err := assertCleanTree(ctx, wt); err != nil {
+		return "", err
+	}
+
+	upgradeSwapMu.Lock()
+	path, err := swapBinary(ctx, built, self)
+	upgradeSwapMu.Unlock()
+	if err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
+		return "", err
+	}
+	digest, derr := fileSHA256(path)
+	if derr != nil {
+		return "", fmt.Errorf("hash installed artifact: %w", derr)
+	}
+	if err := persistUpgradeRecord(UpgradeRecord{
+		BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree,
+		ArtifactSHA256: digest, Approval: approval, Verify: verify,
+		Verification: verification, Version: ver, InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// resolveCommit returns the immutable commit SHA for ref (or HEAD when ref is
+// empty), so review, verification, build, and install all bind to one commit.
+func resolveCommit(ctx context.Context, repoDir, ref string) (string, error) {
+	arg := "HEAD"
+	if ref != "" {
+		arg = ref + "^{commit}"
+	}
+	out, err := commandOutput(ctx, repoDir, "git", "rev-parse", arg)
+	if err != nil {
+		return "", fmt.Errorf("resolve commit %q: %w", ref, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// reviewBaseSHA is the diff base for the review. With an explicit ref, the
+// base is the configured checkout's HEAD (what the operator is on). With no
+// ref, the candidate is HEAD and the base is its parent — the most recent
+// commit is what would newly land; a root commit reviews against the empty
+// tree. The no-ref path is always reviewed and commit-bound (#413).
+func reviewBaseSHA(ctx context.Context, repoDir, ref, sha string) (string, error) {
+	if ref != "" {
+		return resolveCommit(ctx, repoDir, "")
+	}
+	out, err := commandOutput(ctx, repoDir, "git", "rev-parse", sha+"~1")
+	if err != nil {
+		return emptyTreeSHA, nil
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// addDetachedTempWorktree creates a detached worktree at sha under a fresh
+// temp directory. The path is created by the caller of os.MkdirTemp and
+// removed so git worktree add can claim it.
+func addDetachedTempWorktree(ctx context.Context, repoDir, sha string) (string, error) {
+	dir, err := os.MkdirTemp("", "waffle-upgrade-worktree-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Remove(dir); err != nil {
+		return "", err
+	}
+	if err := run(ctx, repoDir, io.Discard, "git", "worktree", "add", "--detach", "--quiet", dir, sha); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("create worktree at %s: %w", sha, err)
+	}
+	return dir, nil
+}
+
+// removeWorktree removes the detached worktree, falling back to plain
+// directory removal so a temp dir never leaks even if git metadata cleanup
+// fails (the stale entry is harmless and pruned later).
+func removeWorktree(ctx context.Context, repoDir, dir string) error {
+	if dir == "" {
+		return nil
+	}
+	err := run(ctx, repoDir, io.Discard, "git", "worktree", "remove", "--force", dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return err
+	}
+	return nil
+}
+
+// assertCleanTree fails the upgrade if the worktree is not pristine: a dirty
+// tree would mean the artifact is no longer exactly the reviewed SHA.
+func assertCleanTree(ctx context.Context, worktree string) error {
+	out, err := commandOutput(ctx, worktree, "git", "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("check worktree cleanliness: %w", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("worktree is not clean: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// treeHash is the tree object of the worktree's HEAD, recorded in the audit
+// so the installed artifact is bound to an exact tree.
+func treeHash(ctx context.Context, worktree string) (string, error) {
+	out, err := commandOutput(ctx, worktree, "git", "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// fileSHA256 returns the sha256 of a file's contents.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // upgradeInto verifies and builds a checkout before replacing target. Keeping
 // target explicit makes the no-swap boundary integration-testable.
 func upgradeInto(ctx context.Context, repoDir, target string, stderr io.Writer, verify bool) (string, error) {
+	buildDir, err := os.MkdirTemp("", "waffle-upgrade-build-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(buildDir) }()
+	built, _, err := verifyAndBuild(ctx, repoDir, buildDir, stderr, verify)
+	if err != nil {
+		return "", err
+	}
+	return swapBinary(ctx, built, target)
+}
+
+// verifyAndBuild verifies (when requested) and builds the binary from repoDir
+// into buildDir. The build lands outside the worktree so the reviewed tree
+// stays pristine and can be asserted clean before install (#413).
+func verifyAndBuild(ctx context.Context, repoDir, buildDir string, stderr io.Writer, verify bool) (string, string, error) {
 	if verify {
 		if err := verifyRepo(ctx, repoDir, stderr); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
-	built := filepath.Join(repoDir, ".waffle-build")
+	built := filepath.Join(buildDir, "waffle-build")
 	ver, err := buildVersion(ctx, repoDir)
 	if err != nil {
-		return "", fmt.Errorf("version stamp: %w", err)
+		return "", "", fmt.Errorf("version stamp: %w", err)
 	}
 	ldflags := "-X main.version=" + ver
 	fmt.Fprintf(stderr, "building waffle %s\n", ver)
 	if err := run(ctx, repoDir, stderr, "go", "build", "-ldflags", ldflags, "-o", built, "./cmd/waffle"); err != nil {
-		return "", fmt.Errorf("build: %w", err)
+		return "", "", fmt.Errorf("build: %w", err)
 	}
 	fmt.Fprintf(stderr, "built waffle %s\n", ver)
+	return built, ver, nil
+}
 
-	defer func() { _ = os.Remove(built) }()
-
+// swapBinary gates on the new binary's own doctor, backs up the target, and
+// atomically swaps it in. The previous binary's provenance is retained via
+// the .prev backup for rollback (#413).
+func swapBinary(ctx context.Context, built, target string) (string, error) {
 	// Gate on the *new* binary's own doctor.
 	out, err := exec.CommandContext(ctx, built, "doctor").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("new binary failed doctor:\n%s", out)
 	}
-
 	backup := target + ".prev"
 	if err := copyFile(target, backup); err != nil {
 		return "", fmt.Errorf("back up current binary: %w", err)
@@ -602,11 +797,11 @@ func verifySteps() [][]string {
 	}
 }
 
-func rejectProtectedChanges(ctx context.Context, repoDir, ref string, protected []string) error {
-	if ref == "" {
-		return nil
-	}
-	out, err := commandOutput(ctx, repoDir, "git", "diff", "--name-only", "HEAD", ref)
+// rejectProtectedChanges refuses an auto-patch that touches protected paths
+// between baseSHA and candidateSHA (#413: both are immutable SHAs, so the
+// check binds to the exact reviewed diff).
+func rejectProtectedChanges(ctx context.Context, repoDir, baseSHA, candidateSHA string, protected []string) error {
+	out, err := commandOutput(ctx, repoDir, "git", "diff", "--name-only", baseSHA, candidateSHA)
 	if err != nil {
 		return fmt.Errorf("inspect auto-patch diff: %w", err)
 	}

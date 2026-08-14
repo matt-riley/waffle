@@ -691,11 +691,24 @@ func TestRejectProtectedIncludesEvalPath(t *testing.T) {
 	}
 	git("add", ".")
 	git("commit", "-qm", "touch protected eval")
-	git("checkout", "-q", "base")
-	err := rejectProtectedChanges(context.Background(), dir, "candidate", nil)
+	candidate := gitSHA(t, dir, "candidate")
+	base := gitSHA(t, dir, "base")
+	err := rejectProtectedChanges(context.Background(), dir, base, candidate, nil)
 	if err == nil || !strings.Contains(err.Error(), `protected path "internal/eval/eval.go"`) {
 		t.Fatalf("production protected-path check = %v", err)
 	}
+}
+
+// gitSHA resolves a ref to its commit sha in dir.
+func gitSHA(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", ref+"^{commit}")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v", ref, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestUpgradeRejectsOptionRefs(t *testing.T) {

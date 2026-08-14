@@ -71,9 +71,15 @@ func doctorCmd(ctx context.Context, stdout io.Writer) error {
 
 const upgradeUsage = `Usage: waffle upgrade [ref] [--no-verify]
   Upgrade the waffle binary from the configured [repo] dir.
-  ref           optional git commit/branch/tag to build
+  ref           optional git commit/branch/tag to build (default: HEAD)
   --no-verify   skip vet/tests/lint (unsafe)
   -h, --help    show this help
+
+Every upgrade resolves one immutable commit SHA, reviews that exact commit,
+and verifies and builds it in an isolated detached worktree; the configured
+checkout is never modified and uncommitted local edits can never enter the
+built binary. The audit record (selfdev-upgrades.jsonl) binds base SHA,
+candidate SHA, tree hash, and the installed artifact's SHA-256.
 `
 
 func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
