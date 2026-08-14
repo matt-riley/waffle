@@ -80,8 +80,9 @@ func (c CandidateEdit) contentHash() string {
 // otherwise a deterministic mechanism rule table; generic restatements are
 // never generated. Prior attempts and cache hits are honored so unchanged
 // evidence costs zero provider calls. The second return is the number of
-// provider calls made during proposal generation.
-func (l *Learner) Propose(runID string, patterns []FailurePattern, minCount int) ([]Proposal, int, error) {
+// provider calls made during proposal generation. ctx propagates cancellation
+// into provider calls and cache writes (#424 review).
+func (l *Learner) Propose(ctx context.Context, runID string, patterns []FailurePattern, minCount int) ([]Proposal, int, error) {
 	if minCount <= 0 {
 		minCount = 2
 	}
@@ -102,12 +103,12 @@ func (l *Learner) Propose(runID string, patterns []FailurePattern, minCount int)
 			MaxCandidates:   defaultMaxCandidates,
 		}
 		if l.DB != nil {
-			req.PriorAttempts, err = l.priorAttempts(context.Background(), p.Class)
+			req.PriorAttempts, err = l.priorAttempts(ctx, p.Class)
 			if err != nil {
 				return nil, calls, err
 			}
 		}
-		edits, fromCache, c, err := l.proposeEdits(req)
+		edits, fromCache, c, err := l.proposeEdits(ctx, req)
 		if err != nil {
 			return nil, calls, err
 		}
@@ -127,10 +128,10 @@ func (l *Learner) Propose(runID string, patterns []FailurePattern, minCount int)
 // proposeEdits returns candidates for one pattern from cache, the model, or
 // the deterministic fallback (in that order). fromCache reports a cache hit;
 // calls reports model calls made.
-func (l *Learner) proposeEdits(req ProposalRequest) (edits []CandidateEdit, fromCache bool, calls int, err error) {
+func (l *Learner) proposeEdits(ctx context.Context, req ProposalRequest) (edits []CandidateEdit, fromCache bool, calls int, err error) {
 	if l.DB != nil {
 		key := l.proposalCacheKey(req)
-		cached, ok, cerr := l.proposalCacheGet(context.Background(), key)
+		cached, ok, cerr := l.proposalCacheGet(ctx, key)
 		if cerr != nil {
 			return nil, false, 0, cerr
 		}
@@ -142,7 +143,7 @@ func (l *Learner) proposeEdits(req ProposalRequest) (edits []CandidateEdit, from
 		}
 	}
 	if l.Provider != nil && l.Model != "" {
-		edits, err = l.proposeOnce(req)
+		edits, err = l.proposeOnce(ctx, req)
 		if err != nil {
 			// Model failure falls back to the deterministic table rather than
 			// dropping the pattern (#410).
@@ -150,6 +151,11 @@ func (l *Learner) proposeEdits(req ProposalRequest) (edits []CandidateEdit, from
 			calls = 0
 		} else {
 			calls = 1
+			if len(edits) == 0 {
+				// The model returned candidates that all failed validation;
+				// fall back instead of silently proposing nothing (#424 review).
+				edits = fallbackPropose(req)
+			}
 		}
 	} else {
 		edits = fallbackPropose(req)
@@ -157,7 +163,7 @@ func (l *Learner) proposeEdits(req ProposalRequest) (edits []CandidateEdit, from
 	if l.DB != nil && len(edits) > 0 {
 		payload, _ := json.Marshal(edits)
 		key := l.proposalCacheKey(req)
-		if _, err := l.DB.ExecContext(context.Background(), `
+		if _, err := l.DB.ExecContext(ctx, `
 			INSERT OR REPLACE INTO learn_proposal_cache (cache_key, payload, created_at)
 			VALUES (?, ?, ?)`, key, string(payload), l.now().Format("2006-01-02T15:04:05.999999999Z07:00")); err != nil {
 			return nil, false, calls, err
@@ -217,12 +223,12 @@ func attemptsDigest(attempts []AttemptSummary) string {
 // proposeOnce asks the utility model for a strict JSON candidate set. The
 // response must decode as a single candidates array; unknown surfaces, empty
 // bodies, and out-of-budget output are rejected by validateCandidates.
-func (l *Learner) proposeOnce(req ProposalRequest) ([]CandidateEdit, error) {
+func (l *Learner) proposeOnce(ctx context.Context, req ProposalRequest) ([]CandidateEdit, error) {
 	if l.Provider == nil || l.Model == "" {
 		return nil, errors.New("proposer is not configured")
 	}
 	prompt := proposalPrompt(req)
-	resp, err := l.Provider.Complete(context.Background(), llm.Request{
+	resp, err := l.Provider.Complete(ctx, llm.Request{
 		Model:     l.Model,
 		MaxTokens: 1600,
 		Messages:  []llm.Message{llm.UserText(prompt)},
@@ -240,31 +246,47 @@ func (l *Learner) proposeOnce(req ProposalRequest) ([]CandidateEdit, error) {
 	return validateCandidates(edits, req), nil
 }
 
-// decodeCandidates strictly decodes the model's JSON candidates array. The
-// output must be a JSON object with a "candidates" array; anything else is a
-// structured-decode failure.
+// decodeCandidates strictly decodes the model's JSON candidates array: unknown
+// fields are rejected (DisallowUnknownFields) and trailing content after the
+// JSON value is an error. The output must be a JSON object with a
+// "candidates" array (a bare array is tolerated at the envelope level);
+// anything else is a structured-decode failure (#424 review).
 func decodeCandidates(raw string) ([]CandidateEdit, error) {
 	raw = strings.TrimSpace(raw)
 	var envelope struct {
 		Candidates []CandidateEdit `json:"candidates"`
 	}
-	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-		// Accept a bare array too (lenient envelope, strict fields).
-		var bare []CandidateEdit
-		if berr := json.Unmarshal([]byte(raw), &bare); berr != nil {
-			return nil, fmt.Errorf("proposer output is not structured JSON: %w", err)
-		}
-		envelope.Candidates = bare
+	if err := strictDecodeJSON(raw, &envelope); err == nil && len(envelope.Candidates) > 0 {
+		return envelope.Candidates, nil
 	}
-	if len(envelope.Candidates) == 0 {
+	var bare []CandidateEdit
+	if err := strictDecodeJSON(raw, &bare); err != nil {
+		return nil, fmt.Errorf("proposer output is not structured JSON: %w", err)
+	}
+	if len(bare) == 0 {
 		return nil, errors.New("proposer output has no candidates")
 	}
-	return envelope.Candidates, nil
+	return bare, nil
+}
+
+// strictDecodeJSON decodes exactly one JSON value with unknown fields
+// rejected and no trailing content allowed.
+func strictDecodeJSON(raw string, v any) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing content after JSON value")
+	}
+	return nil
 }
 
 // validateCandidates applies the closed-surface allowlist and shape rules:
-// unknown surfaces, empty bodies, and generic restatements are dropped; names
-// must satisfy the spec; output is capped at MaxCandidates.
+// unknown surfaces, empty bodies, and generic restatements are dropped; skill
+// names must satisfy the spec and non-skill names must be path-safe; output is
+// capped at MaxCandidates.
 func validateCandidates(edits []CandidateEdit, req ProposalRequest) []CandidateEdit {
 	allowed := map[string]bool{}
 	for _, s := range req.AllowedSurfaces {
@@ -293,10 +315,31 @@ func validateCandidates(edits []CandidateEdit, req ProposalRequest) []CandidateE
 				continue
 			}
 			c.Name = strings.TrimSpace(c.Name)
+		} else if c.Name != "" && !safeFileName(c.Name) {
+			// config_stub/memory names feed filesystem paths; never let a
+			// model-provided name escape the staging directory (#424 review).
+			continue
 		}
 		out = append(out, c)
 	}
 	return out
+}
+
+// safeFileName rejects names that could escape a staging directory: path
+// separators, dot-dot, leading dots, and control characters.
+func safeFileName(name string) bool {
+	if name == "" || name == "." || name == ".." || len(name) > 64 {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\\x00\n\r") || strings.HasPrefix(name, ".") {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // isGenericRestatement detects the boilerplate recovery shape ("reproduce,
@@ -398,13 +441,13 @@ func (l *Learner) preferredSkillName(proposed string, p FailurePattern, c Candid
 // as this candidate (shared significant words with the description or the
 // pattern class).
 func skillsMatch(s SkillSummary, p FailurePattern, c CandidateEdit) bool {
-	hay := strings.ToLower(s.Description + " " + s.Name + " " + p.Class + " " + p.Attribution)
-	words := significantWords(hay)
+	words := significantWords(p.Class + " " + p.Attribution + " " + c.Rationale)
 	if len(words) == 0 {
 		return false
 	}
+	skillText := strings.ToLower(s.Name + " " + s.Description)
 	for _, w := range words {
-		if strings.Contains(strings.ToLower(s.Description), w) || strings.Contains(strings.ToLower(s.Name), w) {
+		if strings.Contains(skillText, w) {
 			return true
 		}
 	}

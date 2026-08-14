@@ -550,7 +550,7 @@ func (l *Learner) defaultValidate(p Proposal, heldIn, heldOut []string) (Validat
 // Propose builds constrained proposals for patterns (skill surface by default).
 // Replaced by the mechanism-specific Learner.Propose (#410).
 func Propose(runID string, patterns []FailurePattern, minCount int) ([]Proposal, error) {
-	props, _, err := (&Learner{}).Propose(runID, patterns, minCount)
+	props, _, err := (&Learner{}).Propose(context.Background(), runID, patterns, minCount)
 	return props, err
 }
 
@@ -879,7 +879,7 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		return nil, err
 	}
 
-	props, propCalls, err := l.Propose(runID, patterns, minCount)
+	props, propCalls, err := l.Propose(ctx, runID, patterns, minCount)
 	if err != nil {
 		l.failRun(ctx, runID, err)
 		return nil, err

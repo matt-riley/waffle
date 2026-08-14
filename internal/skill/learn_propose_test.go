@@ -47,7 +47,7 @@ func TestProposeFallbackMechanismSpecific(t *testing.T) {
 		patternFor("permission denied writing protected config path", 3),
 		patternFor("command not found for foobar-cli", 2),
 	}
-	props, calls, err := l.Propose("run-fb", patterns, 2)
+	props, calls, err := l.Propose(context.Background(), "run-fb", patterns, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestProposeFallbackMechanismSpecific(t *testing.T) {
 // boilerplate: a class with no mechanism rule yields no candidate at all.
 func TestProposeFallbackSkipsUnknownClass(t *testing.T) {
 	l := &Learner{}
-	props, _, err := l.Propose("run-unk", []FailurePattern{patternFor("quantum flux anomaly in zeta subsystem", 9)}, 2)
+	props, _, err := l.Propose(context.Background(), "run-unk", []FailurePattern{patternFor("quantum flux anomaly in zeta subsystem", 9)}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestProposeModelStructuredAndCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	props, calls, err := l.Propose("run-1", patterns, 2)
+	props, calls, err := l.Propose(context.Background(), "run-1", patterns, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestProposeModelStructuredAndCached(t *testing.T) {
 
 	// Cache hit: same inputs, zero provider calls.
 	p.reqs = nil
-	props2, calls2, err := l.Propose("run-2", patterns, 2)
+	props2, calls2, err := l.Propose(context.Background(), "run-2", patterns, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestProposeModelStructuredAndCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, calls3, err := l.Propose("run-3", patterns2, 2); err != nil {
+	if _, calls3, err := l.Propose(context.Background(), "run-3", patterns2, 2); err != nil {
 		t.Fatal(err)
 	} else if calls3 == 0 {
 		t.Fatal("changed evidence served from stale cache")
@@ -220,7 +220,7 @@ func TestProposePriorAttemptAvoidance(t *testing.T) {
 
 	// Store a rejected proposal with the same body the fallback would emit.
 	l := NewLearnerFromStore(st, sessions, memory.Workspace{Dir: t.TempDir()})
-	props, _, err := l.Propose("run-first", []FailurePattern{patternFor("command not found for foobar-cli", 3)}, 2)
+	props, _, err := l.Propose(context.Background(), "run-first", []FailurePattern{patternFor("command not found for foobar-cli", 3)}, 2)
 	if err != nil || len(props) != 1 {
 		t.Fatalf("first propose = %+v, %v", props, err)
 	}
@@ -232,7 +232,7 @@ func TestProposePriorAttemptAvoidance(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The next round must not re-propose the same content hash.
-	props2, _, err := l.Propose("run-second", []FailurePattern{patternFor("command not found for foobar-cli", 3)}, 2)
+	props2, _, err := l.Propose(context.Background(), "run-second", []FailurePattern{patternFor("command not found for foobar-cli", 3)}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestProposePrefersExistingInactiveSkill(t *testing.T) {
 	p := &scriptedProposer{payload: `{"candidates":[{"surface":"skill","name":"recover-permissions","rationale":"fix mode","body":"1. run ` + "`ls -la`" + `\n2. chmod the needed bits\n3. verify"}]}`}
 	l.Provider = p
 	l.Model = "utility-m"
-	props, _, err := l.Propose("run-pref", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
+	props, _, err := l.Propose(context.Background(), "run-pref", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestProposePrefersExistingInactiveSkill(t *testing.T) {
 	l2 := &Learner{WS: active}
 	l2.Provider = p
 	l2.Model = "utility-m"
-	props2, _, err := l2.Propose("run-act", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
+	props2, _, err := l2.Propose(context.Background(), "run-act", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestProposeModelFailureFallsBack(t *testing.T) {
 	l := &Learner{}
 	l.Provider = &scriptedProposer{err: errBoom}
 	l.Model = "utility-m"
-	props, calls, err := l.Propose("run-err", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
+	props, calls, err := l.Propose(context.Background(), "run-err", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,3 +334,69 @@ func TestDigestPrintsRationaleWithoutSamples(t *testing.T) {
 }
 
 var errBoom = errors.New("proposer exploded")
+
+// TestDecodeCandidatesRejectsUnknownFields is the #424 review regression:
+// strict decoding must reject extra fields, not silently ignore them.
+func TestDecodeCandidatesRejectsUnknownFields(t *testing.T) {
+	if _, err := decodeCandidates(`{"candidates":[{"surface":"skill","name":"ok-name","rationale":"r","body":"a mechanism body long enough","extra":"field"}]}`); err == nil {
+		t.Fatal("unknown field accepted by strict decode")
+	}
+	if _, err := decodeCandidates(`{"candidates":[{"surface":"skill","name":"ok-name","rationale":"r","body":"a mechanism body long enough"}],"extra":true}`); err == nil {
+		t.Fatal("unknown envelope field accepted")
+	}
+	// Trailing content after the JSON value is also rejected.
+	if _, err := decodeCandidates(`{"candidates":[{"surface":"skill","name":"ok-name","rationale":"r","body":"a mechanism body long enough"}]} trailing`); err == nil {
+		t.Fatal("trailing content accepted")
+	}
+	// Clean payload still decodes.
+	edits, err := decodeCandidates(`{"candidates":[{"surface":"skill","name":"ok-name","rationale":"r","body":"a mechanism body long enough"}]}`)
+	if err != nil || len(edits) != 1 {
+		t.Fatalf("clean decode = %+v, %v", edits, err)
+	}
+}
+
+// TestValidateCandidatesRejectsUnsafeConfigStubName is the #424 review
+// regression: a model-provided name must never escape the config-stubs dir.
+func TestValidateCandidatesRejectsUnsafeConfigStubName(t *testing.T) {
+	req := ProposalRequest{AllowedSurfaces: []string{SurfaceSkill, SurfaceConfigStub}, MaxCandidates: 3}
+	edits := []CandidateEdit{
+		{Surface: SurfaceConfigStub, Name: "../../etc/cron", Rationale: "r", Body: "a mechanism body long enough for a config stub candidate"},
+		{Surface: SurfaceConfigStub, Name: "..", Rationale: "r", Body: "another mechanism body long enough for a config stub candidate"},
+		{Surface: SurfaceConfigStub, Name: "safe-stub", Rationale: "r", Body: "a final mechanism body long enough for a config stub candidate"},
+	}
+	got := validateCandidates(edits, req)
+	if len(got) != 1 || got[0].Name != "safe-stub" {
+		t.Fatalf("validated = %+v, want only the safe-stub candidate", got)
+	}
+}
+
+// TestSkillsMatchDoesNotMatchUnrelatedSkill is the #424 review regression:
+// matching must use pattern words against the skill, never the skill's own
+// text (which made every skill match).
+func TestSkillsMatchDoesNotMatchUnrelatedSkill(t *testing.T) {
+	p := patternFor("permission denied writing protected config path", 3)
+	c := CandidateEdit{Surface: SurfaceSkill, Name: "recover-permissions", Rationale: "fix file mode", Body: "x"}
+	unrelated := SkillSummary{Name: "docker-networking", Status: "inactive", Description: "Troubleshoot container network connectivity."}
+	related := SkillSummary{Name: "handle-permissions", Status: "inactive", Description: "Fix permission denied failures."}
+	if skillsMatch(unrelated, p, c) {
+		t.Fatal("unrelated skill matched the pattern")
+	}
+	if !skillsMatch(related, p, c) {
+		t.Fatal("related skill did not match the pattern")
+	}
+}
+
+// TestProposeFallsBackWhenValidationDropsAllCandidates is the #424 review
+// regression: a model payload whose candidates all fail validation must not
+// silently yield zero proposals — the deterministic table takes over.
+func TestProposeFallsBackWhenValidationDropsAllCandidates(t *testing.T) {
+	p := &scriptedProposer{payload: `{"candidates":[{"surface":"system_prompt","name":"nope","rationale":"r","body":"unknown surface rejected"}]}`}
+	l := &Learner{Provider: p, Model: "utility-m"}
+	props, _, err := l.Propose(context.Background(), "run-drop", []FailurePattern{patternFor("permission denied writing protected config path", 3)}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 1 || props[0].Name != "recover-permissions" {
+		t.Fatalf("fallback after all-dropped validation = %+v", props)
+	}
+}
