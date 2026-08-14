@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.0](https://github.com/matt-riley/waffle/compare/v0.18.0...v0.19.0) (2026-08-14)
+
+
+### Features
+
+* **plugin:** adopt the Agent Plugins package format ([#389](https://github.com/matt-riley/waffle/issues/389)) ([#397](https://github.com/matt-riley/waffle/issues/397)) ([562eb91](https://github.com/matt-riley/waffle/commit/562eb91cbc843d31f5a564278c2e4e1bd5bf96e7))
+* **plugin:** component-level failure isolation when loading a plugin ([#393](https://github.com/matt-riley/waffle/issues/393)) ([#402](https://github.com/matt-riley/waffle/issues/402)) ([730df64](https://github.com/matt-riley/waffle/commit/730df6484dfc3f9057f14a91ac7cdb8225d6b8a5))
+* **plugin:** define the waffle client-extension namespace and apply its policy ([#394](https://github.com/matt-riley/waffle/issues/394)) ([#403](https://github.com/matt-riley/waffle/issues/403)) ([e3522fb](https://github.com/matt-riley/waffle/commit/e3522fb1de26d73dca15fa52246bc2f6efc6ea73))
+* **plugin:** discover plugin skills with Agent Skills conformance ([#390](https://github.com/matt-riley/waffle/issues/390)) ([#399](https://github.com/matt-riley/waffle/issues/399)) ([42ade49](https://github.com/matt-riley/waffle/commit/42ade494fe6702913390fdc4eb671c4f6e9005b6))
+* **plugin:** load portable mcp.json and map onto the MCP runtime ([#391](https://github.com/matt-riley/waffle/issues/391)) ([#400](https://github.com/matt-riley/waffle/issues/400)) ([6f7bde5](https://github.com/matt-riley/waffle/commit/6f7bde512475d43857756ad0c8ab7fe4d187bbca))
+* **plugin:** provide PLUGIN_ROOT/PLUGIN_DATA and expand placeholders ([#392](https://github.com/matt-riley/waffle/issues/392)) ([#401](https://github.com/matt-riley/waffle/issues/401)) ([3011477](https://github.com/matt-riley/waffle/commit/3011477bdafb114d9dca4063b7cf2f840568d650))
+* **skill:** add the shared Agent Skills validator ([#395](https://github.com/matt-riley/waffle/issues/395)) ([#398](https://github.com/matt-riley/waffle/issues/398)) ([359612f](https://github.com/matt-riley/waffle/commit/359612fbff6ffb155e4007f40b386fc9d9b030e0))
+* **skill:** validate every skill waffle writes and relocate metadata under metadata ([#396](https://github.com/matt-riley/waffle/issues/396)) ([#404](https://github.com/matt-riley/waffle/issues/404)) ([632b8bc](https://github.com/matt-riley/waffle/commit/632b8bcbae874947661cd877112dfdcd5f01bb4a))
+
 ## [0.18.0](https://github.com/matt-riley/waffle/compare/v0.17.0...v0.18.0) (2026-08-13)
 
 
