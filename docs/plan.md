@@ -400,6 +400,15 @@ cannot read another repo, another session's secrets, or any raw key.
   skill installer, and activate/deactivate (#395) so the rules cannot drift.
   Hand-rolled rather than the `skills-ref` CLI: waffle validates in-process
   with zero dependencies and no subprocess boundary.
+- Plugin skills: `internal/plugin.DiscoverSkills` reads `<plugin root>/skills`
+  (Agent Plugins §6.1/§7.1): one skill per immediate child directory with a
+  regular-file `SKILL.md`, name must match the directory, and each `SKILL.md`
+  must resolve within the plugin root (§4.1). A non-conforming skill, a
+  `SKILL.md` that is not a regular file, or one resolving outside the root
+  is **skipped and reported** — it never aborts the walk and never affects
+  other skills or component types (#390). The workspace-global
+  `skill.Discover` path is unchanged and stays lenient for legacy files;
+  plugin-supplied skills are held to the spec strictly.
 - Memory recall: every turn is indexed in SQLite FTS5; a `remember` tool lets
   the agent curate `MEMORY.md` (stable note IDs, exact-body dedupe); a
   `memory_update` tool supersedes or forgets by ID, archiving old lines to
