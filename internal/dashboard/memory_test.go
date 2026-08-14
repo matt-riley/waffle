@@ -240,11 +240,16 @@ func TestMemorySearchUsesPersistedSummaryUpdatedAtForNewestFirst(t *testing.T) {
 	}
 	older := clock.Add(time.Hour)
 	newer := clock.Add(2 * time.Hour)
-	clock = older
+	// updated_at is conversation activity only (#411): recency for summary
+	// search comes from appending turns, not from writing summaries.
+	for id, ts := range map[string]time.Time{olderID: older, newerID: newer} {
+		if _, err := sessions.DB().ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, ts.UTC().Format(time.RFC3339Nano), id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := sessions.SetSummary(ctx, olderID, "security older"); err != nil {
 		t.Fatal(err)
 	}
-	clock = newer
 	if err := sessions.SetSummary(ctx, newerID, "security newer"); err != nil {
 		t.Fatal(err)
 	}
