@@ -864,6 +864,20 @@ delivered with the deliberate cuts in [Deviations](#deviations).** The status
 line in [README.md](../README.md) tracks what's landed; the notes below are
 the original plan, kept as the record of intent.
 
+### What v1 means
+
+Feature phases are done. v1 is a compatibility promise, not another backlog:
+the owner loops documented from [README.md](../README.md) (`setup` → `chat`,
+or `serve` + pairing) stay accurate, `waffle upgrade` / `waffle rollback`
+remains the install contract, breaking config or schema changes are called
+out in the changelog, and deny-by-default sandbox, network, and secret
+posture does not loosen. Until that promise is made, tagged releases are
+developer-preview stamps.
+
+Still not v1 work: Discord, a native Gemini package, in-process host hooks,
+a plugin marketplace, and in-tree smart routing. Those stay in
+[Deviations](#deviations) and [Explicitly out of scope](#explicitly-out-of-scope-for-now).
+
 **Phase 0 — Skeleton (small).** Go module, `cmd/waffle`, config loading
 (`~/.waffle/config.toml`), SQLite store + migrations, CI (build, test,
 `golangci-lint`), OTel wiring; `internal/secret` Store interface with the
