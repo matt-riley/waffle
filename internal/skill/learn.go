@@ -199,10 +199,12 @@ func MineFailurePatterns(ctx context.Context, sessions *session.Store, cursor Le
 		if err != nil {
 			return nil, cursor, scanned, pages, err
 		}
-		pages++
 		if len(list) == 0 {
 			break
 		}
+		// A page is counted only when it carried work: a drained cursor must
+		// not report a phantom page (#412 review).
+		pages++
 		for _, sess := range list {
 			turns, err := sessions.Turns(ctx, sess.ID)
 			if err != nil {
@@ -774,17 +776,20 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 			started.Add(-staleAfter).Format(time.RFC3339Nano)); err != nil {
 			return nil, err
 		}
-		var running int
-		if err := l.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM learn_runs WHERE status = 'running'`).Scan(&running); err != nil {
+		// Claim the loop atomically: the conditional insert and its
+		// existence check are one statement, so two processes cannot both
+		// observe zero running rows and start (#412 review). RowsAffected is
+		// 0 when another process won the claim.
+		res, err := l.DB.ExecContext(ctx, `
+			INSERT INTO learn_runs (id, started_at, since_at, status)
+			SELECT ?, ?, '', 'running'
+			WHERE NOT EXISTS (SELECT 1 FROM learn_runs WHERE status = 'running')`,
+			runID, started.Format(time.RFC3339Nano))
+		if err != nil {
 			return nil, err
 		}
-		if running > 0 {
+		if n, _ := res.RowsAffected(); n == 0 {
 			return nil, errors.New("a learn run is already in progress; refusing to start a concurrent run")
-		}
-		if _, err := l.DB.ExecContext(ctx, `
-			INSERT INTO learn_runs (id, started_at, since_at, status) VALUES (?, ?, ?, 'running')`,
-			runID, started.Format(time.RFC3339Nano), ""); err != nil {
-			return nil, err
 		}
 	}
 

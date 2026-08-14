@@ -475,6 +475,11 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 			return nil, fmt.Errorf("parse session updated_at: %w", err)
 		}
 		sess.UpdatedAt = updatedAtT
+		if reflected != "" {
+			if sess.ReflectedAt, err = time.Parse(time.RFC3339Nano, reflected); err != nil {
+				return nil, fmt.Errorf("parse session reflected_at: %w", err)
+			}
+		}
 		out = append(out, sess)
 	}
 	return out, rows.Err()

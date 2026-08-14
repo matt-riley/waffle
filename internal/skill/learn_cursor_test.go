@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,19 @@ func seedSessions(t *testing.T, sessions *session.Store, n int) []string {
 	return ids
 }
 
+// clockedSessions wraps a store with a deterministic, monotonically advancing
+// clock so rapid session seeding cannot produce colliding updated_at values
+// and make ordering assertions flaky (#412 review).
+func clockedSessions(st *store.Store) *session.Store {
+	s := session.New(st)
+	var n int64
+	base := time.Date(2026, 8, 14, 8, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time {
+		return base.Add(time.Duration(atomic.AddInt64(&n, 1)) * time.Millisecond)
+	}
+	return s
+}
+
 // TestMinePagesEveryQualifyingSessionOnce is the 75-session pagination proof:
 // with a page size of 10, all 75 sessions are scanned exactly once and their
 // failure classes all surface, so a busy window is never capped at 50 (#412).
@@ -39,7 +53,7 @@ func TestMinePagesEveryQualifyingSessionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	ids := seedSessions(t, sessions, 75)
 
 	patterns, next, scanned, pages, err := MineFailurePatterns(ctx, sessions, LearnCursor{}, 10)
@@ -65,10 +79,12 @@ func TestMinePagesEveryQualifyingSessionOnce(t *testing.T) {
 	if next.UpdatedAt == "" || next.SessionID != ids[len(ids)-1] {
 		t.Fatalf("next cursor = %+v, want last session %s", next, ids[len(ids)-1])
 	}
-	// A follow-up page from the next cursor finds nothing new.
-	_, next2, scanned2, _, err := MineFailurePatterns(ctx, sessions, next, 10)
-	if err != nil || scanned2 != 0 {
-		t.Fatalf("drain after cursor scanned=%d err=%v (cursor %+v -> %+v)", scanned2, err, next, next2)
+	// A follow-up page from the next cursor finds nothing new: zero sessions
+	// scanned and zero pages consumed (a drained cursor reports no phantom
+	// page, #412 review).
+	_, next2, scanned2, pages2, err := MineFailurePatterns(ctx, sessions, next, 10)
+	if err != nil || scanned2 != 0 || pages2 != 0 {
+		t.Fatalf("drain after cursor scanned=%d pages=%d err=%v (cursor %+v -> %+v)", scanned2, pages2, err, next, next2)
 	}
 }
 
@@ -82,7 +98,7 @@ func TestLearnCursorBoundaryTieBreaker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	ids := seedSessions(t, sessions, 25)
 	// Same updated_at for every session (RFC3339Nano strings compare equal).
 	same := "2026-08-14T10:00:00.000000001Z"
@@ -132,7 +148,7 @@ func TestLearnRunFailureLeavesCursorAndMarksRunFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	ids := seedSessions(t, sessions, 6)
 	ws := memory.Workspace{Dir: t.TempDir()}
 
@@ -201,7 +217,7 @@ func TestLearnRunConcurrentTriggerRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	seedSessions(t, sessions, 4)
 	ws := memory.Workspace{Dir: t.TempDir()}
 
@@ -232,7 +248,7 @@ func TestLearnRunReclaimsStaleInProgressRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	seedSessions(t, sessions, 4)
 	ws := memory.Workspace{Dir: t.TempDir()}
 
@@ -307,7 +323,7 @@ func TestLearnRunInProcessSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sessions := session.New(st)
+	sessions := clockedSessions(st)
 	seedSessions(t, sessions, 4)
 	ws := memory.Workspace{Dir: t.TempDir()}
 	l := NewLearnerFromStore(st, sessions, ws)
