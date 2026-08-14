@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -288,5 +290,94 @@ func TestResolveCommitPinsBranchToImmutableSha(t *testing.T) {
 	got2, err := resolveCommit(ctx, repo, "")
 	if err != nil || got2 != sha {
 		t.Fatalf("resolve HEAD with dirty tree = %q, %v; want %q", got2, err, sha)
+	}
+}
+
+// TestPersistUpgradeRecordConcurrentAppends proves JSONL appends never
+// interleave or lose lines under concurrent writers (#425 review).
+func TestPersistUpgradeRecordConcurrentAppends(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	const writers = 4
+	const each = 10
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				if err := persistUpgradeRecord(UpgradeRecord{
+					BaseSHA:      fmt.Sprintf("base-%d-%d", w, i),
+					CandidateSHA: fmt.Sprintf("cand-%d-%d", w, i),
+					Approval:     "manual",
+					Verification: "ok",
+				}); err != nil {
+					t.Errorf("persist: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	home, _ := config.Home()
+	raw, err := os.ReadFile(filepath.Join(home, "selfdev-upgrades.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	if len(lines) != writers*each {
+		t.Fatalf("lines = %d, want %d", len(lines), writers*each)
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		var r UpgradeRecord
+		if err := json.Unmarshal(line, &r); err != nil {
+			t.Fatalf("interleaved/corrupt audit line: %v: %q", err, line)
+		}
+		if seen[r.CandidateSHA] {
+			t.Fatalf("duplicate audit line for %s", r.CandidateSHA)
+		}
+		seen[r.CandidateSHA] = true
+	}
+}
+
+// TestUpgradeFailurePersistsAuditRecord proves an early failure (auto-patch
+// protected-path refusal, before any worktree) still writes a durable failure
+// record (#425 review).
+func TestUpgradeFailurePersistsAuditRecord(t *testing.T) {
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	ctx := context.Background()
+	dir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "base")
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "eval"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "internal", "eval", "eval.go"), []byte("package eval\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "touches protected path")
+	_, err := UpgradeWithOptions(ctx, dir, "", ioDiscard(), false, "auto-patch", nil)
+	if err == nil || !strings.Contains(err.Error(), "auto-patch refused") {
+		t.Fatalf("UpgradeWithOptions = %v, want protected-path refusal", err)
+	}
+	home, _ := config.Home()
+	raw, readErr := os.ReadFile(filepath.Join(home, "selfdev-upgrades.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var got UpgradeRecord
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Error, "auto-patch refused") || got.Verification != "failed" || got.CandidateSHA == "" {
+		t.Fatalf("failure audit record = %+v", got)
 	}
 }

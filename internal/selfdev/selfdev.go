@@ -19,10 +19,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/flock"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
@@ -499,11 +499,6 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 // base when upgrading a root commit with no parent (#413).
 const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-// upgradeSwapMu serializes the install/swap section of concurrent upgrades.
-// Worktrees are distinct per upgrade; only the swap of the shared binary is
-// exclusive (#413).
-var upgradeSwapMu sync.Mutex
-
 // UpgradeWithOptions is Upgrade with an explicit verification and approval
 // policy. Verification is intentionally opt-out only: callers should make
 // the unsafe choice visible in their own CLI.
@@ -539,10 +534,12 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	}
 	if approval == "auto-patch" {
 		if err := rejectProtectedChanges(ctx, repoDir, baseSHA, sha, protected); err != nil {
+			_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, Approval: approval, Verify: verify, Verification: "failed", Error: err.Error()})
 			return "", err
 		}
 	}
 	if err := reviewExactCommit(ctx, repoDir, baseSHA, sha, approval); err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, Approval: approval, Verify: verify, Verification: "failed", Error: err.Error()})
 		return "", err
 	}
 
@@ -551,11 +548,13 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	// cannot reach verification or the artifact.
 	wt, err := addDetachedTempWorktree(ctx, repoDir, sha)
 	if err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, Approval: approval, Verify: verify, Verification: "failed", Error: err.Error()})
 		return "", err
 	}
 	defer func() { _ = removeWorktree(ctx, repoDir, wt) }()
 	tree, err := treeHash(ctx, wt)
 	if err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, Approval: approval, Verify: verify, Verification: "failed", Error: err.Error()})
 		return "", err
 	}
 	buildDir, err := os.MkdirTemp("", "waffle-upgrade-build-*")
@@ -567,31 +566,41 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	verification := "skipped"
 	if verify {
 		if err := verifyRepo(ctx, wt, stderr); err != nil {
-			_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: true, Verification: "failed", Error: err.Error()})
+			if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: true, Verification: "failed", Error: err.Error()}); perr != nil {
+				return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
+			}
 			return "", err
 		}
 		verification = "ok"
 	}
 	built, ver, err := verifyAndBuild(ctx, wt, buildDir, stderr, false)
 	if err != nil {
-		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
+		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()}); perr != nil {
+			return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
+		}
 		return "", err
 	}
 	// The worktree must be pristine right before install so the artifact is
 	// exactly the reviewed SHA/tree.
 	if err := assertCleanTree(ctx, wt); err != nil {
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
 		return "", err
 	}
 
-	upgradeSwapMu.Lock()
+	// Worktrees are distinct per upgrade; the swap of the shared binary is
+	// serialized across processes inside swapBinary (#413 review).
 	path, err := swapBinary(ctx, built, self)
-	upgradeSwapMu.Unlock()
 	if err != nil {
-		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
+		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()}); perr != nil {
+			return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
+		}
 		return "", err
 	}
 	digest, derr := fileSHA256(path)
 	if derr != nil {
+		// The swap already happened; record the install with the hashing
+		// failure rather than leaving the audit silent.
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: derr.Error()})
 		return "", fmt.Errorf("hash installed artifact: %w", derr)
 	}
 	if err := persistUpgradeRecord(UpgradeRecord{
@@ -744,13 +753,20 @@ func verifyAndBuild(ctx context.Context, repoDir, buildDir string, stderr io.Wri
 
 // swapBinary gates on the new binary's own doctor, backs up the target, and
 // atomically swaps it in. The previous binary's provenance is retained via
-// the .prev backup for rollback (#413).
+// the .prev backup for rollback (#413). The backup/swap section is serialized
+// across processes with an advisory flock so two concurrent `waffle upgrade`
+// shells cannot race on the target and its .prev (#413 review).
 func swapBinary(ctx context.Context, built, target string) (string, error) {
 	// Gate on the *new* binary's own doctor.
 	out, err := exec.CommandContext(ctx, built, "doctor").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("new binary failed doctor:\n%s", out)
 	}
+	unlock, err := flock.Acquire(target+".swap.lock", "waffle upgrade swap", 30*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("lock upgrade swap: %w", err)
+	}
+	defer func() { _ = unlock() }()
 	backup := target + ".prev"
 	if err := copyFile(target, backup); err != nil {
 		return "", fmt.Errorf("back up current binary: %w", err)
