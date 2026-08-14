@@ -59,21 +59,39 @@ jobs:
 
   # The universal-ci reusable workflow ran build, test, and vet serially in one
   # job, and `go test -race ./...` is ~97% of that job's wall time. CI now runs
-  # the race suite split across three parallel runners (scripts/ci-test-shard.sh
-  # partitions by measured package weight), with the cheap build/vet/dashboard/
-  # eval work in a separate parallel job. Caches are still saved on main by
-  # ci-cache-save so every other run keeps restoring warm caches.
+  # the race suite across five parallel runners: internal/workspace alone is
+  # ~half of all CI test time under -race on 4-vCPU runners (369s measured), so
+  # it is split across two runners by test name (-run), while the remaining
+  # packages are split across three runners by measured package weight
+  # (scripts/ci-test-shard.sh). The cheap build/vet/dashboard work runs in a
+  # separate parallel job. Caches are still saved on main by ci-cache-save so
+  # every other run keeps restoring warm caches.
   ci:
-    name: ci (test shard ${{ matrix.shard }}/3)
+    name: ci (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-shard-${{ matrix.shard }}
+      group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-${{ matrix.name }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        include:
+          - name: workspace group 1/2
+            workspace_group: 1
+            pkg_shard: ''
+          - name: workspace group 2/2
+            workspace_group: 2
+            pkg_shard: ''
+          - name: package shard 1/3
+            workspace_group: ''
+            pkg_shard: 1
+          - name: package shard 2/3
+            workspace_group: ''
+            pkg_shard: 2
+          - name: package shard 3/3
+            workspace_group: ''
+            pkg_shard: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
@@ -85,7 +103,12 @@ jobs:
       - uses: ./.github/actions/restore-go-caches
         with:
           dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
-      - run: bash scripts/ci-test-shard.sh ${{ matrix.shard }} 3
+      - name: Run workspace test group
+        if: matrix.workspace_group != ''
+        run: bash scripts/ci-test-shard.sh workspace ${{ matrix.workspace_group }} 2
+      - name: Run package test shard
+        if: matrix.pkg_shard != ''
+        run: bash scripts/ci-test-shard.sh pkg ${{ matrix.pkg_shard }} 3
 
   ci-aux:
     name: ci build, vet, dashboard

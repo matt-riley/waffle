@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# Runs `go test -race` on one shard of the repository's Go packages.
+# Runs `go test -race` on one shard of the repository's Go tests.
 #
-# The split is a greedy balanced partition using measured per-package test
-# weights from scripts/ci-test-shard-weights.tsv, so the heavy packages
-# (cmd/waffle, internal/workspace) land on different shards and every shard
-# finishes in roughly the same time. Packages without an entry default to a
-# weight of 1s, so newly added packages attach to the currently-lightest
-# shard without manual bookkeeping.
+# Two modes:
+#   pkg SHARD TOTAL        shard of the package list. The split is a greedy
+#                          balanced partition using measured per-package test
+#                          weights from scripts/ci-test-shard-weights.tsv, so
+#                          the heavy packages (cmd/waffle, internal/skill)
+#                          land on different shards and every shard finishes
+#                          in roughly the same time. internal/workspace is
+#                          excluded here because it runs via the workspace
+#                          mode below.
+#   workspace GROUP TOTAL  shard of internal/workspace's tests by name, using
+#                          measured per-test weights from
+#                          scripts/ci-test-workspace-weights.tsv. The workspace
+#                          package is ~half of all CI test time under -race on
+#                          4-vCPU runners, so it is split across runners with
+#                          -run instead of serializing on one runner.
 #
-# Usage: ci-test-shard.sh SHARD TOTAL_SHARDS [--list]
-#   SHARD is 1-based. --list prints the package split without running tests.
+# Items without a weight entry default to 1s, so newly added packages/tests
+# attach to the currently-lightest shard without manual bookkeeping.
+#
+# Usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]
+#   SHARD/GROUP are 1-based. --list prints the split without running tests.
 set -euo pipefail
 
-shard="${1:?usage: ci-test-shard.sh SHARD TOTAL_SHARDS [--list]}"
-total="${2:?usage: ci-test-shard.sh SHARD TOTAL_SHARDS [--list]}"
-list_only="${3:-}"
+mode="${1:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
+shard="${2:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
+total="${3:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
+list_only="${4:-}"
 
 if (( shard < 1 || shard > total )); then
   echo "error: shard $shard out of range 1..$total" >&2
@@ -22,11 +35,28 @@ if (( shard < 1 || shard > total )); then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-module="$(go list -m)"
-weights_file="$script_dir/ci-test-shard-weights.tsv"
-packages="$(go list ./... | sed "s|^${module}/||")"
 
-selected="$(awk -v shard="$shard" -v total="$total" -v wf="$weights_file" '
+case "$mode" in
+  pkg)
+    module="$(go list -m)"
+    weights_file="$script_dir/ci-test-shard-weights.tsv"
+    # ./ prefix so go resolves the paths relative to the module rather than
+    # treating them as std import paths (go test internal/config fails).
+    prefix="./"
+    input="$(go list ./... | sed "s|^${module}/||" | grep -v '^internal/workspace$')"
+    ;;
+  workspace)
+    weights_file="$script_dir/ci-test-workspace-weights.tsv"
+    prefix=""
+    input="$(go test -list '^Test' ./internal/workspace | grep '^Test')"
+    ;;
+  *)
+    echo "error: unknown mode $mode (expected pkg or workspace)" >&2
+    exit 1
+    ;;
+esac
+
+selected="$(awk -v shard="$shard" -v total="$total" -v wf="$weights_file" -v prefix="$prefix" '
 BEGIN {
   while ((getline line < wf) > 0) {
     split(line, a, "\t")
@@ -34,13 +64,13 @@ BEGIN {
   }
   close(wf)
   n = 0
-  while ((getline pkg) > 0) {
-    rows[n] = pkg
-    wt[n] = (pkg in w) ? w[pkg] : 1
+  while ((getline item) > 0) {
+    rows[n] = item
+    wt[n] = (item in w) ? w[item] : 1
     n++
   }
-  # Sort packages by weight descending so the greedy fill places the heavy
-  # packages first, then fills with light ones into the lightest shard.
+  # Sort items by weight descending so the greedy fill places the heavy
+  # items first, then fills with light ones into the lightest shard.
   for (i = 0; i < n; i++) {
     best = i
     for (j = i + 1; j < n; j++) if (wt[j] > wt[best]) best = j
@@ -56,21 +86,19 @@ BEGIN {
   }
   count = split(shards[shard - 1], out, " ")
   if (count == 0 || (count == 1 && out[1] == "")) exit 2
-  # ./ prefix so go resolves the paths relative to the module rather than
-  # treating them as std import paths (go test internal/config fails).
-  for (i = 1; i <= count; i++) if (out[i] != "") print "./" out[i]
-}' <<< "$packages")" || {
-  echo "error: failed to partition packages for shard $shard" >&2
+  for (i = 1; i <= count; i++) if (out[i] != "") print prefix out[i]
+}' <<< "$input")" || {
+  echo "error: failed to partition items for shard $shard" >&2
   exit 1
 }
 
 if [[ -z "$selected" ]]; then
-  echo "error: shard $shard has no packages" >&2
+  echo "error: shard $shard has no items" >&2
   exit 1
 fi
 
-echo "::group::shard ${shard}/${total} packages"
-# shellcheck disable=SC2086 # intentional: one package per line
+echo "::group::shard ${shard}/${total} ($mode)"
+# shellcheck disable=SC2086 # intentional: one item per line
 printf '%s\n' $selected
 echo "::endgroup::"
 
@@ -78,5 +106,12 @@ if [[ "$list_only" == "--list" ]]; then
   exit 0
 fi
 
-# shellcheck disable=SC2086 # intentional word splitting into go test args
-go test -race $selected
+if [[ "$mode" == "workspace" ]]; then
+  # Join the newline-separated test names into a -run alternation. The regex
+  # is anchored so partial name prefixes cannot match extra tests.
+  run_regex="^($(printf '%s' "$selected" | tr '\n' '|'))$"
+  go test -race ./internal/workspace -run "$run_regex"
+else
+  # shellcheck disable=SC2086 # intentional word splitting into go test args
+  go test -race $selected
+fi
