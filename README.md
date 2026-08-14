@@ -1,9 +1,9 @@
 # waffle
 
 A personal AI agent, written in Go, that you run on your own hardware. One
-static binary holds the agent loop, a Telegram gateway, terminal chat, Waffle
-Desk, and a provider-agnostic LLM layer. It serves exactly one owner. Sandbox
-and network policy are deny-by-default. Named for the cat.
+binary holds the agent loop, a Telegram gateway, terminal chat, Waffle Desk,
+and a provider-agnostic LLM layer. It serves exactly one owner. Sandbox and
+network policy are deny-by-default. Named for the cat.
 
 ## Status
 
@@ -25,8 +25,9 @@ mise run build
 ```
 
 `mise install` pins Go (see `mise.toml`). If you already have that toolchain,
-`go install github.com/matt-riley/waffle/cmd/waffle@latest` then `waffle setup`
-and `waffle chat` is enough.
+`go install github.com/matt-riley/waffle/cmd/waffle@latest` writes
+`$(go env GOPATH)/bin/waffle`. Put that directory on PATH, then run
+`waffle setup` and `waffle chat`.
 
 `waffle setup` creates the secret identity, enrolls a provider, and writes a
 starter `[agent.profile.main]`. After that, talk in the TUI. Telegram uses
