@@ -53,7 +53,10 @@ func DeactivateSkill(ctx context.Context, db *sql.DB, ws memory.Workspace, name 
 	if err != nil {
 		return err
 	}
-	updated := setFrontmatterStatus(string(raw), StatusInactive)
+	updated, err := setFrontmatterStatus(string(raw), StatusInactive)
+	if err != nil {
+		return err
+	}
 	if err := filecommit.Write(target.Path, []byte(updated), info.Mode().Perm()); err != nil {
 		return err
 	}

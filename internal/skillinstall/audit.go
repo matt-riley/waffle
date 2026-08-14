@@ -9,17 +9,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/matt-riley/waffle/internal/skill"
 	"github.com/matt-riley/waffle/internal/skill/spec"
 )
-
-var frontmatterKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 func readReviewedTree(root string) (reviewedTree, error) {
 	return readReviewedTreeBound(root, maxReviewBytes)
@@ -335,94 +331,24 @@ func hasVCSComponent(path string) bool {
 }
 
 func parseSkillFrontmatter(raw string) (string, string, error) {
-	if !strings.HasPrefix(raw, "---\n") {
-		return "", "", fmt.Errorf("%w: SKILL.md requires leading frontmatter", ErrAuditFailed)
+	fields, _, err := spec.ParseFrontmatter(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
 	}
-	rest := strings.TrimPrefix(raw, "---\n")
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return "", "", fmt.Errorf("%w: SKILL.md frontmatter is not closed", ErrAuditFailed)
-	}
-	after := rest[end+len("\n---"):]
-	if after != "" && !strings.HasPrefix(after, "\n") {
-		return "", "", fmt.Errorf("%w: invalid SKILL.md frontmatter delimiter", ErrAuditFailed)
-	}
-
-	values := make(map[string]string)
-	for _, line := range strings.Split(rest[:end], "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if trimmed != line {
-			return "", "", fmt.Errorf("%w: multiline or nested frontmatter is not allowed", ErrAuditFailed)
-		}
-		key, value, found := strings.Cut(line, ":")
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if !found || !frontmatterKeyPattern.MatchString(key) {
-			return "", "", fmt.Errorf("%w: invalid frontmatter line %q", ErrAuditFailed, line)
-		}
-		if _, duplicate := values[key]; duplicate {
-			return "", "", fmt.Errorf("%w: duplicate frontmatter key %q", ErrAuditFailed, key)
-		}
-		parsed, err := unquoteFrontmatterValue(value)
-		if err != nil {
-			return "", "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
-		}
-		values[key] = parsed
-	}
-	name := values["name"]
+	name := fields["name"]
 	if !spec.ValidName(name) {
 		return "", "", fmt.Errorf("%w: skill name %q is not an Agent Skills name", ErrAuditFailed, name)
 	}
-	description := strings.TrimSpace(values["description"])
+	description := strings.TrimSpace(fields["description"])
 	if description == "" || description == "|" || description == ">" ||
 		strings.ContainsAny(description, "\r\n") {
 		return "", "", fmt.Errorf("%w: description must be one non-empty line", ErrAuditFailed)
 	}
-	if status, present := values["status"]; present && status != skill.StatusActive && status != skill.StatusInactive {
+	if status := spec.StatusField(fields); status != "" &&
+		status != skill.StatusActive && status != skill.StatusInactive {
 		return "", "", fmt.Errorf("%w: invalid skill status %q", ErrAuditFailed, status)
 	}
 	return name, description, nil
-}
-
-func unquoteFrontmatterValue(value string) (string, error) {
-	if value == "" {
-		return "", nil
-	}
-	first := value[0]
-	if first != '"' && first != '\'' {
-		if strings.ContainsAny(value[:1], "-?:,[]{}#&*!|>'\"%@`") ||
-			strings.Contains(value, ": ") || strings.Contains(value, " #") ||
-			strings.HasSuffix(value, `"`) || strings.HasSuffix(value, `'`) {
-			return "", errors.New("invalid plain frontmatter scalar")
-		}
-		return value, nil
-	}
-	if len(value) < 2 || value[len(value)-1] != first {
-		return "", errors.New("unmatched frontmatter quote")
-	}
-	if first == '"' {
-		parsed, err := strconv.Unquote(value)
-		if err != nil {
-			return "", errors.New("invalid double-quoted frontmatter scalar")
-		}
-		return parsed, nil
-	}
-	var parsed strings.Builder
-	for index := 1; index < len(value)-1; index++ {
-		if value[index] != '\'' {
-			parsed.WriteByte(value[index])
-			continue
-		}
-		if index+1 >= len(value)-1 || value[index+1] != '\'' {
-			return "", errors.New("invalid single-quoted frontmatter scalar")
-		}
-		parsed.WriteByte('\'')
-		index++
-	}
-	return parsed.String(), nil
 }
 
 func auditFlags(files []reviewedFile) []string {

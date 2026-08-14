@@ -1219,9 +1219,9 @@ func TestInstallInjectsInactiveAndConsumesStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	const wantSkill = "---\nname: reviewed-skill\ndescription: Reviews changes carefully.\nstatus: inactive\nowner: matt\n---\n\n# Reviewed skill\n\nKeep this body exact.\n"
+	const wantSkill = "---\ndescription: Reviews changes carefully.\nname: reviewed-skill\nowner: matt\nmetadata:\n  waffle/status: inactive\n---\n\n# Reviewed skill\n\nKeep this body exact.\n"
 	if text != wantSkill {
-		t.Fatalf("installed SKILL.md =\n%s\nwant only status rewrite:\n%s", text, wantSkill)
+		t.Fatalf("installed SKILL.md =\n%s\nwant only the status rewrite (metadata form):\n%s", text, wantSkill)
 	}
 	discovered, err := skill.Discover(f.skills)
 	if err != nil {

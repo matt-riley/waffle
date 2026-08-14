@@ -20,6 +20,7 @@ import (
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/session"
+	"github.com/matt-riley/waffle/internal/skill/spec"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/textcut"
 )
@@ -817,8 +818,14 @@ func formatDigest(patterns []FailurePattern, props []Proposal, calls int) string
 	return b.String()
 }
 
-// writeSkillInactive writes SKILL.md with status: inactive in frontmatter.
+// writeSkillInactive writes SKILL.md with status: inactive recorded under
+// the waffle metadata key (#396). Non-conforming output is refused, not
+// written; the provenance markers are dropped (write-only).
 func writeSkillInactive(w memory.Workspace, c memory.Candidate) error {
+	description := oneLine(c.Description)
+	if err := spec.Validate(c.Name, description, nil, c.Body, c.Name); err != nil {
+		return fmt.Errorf("refuse to write non-conforming skill: %w", err)
+	}
 	dir := filepath.Join(w.SkillsDir(), c.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -830,9 +837,12 @@ func writeSkillInactive(w memory.Workspace, c memory.Candidate) error {
 			return fmt.Errorf("cannot overwrite active skill %q without validation; deactivate first or use waffle skills activate after review", c.Name)
 		}
 	}
-	content := fmt.Sprintf("---\nname: %s\ndescription: %q\nstatus: inactive\nprovenance: %s\nsource_id: %s\ntrust_class: %s\n---\n\n%s\n",
-		c.Name, oneLine(c.Description), c.Provenance.SourceKind, c.Provenance.SourceID, c.Provenance.TrustClass, strings.TrimSpace(c.Body))
-	return os.WriteFile(path, []byte(content), 0o644)
+	content := spec.MarshalSKILL(map[string]string{
+		"name":               c.Name,
+		"description":        description,
+		spec.WaffleStatusKey: "inactive",
+	}, c.Body)
+	return os.WriteFile(path, content, 0o644)
 }
 
 // NewLearnerFromStore is a convenience constructor.

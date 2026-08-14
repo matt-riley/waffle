@@ -674,7 +674,8 @@ func TestCannotOverwriteActiveSkill(t *testing.T) {
 	// Activate via frontmatter.
 	path := filepath.Join(ws.SkillsDir(), "live", "SKILL.md")
 	raw, _ := os.ReadFile(path)
-	_ = os.WriteFile(path, []byte(setFrontmatterStatus(string(raw), StatusActive)), 0o644)
+	updated, _ := setFrontmatterStatus(string(raw), StatusActive)
+	_ = os.WriteFile(path, []byte(updated), 0o644)
 	if err := writeSkillInactive(ws, c); err == nil {
 		t.Fatal("expected refuse overwrite of active skill")
 	}

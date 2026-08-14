@@ -630,30 +630,22 @@ func filesWithInactiveStatus(files []reviewedFile) ([]reviewedFile, error) {
 }
 
 func setInactiveStatus(raw string) (string, error) {
-	if _, _, err := parseSkillFrontmatter(raw); err != nil {
-		return "", err
+	// The reviewed source already passed the strict installer audit; validate
+	// once more through the shared parser, then record the inactive state
+	// under the waffle metadata key so the installed file stays
+	// Agent-Skills-conforming (#396).
+	fields, body, err := spec.ParseFrontmatter(raw)
+	if err != nil {
+		// Keep the installer's error classification: every frontmatter
+		// failure on this path is an audit failure (#404 review).
+		return "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
 	}
-	rest := strings.TrimPrefix(raw, "---\n")
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return "", ErrAuditFailed
+	if err := spec.Validate(fields["name"], fields["description"], fields, body, ""); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrAuditFailed, err)
 	}
-	lines := strings.Split(rest[:end], "\n")
-	found := false
-	for index, line := range lines {
-		key, _, ok := strings.Cut(line, ":")
-		if ok && strings.TrimSpace(key) == "status" {
-			if found {
-				return "", fmt.Errorf("%w: duplicate status", ErrAuditFailed)
-			}
-			lines[index] = "status: inactive"
-			found = true
-		}
-	}
-	if !found {
-		lines = append(lines, "status: inactive")
-	}
-	return "---\n" + strings.Join(lines, "\n") + rest[end:], nil
+	fields[spec.WaffleStatusKey] = "inactive"
+	delete(fields, "status")
+	return string(spec.MarshalSKILL(fields, body)), nil
 }
 
 func sha256Sum(data []byte) string {

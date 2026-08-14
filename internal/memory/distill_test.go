@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matt-riley/waffle/internal/skill/spec"
 )
 
 func TestDistillWritesLoadableSkill(t *testing.T) {
@@ -111,5 +113,76 @@ func TestDistillQuotesAndNormalizesDescription(t *testing.T) {
 	// Newlines in description are normalized to spaces in frontmatter.
 	if !strings.Contains(string(raw), "release: prod carefully") {
 		t.Fatalf("description = %q", raw)
+	}
+}
+
+// TestDistillRefusesNonConformingOutput: distill refuses to write a skill
+// failing the Agent Skills constraints (name, empty/oversized description)
+// and creates no SKILL.md on the failing path (#396).
+func TestDistillRefusesNonConformingOutput(t *testing.T) {
+	cases := []struct {
+		name        string
+		manifest    string
+		wantSub     string
+		description string
+	}{
+		{name: "trailing hyphen", wantSub: "name", description: "d", manifest: `{"name":"bad-","description":"d","body":"step one is sufficiently detailed then step two"}`},
+		{name: "consecutive hyphens", wantSub: "name", description: "d", manifest: `{"name":"a--b","description":"d","body":"step one is sufficiently detailed then step two"}`},
+		{name: "over 64 chars", wantSub: "name", description: "d", manifest: `{"name":"` + strings.Repeat("a", 65) + `","description":"d","body":"step one is sufficiently detailed then step two"}`},
+		{name: "empty description", wantSub: "description", manifest: `{"name":"ok-skill","description":"","body":"step one is sufficiently detailed then step two"}`},
+		{name: "oversized description", wantSub: "description", manifest: `{"name":"ok-skill","description":"` + strings.Repeat("d", 1025) + `","body":"step one is sufficiently detailed then step two"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := testWorkspace(t)
+			tl := DistillTool{WS: ws}
+			if _, err := tl.Run(context.Background(), json.RawMessage(tc.manifest)); err == nil {
+				t.Fatal("distill succeeded, want refusal")
+			} else if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error = %v, want naming %q", err, tc.wantSub)
+			}
+			dir := filepath.Join(ws.SkillsDir(), tc.description)
+			_ = dir
+			if _, err := os.Stat(filepath.Join(ws.SkillsDir(), "ok-skill", "SKILL.md")); !os.IsNotExist(err) {
+				t.Errorf("SKILL.md created on failing path")
+			}
+			if entries, err := os.ReadDir(ws.SkillsDir()); err == nil && len(entries) != 0 {
+				t.Errorf("skills dir not empty after refusal: %v", entries)
+			}
+		})
+	}
+}
+
+// TestDistillWritesSpecConformingFile: the distilled SKILL.md validates
+// under the shared validator and carries status under the waffle metadata
+// key — no non-standard top-level fields (#396).
+func TestDistillWritesSpecConformingFile(t *testing.T) {
+	ws := testWorkspace(t)
+	tl := DistillTool{WS: ws}
+	if _, err := tl.Run(context.Background(), json.RawMessage(`{
+		"name":"conform",
+		"description":"Colon: and #hash and \"quotes\"",
+		"body":"step one is sufficiently detailed then step two"
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ws.SkillsDir(), "conform", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, body, err := spec.ParseFrontmatter(string(raw))
+	if err != nil {
+		t.Fatalf("distilled file unparseable: %v\n%s", err, raw)
+	}
+	if fields[spec.WaffleStatusKey] != "inactive" {
+		t.Errorf("status = %q, want inactive under metadata:\n%s", fields[spec.WaffleStatusKey], raw)
+	}
+	if err := spec.Validate(fields["name"], fields["description"], fields, body, "conform"); err != nil {
+		t.Errorf("distilled file fails validator: %v", err)
+	}
+	for _, marker := range []string{"provenance:", "source_id:", "trust_class:", "session_id:", "channel:", "untrusted_context:"} {
+		if strings.Contains(string(raw), marker) {
+			t.Errorf("distilled file still carries dropped marker %q", marker)
+		}
 	}
 }
