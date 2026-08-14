@@ -205,3 +205,53 @@ func TestProductionLearnerFromStoreReturnsPending(t *testing.T) {
 		t.Fatalf("no proposals resolved: %+v", res)
 	}
 }
+
+// TestNilAfterScorerFailsClosed is the #414 review regression: a nil after
+// scorer must never masquerade as a real measurement that looks improved.
+func TestNilAfterScorerFailsClosed(t *testing.T) {
+	baseline := func(_ context.Context, id, _ string) (int, error) { return 5, nil }
+	prop := Proposal{PatternSig: "permission denied", Body: "1. fix permissions carefully with chmod\n2. re-run the command"}
+	result, audit := DefaultValidate(context.Background(), nil, baseline, prop, []string{"in"}, []string{"out"})
+	if result.Err == nil || result.Promotable() {
+		t.Fatalf("nil after-scorer result = %+v audit=%q, want fail-closed error", result, audit)
+	}
+	if !strings.Contains(audit, "no after-scorer") {
+		t.Fatalf("audit = %q, want no-after-scorer", audit)
+	}
+}
+
+// TestPrecheckRejectionsAreNotPending verifies deterministic prechecks mark
+// Rejected (not unevaluated/pending): a short body or empty held-in is a hard
+// rejection, never stranded for owner review (#414 review).
+func TestPrecheckRejectionsAreNotPending(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "pre.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ws := memory.Workspace{Dir: t.TempDir()}
+	l := NewLearnerFromStore(st, session.New(st), ws)
+	for _, tc := range []struct {
+		name string
+		body string
+		ids  []string
+	}{
+		{"short body", "too short", []string{"s1", "s2"}},
+		{"no held-in", "1. fix permissions carefully with chmod\n2. re-run the command", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := l.PromoteProposal(ctx, Proposal{
+				ID: "prop-pre", RunID: "run-pre", Surface: SurfaceSkill,
+				PatternSig: "permission denied", Name: "recover-perm",
+				Body: tc.body, Status: "proposed",
+			}, FailurePattern{Class: "permission denied", SessionIDs: tc.ids})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Status != "rejected" {
+				t.Fatalf("status = %q audit=%q, want rejected (not pending)", out.Status, out.Audit)
+			}
+		})
+	}
+}

@@ -89,9 +89,12 @@ type RunResult struct {
 }
 
 // ValidationResult is the fail-closed outcome of held-in/held-out validation
-// (#414). Evaluated is false when no real before/after measurement existed;
-// Err is non-nil when a scorer/evaluator error aborted the measurement. Only
-// a fully evaluated, error-free result that strictly improves held-in without
+// (#414). Evaluated is true only when a real before/after measurement ran (or
+// a scorer error aborted it); deterministic precheck rejections (body too
+// short, empty held-in) set Rejected without claiming a measurement, and a
+// nil baseline leaves both false so the proposal stays pending. Err is
+// non-nil when a scorer/evaluator error aborted the measurement. Only a
+// fully evaluated, error-free result that strictly improves held-in without
 // regressing held-out may auto-promote.
 type ValidationResult struct {
 	HeldInBefore  int
@@ -100,12 +103,18 @@ type ValidationResult struct {
 	HeldOutAfter  int
 	EvidenceIDs   []string
 	Evaluated     bool
-	Err           error
+	// Rejected marks deterministic precheck rejections that never measured
+	// anything: the proposal must be rejected, not held pending (#414 review).
+	Rejected bool
+	Err      error
 }
 
 // Promotable reports whether this result satisfies the conservative
 // promotion rule: held-in improves strictly and held-out does not regress,
-// with a real measurement behind both counts.
+// with a real measurement behind both counts. Note that PromoteProposal
+// additionally requires at least one independent held-out case before an
+// automatic accept, so Promotable alone is not the complete promotion gate
+// (#414 review).
 func (v ValidationResult) Promotable() bool {
 	return v.Evaluated && v.Err == nil &&
 		v.HeldInBefore > v.HeldInAfter &&
@@ -458,17 +467,20 @@ func sumScores(ctx context.Context, score ScoreFunc, sessionIDs []string, patter
 func DefaultValidate(ctx context.Context, score, baseline ScoreFunc, p Proposal, heldIn, heldOut []string) (ValidationResult, string) {
 	evidence := append(append([]string(nil), heldIn...), heldOut...)
 	if strings.TrimSpace(p.Body) == "" || len(strings.TrimSpace(p.Body)) < 20 {
-		return ValidationResult{Evaluated: true, EvidenceIDs: evidence}, "body too short; rejected as non-substantive"
+		return ValidationResult{Rejected: true, EvidenceIDs: evidence}, "body too short; rejected as non-substantive"
 	}
 	if len(heldIn) == 0 {
-		return ValidationResult{EvidenceIDs: evidence}, "held-in has no evidence"
+		return ValidationResult{Rejected: true, EvidenceIDs: evidence}, "held-in has no evidence"
 	}
 	if baseline == nil {
 		return ValidationResult{EvidenceIDs: evidence},
 			"not measured: no baseline evaluator; proposal kept pending for owner review"
 	}
 	if score == nil {
-		score = func(context.Context, string, string) (int, error) { return 0, nil }
+		// A nil after-scorer must never masquerade as a real measurement: an
+		// all-zero "after" could look like a strict improvement (#414 review).
+		return ValidationResult{Evaluated: true, Err: errors.New("no after-scorer configured"), EvidenceIDs: evidence},
+			"no after-scorer configured; failed closed"
 	}
 	inBefore, err := sumScores(ctx, baseline, heldIn, p.PatternSig)
 	if err != nil {
@@ -605,6 +617,16 @@ func (l *Learner) PromoteProposal(ctx context.Context, p Proposal, pattern Failu
 		// Evaluator/scorer errors fail closed and are persisted (#414).
 		p.Status = "rejected"
 		p.Audit = "rejected: evaluator error; " + audit
+		if err := l.storeProposal(ctx, p); err != nil {
+			return p, err
+		}
+		return p, nil
+	}
+	if result.Rejected {
+		// Deterministic precheck rejections (body too short, no held-in
+		// evidence) are rejected, never held pending (#414 review).
+		p.Status = "rejected"
+		p.Audit = "rejected: " + audit
 		if err := l.storeProposal(ctx, p); err != nil {
 			return p, err
 		}
