@@ -20,6 +20,10 @@ type ReflectOptions struct {
 	Model string
 	// MaxTokens defaults to 1024.
 	MaxTokens int
+	// PriorSummary, when set, is the previous summary of the conversation; it
+	// is sent for continuity alongside the trailing turns (#411 incremental
+	// re-reflection).
+	PriorSummary string
 }
 
 // Reflect generates a session summary via the provider and returns the text.
@@ -45,9 +49,21 @@ func Reflect(ctx context.Context, provider llm.Provider, history []llm.Message, 
 		maxTok = 1024
 	}
 	prompt := llm.UserText(ReflectPrompt)
+	msgs := append(append([]llm.Message{}, hist...), prompt)
+	if opts.PriorSummary != "" {
+		// The prior summary is context, not instructions: it goes in as an
+		// assistant message (never a user message that could elevate
+		// user-influenced text into the instruction stream, #421 review).
+		prior := llm.Message{
+			Role: llm.RoleAssistant,
+			Blocks: []llm.Block{{Type: llm.BlockText,
+				Text: "Previous summary of this conversation (for continuity):\n" + opts.PriorSummary}},
+		}
+		msgs = append(msgs[:len(msgs)-1], prior, msgs[len(msgs)-1])
+	}
 	resp, err := provider.Complete(ctx, llm.Request{
 		Model:     model,
-		Messages:  append(append([]llm.Message{}, hist...), prompt),
+		Messages:  msgs,
 		MaxTokens: maxTok,
 	}, nil)
 	if err != nil {
@@ -123,13 +139,12 @@ func (r *IdleReflector) reflectOne(ctx context.Context, id string, provider llm.
 		}
 		defer unlock()
 	}
-	// Re-check under lock: at most once per quiet period (#59).
+	// Re-check under lock: only reflect when the summary does not already
+	// cover the latest turn (#411). A second quiet period after new turns is
+	// eligible again; an unchanged session is skipped.
 	sess, err := r.Sessions.Get(ctx, id)
 	if err != nil {
 		return false, err
-	}
-	if strings.TrimSpace(sess.Summary) != "" {
-		return false, nil
 	}
 	hist, err := r.Sessions.Turns(ctx, id)
 	if err != nil {
@@ -138,18 +153,49 @@ func (r *IdleReflector) reflectOne(ctx context.Context, id string, provider llm.
 	if len(hist) < 2 {
 		return false, nil
 	}
-	summary, err := Reflect(ctx, provider, hist, ReflectOptions{Model: model})
+	latest := int64(len(hist))
+	if sess.SummaryWatermark >= latest {
+		return false, nil
+	}
+	// Incremental: send the previous summary plus only the uncovered turns so
+	// a resumed long session does not pay full-history cost on every quiet
+	// period (#411). The window is bounded like Reflect's MaxHistory, and the
+	// committed watermark claims coverage only for the turns actually sent, so
+	// an over-long gap converges across quiet periods instead of overclaiming
+	// (#411 review).
+	history := hist
+	var prior string
+	if sess.SummaryWatermark > 0 && int64(len(hist)) > sess.SummaryWatermark {
+		prior = sess.Summary
+		history = hist[sess.SummaryWatermark:]
+	}
+	if len(history) > IdleReflectMaxHistory {
+		history = history[len(history)-IdleReflectMaxHistory:]
+	}
+	covered := int64(len(history))
+	if prior != "" {
+		covered = sess.SummaryWatermark + int64(len(history))
+	}
+	if covered > latest {
+		covered = latest
+	}
+	summary, err := Reflect(ctx, provider, history, ReflectOptions{Model: model, PriorSummary: prior})
 	if err != nil {
 		return false, err
 	}
 	if summary == "" {
 		return false, nil
 	}
-	if err := r.Sessions.SetSummary(ctx, id, summary); err != nil {
+	if err := r.Sessions.SetSummaryWatermark(ctx, id, summary, covered); err != nil {
 		return false, err
 	}
 	return true, nil
 }
+
+// IdleReflectMaxHistory bounds the turns sent per idle reflection window,
+// matching Reflect's MaxHistory default so the watermark can claim honest
+// coverage (#411 review).
+const IdleReflectMaxHistory = 30
 
 // Loop ticks Every until ctx is done.
 func (r *IdleReflector) Loop(ctx context.Context) {
@@ -171,16 +217,20 @@ func (r *IdleReflector) Loop(ctx context.Context) {
 	}
 }
 
-// ListIdleForReflection returns session ids with empty summary, at least two
-// turns worth of activity, and updated_at before cutoff.
+// ListIdleForReflection returns session ids eligible for a *new* idle
+// reflection: at least two turns, updated_at before cutoff, and a latest turn
+// sequence newer than the summary watermark (#411). Sessions summarized after
+// their last activity are not returned; a resumed session with new turns is.
 func (s *Store) ListIdleForReflection(ctx context.Context, cutoff time.Time, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id FROM sessions
-		WHERE summary = ''
-		  AND updated_at < ?
+		WHERE updated_at < ?
+		  AND summary_watermark < (
+		    SELECT COALESCE(MAX(seq), 0) FROM turns WHERE session_id = sessions.id
+		  )
 		  AND EXISTS (
 		    SELECT 1 FROM turns
 		    WHERE session_id = sessions.id
