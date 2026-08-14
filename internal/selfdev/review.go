@@ -96,7 +96,11 @@ func enforceReview(path string, record ReviewRecord) error {
 	return nil
 }
 
-func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
+// reviewExactCommit reviews the exact diff baseSHA..sha and persists the audit
+// record bound to the candidate SHA (#413). The configured checkout is read
+// only; the candidate is always an immutable resolved SHA, so a force-push
+// after review cannot change what is verified and installed.
+func reviewExactCommit(ctx context.Context, repoDir, baseSHA, sha, approval string) error {
 	cfgPath, err := config.Path()
 	if err != nil {
 		return err
@@ -109,15 +113,11 @@ func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
 	if err != nil {
 		return err
 	}
-	diff, err := commandOutput(ctx, repoDir, "git", "diff", "HEAD", ref, "--")
+	diff, err := commandOutput(ctx, repoDir, "git", "diff", baseSHA, sha, "--")
 	if err != nil {
 		return fmt.Errorf("read candidate diff: %w", err)
 	}
-	sha, err := commandOutput(ctx, repoDir, "git", "rev-parse", ref)
-	if err != nil {
-		return fmt.Errorf("resolve reviewed commit: %w", err)
-	}
-	findings, err := reviewer.Review(ctx, diff, "upgrade "+ref)
+	findings, err := reviewer.Review(ctx, diff, "upgrade "+sha)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func reviewCandidate(ctx context.Context, repoDir, ref, approval string) error {
 	if err != nil {
 		return err
 	}
-	return enforceReview(filepath.Join(home, "selfdev-reviews.jsonl"), ReviewRecord{CommitSHA: strings.TrimSpace(sha), Approval: approval, Findings: findings})
+	return enforceReview(filepath.Join(home, "selfdev-reviews.jsonl"), ReviewRecord{CommitSHA: sha, Approval: approval, Findings: findings})
 }
 
 func configuredReviewer(cfg config.Config) (Reviewer, error) {
