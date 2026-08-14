@@ -57,14 +57,20 @@ func candidatesCmd(ctx context.Context, args []string, stdout io.Writer) error {
 func candidatesList(ctx context.Context, args []string, svc *memory.CandidateService, stdout io.Writer) error {
 	status := ""
 	asJSON := false
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
 		case arg == "--json":
 			asJSON = true
+		case arg == "--status":
+			// Accept both "--status pending" and "--status=pending" (#420 review).
+			if i+1 >= len(args) {
+				return errors.New("usage: waffle candidates list [--status pending|applied|denied] [--json]")
+			}
+			i++
+			status = args[i]
 		case strings.HasPrefix(arg, "--status="):
 			status = strings.TrimPrefix(arg, "--status=")
-		case arg == "--status":
-			return errors.New("usage: waffle candidates list [--status pending|applied|denied] [--json]")
 		default:
 			return fmt.Errorf("unknown list flag %q", arg)
 		}
@@ -182,12 +188,18 @@ func candidatesApprove(ctx context.Context, args []string, svc *memory.Candidate
 
 func candidatesDeny(ctx context.Context, args []string, svc *memory.CandidateService, stdout io.Writer) error {
 	var id, reason string
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
+		case arg == "--reason":
+			// Accept both "--reason text" and "--reason=text" (#420 review).
+			if i+1 >= len(args) {
+				return errors.New("usage: waffle candidates deny <id> --reason \"...\"")
+			}
+			i++
+			reason = args[i]
 		case strings.HasPrefix(arg, "--reason="):
 			reason = strings.TrimPrefix(arg, "--reason=")
-		case arg == "--reason":
-			return errors.New("usage: waffle candidates deny <id> --reason \"...\"")
 		default:
 			if id != "" {
 				return errors.New("usage: waffle candidates deny <id> --reason \"...\"")

@@ -177,3 +177,38 @@ func TestCandidatesCLISkipsCorruptFiles(t *testing.T) {
 		t.Errorf("valid candidates hidden by corrupt file:\n%s", buf.String())
 	}
 }
+
+// TestCandidatesCLISpaceSeparatedFlags verifies --status and --reason accept
+// both "--flag value" and "--flag=value" forms (#420 review).
+func TestCandidatesCLISpaceSeparatedFlags(t *testing.T) {
+	candidatesFixture(t)
+
+	// --status pending (space form) must not error.
+	var out bytes.Buffer
+	if err := candidatesCmd(context.Background(), []string{"list", "--status", "pending", "--json"}, &out); err != nil {
+		t.Fatalf("list --status pending (space form): %v", err)
+	}
+	var summaries []memory.CandidateSummary
+	if err := json.Unmarshal(out.Bytes(), &summaries); err != nil {
+		t.Fatalf("list --status pending JSON: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("--status pending returned %d candidates, want 2", len(summaries))
+	}
+
+	// --reason "text" (space form) must deny without a usage error.
+	id := summaries[0].ID
+	out.Reset()
+	if err := candidatesCmd(context.Background(), []string{"deny", id, "--reason", "space-separated reason"}, &out); err != nil {
+		t.Fatalf("deny --reason (space form): %v", err)
+	}
+	if !strings.Contains(out.String(), "space-separated reason") {
+		t.Fatalf("deny output = %q", out.String())
+	}
+
+	// Missing value after --status still fails with usage.
+	out.Reset()
+	if err := candidatesCmd(context.Background(), []string{"list", "--status"}, &out); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("list --status without value err = %v, want usage", err)
+	}
+}

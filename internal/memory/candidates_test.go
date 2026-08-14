@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,5 +217,4 @@ func TestCandidateServiceMemoryUpdateDecision(t *testing.T) {
 	if !strings.Contains(string(live), "owner-approved replacement") || strings.Contains(string(live), "original text") {
 		t.Fatalf("approved update not applied exactly:\n%s", live)
 	}
-	_ = fmt.Sprint()
 }
