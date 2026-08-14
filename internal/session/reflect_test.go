@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -446,6 +447,64 @@ func TestIdleReflectIncrementalSendsPriorSummary(t *testing.T) {
 	}
 	if !strings.Contains(joined, "turn three") || !strings.Contains(joined, "turn four") {
 		t.Fatalf("uncovered turns missing: %v", texts)
+	}
+	// The prior summary must arrive as assistant/context content, never as a
+	// user message that could elevate user-influenced text into the
+	// instruction stream (#421 review).
+	var priorRole llm.Role
+	for _, m := range p.payload {
+		if strings.Contains(m.Text(), "first summary") {
+			priorRole = m.Role
+		}
+	}
+	if priorRole != llm.RoleAssistant {
+		t.Fatalf("prior summary role = %q, want assistant", priorRole)
+	}
+}
+
+// TestIdleReflectBoundedWindowDoesNotOverclaim verifies the committed
+// watermark never claims coverage beyond the turns actually sent: with more
+// than the bounded window of uncovered turns, the watermark advances by the
+// window, not to the latest turn (#411 review).
+func TestIdleReflectBoundedWindowDoesNotOverclaim(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := New(st)
+	// 60 turns: far more than the 30-turn bounded window.
+	sess, err := sessions.Create(ctx, "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := sess.ID
+	for i := 0; i < 60; i++ {
+		role := llm.RoleUser
+		if i%2 == 1 {
+			role = llm.RoleAssistant
+		}
+		if err := sessions.AppendTurn(ctx, id, llm.Message{Role: role, Blocks: []llm.Block{{Type: llm.BlockText, Text: fmt.Sprintf("turn %d", i)}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pastSession(t, st, id, 2)
+	r := &IdleReflector{Sessions: sessions, Provider: func() (llm.Provider, string) { return &scriptProvider{reply: "bounded summary"}, "m" }, After: 30 * time.Minute, Now: time.Now}
+	if n, err := r.RunOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("RunOnce n=%d err=%v", n, err)
+	}
+	got, _ := sessions.Get(ctx, id)
+	if got.SummaryWatermark != IdleReflectMaxHistory {
+		t.Fatalf("watermark = %d, want the bounded window %d (must not overclaim 60)", got.SummaryWatermark, IdleReflectMaxHistory)
+	}
+	// Still eligible: the next quiet period advances coverage by the window.
+	if n, err := r.RunOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("second pass n=%d err=%v, want the uncovered remainder reflected", n, err)
+	}
+	got, _ = sessions.Get(ctx, id)
+	if got.SummaryWatermark != 2*IdleReflectMaxHistory {
+		t.Fatalf("watermark after second pass = %d, want %d", got.SummaryWatermark, 2*IdleReflectMaxHistory)
 	}
 }
 

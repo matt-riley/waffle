@@ -403,6 +403,7 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 		return false, nil
 	}
 	var prior string
+	covered := int64(len(history))
 	if onlyIfEmpty {
 		sess, err := g.Sessions.Get(ctx, sessionID)
 		if err != nil {
@@ -415,6 +416,13 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 			prior = sess.Summary
 			history = history[sess.SummaryWatermark:]
 		}
+		// The watermark claims only the turns actually sent, so an over-long
+		// gap converges across quiet periods instead of overclaiming (#421
+		// review, matching the idle reflector's bounded window).
+		if len(history) > session.IdleReflectMaxHistory {
+			history = history[len(history)-session.IdleReflectMaxHistory:]
+		}
+		covered = sess.SummaryWatermark + int64(len(history))
 	}
 	provider, reflectModel := g.providerForSession(ctx, sessionID)
 	if model != "" {
@@ -431,7 +439,12 @@ func (g *Gateway) reflectSessionLocked(ctx context.Context, sessionID string, hi
 	if summary == "" {
 		return false, nil
 	}
-	if err := g.Sessions.SetSummary(ctx, sessionID, summary); err != nil {
+	if onlyIfEmpty {
+		if err := g.Sessions.SetSummaryWatermark(ctx, sessionID, summary, covered); err != nil {
+			log.Warn("session summary persist failed", "session_id", sessionID, "err", err)
+			return false, err
+		}
+	} else if err := g.Sessions.SetSummary(ctx, sessionID, summary); err != nil {
 		log.Warn("session summary persist failed", "session_id", sessionID, "err", err)
 		return false, err
 	}
