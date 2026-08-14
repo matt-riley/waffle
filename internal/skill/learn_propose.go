@@ -147,7 +147,7 @@ func (l *Learner) proposeEdits(req ProposalRequest) (edits []CandidateEdit, from
 			// Model failure falls back to the deterministic table rather than
 			// dropping the pattern (#410).
 			edits = fallbackPropose(req)
-			err = nil
+			calls = 0
 		} else {
 			calls = 1
 		}
