@@ -51,9 +51,15 @@ func Reflect(ctx context.Context, provider llm.Provider, history []llm.Message, 
 	prompt := llm.UserText(ReflectPrompt)
 	msgs := append(append([]llm.Message{}, hist...), prompt)
 	if opts.PriorSummary != "" {
-		msgs = append([]llm.Message{
-			llm.UserText("Previous summary of this conversation (for continuity):\n" + opts.PriorSummary),
-		}, msgs...)
+		// The prior summary is context, not instructions: it goes in as an
+		// assistant message (never a user message that could elevate
+		// user-influenced text into the instruction stream, #421 review).
+		prior := llm.Message{
+			Role: llm.RoleAssistant,
+			Blocks: []llm.Block{{Type: llm.BlockText,
+				Text: "Previous summary of this conversation (for continuity):\n" + opts.PriorSummary}},
+		}
+		msgs = append(msgs[:len(msgs)-1], prior, msgs[len(msgs)-1])
 	}
 	resp, err := provider.Complete(ctx, llm.Request{
 		Model:     model,
@@ -153,12 +159,25 @@ func (r *IdleReflector) reflectOne(ctx context.Context, id string, provider llm.
 	}
 	// Incremental: send the previous summary plus only the uncovered turns so
 	// a resumed long session does not pay full-history cost on every quiet
-	// period (#411). Bound the trailing window like Reflect does.
+	// period (#411). The window is bounded like Reflect's MaxHistory, and the
+	// committed watermark claims coverage only for the turns actually sent, so
+	// an over-long gap converges across quiet periods instead of overclaiming
+	// (#411 review).
 	history := hist
 	var prior string
 	if sess.SummaryWatermark > 0 && int64(len(hist)) > sess.SummaryWatermark {
 		prior = sess.Summary
 		history = hist[sess.SummaryWatermark:]
+	}
+	if len(history) > IdleReflectMaxHistory {
+		history = history[len(history)-IdleReflectMaxHistory:]
+	}
+	covered := int64(len(history))
+	if prior != "" {
+		covered = sess.SummaryWatermark + int64(len(history))
+	}
+	if covered > latest {
+		covered = latest
 	}
 	summary, err := Reflect(ctx, provider, history, ReflectOptions{Model: model, PriorSummary: prior})
 	if err != nil {
@@ -167,11 +186,16 @@ func (r *IdleReflector) reflectOne(ctx context.Context, id string, provider llm.
 	if summary == "" {
 		return false, nil
 	}
-	if err := r.Sessions.SetSummaryWatermark(ctx, id, summary, latest); err != nil {
+	if err := r.Sessions.SetSummaryWatermark(ctx, id, summary, covered); err != nil {
 		return false, err
 	}
 	return true, nil
 }
+
+// IdleReflectMaxHistory bounds the turns sent per idle reflection window,
+// matching Reflect's MaxHistory default so the watermark can claim honest
+// coverage (#411 review).
+const IdleReflectMaxHistory = 30
 
 // Loop ticks Every until ctx is done.
 func (r *IdleReflector) Loop(ctx context.Context) {

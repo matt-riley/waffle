@@ -126,13 +126,28 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 // SetSummary records the reflection pass's summary and marks it as covering
 // every turn the session has today (the current max turn sequence). It does
 // not touch updated_at: idle reflection timing stays based on conversation
-// activity, not summary writes (#411).
+// activity, not summary writes (#411). The watermark derives from MAX(seq) in
+// the same statement — indexed by UNIQUE(session_id, seq) — rather than a
+// separate COUNT query (#411 review).
 func (s *Store) SetSummary(ctx context.Context, id, summary string) error {
-	count, err := s.TurnCount(ctx, id)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET
+			summary = ?,
+			summary_watermark = (SELECT COALESCE(MAX(seq), 0) FROM turns WHERE session_id = sessions.id),
+			reflected_at = ?
+		WHERE id = ?`,
+		summary, s.nowStr(), id)
 	if err != nil {
-		return err
+		return fmt.Errorf("set session summary: %w", err)
 	}
-	return s.SetSummaryWatermark(ctx, id, summary, int64(count))
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-summary result: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetSummaryWatermark records a summary with an explicit coverage watermark:
