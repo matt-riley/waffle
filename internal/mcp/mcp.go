@@ -182,6 +182,14 @@ func ExpandPlaceholders(s, root, data string) string {
 // plugin-sourced servers), and then — plugin-sourced only — the reserved
 // PLUGIN_ROOT/PLUGIN_DATA variables appended last so the client's values
 // always win over any same-name entry (spec §9.1).
+// pluginSourced reports whether this server is a plugin-sourced launch per
+// spec §9: both PLUGIN_ROOT and PLUGIN_DATA must be set. A single condition
+// everywhere avoids a PLUGIN_DATA= entry (or ${PLUGIN_DATA} expansion) with
+// an empty data path.
+func (s Server) pluginSourced() bool {
+	return s.PluginRoot != "" && s.PluginData != ""
+}
+
 // buildChildEnv assembles the child environment per the #79/#77 posture
 // and the Agent Plugins §9 runtime contract: the BuildProcessEnv
 // allowlisted base, the explicit EnvVars overlay (expanded for
@@ -193,13 +201,13 @@ func (s Server) buildChildEnv() []string {
 	env := BuildProcessEnv(s.Env)
 	overlay := make(map[string]string, len(s.EnvVars))
 	for name, value := range s.EnvVars {
-		if s.PluginRoot != "" {
+		if s.pluginSourced() {
 			value = ExpandPlaceholders(value, s.PluginRoot, s.PluginData)
 		}
 		overlay[name] = value
 	}
 	env = overlayEnv(env, overlay)
-	if s.PluginRoot != "" {
+	if s.pluginSourced() {
 		env = append(env, "PLUGIN_ROOT="+s.PluginRoot, "PLUGIN_DATA="+s.PluginData)
 	}
 	return env
@@ -345,8 +353,10 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	// Plugin-sourced servers (#392): ensure the client-managed PLUGIN_DATA
 	// directory exists (0700, writable) before launch (spec §9.1), and
 	// expand ${PLUGIN_ROOT}/${PLUGIN_DATA} in args, env values, and cwd
-	// (§9.2). command and env keys are never expanded.
-	if s.PluginRoot != "" && s.PluginData != "" {
+	// (§9.2). command and env keys are never expanded. The same condition
+	// gates expansion and env assembly, so a half-configured plugin never
+	// yields PLUGIN_DATA= or an empty data path.
+	if s.pluginSourced() {
 		if err := os.MkdirAll(s.PluginData, 0o700); err != nil {
 			return nil, fmt.Errorf("mcp %s: create plugin data dir: %w", s.Name, err)
 		}
@@ -360,7 +370,7 @@ func ConnectRestricted(ctx context.Context, s Server, opts RestrictOpts) (*Clien
 	procCtx, procCancel := context.WithCancel(context.Background())
 	args := s.Args
 	dir := s.Cwd
-	if s.PluginRoot != "" {
+	if s.pluginSourced() {
 		args = make([]string, len(s.Args))
 		for i, a := range s.Args {
 			args[i] = ExpandPlaceholders(a, s.PluginRoot, s.PluginData)
