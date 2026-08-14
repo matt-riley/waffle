@@ -392,6 +392,14 @@ cannot read another repo, another session's secrets, or any raw key.
 - Workspace layout: `~/.waffle/workspace/<agent>/` with `AGENT.md` (persona +
   standing instructions), `MEMORY.md`, `USER.md`, and `skills/<name>/SKILL.md`
   (agentskills.io-compatible so hermes/openclaw skills port over).
+- Skill format: [Agent Skills](https://agentskills.io/specification) is the
+  single source of truth for `SKILL.md` frontmatter and naming rules.
+  `internal/skill/spec` is the one shared validator/parser/serializer
+  (`spec.ValidName`, `spec.Validate`, `spec.ParseFrontmatter`,
+  `spec.MarshalSKILL`) used by discovery, distill_skill, the learn loop, the
+  skill installer, and activate/deactivate (#395) so the rules cannot drift.
+  Hand-rolled rather than the `skills-ref` CLI: waffle validates in-process
+  with zero dependencies and no subprocess boundary.
 - Memory recall: every turn is indexed in SQLite FTS5; a `remember` tool lets
   the agent curate `MEMORY.md` (stable note IDs, exact-body dedupe); a
   `memory_update` tool supersedes or forgets by ID, archiving old lines to
