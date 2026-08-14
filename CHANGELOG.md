@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.21.0](https://github.com/matt-riley/waffle/compare/v0.20.0...v0.21.0) (2026-08-14)
+
+
+### Features
+
+* **learn:** generate mechanism-specific candidate edits instead of boilerplate recovery skills ([#424](https://github.com/matt-riley/waffle/issues/424)) ([3b247f5](https://github.com/matt-riley/waffle/commit/3b247f5eb2d03da026d0b5e13797903d05652a0f))
+
+
+### Bug Fixes
+
+* **learn:** fail closed when held-in/held-out validation has no real baseline ([#423](https://github.com/matt-riley/waffle/issues/423)) ([acace70](https://github.com/matt-riley/waffle/commit/acace7049020a2cdb4587a9568964a689b23e9a9))
+* **learn:** make the mining cursor lossless across failures and pagination ([#422](https://github.com/matt-riley/waffle/issues/422)) ([dbcc092](https://github.com/matt-riley/waffle/commit/dbcc092ac4250036430f81668a791d79f0024210))
+* **selfdev:** bind review, verification, and install to one clean immutable tree ([#425](https://github.com/matt-riley/waffle/issues/425)) ([dfdc23d](https://github.com/matt-riley/waffle/commit/dfdc23dafb112f280efd41b69fa8166911fcebc7))
+* **selfdev:** make approval=ci verify required checks for the exact candidate SHA ([#426](https://github.com/matt-riley/waffle/issues/426)) ([53a85ca](https://github.com/matt-riley/waffle/commit/53a85ca3e2f8db1dcb3dad08467e946f3ff13db0))
+
 ## [0.20.0](https://github.com/matt-riley/waffle/compare/v0.19.0...v0.20.0) (2026-08-14)
 
 
