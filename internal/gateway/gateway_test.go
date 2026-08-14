@@ -1327,6 +1327,62 @@ func TestReflectSessionFailureLoggedNoCrash(t *testing.T) {
 	_, _ = gw.ReflectSession(ctx, group.SessionID)
 }
 
+// TestReflectSessionReReflectsResumedSession covers the gateway idle path:
+// a first reflection writes a summary and watermark; new turns make the
+// session eligible again, and the second reflection advances the watermark
+// instead of being skipped (#411).
+func TestReflectSessionReReflectsResumedSession(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sessions := session.New(st)
+	entities := entity.New(st, sessions)
+	group, err := entities.GroupFor(ctx, "fake", "resume-chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.UserText("a"))
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.Message{
+		Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "b"}},
+	})
+	p := &reflectProvider{reply: "first summary"}
+	gw := &Gateway{
+		Agent:    &agent.Agent{Provider: p, Tools: tool.NewRegistry(), Model: "m"},
+		Entities: entities,
+		Sessions: sessions,
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	wrote, err := gw.ReflectSession(ctx, group.SessionID)
+	if err != nil || !wrote {
+		t.Fatalf("first ReflectSession wrote=%v err=%v", wrote, err)
+	}
+	sess, _ := sessions.Get(ctx, group.SessionID)
+	if sess.SummaryWatermark != 2 {
+		t.Fatalf("first reflection watermark = %d, want 2", sess.SummaryWatermark)
+	}
+	// Unchanged: skipped.
+	if wrote, _ := gw.ReflectSession(ctx, group.SessionID); wrote {
+		t.Fatal("unchanged session reflected twice")
+	}
+	// Resumed with new turns: reflected again, watermark advances.
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.UserText("c"))
+	_ = sessions.AppendTurn(ctx, group.SessionID, llm.Message{
+		Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "d"}},
+	})
+	p.reply = "second summary"
+	wrote, err = gw.ReflectSession(ctx, group.SessionID)
+	if err != nil || !wrote {
+		t.Fatalf("resumed ReflectSession wrote=%v err=%v", wrote, err)
+	}
+	sess, _ = sessions.Get(ctx, group.SessionID)
+	if !strings.Contains(sess.Summary, "second summary") || sess.SummaryWatermark != 4 {
+		t.Fatalf("resumed reflection = %+v", sess)
+	}
+}
+
 func TestReflectSessionSkipsWhenGroupLocked(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
