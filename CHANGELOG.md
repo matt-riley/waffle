@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.20.0](https://github.com/matt-riley/waffle/compare/v0.19.0...v0.20.0) (2026-08-14)
+
+
+### Features
+
+* **memory:** expose a complete operator workflow for pending memory and skill candidates ([#420](https://github.com/matt-riley/waffle/issues/420)) ([7eefaea](https://github.com/matt-riley/waffle/commit/7eefaeac38c21be9f2bb552864c4cc76fe803a88))
+
+
+### Bug Fixes
+
+* issue 411 summary watermark ([#431](https://github.com/matt-riley/waffle/issues/431)) ([961fa91](https://github.com/matt-riley/waffle/commit/961fa9148738e49c007bc3aa154866fd6e83cea8))
+* **memory:** route supersede and forget through the write gate with honest provenance ([#419](https://github.com/matt-riley/waffle/issues/419)) ([54967db](https://github.com/matt-riley/waffle/commit/54967db1301bc0a9dba3702e8658144d79502ce5))
+
 ## [0.19.0](https://github.com/matt-riley/waffle/compare/v0.18.0...v0.19.0) (2026-08-14)
 
 
