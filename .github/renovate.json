@@ -1,0 +1,9 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>matt-riley/renovate-config",
+    "github>matt-riley/renovate-config:go",
+    "github>matt-riley/renovate-config:astro",
+    "github>matt-riley/renovate-config:github-actions"
+  ]
+}
