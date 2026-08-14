@@ -280,6 +280,13 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 # Operator overrides for plugin servers land in config.toml keyed by
 # plugin+server (waffle extension namespace, #394).
 #
+# Plugin stdio servers (#392) receive PLUGIN_ROOT (the resolved plugin
+# root) and PLUGIN_DATA (a client-managed, 0700, per-plugin writable
+# directory at <home>/plugins-data/<plugin>) in their environment, and
+# ${PLUGIN_ROOT}/${PLUGIN_DATA} in args, env values, and cwd are expanded
+# exactly once, non-recursively, before launch. Native [[mcp]] servers do
+# not receive these variables and are never placeholder-expanded.
+#
 # Remote servers:
 #   * have no process to restrict, so execution must stay unset or "host";
 #     execution = "sandbox" is rejected (reachability is egress's job).

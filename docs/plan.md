@@ -250,6 +250,20 @@ posture; policy lands via the waffle extension namespace (#394) and
 operator config. `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` expansion is the next
 issue (#392).
 
+**PLUGIN_ROOT/PLUGIN_DATA (#392).** Plugin stdio servers are launched with
+the §9 runtime contract: `PLUGIN_ROOT` (the resolved plugin root) and
+`PLUGIN_DATA` (a client-managed writable directory at
+`<waffle home>/plugins-data/<plugin>/`, created `0700` before launch,
+preserved across updates) are added to the child environment **after** the
+configured env overlay, so the client's values always win. `${PLUGIN_ROOT}`
+and `${PLUGIN_DATA}` in `args`, `env` values, and `cwd` are expanded exactly
+once, non-recursively (`mcp.ExpandPlaceholders`); `command` and `env` keys
+are never expanded, unrecognized placeholder-like text stays literal, and
+an `env` entry named `PLUGIN_ROOT`/`PLUGIN_DATA` invalidates the server
+entry at validation time. The `BuildProcessEnv` allowlist discipline is
+unchanged — plugins never see ambient secrets — and native `[[mcp]]`
+servers are never expanded.
+
 **Mid-run owner messaging (#253).** The gateway attaches one session-scoped
 outbound sender per run (`internal/notify`), bound to the conversation's
 channel and chat id — the same adapter resolution the memory-change notifier

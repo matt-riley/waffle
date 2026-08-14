@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -184,6 +185,43 @@ func TestLoadMCPNotRegularFile(t *testing.T) {
 	}
 	if result.Disabled == "" || !strings.Contains(result.Disabled, "not a regular file") {
 		t.Errorf("directory mcp.json = %q, want component-type-invalid", result.Disabled)
+	}
+}
+
+func TestLoadMCPReservedEnvRejected(t *testing.T) {
+	root := t.TempDir()
+	result := loadMCP(t, root, mcpServersBody(t, map[string]any{
+		"bad-root": map[string]any{"type": "stdio", "command": "npx", "env": map[string]any{"PLUGIN_ROOT": "x"}},
+		"bad-data": map[string]any{"type": "stdio", "command": "npx", "env": map[string]any{"PLUGIN_DATA": "x"}},
+		"good":     map[string]any{"type": "stdio", "command": "npx"},
+	}))
+	if len(result.Servers) != 1 || result.Servers[0].Name != "good" {
+		t.Errorf("Servers = %+v, want only good", result.Servers)
+	}
+	if len(result.Skips) != 2 {
+		t.Fatalf("Skips = %+v, want 2 (reserved env keys invalidate the entry)", result.Skips)
+	}
+	for _, skip := range result.Skips {
+		if !strings.Contains(skip.Reason, "reserved") {
+			t.Errorf("skip reason = %q, want reserved-variable report", skip.Reason)
+		}
+	}
+}
+
+func TestPluginDataDirConvention(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".waffle")
+	got, err := PluginDataDir(home, "acme-tools")
+	if err != nil {
+		t.Fatalf("PluginDataDir: %v", err)
+	}
+	if want := filepath.Join(home, "plugins-data", "acme-tools"); got != want {
+		t.Errorf("PluginDataDir = %q, want %q", got, want)
+	}
+	if PluginsDataDir(home) != filepath.Join(home, "plugins-data") {
+		t.Errorf("PluginsDataDir = %q", PluginsDataDir(home))
+	}
+	if _, err := PluginDataDir(home, "Bad-Name"); !errors.Is(err, ErrInvalidName) {
+		t.Errorf("invalid name error = %v", err)
 	}
 }
 

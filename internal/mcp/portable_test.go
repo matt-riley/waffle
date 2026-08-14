@@ -92,6 +92,194 @@ func TestConnectEnvVarsOverlay(t *testing.T) {
 	}
 }
 
+// TestExpandPlaceholders pins the exact §9.2 semantics: single-pass,
+// non-recursive, exact-token matching.
+func TestExpandPlaceholders(t *testing.T) {
+	root := "/plugins/acme"
+	data := "/plugins-data/acme"
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"${PLUGIN_ROOT}", root},
+		{"${PLUGIN_DATA}", data},
+		{"${PLUGIN_ROOT}/config.json", root + "/config.json"},
+		{"x${PLUGIN_ROOT}y", "x" + root + "y"},
+		{"${PLUGIN_ROOT}${PLUGIN_DATA}", root + data},
+		{"${PLUGIN_DATA}${PLUGIN_ROOT}${PLUGIN_DATA}", data + root + data},
+		{"$PLUGIN_ROOT", "$PLUGIN_ROOT"},
+		{"PLUGIN_ROOT", "PLUGIN_ROOT"},
+		{"${PLUGIN_ROOTX}", "${PLUGIN_ROOTX}"},
+		{"${PLUGIN_ROOT", "${PLUGIN_ROOT"},
+		{"${FOO}", "${FOO}"},
+		{"plain", "plain"},
+		{"", ""},
+		// Text introduced by a replacement is never re-scanned: root
+		// containing the other placeholder stays literal.
+		{"${PLUGIN_ROOT}", root},
+	}
+	for _, tc := range cases {
+		got := ExpandPlaceholders(tc.in, root, data)
+		if got != tc.want {
+			t.Errorf("ExpandPlaceholders(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Non-recursion: a root that itself contains ${PLUGIN_DATA} is inserted
+	// verbatim, never re-expanded.
+	craftedRoot := "/x/${PLUGIN_DATA}"
+	if got := ExpandPlaceholders("${PLUGIN_ROOT}", craftedRoot, "/data"); got != craftedRoot {
+		t.Errorf("non-recursive insertion violated: %q", got)
+	}
+}
+
+// pluginEnvDumpServer writes its environment, args, and cwd to a file and
+// answers the MCP handshake.
+const pluginEnvDumpServer = `#!/usr/bin/env bash
+if [[ -n "${PLUGIN_DUMP_FILE:-}" ]]; then
+  {
+    echo "ENV:"; env | sort
+    echo "ARGS:"; for a in "$@"; do echo "  $a"; done
+    echo "PWD: $(pwd)"
+  } > "$PLUGIN_DUMP_FILE"
+fi
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id" ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id" ;;
+    *'"notifications/initialized"'*) : ;;
+  esac
+done
+`
+
+// TestPluginServerReceivesRootAndData launches a plugin-sourced stdio server
+// and asserts the §9 contract end to end: PLUGIN_ROOT/PLUGIN_DATA in the
+// child env, args/env/cwd placeholder expansion, and no ambient secrets.
+func TestPluginServerReceivesRootAndData(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash helper is unix-only")
+	}
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "child.txt")
+	path := filepath.Join(dir, "plugin-server.sh")
+	if err := os.WriteFile(path, []byte(pluginEnvDumpServer), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pluginRoot := t.TempDir()
+	pluginData := filepath.Join(t.TempDir(), "data")
+	t.Setenv("PLUGIN_DUMP_FILE", dump)
+	t.Setenv("GITHUB_TOKEN", "ghp_should_not_leak")
+
+	ctx := context.Background()
+	client, err := ConnectRestricted(ctx, Server{
+		Name:    "plugin-srv",
+		Command: "bash",
+		Args:    []string{path, "--config", "${PLUGIN_ROOT}/config.json"},
+		Env:     []string{"PLUGIN_DUMP_FILE"},
+		EnvVars: map[string]string{
+			"CONFIG_PATH": "${PLUGIN_ROOT}/config.json",
+			"STATE_DIR":   "${PLUGIN_DATA}/state",
+		},
+		Cwd:        "${PLUGIN_ROOT}",
+		PluginRoot: pluginRoot,
+		PluginData: pluginData,
+	}, RestrictOpts{Mode: "restricted"})
+	if err != nil {
+		t.Fatalf("ConnectRestricted: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("read child dump: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"PLUGIN_ROOT=" + pluginRoot,
+		"PLUGIN_DATA=" + pluginData,
+		"CONFIG_PATH=" + pluginRoot + "/config.json",
+		"STATE_DIR=" + pluginData + "/state",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("child env missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "ghp_should_not_leak") {
+		t.Errorf("ambient secret leaked:\n%s", body)
+	}
+	if !strings.Contains(body, pluginRoot+"/config.json") {
+		t.Errorf("args not expanded:\n%s", body)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(pluginRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "PWD: "+resolvedRoot) {
+		t.Errorf("cwd not the plugin root:\n%s", body)
+	}
+	info, err := os.Stat(pluginData)
+	if err != nil {
+		t.Fatalf("plugin data dir not created: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("plugin data mode = %o, want 0700", info.Mode().Perm())
+	}
+}
+
+// TestPluginDataPersistsAcrossLaunches writes into PLUGIN_DATA from one
+// launch and asserts a second launch sees it (spec §9.1: preserved across
+// launches and plugin updates).
+func TestPluginDataPersistsAcrossLaunches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash helper is unix-only")
+	}
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "child.txt")
+	path := filepath.Join(dir, "plugin-server.sh")
+	if err := os.WriteFile(path, []byte(pluginEnvDumpServer), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot := t.TempDir()
+	pluginData := filepath.Join(t.TempDir(), "data")
+	t.Setenv("PLUGIN_DUMP_FILE", dump)
+
+	launch := func() *Client {
+		t.Helper()
+		client, err := ConnectRestricted(context.Background(), Server{
+			Name:       "plugin-srv",
+			Command:    "bash",
+			Args:       []string{path, "--state", "${PLUGIN_DATA}/state"},
+			Env:        []string{"PLUGIN_DUMP_FILE"},
+			EnvVars:    map[string]string{"STATE": "${PLUGIN_DATA}/state"},
+			PluginRoot: pluginRoot,
+			PluginData: pluginData,
+		}, RestrictOpts{Mode: "restricted"})
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		return client
+	}
+	first := launch()
+	if err := os.MkdirAll(filepath.Join(pluginData, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginData, "state", "marker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := launch()
+	defer func() { _ = second.Close() }()
+	if _, err := os.Stat(filepath.Join(pluginData, "state", "marker")); err != nil {
+		t.Errorf("PLUGIN_DATA not preserved across launches: %v", err)
+	}
+}
+
 // TestConnectCwd verifies per-server Cwd is applied when RestrictOpts.Dir is
 // empty, and that a caller-supplied Dir still wins.
 func TestConnectCwd(t *testing.T) {
