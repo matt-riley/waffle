@@ -376,7 +376,7 @@ func TestDefaultValidateScoresSessionTurns(t *testing.T) {
 	if result.Promotable() {
 		t.Fatalf("must not promote when held-out regresses: %+v audit=%q", result, audit)
 	}
-	if !(result.HeldOutAfter > result.HeldOutBefore) {
+	if result.HeldOutAfter <= result.HeldOutBefore {
 		t.Fatalf("held-out regress not captured: %+v", result)
 	}
 }
