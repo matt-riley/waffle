@@ -77,6 +77,25 @@ enabled = false
 # Never combine this with Tailscale Funnel: Funnel is public, and Desk rejects
 # any request Serve marks as a Funnel request.
 # [dashboard.tailnet]
+
+# Memory write gate and review queue (#416).
+#
+# [memory]
+# write_gate = "auto"   # auto (default) | notify | review
+# inject_budget = 8192  # max bytes of MEMORY.md injected into the system prompt
+
+# write_gate=review turns every durable memory/skill write (remember,
+# memory_update supersede/forget, distill_skill, learn proposals) into a
+# pending candidate that the owner must review before it reaches live memory:
+#
+#   waffle candidates list                # queue: kind, status, preview
+#   waffle candidates show <id>           # full payload + provenance + diff
+#   waffle candidates approve <id>        # apply exactly the reviewed payload
+#   waffle candidates deny <id> --reason "..."   # record decision, no mutation
+#
+# Untrusted-derived writes (e.g. fetched web content) are always queued for
+# review regardless of write_gate. Skill approval writes the skill inactive;
+# activation stays explicit (`waffle skills activate <name>`).
 # enabled = true
 # The exact MagicDNS name Serve answers on. A bare DNS name, never an IP or port.
 # serve_host = "waffle.example-tailnet.ts.net"
