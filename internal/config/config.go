@@ -228,6 +228,10 @@ type Selfdev struct {
 	Approval  string   `toml:"approval"`
 	Verify    bool     `toml:"verify"`
 	Protected []string `toml:"protected"`
+	// RequiredChecks are the exact check names approval=ci verifies for the
+	// candidate SHA (#415). Empty uses the safe default covering the primary
+	// CI workflow.
+	RequiredChecks []string `toml:"required_checks"`
 }
 
 // MCPServer is one Model Context Protocol server: a local command run over
@@ -1461,6 +1465,9 @@ func Load(path string) (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("selfdev.approval: unknown value %q (want \"manual\", \"ci\", or \"auto-patch\")", cfg.Selfdev.Approval)
 	}
+	if err := validateRequiredChecks(cfg.Selfdev.RequiredChecks); err != nil {
+		return Config{}, err
+	}
 	if err := validateWorkspaceEgress(cfg.Workspace); err != nil {
 		return Config{}, fmt.Errorf("workspace egress: %w", err)
 	}
@@ -1674,6 +1681,31 @@ func validateWorkspaceEgress(w Workspace) error {
 		if host == "" || strings.ContainsAny(host, "/?#") || net.ParseIP(host) != nil {
 			return fmt.Errorf("invalid allowlist host %q", host)
 		}
+	}
+	return nil
+}
+
+// checkNameRE rejects unknown or malformed required-check names at config
+// load (#415): GitHub check/job names are alphanumeric, with separators like
+// spaces, hyphens, slashes, dots, and parentheses.
+var checkNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _/().\-]+$`)
+
+// validateRequiredChecks rejects unknown, empty, or duplicate entries so a
+// typo in approval=ci's required_checks can never silently weaken the gate.
+func validateRequiredChecks(checks []string) error {
+	seen := map[string]bool{}
+	for _, c := range checks {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			return errors.New("selfdev.required_checks: check names may not be empty")
+		}
+		if !checkNameRE.MatchString(c) {
+			return fmt.Errorf("selfdev.required_checks: unknown or malformed check name %q", c)
+		}
+		if seen[c] {
+			return fmt.Errorf("selfdev.required_checks: duplicate check name %q", c)
+		}
+		seen[c] = true
 	}
 	return nil
 }

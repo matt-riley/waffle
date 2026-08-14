@@ -80,6 +80,11 @@ and verifies and builds it in an isolated detached worktree; the configured
 checkout is never modified and uncommitted local edits can never enter the
 built binary. The audit record (selfdev-upgrades.jsonl) binds base SHA,
 candidate SHA, tree hash, and the installed artifact's SHA-256.
+
+With [selfdev] approval = "ci", the upgrade additionally requires every name
+in selfdev.required_checks (default: ["ci"]) to be a completed success for
+the exact candidate SHA via the scoped GitHub App; missing, failed, pending,
+skipped, stale, or error states deny the upgrade with the check name and URL.
 `
 
 func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -113,7 +118,21 @@ func upgradeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if noVerify {
 		fmt.Fprintln(stderr, "warning: --no-verify is unsafe; vet, tests, and lint are being skipped")
 	}
-	path, err := selfdev.UpgradeWithOptions(ctx, cfg.Repo.Dir, ref, stderr, verify, cfg.Selfdev.Approval, cfg.Selfdev.Protected)
+	// approval=ci needs the scoped GitHub App to verify checks for the exact
+	// candidate SHA (#415). A missing app fails closed before any build.
+	var ciOptions []selfdev.UpgradeOption
+	if cfg.Selfdev.Approval == "ci" {
+		app, appErr := newGitHubApp(cfg)
+		if appErr != nil {
+			return appErr
+		}
+		if app == nil {
+			return fmt.Errorf("approval=ci requires [github.app] configuration (app_id, installation_id, private_key)")
+		}
+		gate := selfdev.NewGitHubCIGate(app)
+		ciOptions = append(ciOptions, selfdev.WithCIGate(gate, cfg.Selfdev.RequiredChecks))
+	}
+	path, err := selfdev.UpgradeWithOptions(ctx, cfg.Repo.Dir, ref, stderr, verify, cfg.Selfdev.Approval, cfg.Selfdev.Protected, ciOptions...)
 	if err != nil {
 		return err
 	}

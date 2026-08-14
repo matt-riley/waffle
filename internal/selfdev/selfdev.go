@@ -23,6 +23,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/flock"
+	"github.com/matt-riley/waffle/internal/gitcred"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llm/anthropicp"
 	"github.com/matt-riley/waffle/internal/llm/openaip"
@@ -499,6 +500,24 @@ func Upgrade(ctx context.Context, repoDir, ref string, stderr io.Writer) (string
 // base when upgrading a root commit with no parent (#413).
 const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+// upgradeOptions carries optional gates for UpgradeWithOptions.
+type upgradeOptions struct {
+	ciGate   CIGate
+	required []string
+}
+
+// UpgradeOption configures one optional gate.
+type UpgradeOption func(*upgradeOptions)
+
+// WithCIGate supplies the CI approval gate and the required-check names used
+// when approval="ci" (#415). required may be empty to use the safe default.
+func WithCIGate(gate CIGate, required []string) UpgradeOption {
+	return func(o *upgradeOptions) {
+		o.ciGate = gate
+		o.required = required
+	}
+}
+
 // UpgradeWithOptions is Upgrade with an explicit verification and approval
 // policy. Verification is intentionally opt-out only: callers should make
 // the unsafe choice visible in their own CLI.
@@ -507,8 +526,13 @@ const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 // path), reviews that exact commit, and verifies and builds it in an isolated
 // detached worktree created from the SHA. The configured checkout branch,
 // index, and working tree are never touched, and dirty bytes in the checkout
-// can never enter the artifact (#413).
-func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writer, verify bool, approval string, protected []string) (string, error) {
+// can never enter the artifact (#413). approval="ci" additionally requires
+// successful CI evidence for the exact candidate SHA before any build (#415).
+func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writer, verify bool, approval string, protected []string, extra ...UpgradeOption) (string, error) {
+	opts := upgradeOptions{}
+	for _, o := range extra {
+		o(&opts)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -538,6 +562,30 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 			return "", err
 		}
 	}
+
+	// CI approval: successful, current evidence for the exact SHA is a hard
+	// precondition; network/API errors fail closed and are distinguishable
+	// from a genuine red check (#415). Verified before review so a red or
+	// unavailable gate denies before any provider cost.
+	var ci CIEvidence
+	if approval == "ci" {
+		if opts.ciGate == nil {
+			return "", errors.New("approval=ci requires a configured [github.app] to verify checks; set selfdev.required_checks for exact check names")
+		}
+		repo, err := remoteRepo(ctx, repoDir)
+		if err != nil {
+			return "", err
+		}
+		required := requiredChecks(opts.required)
+		evidence, err := opts.ciGate.Verify(ctx, repo, sha, required)
+		if err != nil {
+			return "", fmt.Errorf("ci approval failed closed: %w", err)
+		}
+		if ok, detail := evidence.Passes(required); !ok {
+			return "", fmt.Errorf("ci approval denied for %s: %s", sha, detail)
+		}
+		ci = evidence
+	}
 	if err := reviewExactCommit(ctx, repoDir, baseSHA, sha, approval); err != nil {
 		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, Approval: approval, Verify: verify, Verification: "failed", Error: err.Error()})
 		return "", err
@@ -563,10 +611,17 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	}
 	defer func() { _ = os.RemoveAll(buildDir) }()
 
+	// Only ci approvals record required checks: a manual/auto-patch audit must
+	// never imply a CI gate ran (#415 review).
+	var auditRequired []string
+	if approval == "ci" {
+		auditRequired = requiredChecks(opts.required)
+	}
+
 	verification := "skipped"
 	if verify {
 		if err := verifyRepo(ctx, wt, stderr); err != nil {
-			if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: true, Verification: "failed", Error: err.Error()}); perr != nil {
+			if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: true, Verification: "failed", Error: err.Error(), CIEvidence: ciPtr(ci), RequiredChecks: auditRequired, CIVerified: approval == "ci"}); perr != nil {
 				return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
 			}
 			return "", err
@@ -575,7 +630,7 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	}
 	built, ver, err := verifyAndBuild(ctx, wt, buildDir, stderr, false)
 	if err != nil {
-		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()}); perr != nil {
+		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error(), CIEvidence: ciPtr(ci), RequiredChecks: auditRequired, CIVerified: approval == "ci"}); perr != nil {
 			return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
 		}
 		return "", err
@@ -583,7 +638,7 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	// The worktree must be pristine right before install so the artifact is
 	// exactly the reviewed SHA/tree.
 	if err := assertCleanTree(ctx, wt); err != nil {
-		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()})
+		_ = persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error(), CIEvidence: ciPtr(ci), RequiredChecks: auditRequired, CIVerified: approval == "ci"})
 		return "", err
 	}
 
@@ -591,7 +646,7 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 	// serialized across processes inside swapBinary (#413 review).
 	path, err := swapBinary(ctx, built, self)
 	if err != nil {
-		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error()}); perr != nil {
+		if perr := persistUpgradeRecord(UpgradeRecord{BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree, Approval: approval, Verify: verify, Verification: verification, Error: err.Error(), CIEvidence: ciPtr(ci), RequiredChecks: auditRequired, CIVerified: approval == "ci"}); perr != nil {
 			return "", fmt.Errorf("%w (upgrade audit write failed: %v)", err, perr)
 		}
 		return "", err
@@ -607,10 +662,60 @@ func UpgradeWithOptions(ctx context.Context, repoDir, ref string, stderr io.Writ
 		BaseSHA: baseSHA, CandidateSHA: sha, TreeHash: tree,
 		ArtifactSHA256: digest, Approval: approval, Verify: verify,
 		Verification: verification, Version: ver, InstalledAt: time.Now().UTC(),
+		CIEvidence: ciPtr(ci), RequiredChecks: auditRequired,
+		CIVerified: approval == "ci",
 	}); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// ciPtr returns a pointer to evidence for audit persistence (nil-safe).
+func ciPtr(ci CIEvidence) *CIEvidence {
+	if ci.SHA == "" && ci.VerifiedAt.IsZero() {
+		return nil
+	}
+	return &ci
+}
+
+// remoteRepo derives the canonical owner/repo for the checkout's origin
+// remote, used by the CI gate (and only by it). The parser does not assume a
+// github.com host: GitHub Enterprise and ssh scp-style URLs work too (#415
+// review).
+func remoteRepo(ctx context.Context, repoDir string) (string, error) {
+	out, err := commandOutput(ctx, repoDir, "git", "remote", "get-url", "origin")
+	if err != nil {
+		return "", fmt.Errorf("ci approval: resolve origin remote: %w", err)
+	}
+	repo, err := parseRemoteRepo(strings.TrimSpace(out))
+	if err != nil {
+		return "", fmt.Errorf("ci approval: %w", err)
+	}
+	return repo, nil
+}
+
+// parseRemoteRepo extracts owner/repo from common origin URL forms:
+// https://host/owner/repo(.git), git@host:owner/repo(.git),
+// ssh://git@host[:port]/owner/repo(.git), or a bare owner/repo.
+func parseRemoteRepo(raw string) (string, error) {
+	u := strings.TrimSuffix(strings.TrimSpace(raw), ".git")
+	if i := strings.Index(u, "://"); i >= 0 {
+		// scheme://[user@]host[:port]/owner/repo → drop the authority.
+		rest := u[i+3:]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			u = rest[j+1:]
+		} else {
+			return "", fmt.Errorf("origin remote %q has no path after the host", raw)
+		}
+	} else if i := strings.LastIndex(u, ":"); i >= 0 {
+		// scp-style git@host:owner/repo → drop everything through the colon.
+		u = u[i+1:]
+	}
+	u = strings.TrimLeft(u, "/")
+	if _, _, err := gitcred.SplitRepo(u); err != nil {
+		return "", fmt.Errorf("origin remote %q is not an owner/repo: %w", raw, err)
+	}
+	return u, nil
 }
 
 // resolveCommit returns the immutable commit SHA for ref (or HEAD when ref is

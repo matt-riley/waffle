@@ -13,9 +13,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/intake"
 )
 
 // App mints and caches GitHub installation tokens for one app installation.
@@ -160,6 +163,94 @@ func (a *App) Token(ctx context.Context, repo string, permissions map[string]str
 // nothing else: Token with the pull_requests:write permission set.
 func (a *App) PullRequestToken(ctx context.Context, repo string) (string, error) {
 	return a.Token(ctx, repo, permPullRequests)
+}
+
+// CheckRun is one check run reported for a commit.
+type CheckRun struct {
+	Name       string
+	Status     string // completed | in_progress | queued | pending
+	Conclusion string // success | failure | cancelled | timed_out | action_required | skipped | neutral
+	DetailsURL string
+	HeadSHA    string // the commit the run actually targeted
+}
+
+// CheckRunsForCommit lists check runs for one exact commit SHA using a
+// checks:read installation token, following Link-header pagination. Runs whose
+// head_sha differs from the requested SHA are returned as-is so the CI gate
+// can fail closed on stale or wrong-SHA evidence (#415).
+func (a *App) CheckRunsForCommit(ctx context.Context, repo, sha string) ([]CheckRun, error) {
+	owner, name, err := SplitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	token, err := a.Token(ctx, repo, permChecksRead)
+	if err != nil {
+		return nil, fmt.Errorf("mint checks read token: %w", err)
+	}
+	var all []CheckRun
+	pageURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=100", a.baseURL, owner, name, url.PathEscape(sha))
+	for page := 1; page <= maxPages; page++ {
+		resp, cancel, err := a.do(ctx, pageURL, token)
+		if err != nil {
+			return nil, err
+		}
+		raw, readErr := readBody(resp, jsonBodyCap)
+		cancel()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode/100 != 2 {
+			return nil, refused("check runs", resp, raw)
+		}
+		var body struct {
+			CheckRuns []struct {
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+				DetailsURL string `json:"details_url"`
+				HeadSHA    string `json:"head_sha"`
+			} `json:"check_runs"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, fmt.Errorf("github check runs response unreadable: %w", err)
+		}
+		for _, r := range body.CheckRuns {
+			all = append(all, CheckRun{
+				Name: r.Name, Status: r.Status, Conclusion: r.Conclusion,
+				DetailsURL: r.DetailsURL, HeadSHA: r.HeadSHA,
+			})
+		}
+		nextURL, ok := intake.NextLinkURL(resp.Header.Get("Link"))
+		if !ok {
+			break
+		}
+		if page == maxPages {
+			break
+		}
+		pageURL = nextURL
+	}
+	return all, nil
+}
+
+// do performs one authenticated GitHub GET against the app's API root.
+// The returned cancel must be called once the caller has finished reading the
+// response body.
+func (a *App) do(ctx context.Context, apiURL, token string) (*http.Response, func(), error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", jsonAccept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return resp, cancel, nil
 }
 
 // Verify reports whether the configured app credentials can still mint an

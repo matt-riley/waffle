@@ -17,16 +17,19 @@ import (
 // a misbehaving upgrade is observable. With approval=ci the CI evidence is
 // persisted too (#415).
 type UpgradeRecord struct {
-	BaseSHA        string    `json:"base_sha"`
-	CandidateSHA   string    `json:"candidate_sha"`
-	TreeHash       string    `json:"tree_hash"`
-	ArtifactSHA256 string    `json:"artifact_sha256,omitempty"`
-	Approval       string    `json:"approval"`
-	Verify         bool      `json:"verify"`
-	Verification   string    `json:"verification"` // ok | skipped | failed
-	Version        string    `json:"version,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	InstalledAt    time.Time `json:"installed_at,omitempty"`
+	BaseSHA        string      `json:"base_sha"`
+	CandidateSHA   string      `json:"candidate_sha"`
+	TreeHash       string      `json:"tree_hash"`
+	ArtifactSHA256 string      `json:"artifact_sha256,omitempty"`
+	Approval       string      `json:"approval"`
+	Verify         bool        `json:"verify"`
+	Verification   string      `json:"verification"` // ok | skipped | failed
+	Version        string      `json:"version,omitempty"`
+	Error          string      `json:"error,omitempty"`
+	InstalledAt    time.Time   `json:"installed_at,omitempty"`
+	RequiredChecks []string    `json:"required_checks,omitempty"`
+	CIEvidence     *CIEvidence `json:"ci_evidence,omitempty"`
+	CIVerified     bool        `json:"ci_verified"`
 }
 
 // persistUpgradeRecord appends one JSON audit line to
