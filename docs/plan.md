@@ -514,7 +514,11 @@ Prompt-level self-modification is gated like code self-modification. Memory
 and skill candidates carry provenance; `[memory] write_gate` accepts `auto`,
 `notify`, or `review`. Review writes remain pending until host approval, and
 untrusted-derived candidates never enter the live prompt automatically.
-Rendered `MEMORY.md` is explicitly observational data, not instructions.
+Every memory mutation crosses the same gate (#44): `remember` appends, and
+`memory_update` supersedes/forgets existing notes by ID with honest
+model-derived provenance and a compare-and-swap digest on approval (#417) —
+no mutation bypasses review mode. Rendered `MEMORY.md` is explicitly
+observational data, not instructions.
 
 ### Self-development loop (waffle works on waffle)
 
