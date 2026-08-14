@@ -190,6 +190,28 @@ a native Go tool via a self-PR — that path is described in `docs/plan.md`
 under "Skills & memory" but isn't something you trigger directly; it's a
 consequence of the reflection loop noticing repetition, not a command.
 
+### Review queue (write_gate=review)
+
+With `[memory] write_gate = "review"`, every durable write — `remember`,
+`memory_update` supersede/forget, `distill_skill`, and learn proposals — lands
+in a pending queue instead of live memory. Untrusted-derived writes (fetched
+web content) are queued for review even under `auto` or `notify`. The queue is
+drained through the host CLI:
+
+```sh
+waffle candidates list                 # pending memory/skill candidates
+waffle candidates show <id>            # full payload, provenance, diff
+waffle candidates approve <id>         # apply exactly the reviewed payload
+waffle candidates deny <id> --reason "duplicate"   # record decision, no write
+```
+
+Approval is compare-and-swap: if the pending file (or the target memory note
+for an update) changed since you inspected it, the decision fails stale and
+you re-inspect. Approved skills are written **inactive**; activation stays
+`waffle skills activate <name>`. Denied candidates keep the full payload plus
+denial reason as an audit record and never touch live memory. Corrupt pending
+files are reported individually by name and do not hide the rest of the queue.
+
 ## Model aliases (the other gap)
 
 Not one of the four above, but worth folding in since it trips people up: you

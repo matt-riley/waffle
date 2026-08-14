@@ -784,7 +784,7 @@ func (t RememberTool) Run(ctx context.Context, input json.RawMessage) (string, e
 		return "", err
 	}
 	if c.Status == "pending" {
-		return fmt.Sprintf("memory candidate %s is pending owner approval", c.ID), nil
+		return fmt.Sprintf("memory candidate %s is pending owner approval (%s)", c.ID, c.ReviewHint), nil
 	}
 	return fmt.Sprintf("noted in MEMORY.md (id=%s)", noteID), nil
 }
@@ -884,7 +884,7 @@ func (t MemoryUpdateTool) Run(ctx context.Context, input json.RawMessage) (strin
 		return "", err
 	}
 	if applied.Status == "pending" {
-		return fmt.Sprintf("memory %s of note %s is pending owner approval (%s); it has not changed live memory", in.Action, in.ID, applied.ID), nil
+		return fmt.Sprintf("memory %s of note %s is pending owner approval (%s); it has not changed live memory", in.Action, in.ID, applied.ReviewHint), nil
 	}
 	switch in.Action {
 	case "forget":
