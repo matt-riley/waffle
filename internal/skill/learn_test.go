@@ -56,7 +56,7 @@ func TestMineThreeFailureClasses(t *testing.T) {
 	seedFailureClass(t, sessions, "b", "error: permission denied writing protected config path", 2)
 	seedFailureClass(t, sessions, "c", "error: command not found for foobar-cli binary", 4)
 
-	patterns, err := MineFailurePatterns(ctx, sessions, "", 20)
+	patterns, _, _, _, err := MineFailurePatterns(ctx, sessions, LearnCursor{}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}

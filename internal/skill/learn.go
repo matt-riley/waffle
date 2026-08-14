@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/id"
@@ -69,17 +71,20 @@ type Proposal struct {
 
 // RunResult is the outcome of one learn pass.
 type RunResult struct {
-	ID            string
-	StartedAt     time.Time
-	FinishedAt    time.Time
-	SinceAt       string
-	Patterns      []FailurePattern
-	Proposals     []Proposal
-	Accepted      int
-	Rejected      int
-	ProviderCalls int
-	Digest        string
-	FromCacheOnly bool // true when attribution used only cache
+	ID              string
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	SinceAt         string
+	Patterns        []FailurePattern
+	Proposals       []Proposal
+	Accepted        int
+	Rejected        int
+	ProviderCalls   int
+	Digest          string
+	FromCacheOnly   bool // true when attribution used only cache
+	Cursor          LearnCursor
+	ScannedSessions int
+	Pages           int
 }
 
 // ValidateFunc is the pluggable held-in/held-out scorer used by PromoteProposal (#65).
@@ -116,6 +121,13 @@ type Learner struct {
 	Baseline ScoreFunc
 	// ValidateCtx is the context used by default scoring (tests may set it).
 	ValidateCtx context.Context
+	// StaleRunAfter bounds how old an in-progress run may be before a new run
+	// treats it as a crashed/interrupted run and reclaims the loop (#412).
+	// Zero means the default (30 minutes).
+	StaleRunAfter time.Duration
+	// mu serializes in-process Run calls so concurrent /learn triggers cannot
+	// interleave (#412).
+	mu sync.Mutex
 }
 
 func (l *Learner) now() time.Time {
@@ -125,79 +137,111 @@ func (l *Learner) now() time.Time {
 	return time.Now().UTC()
 }
 
-// LastRunSince returns the finished_at (or started_at) of the most recent
-// learn run, used as the mining high-water mark.
-func LastRunSince(ctx context.Context, db *sql.DB) (string, error) {
-	if db == nil {
-		return "", nil
-	}
-	var since string
-	err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(finished_at, ''), started_at)
-		FROM learn_runs
-		ORDER BY started_at DESC LIMIT 1`).Scan(&since)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return since, err
+// LearnCursor is the durable mining high-water mark (#412). Only a
+// successfully finished learn run may advance it, so a failed or interrupted
+// run never skips evidence. SessionID is the tie-breaker for sessions sharing
+// the same updated_at (keyset pagination).
+type LearnCursor struct {
+	// UpdatedAt is the RFC3339Nano updated_at of the last mined session; empty
+	// means start from the beginning.
+	UpdatedAt string
+	SessionID string
 }
 
-// MineFailurePatterns scans sessions updated since sinceAt (empty = all
-// recent) for recurring tool-error classes. sessionLimit caps how many
-// sessions are inspected when sinceAt is empty.
-func MineFailurePatterns(ctx context.Context, sessions *session.Store, sinceAt string, sessionLimit int) ([]FailurePattern, error) {
+// LastRunSince returns the committed cursor's updated_at (the old
+// high-water mark display), or "" when no finished run exists.
+func LastRunSince(ctx context.Context, db *sql.DB) (string, error) {
+	c, err := LoadCommittedCursor(ctx, db)
+	return c.UpdatedAt, err
+}
+
+// LoadCommittedCursor returns the cursor committed by the most recent
+// successfully finished learn run (#412). Failed and in-progress runs never
+// advance it.
+func LoadCommittedCursor(ctx context.Context, db *sql.DB) (LearnCursor, error) {
+	if db == nil {
+		return LearnCursor{}, nil
+	}
+	var c LearnCursor
+	err := db.QueryRowContext(ctx, `
+		SELECT cursor_updated_at, cursor_session_id
+		FROM learn_runs
+		WHERE status = 'finished'
+		ORDER BY started_at DESC LIMIT 1`).Scan(&c.UpdatedAt, &c.SessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LearnCursor{}, nil
+	}
+	return c, err
+}
+
+// MineFailurePatterns pages through every session updated after the cursor in
+// (updated_at, id) keyset order and aggregates recurring tool-error classes.
+// The fixed page size is a page size, not a total-window cap: a busy learn
+// window is drained completely (#412). It returns the patterns, the next
+// cursor (position after the last mined session), the count of scanned
+// sessions, and the number of pages consumed.
+func MineFailurePatterns(ctx context.Context, sessions *session.Store, cursor LearnCursor, pageSize int) ([]FailurePattern, LearnCursor, int, int, error) {
 	if sessions == nil {
-		return nil, fmt.Errorf("no session store")
+		return nil, cursor, 0, 0, fmt.Errorf("no session store")
 	}
-	if sessionLimit <= 0 {
-		sessionLimit = 50
-	}
-	list, err := sessions.List(ctx, sessionLimit)
-	if err != nil {
-		return nil, err
+	if pageSize <= 0 {
+		pageSize = 50
 	}
 	type acc struct {
 		p    FailurePattern
 		seen map[string]bool
 	}
 	counts := map[string]*acc{}
-	for _, sess := range list {
-		if sinceAt != "" && !sess.UpdatedAt.IsZero() {
-			// Skip sessions not updated after the last learn run.
-			if !sess.UpdatedAt.After(parseTime(sinceAt)) {
-				continue
-			}
-		}
-		turns, err := sessions.Turns(ctx, sess.ID)
+	scanned := 0
+	pages := 0
+	for {
+		list, err := sessions.ListUpdatedAfter(ctx, cursor.UpdatedAt, cursor.SessionID, pageSize)
 		if err != nil {
-			return nil, err
+			return nil, cursor, scanned, pages, err
 		}
-		for _, m := range turns {
-			for _, b := range m.Blocks {
-				if b.Type != llm.BlockToolResult || b.ToolResult == nil {
-					continue
-				}
-				if !b.ToolResult.IsError && !strings.Contains(strings.ToLower(b.ToolResult.Content), "error:") {
-					continue
-				}
-				sig, sample := fingerprintError(b.ToolResult.Content)
-				if sig == "" {
-					continue
-				}
-				a := counts[sig]
-				if a == nil {
-					a = &acc{p: FailurePattern{Class: sig}, seen: map[string]bool{}}
-					counts[sig] = a
-				}
-				a.p.Count++
-				if !a.seen[sess.ID] {
-					a.seen[sess.ID] = true
-					a.p.SessionIDs = append(a.p.SessionIDs, sess.ID)
-				}
-				if len(a.p.Samples) < 3 {
-					a.p.Samples = append(a.p.Samples, sample)
+		if len(list) == 0 {
+			break
+		}
+		// A page is counted only when it carried work: a drained cursor must
+		// not report a phantom page (#412 review).
+		pages++
+		for _, sess := range list {
+			turns, err := sessions.Turns(ctx, sess.ID)
+			if err != nil {
+				return nil, cursor, scanned, pages, err
+			}
+			for _, m := range turns {
+				for _, b := range m.Blocks {
+					if b.Type != llm.BlockToolResult || b.ToolResult == nil {
+						continue
+					}
+					if !b.ToolResult.IsError && !strings.Contains(strings.ToLower(b.ToolResult.Content), "error:") {
+						continue
+					}
+					sig, sample := fingerprintError(b.ToolResult.Content)
+					if sig == "" {
+						continue
+					}
+					a := counts[sig]
+					if a == nil {
+						a = &acc{p: FailurePattern{Class: sig}, seen: map[string]bool{}}
+						counts[sig] = a
+					}
+					a.p.Count++
+					if !a.seen[sess.ID] {
+						a.seen[sess.ID] = true
+						a.p.SessionIDs = append(a.p.SessionIDs, sess.ID)
+					}
+					if len(a.p.Samples) < 3 {
+						a.p.Samples = append(a.p.Samples, sample)
+					}
 				}
 			}
+			scanned++
+			cursor = LearnCursor{UpdatedAt: sess.UpdatedAt.Format(time.RFC3339Nano), SessionID: sess.ID}
+		}
+		if len(list) < pageSize {
+			break
 		}
 	}
 	out := make([]FailurePattern, 0, len(counts))
@@ -212,20 +256,7 @@ func MineFailurePatterns(ctx context.Context, sessions *session.Store, sinceAt s
 		}
 		return out[i].Class < out[j].Class
 	})
-	return out, nil
-}
-
-func parseTime(s string) time.Time {
-	if s == "" {
-		return time.Time{}
-	}
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t
-	}
-	return time.Time{}
+	return out, cursor, scanned, pages, nil
 }
 
 // contentHash for attribution cache: class + samples + session ids.
@@ -711,11 +742,18 @@ func (l *Learner) storeProposal(ctx context.Context, p Proposal) error {
 	return err
 }
 
-// Run executes a full mine→propose→validate pass.
+// Run executes a full mine→propose→validate pass (#412). The durable cursor
+// only advances on a fully successful run; any failure marks the run failed
+// with an error summary and leaves the cursor unchanged so the failed page is
+// retried on the next run. Concurrent triggers are serialized (in-process by
+// the learner mutex; cross-process by refusing to start while a fresh run is
+// in progress; stale in-progress rows from a crash are reclaimed).
 func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 	if l.Sessions == nil {
 		return nil, fmt.Errorf("no session store")
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	minCount := l.MinCount
 	if minCount <= 0 {
 		minCount = 2
@@ -725,30 +763,55 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	since, err := LastRunSince(ctx, l.DB)
-	if err != nil {
-		return nil, err
-	}
 	if l.DB != nil {
-		_, err = l.DB.ExecContext(ctx, `
-			INSERT INTO learn_runs (id, started_at, since_at) VALUES (?, ?, ?)`,
-			runID, started.Format(time.RFC3339Nano), since)
+		staleAfter := l.StaleRunAfter
+		if staleAfter <= 0 {
+			staleAfter = 30 * time.Minute
+		}
+		// Reclaim crashed/interrupted runs so a restart can never wedge the
+		// loop. Their cursor was never committed, so the failed page is retried.
+		if _, err := l.DB.ExecContext(ctx, `
+			UPDATE learn_runs SET status = 'failed', error = 'interrupted (crash/restart); cursor not advanced'
+			WHERE status = 'running' AND started_at < ?`,
+			started.Add(-staleAfter).Format(time.RFC3339Nano)); err != nil {
+			return nil, err
+		}
+		// Claim the loop atomically: the conditional insert and its
+		// existence check are one statement, so two processes cannot both
+		// observe zero running rows and start (#412 review). RowsAffected is
+		// 0 when another process won the claim.
+		res, err := l.DB.ExecContext(ctx, `
+			INSERT INTO learn_runs (id, started_at, since_at, status)
+			SELECT ?, ?, '', 'running'
+			WHERE NOT EXISTS (SELECT 1 FROM learn_runs WHERE status = 'running')`,
+			runID, started.Format(time.RFC3339Nano))
 		if err != nil {
 			return nil, err
 		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, errors.New("a learn run is already in progress; refusing to start a concurrent run")
+		}
 	}
 
-	patterns, err := MineFailurePatterns(ctx, l.Sessions, since, 50)
+	cursor, err := LoadCommittedCursor(ctx, l.DB)
 	if err != nil {
+		l.failRun(ctx, runID, err)
+		return nil, err
+	}
+	patterns, nextCursor, scanned, pages, err := MineFailurePatterns(ctx, l.Sessions, cursor, 50)
+	if err != nil {
+		l.failRun(ctx, runID, err)
 		return nil, err
 	}
 	patterns, calls, err := l.AttributePatterns(ctx, patterns)
 	if err != nil {
+		l.failRun(ctx, runID, err)
 		return nil, err
 	}
 
 	props, err := Propose(runID, patterns, minCount)
 	if err != nil {
+		l.failRun(ctx, runID, err)
 		return nil, err
 	}
 
@@ -764,6 +827,7 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		pat := byClass[prop.PatternSig]
 		out, err := l.PromoteProposal(ctx, prop, pat)
 		if err != nil {
+			l.failRun(ctx, runID, err)
 			return nil, err
 		}
 		if out.Status == "accepted" {
@@ -774,37 +838,61 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		resolved = append(resolved, out)
 	}
 
-	digest := formatDigest(patterns, resolved, calls)
+	digest := formatDigest(patterns, resolved, calls, scanned, pages, nextCursor)
 	finished := l.now()
 	if l.DB != nil {
+		// Only a fully successful run commits the durable cursor (#412).
 		_, err = l.DB.ExecContext(ctx, `
-			UPDATE learn_runs SET finished_at = ?, pattern_count = ?, proposal_count = ?,
-				accepted_count = ?, rejected_count = ?, provider_calls = ?, digest = ?
+			UPDATE learn_runs SET finished_at = ?, status = 'finished', error = '',
+				pattern_count = ?, proposal_count = ?,
+				accepted_count = ?, rejected_count = ?, provider_calls = ?, digest = ?,
+				scanned_sessions = ?, pages = ?, cursor_updated_at = ?, cursor_session_id = ?
 			WHERE id = ?`,
 			finished.Format(time.RFC3339Nano), len(patterns), len(props),
-			accepted, rejected, calls, digest, runID)
+			accepted, rejected, calls, digest, scanned, pages,
+			nextCursor.UpdatedAt, nextCursor.SessionID, runID)
 		if err != nil {
+			l.failRun(ctx, runID, err)
 			return nil, err
 		}
 	}
 	return &RunResult{
-		ID:            runID,
-		StartedAt:     started,
-		FinishedAt:    finished,
-		SinceAt:       since,
-		Patterns:      patterns,
-		Proposals:     resolved,
-		Accepted:      accepted,
-		Rejected:      rejected,
-		ProviderCalls: calls,
-		Digest:        digest,
-		FromCacheOnly: calls == 0 && len(patterns) > 0,
+		ID:              runID,
+		StartedAt:       started,
+		FinishedAt:      finished,
+		SinceAt:         cursor.UpdatedAt,
+		Patterns:        patterns,
+		Proposals:       resolved,
+		Accepted:        accepted,
+		Rejected:        rejected,
+		ProviderCalls:   calls,
+		Digest:          digest,
+		FromCacheOnly:   calls == 0 && len(patterns) > 0,
+		Cursor:          nextCursor,
+		ScannedSessions: scanned,
+		Pages:           pages,
 	}, nil
 }
 
-func formatDigest(patterns []FailurePattern, props []Proposal, calls int) string {
+// failRun marks the in-progress run failed with an explicit error summary.
+// It never advances the cursor, so the next run retries from the last
+// committed position (#412).
+func (l *Learner) failRun(ctx context.Context, runID string, runErr error) {
+	if l.DB == nil {
+		return
+	}
+	if _, err := l.DB.ExecContext(ctx, `
+		UPDATE learn_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
+		runErr.Error(), l.now().Format(time.RFC3339Nano), runID); err != nil {
+		slog.Warn("learn: failed to record failed run", "run_id", runID, "err", err)
+	}
+}
+
+func formatDigest(patterns []FailurePattern, props []Proposal, calls, scanned, pages int, cursor LearnCursor) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "patterns=%d proposals=%d provider_calls=%d\n", len(patterns), len(props), calls)
+	fmt.Fprintf(&b, "patterns=%d proposals=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
+		len(patterns), len(props), calls, scanned, pages)
+	fmt.Fprintf(&b, "cursor=%s/%s\n", cursor.UpdatedAt, cursor.SessionID)
 	for _, p := range patterns {
 		fmt.Fprintf(&b, "  (%d×) %s sessions=%s", p.Count, p.Class, strings.Join(p.SessionIDs, ","))
 		if p.Attribution != "" {

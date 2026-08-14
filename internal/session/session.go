@@ -440,6 +440,51 @@ func (s *Store) List(ctx context.Context, limit int) ([]Session, error) {
 	return s.list(ctx, limit)
 }
 
+// ListUpdatedAfter returns sessions strictly after the keyset cursor
+// (updated_at, id), ordered ascending — the learning loop's lossless
+// pagination surface (#412). The fixed limit is a page size, never a
+// total-window cap. An empty updatedAt starts from the beginning.
+func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limit int) ([]Session, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at
+		FROM sessions
+		WHERE ? = '' OR (updated_at > ? OR (updated_at = ? AND id > ?))
+		ORDER BY updated_at ASC, id ASC
+		LIMIT ?`, updatedAt, updatedAt, updatedAt, id, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]Session, 0, limit)
+	for rows.Next() {
+		var sess Session
+		var created, updated, reflected string
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected); err != nil {
+			return nil, err
+		}
+		createdAt, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil && created != "" {
+			return nil, fmt.Errorf("parse session created_at: %w", err)
+		}
+		sess.CreatedAt = createdAt
+		updatedAtT, err := time.Parse(time.RFC3339Nano, updated)
+		if err != nil && updated != "" {
+			return nil, fmt.Errorf("parse session updated_at: %w", err)
+		}
+		sess.UpdatedAt = updatedAtT
+		if reflected != "" {
+			if sess.ReflectedAt, err = time.Parse(time.RFC3339Nano, reflected); err != nil {
+				return nil, fmt.Errorf("parse session reflected_at: %w", err)
+			}
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at
