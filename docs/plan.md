@@ -232,6 +232,24 @@ OAuth and egress posture under our control. Tool availability is decided by
 the session's policy (openclaw-style allow/deny), evaluated in the gateway,
 not trusted to the sandbox.
 
+**Portable plugin MCP (#391).** A plugin's `mcp.json` is parsed and validated
+in `internal/plugin` (`LoadMCP`) against the closed Agent Plugins §7.2.1
+schemas: `$schema` must match the plugin's declared version (a mismatch
+**disables MCP for that plugin only**, §7.2.2), a missing `mcp.json` is not an
+error, an invalid server entry is skipped with a report while valid entries
+load, and the deprecated `sse` transport is deliberately unsupported and
+skipped. `internal/pluginmcp` maps entries onto the runtime
+(`mcp.Server`/`HTTPOpts`): bare commands stay bare, `./`-relative commands
+and cwd resolve within the plugin root, cwd defaults to the resolved root,
+`env` objects overlay the `BuildProcessEnv` base as explicit name→value pairs
+(never ambient secrets), and fixed `headers` are applied with
+client-generated session/auth headers always winning. The portable surface
+carries **no waffle policy** — no `execution`/`egress`/`groups`/`token`
+fields exist in `mcp.json`, so a plugin cannot relax the #77/#79/#249
+posture; policy lands via the waffle extension namespace (#394) and
+operator config. `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` expansion is the next
+issue (#392).
+
 **Mid-run owner messaging (#253).** The gateway attaches one session-scoped
 outbound sender per run (`internal/notify`), bound to the conversation's
 channel and chat id — the same adapter resolution the memory-change notifier

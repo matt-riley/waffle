@@ -262,15 +262,23 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 
 # MCP servers (#249). A server is exactly one of the two transports:
 #
-#   [[mcp.server]]               local command over stdio (default):
+#   [[mcp]]                     local command over stdio (default):
 #   name = "codeintel"             command = "gopls", args = ["mcp"]
 #   command = "/path/to/server"    execution = "host" | "sandbox"
 #
-#   [[mcp.server]]               remote streamable-HTTP endpoint:
+#   [[mcp]]                     remote streamable-HTTP endpoint:
 #   name = "github"                url = "https://api.github.com/mcp"
 #   url = "https://api.github.com/mcp"
 #
 # Supplying both command and url — or neither — is a load error.
+#
+# Portable plugin MCP servers (Agent Plugins mcp.json, #391) are separate:
+# they are discovered from a plugin's mcp.json, carry no waffle policy
+# fields, and get the most restrictive default posture (docker-mode groups
+# wrap/dial exactly as native servers, remote servers are deny-by-default
+# for unattended tiers, credentials come only from the secret store).
+# Operator overrides for plugin servers land in config.toml keyed by
+# plugin+server (waffle extension namespace, #394).
 #
 # Remote servers:
 #   * have no process to restrict, so execution must stay unset or "host";
@@ -297,7 +305,7 @@ deny = ["bash", "write_file", "edit_file", "remember", "memory_update", "distill
 #     groups list means main only; cron/issue/group (and custom tiers)
 #     must name the server explicitly.
 #
-# [[mcp.server]]
+# [[mcp]]
 # name = "github"
 # url = "https://api.github.com/mcp"
 # groups = ["main"]

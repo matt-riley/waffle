@@ -369,14 +369,14 @@ func schemaRejection(id string) error {
 
 // declaredSchemaVersion extracts the spec version from a canonical
 // identifier of the form
-// https://agent-plugins.org/schemas/<version>/plugin.schema.json.
+// https://agent-plugins.org/schemas/<version>/<name>.schema.json.
 func declaredSchemaVersion(id string) (string, bool) {
 	rest, ok := strings.CutPrefix(id, "https://agent-plugins.org/schemas/")
 	if !ok {
 		return "", false
 	}
 	version, suffix, found := strings.Cut(rest, "/")
-	if !found || suffix != "plugin.schema.json" || version == "" ||
+	if !found || !strings.HasSuffix(suffix, ".schema.json") || version == "" ||
 		strings.ContainsAny(version, "/#?") {
 		return "", false
 	}
