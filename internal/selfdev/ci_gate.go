@@ -33,6 +33,7 @@ type CheckResult struct {
 type CIEvidence struct {
 	SHA        string
 	Checks     []CheckResult
+	ChecksURL  string // stable web URL to the commit's checks page (#415 review)
 	VerifiedAt time.Time
 }
 
@@ -48,7 +49,11 @@ func (e CIEvidence) Passes(required []string) (bool, string) {
 	for _, name := range required {
 		runs := byName[name]
 		if len(runs) == 0 {
-			return false, fmt.Sprintf("required check %q is missing for %s", name, e.SHA)
+			detail := fmt.Sprintf("required check %q is missing for %s", name, e.SHA)
+			if e.ChecksURL != "" {
+				detail += " (" + e.ChecksURL + ")"
+			}
+			return false, detail
 		}
 		// Any matching run must be green on this exact SHA; a stale run for a
 		// different head can never satisfy the gate.
@@ -117,7 +122,27 @@ func (g *githubCIGate) Verify(ctx context.Context, repo, sha string, required []
 			URL: r.DetailsURL, HeadSHA: r.HeadSHA,
 		})
 	}
-	return CIEvidence{SHA: sha, Checks: checks, VerifiedAt: time.Now().UTC()}, nil
+	return CIEvidence{
+		SHA: sha, Checks: checks, VerifiedAt: time.Now().UTC(),
+		ChecksURL: webChecksURL(g.app.BaseURL(), repo, sha),
+	}, nil
+}
+
+// webChecksURL derives the stable web URL to a commit's checks page from the
+// GitHub App API root, so denial details always carry a link even when the
+// check run itself is absent (#415 review). Handles github.com and GitHub
+// Enterprise API bases.
+func webChecksURL(apiBase, repo, sha string) string {
+	host := strings.TrimSpace(apiBase)
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimSuffix(host, "/")
+	host = strings.TrimPrefix(host, "api.")
+	host = strings.TrimSuffix(host, "/api/v3")
+	if host == "" {
+		host = "github.com"
+	}
+	return "https://" + host + "/" + strings.Trim(repo, "/") + "/commit/" + sha + "/checks"
 }
 
 // requiredChecks returns the effective required-check list: the configured

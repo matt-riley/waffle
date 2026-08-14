@@ -164,7 +164,8 @@ func TestUpgradeCIGreenProceedsPastGate(t *testing.T) {
 	}
 }
 
-// TestRemoteRepoParsesScpAndHttpsURLs covers the origin-remote normalization.
+// TestRemoteRepoParsesScpAndHttpsURLs covers origin-remote normalization
+// without assuming a github.com host (GitHub Enterprise and ssh URLs too).
 func TestRemoteRepoParsesScpAndHttpsURLs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -174,6 +175,9 @@ func TestRemoteRepoParsesScpAndHttpsURLs(t *testing.T) {
 		"https://github.com/owner/repo.git",
 		"git@github.com:owner/repo.git",
 		"owner/repo",
+		"ssh://git@ghe.example.com:2222/owner/repo.git",
+		"https://ghe.example.com/owner/repo",
+		"git@ghe.example.com:owner/repo",
 	} {
 		_ = exec.Command("git", "-C", dir, "remote", "remove", "origin").Run()
 		if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", url).CombinedOutput(); err != nil {
@@ -186,6 +190,32 @@ func TestRemoteRepoParsesScpAndHttpsURLs(t *testing.T) {
 		if got != "owner/repo" {
 			t.Fatalf("remoteRepo(%q) = %q, want owner/repo", url, got)
 		}
+	}
+}
+
+// TestWebChecksURLDerivesStableLink covers the missing-check denial URL for
+// github.com and GitHub Enterprise API bases (#415 review).
+func TestWebChecksURLDerivesStableLink(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	if got := webChecksURL("https://api.github.com", "owner/repo", sha); got != "https://github.com/owner/repo/commit/"+sha+"/checks" {
+		t.Fatalf("github.com URL = %q", got)
+	}
+	if got := webChecksURL("https://ghe.example.com/api/v3", "owner/repo", sha); got != "https://ghe.example.com/owner/repo/commit/"+sha+"/checks" {
+		t.Fatalf("enterprise URL = %q", got)
+	}
+	if got := webChecksURL("", "owner/repo", sha); got != "https://github.com/owner/repo/commit/"+sha+"/checks" {
+		t.Fatalf("empty-base URL = %q", got)
+	}
+}
+
+// TestCIEvidenceMissingCarriesChecksURL verifies the missing-check denial
+// includes the stable checks URL when evidence has one.
+func TestCIEvidenceMissingCarriesChecksURL(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	ev := CIEvidence{SHA: sha, ChecksURL: "https://github.com/owner/repo/commit/" + sha + "/checks"}
+	ok, detail := ev.Passes([]string{"ci"})
+	if ok || !strings.Contains(detail, "checks") {
+		t.Fatalf("missing-check denial = (%v, %q), want URL in detail", ok, detail)
 	}
 }
 
