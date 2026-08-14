@@ -904,7 +904,17 @@ shipped** (see [Deviations](#deviations)).
    via that model; results land in `learn_attr_cache` keyed by content hash so
    a re-run on unchanged data makes **zero** provider calls.
 3. **Propose.** Edits are constrained to enumerated surfaces: `skill`,
-   `memory` (MEMORY.md), `config_stub`. Other surfaces are rejected.
+   `memory` (MEMORY.md), `config_stub`. Proposal generation is
+   mechanism-specific: the utility model (when configured) returns a strictly
+   decoded, structured candidate set — or a deterministic rule table does —
+   each with a concrete mechanism rationale, exact commands, and evidence;
+   generic "reproduce, fix root cause, re-run" restatements are never
+   generated or auto-promoted. Existing matching inactive skills are updated
+   in place rather than minting redundant `recover-*` skills, active skills
+   are never overwritten, prior rejected attempts are fed back so the same
+   content hash is not re-proposed, and results are cached by evidence hash,
+   model, prompt/schema version, existing-surface digest, and prior-attempt
+   digest.
 4. **Validate / promote.** Promotion is fail-closed: a real before/after
    measurement (baseline → score) must show held-in strictly improving and
    held-out not regressing, with at least one independent held-out case, or

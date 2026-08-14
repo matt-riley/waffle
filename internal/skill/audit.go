@@ -14,8 +14,6 @@ var (
 	spaceRE = regexp.MustCompile(`\s+`)
 	// drop volatile tokens (paths, numbers, hex ids).
 	volatileRE = regexp.MustCompile(`(?i)(/[^\s]+)|(\b[0-9a-f]{8,}\b)|(\b\d+\b)`)
-	// skillNameRE strips non-slug characters when deriving a skill name.
-	skillNameRE = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
 func fingerprintError(content string) (sig, sample string) {
@@ -42,17 +40,4 @@ func fingerprintError(content string) (sig, sample string) {
 		raw = textcut.Cut(raw, 80)
 	}
 	return raw, sample
-}
-
-func skillNameFromSignature(sig string) string {
-	s := strings.ToLower(sig)
-	s = skillNameRE.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "tool-error"
-	}
-	if len(s) > 40 {
-		s = textcut.Cut(s, 40)
-	}
-	return "recover-" + s
 }

@@ -65,8 +65,11 @@ type Proposal struct {
 	Name        string
 	Description string
 	Body        string
+	Rationale   string // mechanism-specific one-liner from the proposer (#410)
 	Audit       string
 	CreatedAt   time.Time
+	// FromCache is true when the proposal came from the proposal cache (#410).
+	FromCache bool
 }
 
 // RunResult is the outcome of one learn pass.
@@ -162,6 +165,11 @@ type Learner struct {
 	// mu serializes in-process Run calls so concurrent /learn triggers cannot
 	// interleave (#412).
 	mu sync.Mutex
+	// lastExistingSkills and lastPriorAttempts are per-Run proposer inputs,
+	// kept on the Learner so buildProposals can reuse them without re-reading
+	// the workspace and database per pattern (#410).
+	lastExistingSkills []SkillSummary
+	lastPriorAttempts  []AttemptSummary
 }
 
 func (l *Learner) now() time.Time {
@@ -540,47 +548,10 @@ func (l *Learner) defaultValidate(p Proposal, heldIn, heldOut []string) (Validat
 }
 
 // Propose builds constrained proposals for patterns (skill surface by default).
+// Replaced by the mechanism-specific Learner.Propose (#410).
 func Propose(runID string, patterns []FailurePattern, minCount int) ([]Proposal, error) {
-	if minCount <= 0 {
-		minCount = 2
-	}
-	var out []Proposal
-	for _, p := range patterns {
-		if p.Count < minCount {
-			continue
-		}
-		name := skillNameFromSignature(p.Class)
-		attr := p.Attribution
-		if attr == "" {
-			attr = p.Class
-		}
-		body := fmt.Sprintf("# Recover from: %s\n\nAttribution: %s\nSeen %d times.\nEvidence sessions: %s\n\n## Samples\n\n",
-			p.Class, attr, p.Count, strings.Join(p.SessionIDs, ", "))
-		for _, s := range p.Samples {
-			body += "- " + s + "\n"
-		}
-		body += "\n## Suggested approach\n\n1. Reproduce with the same tool input.\n2. Fix the root cause (permissions, missing deps, bad path).\n3. Re-run and confirm the error is gone.\n"
-		idstr, err := id.New("prop-")
-		if err != nil {
-			return out, err
-		}
-		prop := Proposal{
-			ID:          idstr,
-			RunID:       runID,
-			Surface:     SurfaceSkill,
-			PatternSig:  p.Class,
-			Status:      "proposed",
-			Name:        name,
-			Description: "auto-mined recovery: " + attr,
-			Body:        body,
-			CreatedAt:   time.Now().UTC(),
-		}
-		if err := ValidateSurface(prop.Surface); err != nil {
-			return out, err
-		}
-		out = append(out, prop)
-	}
-	return out, nil
+	props, _, err := (&Learner{}).Propose(context.Background(), runID, patterns, minCount)
+	return props, err
 }
 
 // PromoteProposal applies, rejects, or holds a proposal under the fail-closed
@@ -908,11 +879,12 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		return nil, err
 	}
 
-	props, err := Propose(runID, patterns, minCount)
+	props, propCalls, err := l.Propose(ctx, runID, patterns, minCount)
 	if err != nil {
 		l.failRun(ctx, runID, err)
 		return nil, err
 	}
+	calls += propCalls
 
 	// Index patterns by class for promotion evidence.
 	byClass := map[string]FailurePattern{}
@@ -1015,7 +987,14 @@ func formatDigest(patterns []FailurePattern, props []Proposal, calls, scanned, p
 		b.WriteByte('\n')
 	}
 	for _, p := range props {
-		fmt.Fprintf(&b, "  proposal %s %s status=%s\n", p.Surface, p.Name, p.Status)
+		fmt.Fprintf(&b, "  proposal %s %s status=%s", p.Surface, p.Name, p.Status)
+		if p.Rationale != "" {
+			fmt.Fprintf(&b, " rationale=%q", p.Rationale)
+		}
+		if p.FromCache {
+			b.WriteString(" [cache]")
+		}
+		b.WriteByte('\n')
 	}
 	return b.String()
 }

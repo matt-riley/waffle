@@ -75,7 +75,11 @@ func runLearn(ctx context.Context, cfg config.Config, st *store.Store, stdout io
 		}
 	}
 	for _, p := range res.Proposals {
-		fmt.Fprintf(stdout, "  proposal %s %s → %s\n", p.Surface, p.Name, p.Status)
+		fmt.Fprintf(stdout, "  proposal %s %s → %s", p.Surface, p.Name, p.Status)
+		if p.Rationale != "" {
+			fmt.Fprintf(stdout, " rationale=%q", p.Rationale)
+		}
+		fmt.Fprintln(stdout)
 		if p.Audit != "" {
 			fmt.Fprintf(stdout, "      audit: %s\n", p.Audit)
 		}
