@@ -895,18 +895,25 @@ shipped** (see [Deviations](#deviations)).
 **Phase 7 mine→propose→validate (#65).** Offline loop owned by `waffle learn`
 (and `waffle skills audit`):
 
-1. **Mine.** Sessions updated since the last `learn_runs` high-water mark are
-   scanned for recurring tool-error fingerprints. Output is failure classes
-   with counts and evidence session IDs (SQLite + fixture-tested).
+1. **Mine.** Sessions updated since the last committed learn cursor are
+   paged through in (updated_at, id) keyset order; only a fully successful
+   run advances the cursor, and a failed/interrupted run is retried from its
+   last committed position (never lossy under load). Output is failure
+   classes with counts and evidence session IDs (SQLite + fixture-tested).
 2. **Attribute.** When `[provider] utility_model` is set, each class is labeled
    via that model; results land in `learn_attr_cache` keyed by content hash so
    a re-run on unchanged data makes **zero** provider calls.
 3. **Propose.** Edits are constrained to enumerated surfaces: `skill`,
    `memory` (MEMORY.md), `config_stub`. Other surfaces are rejected.
-4. **Validate / promote.** Conservative rule: held-in evidence must improve
-   and held-out must not regress. Rejected proposals are stored with audit;
-   accepted skill edits write **inactive** skills and attempt a git commit
-   message linking the pattern (audit-only when no git repo).
+4. **Validate / promote.** Promotion is fail-closed: a real before/after
+   measurement (baseline → score) must show held-in strictly improving and
+   held-out not regressing, with at least one independent held-out case, or
+   the proposal stays **pending for owner review** — a nil baseline can never
+   produce `accepted` automatically. Scorer/evaluator errors reject the
+   proposal and are persisted, never treated as zero. Exact held-in/held-out
+   counts are persisted in the proposal audit. Accepted skill edits write
+   **inactive** skills and attempt a git commit message linking the pattern
+   (audit-only when no git repo).
 5. **Activate.** `distill_skill` and learn writes are inactive until
    `waffle skills activate <name>`; the skills index lists only active skills
    and refuses to overwrite an active skill without validation.

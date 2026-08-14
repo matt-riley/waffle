@@ -79,6 +79,7 @@ type RunResult struct {
 	Proposals       []Proposal
 	Accepted        int
 	Rejected        int
+	Pending         int
 	ProviderCalls   int
 	Digest          string
 	FromCacheOnly   bool // true when attribution used only cache
@@ -87,10 +88,33 @@ type RunResult struct {
 	Pages           int
 }
 
-// ValidateFunc is the pluggable held-in/held-out scorer used by PromoteProposal (#65).
-// improve is true when held-in improves; regress is true when held-out regresses.
-// The conservative promotion rule is DefaultPromote(improve, regress) == improve && !regress.
-type ValidateFunc func(p Proposal, heldIn, heldOut []string) (improve, regress bool, audit string)
+// ValidationResult is the fail-closed outcome of held-in/held-out validation
+// (#414). Evaluated is false when no real before/after measurement existed;
+// Err is non-nil when a scorer/evaluator error aborted the measurement. Only
+// a fully evaluated, error-free result that strictly improves held-in without
+// regressing held-out may auto-promote.
+type ValidationResult struct {
+	HeldInBefore  int
+	HeldInAfter   int
+	HeldOutBefore int
+	HeldOutAfter  int
+	EvidenceIDs   []string
+	Evaluated     bool
+	Err           error
+}
+
+// Promotable reports whether this result satisfies the conservative
+// promotion rule: held-in improves strictly and held-out does not regress,
+// with a real measurement behind both counts.
+func (v ValidationResult) Promotable() bool {
+	return v.Evaluated && v.Err == nil &&
+		v.HeldInBefore > v.HeldInAfter &&
+		v.HeldOutAfter <= v.HeldOutBefore
+}
+
+// ValidateFunc is the pluggable held-in/held-out validator used by
+// PromoteProposal (#65). It returns a ValidationResult plus an audit string.
+type ValidateFunc func(p Proposal, heldIn, heldOut []string) (ValidationResult, string)
 
 // ScoreFunc returns a failure count for one session under a pattern signature
 // (lower is better). Used by DefaultValidate to compare baseline vs current.
@@ -117,7 +141,8 @@ type Learner struct {
 	Score ScoreFunc
 	// Baseline counts pre-edit pattern failures per session. When set with Score,
 	// DefaultValidate compares baseline→score for held-in improve / held-out regress.
-	// When nil, DefaultValidate uses evidence-based promote (held-in non-empty + body).
+	// When nil, validation is not measured: proposals stay pending for owner
+	// review and can never be auto-accepted (#414).
 	Baseline ScoreFunc
 	// ValidateCtx is the context used by default scoring (tests may set it).
 	ValidateCtx context.Context
@@ -402,69 +427,87 @@ func CountPatternErrors(ctx context.Context, sessions *session.Store, sessionID,
 	return n, nil
 }
 
-// sumScores totals ScoreFunc results over session IDs.
-func sumScores(ctx context.Context, score ScoreFunc, sessionIDs []string, patternSig string) int {
+// sumScores totals ScoreFunc results over session IDs. Scorer errors fail
+// closed (#414): a missing measurement must not silently convert into a zero
+// and a green result.
+func sumScores(ctx context.Context, score ScoreFunc, sessionIDs []string, patternSig string) (int, error) {
 	if score == nil || len(sessionIDs) == 0 {
-		return 0
+		return 0, nil
 	}
 	total := 0
 	for _, id := range sessionIDs {
 		n, err := score(ctx, id, patternSig)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("score session %s: %w", id, err)
 		}
 		total += n
 	}
-	return total
+	return total, nil
 }
 
 // DefaultValidate scores a proposal against held-in/held-out session splits (#65).
 //
-// When baseline is non-nil, compares failure counts (lower is better):
-//   - improve: held-in after < held-in before (strict decrease; before must be > 0)
-//   - regress: held-out after > held-out before (strict increase; empty held-out → no regress)
+// With a baseline, compares failure counts (lower is better): held-in must
+// improve strictly (before must be > after) and held-out must not regress.
+// Scorer errors abort the measurement and fail the proposal closed.
 //
-// When baseline is nil (no pre/post pair), falls back to evidence-based promote:
-// non-empty held-in + non-trivial body → improve, no regress (cannot measure decrease
-// without re-scoring). Short body is treated as held-out regress (reject).
-func DefaultValidate(ctx context.Context, score, baseline ScoreFunc, p Proposal, heldIn, heldOut []string) (improve, regress bool, audit string) {
+// Without a baseline there is no real before/after pair, so the result is
+// marked unevaluated (Evaluated=false) and can never auto-promote (#414): the
+// caller keeps the proposal pending for owner review instead of labeling it
+// accepted on the strength of an audit string that was never measured.
+func DefaultValidate(ctx context.Context, score, baseline ScoreFunc, p Proposal, heldIn, heldOut []string) (ValidationResult, string) {
+	evidence := append(append([]string(nil), heldIn...), heldOut...)
 	if strings.TrimSpace(p.Body) == "" || len(strings.TrimSpace(p.Body)) < 20 {
-		return false, true, "body too short; treated as held-out regress"
+		return ValidationResult{Evaluated: true, EvidenceIDs: evidence}, "body too short; rejected as non-substantive"
 	}
 	if len(heldIn) == 0 {
-		return false, false, "held-in has no evidence"
+		return ValidationResult{EvidenceIDs: evidence}, "held-in has no evidence"
 	}
-	if baseline != nil {
-		if score == nil {
-			score = func(context.Context, string, string) (int, error) { return 0, nil }
-		}
-		inBefore := sumScores(ctx, baseline, heldIn, p.PatternSig)
-		inAfter := sumScores(ctx, score, heldIn, p.PatternSig)
-		outBefore := sumScores(ctx, baseline, heldOut, p.PatternSig)
-		outAfter := sumScores(ctx, score, heldOut, p.PatternSig)
-		improve = inBefore > 0 && inAfter < inBefore
-		regress = len(heldOut) > 0 && outAfter > outBefore
-		audit = fmt.Sprintf("held-in %d→%d; held-out %d→%d", inBefore, inAfter, outBefore, outAfter)
-		if improve && !regress {
-			audit = "held-in improved; held-out did not regress; " + audit
-		} else if regress {
-			audit = "held-out regress; " + audit
-		} else if !improve {
-			audit = "held-in did not improve; " + audit
-		}
-		return improve, regress, audit
+	if baseline == nil {
+		return ValidationResult{EvidenceIDs: evidence},
+			"not measured: no baseline evaluator; proposal kept pending for owner review"
 	}
-	// No baseline pair: evidence-based accept (sessions were mined for this pattern).
-	if score != nil {
-		// Prefer sessions where the pattern is still visible on held-in (addresses a real failure).
-		// Orphan/missing session IDs score 0; still accept when held-in IDs were provided.
-		_ = sumScores(ctx, score, heldIn, p.PatternSig)
+	if score == nil {
+		score = func(context.Context, string, string) (int, error) { return 0, nil }
 	}
-	return true, false, "held-in improved; held-out did not regress"
+	inBefore, err := sumScores(ctx, baseline, heldIn, p.PatternSig)
+	if err != nil {
+		return ValidationResult{Evaluated: true, Err: err, EvidenceIDs: evidence}, "held-in baseline scoring failed: " + err.Error()
+	}
+	inAfter, err := sumScores(ctx, score, heldIn, p.PatternSig)
+	if err != nil {
+		return ValidationResult{Evaluated: true, Err: err, EvidenceIDs: evidence}, "held-in scoring failed: " + err.Error()
+	}
+	outBefore, err := sumScores(ctx, baseline, heldOut, p.PatternSig)
+	if err != nil {
+		return ValidationResult{Evaluated: true, Err: err, EvidenceIDs: evidence}, "held-out baseline scoring failed: " + err.Error()
+	}
+	outAfter, err := sumScores(ctx, score, heldOut, p.PatternSig)
+	if err != nil {
+		return ValidationResult{Evaluated: true, Err: err, EvidenceIDs: evidence}, "held-out scoring failed: " + err.Error()
+	}
+	v := ValidationResult{
+		HeldInBefore:  inBefore,
+		HeldInAfter:   inAfter,
+		HeldOutBefore: outBefore,
+		HeldOutAfter:  outAfter,
+		EvidenceIDs:   evidence,
+		Evaluated:     true,
+	}
+	audit := fmt.Sprintf("held-in %d→%d; held-out %d→%d", inBefore, inAfter, outBefore, outAfter)
+	switch {
+	case v.Promotable():
+		audit = "held-in improved; held-out did not regress; " + audit
+	case outAfter > outBefore:
+		audit = "held-out regress; " + audit
+	case inAfter >= inBefore:
+		audit = "held-in did not improve; " + audit
+	}
+	return v, audit
 }
 
 // defaultValidate is the Learner-bound ValidateFunc using Score/Baseline/Sessions.
-func (l *Learner) defaultValidate(p Proposal, heldIn, heldOut []string) (improve, regress bool, audit string) {
+func (l *Learner) defaultValidate(p Proposal, heldIn, heldOut []string) (ValidationResult, string) {
 	ctx := context.Background()
 	if l != nil && l.ValidateCtx != nil {
 		ctx = l.ValidateCtx
@@ -528,7 +571,16 @@ func Propose(runID string, patterns []FailurePattern, minCount int) ([]Proposal,
 	return out, nil
 }
 
-// PromoteProposal applies or rejects one proposal under the held-in/out rule.
+// PromoteProposal applies, rejects, or holds a proposal under the fail-closed
+// held-in/out rule (#414).
+//
+//   - Scorer/evaluator errors fail the proposal closed: rejected, persisted,
+//     never treated as zero.
+//   - A real before/after measurement must strictly improve held-in and not
+//     regress held-out, with at least one independent held-out case, before an
+//     automatic accept can write anything.
+//   - No baseline (unevaluated) or no held-out evidence keeps the proposal
+//     pending for owner review; it is never labeled accepted.
 func (l *Learner) PromoteProposal(ctx context.Context, p Proposal, pattern FailurePattern) (Proposal, error) {
 	if err := ValidateSurface(p.Surface); err != nil {
 		p.Status = "rejected"
@@ -547,15 +599,40 @@ func (l *Learner) PromoteProposal(ctx context.Context, p Proposal, pattern Failu
 	if validate == nil {
 		validate = l.defaultValidate
 	}
-	improve, regress, audit := validate(p, heldIn, heldOut)
-	if !DefaultPromote(improve, regress) {
+	result, audit := validate(p, heldIn, heldOut)
+	p.Audit = audit
+	if result.Err != nil {
+		// Evaluator/scorer errors fail closed and are persisted (#414).
 		p.Status = "rejected"
-		p.Audit = audit
-		if regress {
-			p.Audit = "rejected: held-out regress; " + audit
-		} else if !improve {
-			p.Audit = "rejected: held-in did not improve; " + audit
+		p.Audit = "rejected: evaluator error; " + audit
+		if err := l.storeProposal(ctx, p); err != nil {
+			return p, err
 		}
+		return p, nil
+	}
+	if !result.Promotable() {
+		if result.Evaluated && result.HeldOutAfter > result.HeldOutBefore {
+			p.Status = "rejected"
+			p.Audit = "rejected: held-out regress; " + audit
+		} else if result.Evaluated && result.HeldInAfter >= result.HeldInBefore {
+			p.Status = "rejected"
+			p.Audit = "rejected: held-in did not improve; " + audit
+		} else {
+			// Not measured (no baseline) or no independent held-out case: keep
+			// pending for owner review rather than labeling it accepted (#414).
+			p.Status = "proposed"
+			p.Audit = "pending owner review; " + audit
+		}
+		if err := l.storeProposal(ctx, p); err != nil {
+			return p, err
+		}
+		return p, nil
+	}
+	// Held-out evidence is required for automatic promotion; without it the
+	// proposal stays pending under the documented owner-approval fallback.
+	if len(heldOut) == 0 {
+		p.Status = "proposed"
+		p.Audit = "pending owner review; no independent held-out case; " + audit
 		if err := l.storeProposal(ctx, p); err != nil {
 			return p, err
 		}
@@ -821,7 +898,7 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		byClass[p.Class] = p
 	}
 
-	accepted, rejected := 0, 0
+	accepted, rejected, pending := 0, 0, 0
 	resolved := make([]Proposal, 0, len(props))
 	for _, prop := range props {
 		pat := byClass[prop.PatternSig]
@@ -830,10 +907,13 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 			l.failRun(ctx, runID, err)
 			return nil, err
 		}
-		if out.Status == "accepted" {
+		switch out.Status {
+		case "accepted":
 			accepted++
-		} else {
+		case "rejected":
 			rejected++
+		default:
+			pending++
 		}
 		resolved = append(resolved, out)
 	}
@@ -845,11 +925,11 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		_, err = l.DB.ExecContext(ctx, `
 			UPDATE learn_runs SET finished_at = ?, status = 'finished', error = '',
 				pattern_count = ?, proposal_count = ?,
-				accepted_count = ?, rejected_count = ?, provider_calls = ?, digest = ?,
+				accepted_count = ?, rejected_count = ?, pending_count = ?, provider_calls = ?, digest = ?,
 				scanned_sessions = ?, pages = ?, cursor_updated_at = ?, cursor_session_id = ?
 			WHERE id = ?`,
 			finished.Format(time.RFC3339Nano), len(patterns), len(props),
-			accepted, rejected, calls, digest, scanned, pages,
+			accepted, rejected, pending, calls, digest, scanned, pages,
 			nextCursor.UpdatedAt, nextCursor.SessionID, runID)
 		if err != nil {
 			l.failRun(ctx, runID, err)
@@ -865,6 +945,7 @@ func (l *Learner) Run(ctx context.Context) (*RunResult, error) {
 		Proposals:       resolved,
 		Accepted:        accepted,
 		Rejected:        rejected,
+		Pending:         pending,
 		ProviderCalls:   calls,
 		Digest:          digest,
 		FromCacheOnly:   calls == 0 && len(patterns) > 0,
@@ -890,8 +971,19 @@ func (l *Learner) failRun(ctx context.Context, runID string, runErr error) {
 
 func formatDigest(patterns []FailurePattern, props []Proposal, calls, scanned, pages int, cursor LearnCursor) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "patterns=%d proposals=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
-		len(patterns), len(props), calls, scanned, pages)
+	accepted, rejected, pending := 0, 0, 0
+	for _, p := range props {
+		switch p.Status {
+		case "accepted":
+			accepted++
+		case "rejected":
+			rejected++
+		default:
+			pending++
+		}
+	}
+	fmt.Fprintf(&b, "patterns=%d proposals=%d accepted=%d rejected=%d pending=%d provider_calls=%d scanned_sessions=%d pages=%d\n",
+		len(patterns), len(props), accepted, rejected, pending, calls, scanned, pages)
 	fmt.Fprintf(&b, "cursor=%s/%s\n", cursor.UpdatedAt, cursor.SessionID)
 	for _, p := range patterns {
 		fmt.Fprintf(&b, "  (%d×) %s sessions=%s", p.Count, p.Class, strings.Join(p.SessionIDs, ","))
