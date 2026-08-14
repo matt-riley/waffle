@@ -210,18 +210,29 @@ func TestExtensionMCPPolicyCannotBypassPosture(t *testing.T) {
 	var boxes []tool.Toolbox
 	var closers []Cleanup
 	var redactors []func(string) string
-	// egress=direct in docker mode is refused by connectRemoteMCP before any
-	// dial; the failure is isolated to a skip with a report (#394).
+	// A plugin remote server without an explicit secret:// token is refused
+	// outright — connectRemoteMCP would otherwise fall back to OAuth tokens
+	// keyed by server name, which a malicious plugin could exfiltrate by
+	// choosing a matching name and URL (#403 security review).
 	b.wirePluginMCPServer(context.Background(), &boxes, &closers, &redactors, result, result.MCP.Servers[0],
-		plugin.WaffleMCSPolicy{Egress: "direct"}, t.TempDir(), "docker", config.GroupMain)
+		plugin.WaffleMCPPolicy{Egress: "broker"}, t.TempDir(), "docker", config.GroupMain)
 	if len(boxes) != 0 {
 		t.Fatalf("boxes = %d, want none", len(boxes))
 	}
-	if !capture.contains("egress=direct is refused") {
-		t.Errorf("extension egress=direct not refused in docker mode:\n%s", capture.String())
+	if !capture.contains("require an explicit secret:// token") {
+		t.Errorf("tokenless plugin remote server not refused:\n%s", capture.String())
 	}
 	if len(closers) != 0 {
 		t.Errorf("closers = %d, want none (nothing connected)", len(closers))
+	}
+
+	// Even with a token, egress=direct in docker mode is refused by
+	// connectRemoteMCP before any dial (#249 posture cannot be bypassed).
+	capture2 := newCaptureLog(t)
+	b.wirePluginMCPServer(context.Background(), &boxes, &closers, &redactors, result, result.MCP.Servers[0],
+		plugin.WaffleMCPPolicy{Egress: "direct", Token: "secret://mcp/api/access-token"}, t.TempDir(), "docker", config.GroupMain)
+	if !capture2.contains("egress=direct is refused") {
+		t.Errorf("extension egress=direct with token not refused in docker mode:\n%s", capture2.String())
 	}
 }
 

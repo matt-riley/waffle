@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/mcp"
@@ -20,7 +21,7 @@ import (
 // egress, groups, token) may grant more than the portable default, but the
 // #77/#79/#249 posture still bounds its application: docker-mode groups
 // refuse direct egress and host-executed plugin stdio binaries.
-func (b *Builder) wirePluginMCPServer(ctx context.Context, boxes *[]tool.Toolbox, closers *[]Cleanup, redactors *[]func(string) string, result plugin.LoadResult, srv plugin.MCPServer, policy plugin.WaffleMCSPolicy, home, sandboxMode, group string) {
+func (b *Builder) wirePluginMCPServer(ctx context.Context, boxes *[]tool.Toolbox, closers *[]Cleanup, redactors *[]func(string) string, result plugin.LoadResult, srv plugin.MCPServer, policy plugin.WaffleMCPPolicy, home, sandboxMode, group string) {
 	pluginName := result.Plugin.Manifest.Name
 	switch srv.Type {
 	case plugin.MCPTypeSSE:
@@ -91,12 +92,23 @@ func (b *Builder) wirePluginMCPServer(ctx context.Context, boxes *[]tool.Toolbox
 // docker-mode groups must traverse the broker or are refused, unattended
 // tiers stay deny-by-default unless the extension names the group, and
 // credentials come only from the secret store.
-func (b *Builder) wirePluginRemoteMCP(ctx context.Context, boxes *[]tool.Toolbox, closers *[]Cleanup, redactors *[]func(string) string, result plugin.LoadResult, srv plugin.MCPServer, policy plugin.WaffleMCSPolicy, sandboxMode, group string) {
+func (b *Builder) wirePluginRemoteMCP(ctx context.Context, boxes *[]tool.Toolbox, closers *[]Cleanup, redactors *[]func(string) string, result plugin.LoadResult, srv plugin.MCPServer, policy plugin.WaffleMCPPolicy, sandboxMode, group string) {
 	pluginName := result.Plugin.Manifest.Name
 	if policy.Egress == "" {
 		slog.Warn("plugin remote mcp server refused",
 			"plugin", pluginName, "server", srv.Name,
 			"reason", "portable mcp.json carries no egress policy; grant egress (and a token) via the waffle extension namespace (#394)")
+		return
+	}
+	// Security (#403 review): a plugin-sourced remote server must carry an
+	// explicit secret:// token reference. Without one, connectRemoteMCP would
+	// fall back to OAuth tokens keyed by server name — a malicious plugin
+	// could name its server after an operator's stored OAuth token and point
+	// the URL at an attacker-controlled endpoint, exfiltrating the token.
+	if !strings.HasPrefix(policy.Token, "secret://") {
+		slog.Warn("plugin remote mcp server refused",
+			"plugin", pluginName, "server", srv.Name,
+			"reason", "plugin remote servers require an explicit secret:// token in the waffle extension; OAuth-by-name is never used for plugin data")
 		return
 	}
 	_, opts, err := pluginmcp.MapHTTP(srv)
@@ -105,12 +117,11 @@ func (b *Builder) wirePluginRemoteMCP(ctx context.Context, boxes *[]tool.Toolbox
 		return
 	}
 	synth := config.MCPServer{
-		Name:    srv.Name,
-		URL:     srv.URL,
-		Egress:  policy.Egress,
-		Groups:  policy.Groups,
-		Token:   policy.Token,
-		Headers: srv.Headers,
+		Name:   srv.Name,
+		URL:    srv.URL,
+		Egress: policy.Egress,
+		Groups: policy.Groups,
+		Token:  policy.Token,
 	}
 	if !RemoteServerInGroup(synth, group) {
 		// Unattended tiers are deny-by-default for remote servers (#249).

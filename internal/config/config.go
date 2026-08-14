@@ -272,10 +272,6 @@ type MCPServer struct {
 	// Env names the only parent environment variables copied to the child
 	// (Command servers only; rejected for URL servers).
 	Env []string `toml:"env"`
-	// Headers carries fixed HTTP headers for a URL server from a plugin's
-	// portable mcp.json (#394). Not settable from native config.toml;
-	// synthesized by the plugin wiring and validated by the agent build.
-	Headers map[string]string
 }
 
 // Agent tunes agent behavior.

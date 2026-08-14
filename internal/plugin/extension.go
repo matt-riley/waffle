@@ -28,7 +28,7 @@ type WaffleExtension struct {
 	// servers: execution/egress/groups/token. The #77/#79/#249 posture
 	// still bounds their application (docker groups require broker egress,
 	// unattended tiers stay deny-by-default).
-	MCP map[string]WaffleMCSPolicy `json:"mcp"`
+	MCP map[string]WaffleMCPPolicy `json:"mcp"`
 }
 
 // WaffleSkillPolicy overrides one plugin skill's activation state.
@@ -37,10 +37,10 @@ type WaffleSkillPolicy struct {
 	Status string `json:"status"`
 }
 
-// WaffleMCSPolicy overrides one plugin mcp.json server's waffle policy.
+// WaffleMCPPolicy overrides one plugin mcp.json server's waffle policy.
 // The portable mcp.json itself carries none of these fields; they ship here
 // so a plugin can assert them without weakening the restrictive defaults.
-type WaffleMCSPolicy struct {
+type WaffleMCPPolicy struct {
 	// Execution is "host" or "sandbox" (stdio servers; default "host").
 	Execution string `json:"execution"`
 	// Egress is "broker" or "direct" (remote servers). Docker-mode groups
@@ -123,9 +123,9 @@ const (
 )
 
 // parseWaffleMCP decodes the mcp object: each member is a closed
-// WaffleMCSPolicy; a malformed member is reported and ignored.
-func parseWaffleMCP(raw json.RawMessage) (map[string]WaffleMCSPolicy, []string) {
-	out := map[string]WaffleMCSPolicy{}
+// WaffleMCPPolicy; a malformed member is reported and ignored.
+func parseWaffleMCP(raw json.RawMessage) (map[string]WaffleMCPPolicy, []string) {
+	out := map[string]WaffleMCPPolicy{}
 	if !jsonKind(raw, '{') {
 		return out, []string{"waffle extension mcp must be an object; ignored"}
 	}
@@ -135,7 +135,7 @@ func parseWaffleMCP(raw json.RawMessage) (map[string]WaffleMCSPolicy, []string) 
 	}
 	var warnings []string
 	for _, name := range sortedKeys(fields) {
-		var policy WaffleMCSPolicy
+		var policy WaffleMCPPolicy
 		if err := decodeClosed(fields[name], &policy); err != nil {
 			warnings = append(warnings, fmt.Sprintf("waffle mcp policy for %q is malformed; ignored", name))
 			continue
