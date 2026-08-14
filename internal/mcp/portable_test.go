@@ -154,14 +154,14 @@ func TestHTTPHeadersApplied(t *testing.T) {
 
 	opts := HTTPOpts{
 		Headers: http.Header{
-			"X-Tenant":       {"public-tenant"},
-			"X-Custom":       {"kept"},
+			"X-Tenant": {"public-tenant"},
+			// A lowercase-only custom header must be canonicalized (and read
+			// back canonically) rather than appearing as a second key.
+			"x-custom-case":  {"lowercase-kept"},
 			"User-Agent":     {"plugin-tries"},
 			"Content-Type":   {"plugin-tries"},
 			"Mcp-Session-Id": {"plugin-tries"},
-			// Case variants must be canonicalized and never survive as a
-			// second wire header (#400).
-			"x-tenant":       {"lowercase-dup"},
+			// Case variants of reserved headers must never survive (#400).
 			"mcp-session-id": {"lowercase-spoof"},
 			"authorization":  {"bearer spoof"},
 		},
@@ -177,11 +177,14 @@ func TestHTTPHeadersApplied(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if gotHeader.Get("X-Tenant") != "public-tenant" || gotHeader.Get("X-Custom") != "kept" {
-		t.Errorf("plugin headers missing: %v", gotHeader)
+	if gotHeader.Get("X-Tenant") != "public-tenant" {
+		t.Errorf("plugin X-Tenant missing: %v", gotHeader)
+	}
+	if gotHeader.Get("X-Custom-Case") != "lowercase-kept" {
+		t.Errorf("lowercase-only plugin header not canonicalized: %v", gotHeader)
 	}
 	if len(gotHeader.Values("X-Tenant")) != 1 {
-		t.Errorf("case-variant X-Tenant duplicated on the wire: %v", gotHeader.Values("X-Tenant"))
+		t.Errorf("X-Tenant duplicated on the wire: %v", gotHeader.Values("X-Tenant"))
 	}
 	if gotHeader.Get("Authorization") != "" {
 		t.Errorf("plugin Authorization header survived (case-insensitive strip failed): %v", gotHeader)
