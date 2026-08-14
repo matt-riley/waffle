@@ -227,6 +227,15 @@ func (g *Gate) Approve(id, approver string) (Candidate, error) {
 	}
 	if c.Kind == "memory" {
 		switch c.Action {
+		case "":
+			// Append candidates must not carry update-only fields: a corrupt
+			// pending file must never smuggle mutation state into an append.
+			if c.TargetID != "" || c.Digest != "" || c.Current != "" {
+				return c, fmt.Errorf("candidate %s is an append but carries update fields (target_id/digest/current)", id)
+			}
+			if _, err := g.WS.appendCandidate(c); err != nil {
+				return c, err
+			}
 		case "forget":
 			if err := g.WS.ForgetNoteCAS(c.TargetID, c.Digest); err != nil {
 				return c, err
@@ -236,9 +245,9 @@ func (g *Gate) Approve(id, approver string) (Candidate, error) {
 				return c, err
 			}
 		default:
-			if _, err := g.WS.appendCandidate(c); err != nil {
-				return c, err
-			}
+			// Fail closed: an unknown action must never silently apply as an
+			// append, which would mutate the wrong thing (#417 review).
+			return c, fmt.Errorf("candidate %s has unknown memory action %q; refusing to apply", id, c.Action)
 		}
 	} else if err := g.WS.writeSkillCandidate(c); err != nil {
 		return c, err

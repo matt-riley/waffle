@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,7 +56,9 @@ func TestMemoryUpdateReviewPending(t *testing.T) {
 	if out, err := upd.Run(ctx, forIn); err != nil || !strings.Contains(out, "pending owner approval") {
 		t.Fatalf("forget = %q, %v; want pending", out, err)
 	}
-	if strings.Contains(liveText(t, ws), "trusted baseline note") == false && len(liveText(t, ws)) == 0 {
+	// The baseline note must still be live, whatever else the file holds: a
+	// pending forget must never alter it before approval.
+	if !strings.Contains(liveText(t, ws), "trusted baseline note") {
 		t.Fatal("forget changed live memory before approval")
 	}
 
@@ -252,5 +255,61 @@ func TestMemoryUpdateNotesIndexKeepsFTSState(t *testing.T) {
 	live := liveText(t, ws)
 	if !strings.Contains(live, "indexed replacement") || strings.Contains(live, "trusted baseline note") {
 		t.Fatalf("live memory after approve:\n%s", live)
+	}
+}
+
+// writePending writes a raw pending candidate file for the given candidate.
+func writePending(t *testing.T, gate *Gate, c Candidate) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(gate.WS.Dir, "pending"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gate.pendingPath(c.ID), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGateApproveRejectsUnknownAction is the #417 review regression: a
+// corrupt or malicious pending file with an unknown memory action must fail
+// closed and never silently apply as an append.
+func TestGateApproveRejectsUnknownAction(t *testing.T) {
+	ws := testWorkspace(t)
+	gate := &Gate{Mode: "review", WS: ws}
+	writePending(t, gate, Candidate{
+		ID: "candidate-unknown-action", Kind: "memory", Action: "explode",
+		TargetID: "note-1", Digest: "abc", Current: "some text",
+		Body:       "replacement",
+		Provenance: Provenance{TrustClass: "model_derived"},
+		Status:     "pending",
+	})
+	if _, err := gate.Approve("candidate-unknown-action", "owner"); err == nil || !strings.Contains(err.Error(), "unknown memory action") {
+		t.Fatalf("approve unknown action err = %v, want fail-closed refusal", err)
+	}
+	if _, err := os.Stat(ws.MemoryPath()); !os.IsNotExist(err) {
+		t.Fatal("unknown action mutated live memory")
+	}
+}
+
+// TestGateApproveRejectsAppendWithUpdateFields proves an append candidate can
+// never smuggle mutation state (target/digest/current) into a live write.
+func TestGateApproveRejectsAppendWithUpdateFields(t *testing.T) {
+	ws := testWorkspace(t)
+	gate := &Gate{Mode: "review", WS: ws}
+	writePending(t, gate, Candidate{
+		ID: "candidate-smuggled", Kind: "memory",
+		TargetID: "note-1", Digest: "abc",
+		Body:       "append body",
+		Provenance: Provenance{TrustClass: "model_derived"},
+		Status:     "pending",
+	})
+	if _, err := gate.Approve("candidate-smuggled", "owner"); err == nil || !strings.Contains(err.Error(), "carries update fields") {
+		t.Fatalf("approve smuggled append err = %v, want refusal", err)
+	}
+	if _, err := os.Stat(ws.MemoryPath()); !os.IsNotExist(err) {
+		t.Fatal("smuggled append mutated live memory")
 	}
 }
