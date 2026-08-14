@@ -1,8 +1,7 @@
 # Waffle usage guide: skills, profiles, cron, self-learning
 
-Second stop after first run. `waffle setup` then `waffle chat` (or `waffle
-serve` and pairing) lives in [chat.md](chat.md); the repository front door
-is [README.md](../README.md).
+Start with `waffle setup` and `waffle chat` (or `waffle serve` and pairing)
+in [chat.md](chat.md). The front door is [README.md](../README.md).
 
 This fills the gap between `docs/plan.md` (architecture) and `docs/chat.md`
 (the chat client): how to actually *use* the four features that don't have a
