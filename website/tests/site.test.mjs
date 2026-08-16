@@ -163,8 +163,11 @@ test('a blank configured site origin is treated as unset', () => {
 test('the astro config resolves its site origin through the tested helper', async () => {
 	const config = await read('astro.config.mjs');
 
-	assert.match(config, /import \{ resolveSiteURL \} from '\.\/src\/site-url\.mjs';/);
-	assert.match(config, /const site = resolveSiteURL\(process\.env\.PUBLIC_SITE_URL\);/);
+	// Match the intent, not the formatting: quote style, spacing, and semicolons
+	// are a formatter's business, and the behaviour under test is only that the
+	// config resolves its origin through the helper the test above covers.
+	assert.match(config, /import\s*\{\s*resolveSiteURL\s*\}\s*from\s*['"][^'"]*site-url\.mjs['"]/);
+	assert.match(config, /resolveSiteURL\(\s*process\.env\.PUBLIC_SITE_URL\s*,?\s*\)/);
 });
 
 /* ---------------------------------------------------------------------------
