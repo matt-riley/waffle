@@ -50,8 +50,8 @@ env = { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1" }
 run = """
 dashboard_node="$(mise which node)"
 dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
-test "$("$dashboard_node" --version)" = "v26.1.0"
-test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+test "$("$dashboard_node" --version)" = "v$(mise current node)"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "$(mise current pnpm)"
 "$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts
 """
 
@@ -60,8 +60,8 @@ description = "Run Waffle Desk browser tests with system Chrome"
 run = """
 dashboard_node="$(mise which node)"
 dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
-test "$("$dashboard_node" --version)" = "v26.1.0"
-test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "11.9.0"
+test "$("$dashboard_node" --version)" = "v$(mise current node)"
+test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "$(mise current pnpm)"
 "$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests test
 """
 
