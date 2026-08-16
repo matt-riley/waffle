@@ -70,9 +70,9 @@ const elements = {
   phase: document.querySelector("#desk-phase"),
   transcript: document.querySelector("#desk-transcript"),
   emptyTranscript: document.querySelector("#desk-empty-transcript"),
-  activity: document.querySelector("#desk-tool-activity"),
-  emptyActivity: document.querySelector("#desk-empty-activity"),
   form: document.querySelector("#desk-composer"),
+  composerActions: document.querySelector(".composer-actions"),
+  slashMenu: document.querySelector("#desk-slash-menu"),
   message: document.querySelector("#desk-message"),
   send: document.querySelector("#desk-send"),
   cancel: document.querySelector("#desk-cancel"),
@@ -128,6 +128,16 @@ const state = {
   streamingText: "",
   toolRows: new Map(),
   toolSequence: 0,
+  turnToolContainer: null,
+  typingMessage: null,
+  lastUserText: "",
+  slash: {
+    open: false,
+    filter: "",
+    index: 0,
+    commands: [],
+    items: [],
+  },
 };
 
 function pushRailConnection(railState) {
@@ -198,6 +208,9 @@ function setPhase(next) {
 
 function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
+  if (!idle) {
+    closeSlashMenu();
+  }
   const cancellable =
     state.activeTurn !== null &&
     (state.currentPhase === phase.sending ||
@@ -458,6 +471,9 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
     renderMarkdown(body, text);
   }
   article.append(label, body);
+  if (!allowEmpty) {
+    attachCopyButton(article);
+  }
   if (beforeNode) {
     elements.transcript.insertBefore(article, beforeNode);
   } else {
@@ -471,49 +487,69 @@ function appendDelta(text) {
   if (!text) {
     return;
   }
+  clearTypingIndicator();
   if (!state.streamingMessage) {
     state.streamingMessage = appendMessage("assistant", "", null, true);
     state.streamingText = "";
   }
   state.streamingText += text;
-  renderMarkdown(
-    state.streamingMessage.querySelector(".message-body"),
-    state.streamingText,
-  );
+  const body = state.streamingMessage.querySelector(".message-body");
+  renderMarkdown(body, state.streamingText);
+  const caret = document.createElement("span");
+  caret.className = "stream-caret";
+  caret.setAttribute("aria-hidden", "true");
+  body.appendChild(caret);
+  state.streamingMessage.scrollIntoView({ block: "nearest" });
 }
 
 function appendToolActivity(kind, data) {
-  if (elements.emptyActivity) {
-    elements.emptyActivity.remove();
-    elements.emptyActivity = null;
-  }
   const tool = data.tool_name || "Tool";
-  const callID =
-    data.tool_call_id || `unpaired-${tool}-${++state.toolSequence}`;
-  let entry = state.toolRows.get(callID);
-  if (!entry) {
-    const row = document.createElement("details");
-    row.className = "activity-row";
-    const summary = document.createElement("summary");
-    const detail = document.createElement("p");
-    row.append(summary, detail);
-    elements.activity.appendChild(row);
-    entry = { row, summary, detail };
-    state.toolRows.set(callID, entry);
+  const callID = data.tool_call_id || `unpaired-${tool}-${++state.toolSequence}`;
+  let chip = state.toolRows.get(callID);
+  if (!chip) {
+    if (!state.turnToolContainer) {
+      state.turnToolContainer = document.createElement("div");
+      state.turnToolContainer.className = "tool-chips";
+      state.turnToolContainer.setAttribute("role", "list");
+      elements.transcript.appendChild(state.turnToolContainer);
+      state.turnToolContainer.scrollIntoView({ block: "nearest" });
+    }
+    chip = document.createElement("div");
+    chip.className = "tool-chip";
+    chip.setAttribute("role", "listitem");
+    const spinner = document.createElement("span");
+    spinner.className = "tool-chip-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "tool-chip-label";
+    const status = document.createElement("span");
+    status.className = "tool-chip-status";
+    chip.append(spinner, label, status);
+    chip._label = label;
+    chip._status = status;
+    state.turnToolContainer.appendChild(chip);
+    state.toolRows.set(callID, chip);
   }
+  const label = chip._label;
+  const status = chip._status;
   if (kind === "tool_started") {
-    entry.row.classList.remove("is-error");
-    entry.row.classList.remove("is-success");
-    entry.summary.textContent = `${tool} · running`;
-    entry.detail.textContent = "Tool call is in progress.";
+    chip.classList.remove("is-error", "is-success");
+    chip.classList.add("is-running");
+    label.textContent = tool;
+    status.textContent = "running…";
+    chip.setAttribute("aria-label", `${tool} running`);
     return;
   }
   const duration = Math.max(0, Number(data.duration_ms) || 0);
   const outcome = data.is_error ? "failed" : "succeeded";
-  entry.row.classList.toggle("is-error", Boolean(data.is_error));
-  entry.row.classList.toggle("is-success", !data.is_error);
-  entry.summary.textContent = `${tool} · ${duration} ms · ${outcome}`;
-  entry.detail.textContent = `${Math.max(0, Number(data.byte_count) || 0)} bytes returned.`;
+  chip.classList.remove("is-running");
+  chip.classList.toggle("is-error", Boolean(data.is_error));
+  chip.classList.toggle("is-success", !data.is_error);
+  label.textContent = tool;
+  status.textContent = data.is_error
+    ? `failed · ${duration} ms`
+    : `✓ ${duration} ms · ${Math.max(0, Number(data.byte_count) || 0)} B`;
+  chip.setAttribute("aria-label", `${tool} ${outcome}`);
 }
 
 function messageText(message) {
@@ -531,6 +567,9 @@ function renderHistory(history) {
   elements.emptyTranscript = null;
   state.streamingMessage = null;
   state.streamingText = "";
+  state.typingMessage = null;
+  state.turnToolContainer = null;
+  state.toolRows = new Map();
   for (const message of history) {
     appendMessage(message.role === "user" ? "user" : "assistant", messageText(message));
   }
@@ -842,6 +881,7 @@ function handleDeskEvent(event) {
       break;
     case "turn_done": {
       renderCanonicalState(data.state, false);
+      finalizeStreamingMessage();
       const turn = state.activeTurn;
       if (turn && turn.generation === state.generation) {
         turn.eventSettled = true;
@@ -1118,8 +1158,13 @@ async function submitTurn(event) {
     idempotencyKey,
   };
   state.activeTurn = turn;
+  state.lastUserText = text;
   setPhase(phase.sending);
   setStatusMessage(elements.composerStatus, "", false, "composer");
+  appendMessage("user", text, state.streamingMessage);
+  showTypingIndicator();
+  elements.message.value = "";
+  updateControls();
   try {
     await postMutation("/api/v1/desk/chat/turn", {
       client_id: state.clientID,
@@ -1128,8 +1173,6 @@ async function submitTurn(event) {
     if (state.activeTurn !== turn || generation !== state.generation) {
       return;
     }
-    appendMessage("user", text, state.streamingMessage);
-    elements.message.value = "";
     state.pendingTurn = null;
     turn.postSettled = true;
     settleTurn(turn);
@@ -1139,6 +1182,7 @@ async function submitTurn(event) {
     }
     state.activeTurn = null;
     state.activeOperation = null;
+    clearTypingIndicator();
     if (error.network) {
       disconnect(
         error.safeMessage ||
@@ -1154,6 +1198,18 @@ async function submitTurn(event) {
         "The turn was rejected. Edit the message or send again to retry.",
       true,
     );
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "retry-button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => {
+      setStatusMessage(elements.composerStatus, "", false, "composer");
+      elements.message.value = turn.text;
+      elements.message.focus();
+      updateControls();
+      void submitTurn({ preventDefault() {} });
+    });
+    elements.composerActions?.appendChild(retry);
     updateControls();
   }
 }
@@ -1484,12 +1540,330 @@ async function toggleSkill() {
   }
 }
 
-function handleComposerKeydown(event) {
-  if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) {
+function attachCopyButton(article) {
+  if (!article || article.querySelector(".message-copy")) {
     return;
   }
-  event.preventDefault();
-  void submitTurn({ preventDefault() {} });
+  const body = article.querySelector(".message-body");
+  if (!body) {
+    return;
+  }
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "message-copy";
+  copy.textContent = "Copy";
+  copy.setAttribute("aria-label", "Copy message");
+  copy.addEventListener("click", async () => {
+    const plain = body.textContent || "";
+    try {
+      await navigator.clipboard.writeText(plain);
+    } catch {
+      const fallback = document.createElement("textarea");
+      fallback.value = plain;
+      document.body.appendChild(fallback);
+      fallback.select();
+      document.execCommand("copy");
+      fallback.remove();
+    }
+    copy.textContent = "Copied";
+    setTimeout(() => {
+      copy.textContent = "Copy";
+    }, 1500);
+  });
+  article.appendChild(copy);
+}
+
+function finalizeStreamingMessage() {
+  clearTypingIndicator();
+  if (!state.streamingMessage) {
+    return;
+  }
+  state.streamingMessage.querySelector(".stream-caret")?.remove();
+  attachCopyButton(state.streamingMessage);
+  state.streamingMessage = null;
+  state.streamingText = "";
+}
+
+function showTypingIndicator() {
+  if (state.typingMessage || !elements.transcript) {
+    return;
+  }
+  const article = document.createElement("article");
+  article.className = "message waffle-message typing-message";
+  const label = document.createElement("p");
+  label.className = "message-author";
+  label.textContent = "Waffle";
+  const body = document.createElement("div");
+  body.className = "message-body";
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+  dots.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 3; i += 1) {
+    const dot = document.createElement("span");
+    dot.className = "typing-dot";
+    dots.appendChild(dot);
+  }
+  body.appendChild(dots);
+  article.append(label, body);
+  elements.transcript.appendChild(article);
+  article.scrollIntoView({ block: "nearest" });
+  state.typingMessage = article;
+}
+
+function clearTypingIndicator() {
+  if (!state.typingMessage) {
+    return;
+  }
+  state.typingMessage.remove();
+  state.typingMessage = null;
+}
+
+function extractSlashToken(value, selectionStart) {
+  const caret = Math.min(selectionStart ?? value.length, value.length);
+  const before = value.slice(0, caret);
+  const match = /(?:^|\s)(\/[^\s]*)$/.exec(before);
+  return match ? match[1] : "";
+}
+
+function slashCommandItems(filter) {
+  const clean = filter.slice(1).toLowerCase();
+  return (state.slash.commands || []).filter((command) => {
+    const name = String(command.name || "").toLowerCase();
+    const aliases = (command.aliases || []).map((alias) =>
+      String(alias).toLowerCase(),
+    );
+    return name.startsWith(clean) || aliases.some((alias) => alias.startsWith(clean));
+  });
+}
+
+function slashSkillItems(filter) {
+  const clean = filter.slice(1).toLowerCase();
+  return (state.skills || []).filter((skill) => {
+    const name = String(skill.name || "").toLowerCase();
+    const description = String(skill.description || "").toLowerCase();
+    return clean === "" || name.includes(clean) || description.includes(clean);
+  });
+}
+
+function rebuildSlashItems(filter) {
+  const commands = slashCommandItems(filter).map((command) => ({
+    kind: "command",
+    command,
+    label: command.usage || `/${command.name || ""}`,
+    description: command.description || "",
+  }));
+  const skills = slashSkillItems(filter).map((skill) => ({
+    kind: "skill",
+    skill,
+    label: skill.name,
+    description: skill.description || "",
+  }));
+  state.slash.items = [...commands, ...skills];
+  if (state.slash.index >= state.slash.items.length) {
+    state.slash.index = Math.max(0, state.slash.items.length - 1);
+  }
+}
+
+function renderSlashMenu() {
+  const menu = elements.slashMenu;
+  menu.replaceChildren();
+  let lastKind = null;
+  state.slash.items.forEach((item, index) => {
+    if (item.kind !== lastKind) {
+      const heading = document.createElement("p");
+      heading.className = "slash-menu-heading";
+      heading.textContent = item.kind === "command" ? "Commands" : "Skills";
+      menu.appendChild(heading);
+      lastKind = item.kind;
+    }
+    const entry = document.createElement("button");
+    entry.type = "button";
+    entry.className = "slash-menu-item";
+    entry.setAttribute("role", "option");
+    entry.setAttribute("aria-selected", String(index === state.slash.index));
+    if (index === state.slash.index) {
+      entry.classList.add("is-selected");
+    }
+    const name = document.createElement("span");
+    name.className = "slash-menu-name";
+    name.textContent = item.label;
+    const description = document.createElement("span");
+    description.className = "slash-menu-description";
+    description.textContent = item.description;
+    entry.append(name, description);
+    entry.addEventListener("click", () => {
+      state.slash.index = index;
+      selectSlashItem();
+    });
+    menu.appendChild(entry);
+  });
+  menu.hidden = false;
+}
+
+function syncSlashMenu() {
+  if (!elements.slashMenu) {
+    return;
+  }
+  const token = extractSlashToken(
+    elements.message.value,
+    elements.message.selectionStart,
+  );
+  if (!token.startsWith("/")) {
+    closeSlashMenu();
+    return;
+  }
+  if (state.slash.filter !== token) {
+    state.slash.index = 0;
+    state.slash.filter = token;
+  }
+  rebuildSlashItems(token);
+  if (state.slash.items.length === 0) {
+    closeSlashMenu();
+    return;
+  }
+  state.slash.open = true;
+  renderSlashMenu();
+}
+
+function moveSlashSelection(delta) {
+  if (state.slash.items.length === 0) {
+    return;
+  }
+  state.slash.index =
+    (state.slash.index + delta + state.slash.items.length) %
+    state.slash.items.length;
+  renderSlashMenu();
+}
+
+function closeSlashMenu() {
+  state.slash.open = false;
+  if (elements.slashMenu) {
+    elements.slashMenu.hidden = true;
+  }
+}
+
+function selectSlashItem() {
+  const item = state.slash.items[state.slash.index];
+  if (!item) {
+    closeSlashMenu();
+    return;
+  }
+  if (item.kind === "command") {
+    const insertion = `/${item.command.name || ""} `;
+    const value = elements.message.value;
+    const caret = Math.min(
+      elements.message.selectionStart ?? value.length,
+      value.length,
+    );
+    const before = value.slice(0, caret);
+    const match = /(?:^|\s)(\/[^\s]*)$/.exec(before);
+    const tokenStart = match ? caret - match[1].length : caret;
+    const next = value.slice(0, tokenStart) + insertion + value.slice(caret);
+    elements.message.value = next;
+    const nextCaret = tokenStart + insertion.length;
+    elements.message.selectionStart = nextCaret;
+    elements.message.selectionEnd = nextCaret;
+  } else {
+    const skill = item.skill;
+    const action = skill.attached ? "detach" : "attach";
+    const generation = state.generation;
+    setPhase(phase.sending);
+    elements.phase.textContent =
+      action === "attach" ? "Attaching skill" : "Detaching skill";
+    void postMutation("/api/v1/desk/chat/command", {
+      client_id: state.clientID,
+      command: { name: "skills", args: `${action} ${skill.name}` },
+    })
+      .then((result) => {
+        if (generation !== state.generation) {
+          return;
+        }
+        renderCanonicalState(result.state, false);
+        state.activeOperation = null;
+        if (state.currentPhase !== phase.disconnected) {
+          setPhase(phase.idle);
+        }
+        setStatusMessage(
+          elements.composerStatus,
+          action === "attach"
+            ? `Attached skill ${skill.name}.`
+            : `Detached skill ${skill.name}.`,
+          false,
+          "composer",
+        );
+      })
+      .catch(() => {
+        if (generation !== state.generation) {
+          return;
+        }
+        state.activeOperation = null;
+        if (state.currentPhase !== phase.disconnected) {
+          setPhase(phase.idle);
+        }
+        setStatusMessage(
+          elements.composerStatus,
+          `Could not ${action} skill ${skill.name}.`,
+          true,
+          "composer",
+        );
+      });
+  }
+  closeSlashMenu();
+  elements.message.focus();
+  updateControls();
+}
+
+async function fetchCommands() {
+  try {
+    const response = await fetch("/api/v1/desk/chat/commands", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      state.slash.commands = [];
+      return;
+    }
+    const body = await response.json();
+    state.slash.commands = Array.isArray(body.commands) ? body.commands : [];
+  } catch {
+    state.slash.commands = [];
+  }
+}
+
+function onComposerInput() {
+  updateControls();
+  syncSlashMenu();
+}
+
+function handleComposerKeydown(event) {
+  if (event.key === "Escape" && state.slash.open) {
+    event.preventDefault();
+    closeSlashMenu();
+    return;
+  }
+  if (
+    state.slash.open &&
+    (event.key === "ArrowDown" || event.key === "ArrowUp")
+  ) {
+    event.preventDefault();
+    moveSlashSelection(event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (state.slash.open && (event.key === "Enter" || event.key === "Tab")) {
+    event.preventDefault();
+    selectSlashItem();
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+    if (elements.message.value.trim() !== "") {
+      event.preventDefault();
+      void submitTurn({ preventDefault() {} });
+    }
+    return;
+  }
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    void submitTurn({ preventDefault() {} });
+  }
 }
 
 function closeOwnerOnPageHide() {
@@ -1510,7 +1884,7 @@ function closeOwnerOnPageHide() {
 
 if (elements.form) {
   elements.form.addEventListener("submit", submitTurn);
-  elements.message.addEventListener("input", updateControls);
+  elements.message.addEventListener("input", onComposerInput);
   elements.message.addEventListener("keydown", handleComposerKeydown);
   elements.cancel.addEventListener("click", cancelTurn);
   elements.model.addEventListener("change", selectModel);
@@ -1542,4 +1916,5 @@ if (elements.form) {
   });
   globalThis.addEventListener?.("pagehide", closeOwnerOnPageHide);
   void openDesk();
+  void fetchCommands();
 }

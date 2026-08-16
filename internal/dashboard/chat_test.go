@@ -42,6 +42,7 @@ func TestTodayClientStaticContract(t *testing.T) {
 		`"/api/v1/desk/chat/turn"`,
 		`"/api/v1/desk/chat/cancel"`,
 		`"/api/v1/desk/chat/command"`,
+		`"/api/v1/desk/chat/commands"`,
 		`"/api/v1/desk/chat/close"`,
 		`resource_id !== state.clientID`,
 		`command: { name: "model", args: alias }`,
@@ -127,6 +128,44 @@ func TestCloneChatStateCopiesToolPointers(t *testing.T) {
 	}
 	if got := original.History[0].Blocks[1].ToolResult.Content; got != "ok" {
 		t.Fatalf("original ToolResult content = %q, want ok", got)
+	}
+}
+
+func TestChatCommandsEndpointListsRegisteredCommands(t *testing.T) {
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) {
+		return nil, errors.New("unused")
+	}, bytes.NewReader(bytes.Repeat([]byte{1}, 32)))
+	security, err := NewSecurity("127.0.0.1:8422", TailnetOptions{}, bytes.NewReader(bytes.Repeat([]byte{2}, 32)))
+	if err != nil {
+		t.Fatalf("NewSecurity() error = %v", err)
+	}
+	config := APIConfig{
+		Security:    security,
+		ChatClients: clients,
+		Idempotency: NewIdempotencyStore(time.Now, 64, time.Minute),
+	}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, config)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/desk/chat/commands", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Commands []chat.Command `json:"commands"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode commands response: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, command := range body.Commands {
+		names[string(command.Name)] = true
+	}
+	for _, want := range []string{"help", "model", "skills", "repo"} {
+		if !names[want] {
+			t.Errorf("commands endpoint missing %q", want)
+		}
 	}
 }
 

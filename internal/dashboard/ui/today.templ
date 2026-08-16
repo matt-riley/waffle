@@ -26,16 +26,8 @@ templ Today(view ShellView) {
 				<div class="message-list" id="desk-transcript" aria-label="Conversation transcript">
 					<p class="empty-transcript" id="desk-empty-transcript">Opening your most recent conversation…</p>
 				</div>
-				<section class="tool-ledger" aria-labelledby="tool-activity-title">
-					<div class="tool-ledger-heading">
-						<h3 id="tool-activity-title">Tool activity</h3>
-						<span>live evidence</span>
-					</div>
-					<div class="tool-activity" id="desk-tool-activity" aria-label="Tool activity">
-						<p class="empty-activity" id="desk-empty-activity">No tool activity yet.</p>
-					</div>
-				</section>
 				<form class="composer" id="desk-composer" action="/desk/" method="post">
+					<div class="slash-menu" id="desk-slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
 					<div class="composer-session">
 						<div class="model-field">
 							<label for="desk-model">Session model</label>
@@ -54,8 +46,8 @@ templ Today(view ShellView) {
 						</div>
 					</div>
 					<label for="desk-message">Message Waffle</label>
-					<textarea id="desk-message" name="message" rows="3" placeholder="Ask Waffle to help…" required></textarea>
-					<p class="composer-hint">Enter adds a new line. Ctrl/Cmd+Enter sends.</p>
+					<textarea id="desk-message" name="message" rows="3" placeholder="Ask Waffle to help…"></textarea>
+					<p class="composer-hint">Enter sends. Shift+Enter adds a new line.</p>
 					<p id="desk-composer-status" class="composer-status" role="status" aria-live="polite" hidden></p>
 					<div class="composer-actions">
 						<button id="desk-cancel" type="button" class="cancel-button" disabled>Cancel turn</button>

@@ -129,6 +129,13 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 	mutation := func(next http.Handler) http.Handler {
 		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatMaxBodyBytes, next)
 	}
+	mux.Handle("GET /api/v1/desk/chat/commands", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, struct {
+			Commands []chat.Command `json:"commands"`
+		}{
+			Commands: chat.Commands(),
+		})
+	}))
 	mux.Handle("POST /api/v1/desk/chat/open", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Continue         bool     `json:"continue"`

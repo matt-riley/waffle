@@ -244,8 +244,8 @@ function createHarness({
     "#desk-phase",
     "#desk-transcript",
     "#desk-empty-transcript",
-    "#desk-tool-activity",
-    "#desk-empty-activity",
+    "#desk-slash-menu",
+    ".composer-actions",
     "#desk-composer",
     "#desk-message",
     "#desk-send",
@@ -276,7 +276,6 @@ function createHarness({
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
-  elements["#desk-tool-activity"].appendChild(elements["#desk-empty-activity"]);
   elements["#desk-composer-status"].hidden = true;
   elements["#desk-model-status"].textContent = "Changes this conversation only.";
   elements["#desk-skill-status"].textContent = "Changes this conversation only.";
@@ -374,6 +373,15 @@ function createHarness({
         return closeHandler({ path, options });
       }
       return jsonResponse({});
+    }
+    if (path === "/api/v1/desk/chat/commands") {
+      return jsonResponse({
+        commands: [
+          { name: "model", usage: "/model [alias]", description: "choose the session model" },
+          { name: "skills", usage: "/skills", description: "list or change session skills" },
+          { name: "status", usage: "/status", description: "show current runtime status" },
+        ],
+      });
     }
     return jsonResponse({});
   };
@@ -677,7 +685,7 @@ test("assistant inline markdown renders bold, italic, strike, and safe links; un
   assert.equal(harness.forbiddenMarkupAssignments.length, 0);
 });
 
-test("Ctrl or Cmd Enter sends while plain Enter remains a newline", async () => {
+test("Ctrl or Cmd Enter sends the message", async () => {
   const harness = createHarness({
     turnHandler: async () => jsonResponse({}),
   });
@@ -686,17 +694,6 @@ test("Ctrl or Cmd Enter sends while plain Enter remains a newline", async () => 
   const keydown = message.listener("keydown");
   message.value = "line one";
   let prevented = 0;
-  await keydown({
-    key: "Enter",
-    ctrlKey: false,
-    metaKey: false,
-    preventDefault() {
-      prevented += 1;
-    },
-  });
-  assert.equal(prevented, 0);
-  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 0);
-
   await keydown({
     key: "Enter",
     ctrlKey: true,
@@ -758,7 +755,7 @@ test("keyboard send ignores empty and non-idle composers", async () => {
   pending.resolve(jsonResponse({}));
 });
 
-test("tool ledger pairs concurrent calls by opaque ID with duration and outcome", async () => {
+test("tool calls render inline as chips paired by opaque ID with duration and outcome", async () => {
   const harness = createHarness();
   await flush();
   const stream = harness.EventSource.instances[0];
@@ -771,6 +768,12 @@ test("tool ledger pairs concurrent calls by opaque ID with duration and outcome"
     });
   emit("tool_started", { tool_name: "read", tool_call_id: "tool-1" });
   emit("tool_started", { tool_name: "read", tool_call_id: "tool-2" });
+  const chipsContainer = harness.elements["#desk-transcript"].querySelector(
+    ".tool-chips",
+  );
+  assert.ok(chipsContainer, "inline tool chip container is created in the transcript");
+  assert.equal(chipsContainer.childNodes.length, 2);
+  assert.match(chipsContainer.childNodes[0].textContent, /read.*running/i);
   emit("tool_finished", {
     tool_name: "read",
     tool_call_id: "tool-2",
@@ -793,12 +796,218 @@ test("tool ledger pairs concurrent calls by opaque ID with duration and outcome"
     is_error: true,
   });
 
-  const ledger = harness.elements["#desk-tool-activity"];
-  assert.equal(ledger.childNodes.length, 2);
-  assert.match(ledger.childNodes[0].textContent, /read.*25 ms.*succeeded.*128 bytes/i);
-  assert.equal(ledger.childNodes[0].classList.contains("is-success"), true);
-  assert.match(ledger.childNodes[1].textContent, /read.*12 ms.*failed/i);
-  assert.equal(ledger.childNodes[1].classList.contains("is-error"), true);
+  const chips = chipsContainer.childNodes;
+  assert.equal(chips.length, 2);
+  assert.match(chips[0].textContent, /read.*✓ 25 ms · 128 B/i);
+  assert.equal(chips[0].classList.contains("is-success"), true);
+  assert.match(chips[1].textContent, /read.*failed · 12 ms/i);
+  assert.equal(chips[1].classList.contains("is-error"), true);
+});
+
+test("plain Enter sends the message while Shift+Enter keeps the default newline", async () => {
+  const pending = deferred();
+  const harness = createHarness({
+    turnHandler: async () => pending.promise,
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const keydown = message.listener("keydown");
+
+  message.value = "hello";
+  let defaultPrevented = false;
+  keydown({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {
+      defaultPrevented = true;
+    },
+  });
+  assert.equal(defaultPrevented, true);
+  await flush();
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+
+  pending.resolve(jsonResponse({}));
+  await flush();
+  message.value = "line1";
+  defaultPrevented = false;
+  keydown({
+    key: "Enter",
+    shiftKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {
+      defaultPrevented = true;
+    },
+  });
+  assert.equal(defaultPrevented, false, "Shift+Enter is left to the default newline");
+});
+
+test("slash menu filters commands and skills and inserts a command on Enter", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const menu = harness.elements["#desk-slash-menu"];
+  const keydown = message.listener("keydown");
+  const input = message.listener("input");
+
+  message.value = "/mo";
+  input();
+  await flush();
+  assert.equal(menu.hidden, false, "slash menu opens on a slash token");
+  assert.match(menu.textContent, /Commands/);
+  assert.match(menu.textContent, /\/model/);
+  assert.doesNotMatch(menu.textContent, /\/skills/);
+
+  keydown({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  assert.equal(message.value, "/model ");
+  assert.equal(menu.hidden, true, "menu closes after insertion");
+});
+
+test("slash menu lists skills and attaches the selected one", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const menu = harness.elements["#desk-slash-menu"];
+  const keydown = message.listener("keydown");
+  const input = message.listener("input");
+
+  message.value = "/";
+  input();
+  await flush();
+  assert.equal(menu.hidden, false);
+  assert.match(menu.textContent, /Skills/);
+  assert.match(menu.textContent, /review/);
+
+  // Commands precede skills in the menu; step past the three commands.
+  for (let i = 0; i < 3; i += 1) {
+    keydown({ key: "ArrowDown", preventDefault() {} });
+  }
+  keydown({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+  const commandCalls = mutationCalls(harness, "/api/v1/desk/chat/command").map(
+    (call) => JSON.parse(call.options.body).command,
+  );
+  assert.deepEqual(commandCalls, [
+    { name: "skills", args: "attach review" },
+  ]);
+  assert.equal(message.value, "/", "selecting a skill leaves the composer text alone");
+});
+
+test("typing indicator appears on send and the first delta replaces it with a caret", async () => {
+  const pending = deferred();
+  const harness = createHarness({
+    turnHandler: async () => pending.promise,
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "hello";
+  void message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+
+  const transcript = harness.elements["#desk-transcript"];
+  assert.ok(transcript.querySelector(".user-message"), "user message appears immediately");
+  assert.ok(transcript.querySelector(".typing-message"), "typing indicator shows while the model works");
+
+  const stream = harness.EventSource.instances[0];
+  const emit = (type, data) =>
+    stream.emit(type, {
+      resource: "chat",
+      resource_id: "client-1",
+      type,
+      data,
+    });
+  emit("text_delta", { text: "Paris" });
+  await flush();
+  assert.equal(transcript.querySelector(".typing-message"), null);
+  const caret = transcript.querySelector(".stream-caret");
+  assert.ok(caret, "streaming message carries a blinking caret");
+  emit("text_delta", { text: "!" });
+  await flush();
+  const caret2 = transcript.querySelector(".stream-caret");
+  assert.ok(caret2, "caret persists across deltas");
+  assert.match(caret2.parentNode.textContent, /Paris!/);
+
+  emit("turn_done", { state: defaultChatState() });
+  await flush();
+  assert.equal(transcript.querySelector(".stream-caret"), null, "caret removed when the turn ends");
+  pending.resolve(jsonResponse({}));
+  await flush();
+});
+
+test("completed messages carry a copy button that writes the plain text", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: "Hello world" }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const copy = harness.elements["#desk-transcript"].querySelector(".message-copy");
+  assert.ok(copy, "copy button rendered on the completed assistant message");
+  await copy.listener("click")();
+  assert.deepEqual(harness.clipboardWrites, ["Hello world"]);
+});
+
+test("rejected turn offers retry that resends the same text", async () => {
+  let attempts = 0;
+  const harness = createHarness({
+    turnHandler: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return { ok: false, status: 422, json: async () => ({ message: "rejected" }) };
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "hello";
+  void message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+  const retry = harness.elements[".composer-actions"].querySelector(".retry-button");
+  assert.ok(retry, "retry button appears after a rejected turn");
+  assert.match(harness.elements["#desk-composer-status"].textContent, /rejected/);
+  await retry.listener("click")();
+  await flush();
+  const turns = mutationCalls(harness, "/api/v1/desk/chat/turn").map((call) =>
+    JSON.parse(call.options.body).text,
+  );
+  assert.deepEqual(turns, ["hello", "hello"]);
 });
 
 test("new conversation requires explicit confirmation then replaces canonical state", async () => {
@@ -1277,7 +1486,7 @@ test("failed skill toggle stays live and reports the error next to the control",
   assert.equal(harness.EventSource.instances[0].closed, false);
 });
 
-test("rejected turn keeps composer text and reuses Idempotency-Key on retry", async () => {
+test("rejected turn clears the composer and retry reuses the Idempotency-Key", async () => {
   let turnCalls = 0;
   const harness = createHarness({
     turnHandler: async () => {
@@ -1300,17 +1509,19 @@ test("rejected turn keeps composer text and reuses Idempotency-Key on retry", as
   await flush();
 
   assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
-  assert.equal(message.value, "Careful question");
+  assert.equal(message.value, "", "composer clears once the message is in the transcript");
   assert.equal(
     harness.elements["#desk-composer-status"].textContent,
     "Turn rejected by policy.",
   );
   assert.equal(harness.elements["#desk-stale-status"].hidden, true);
+  const retry = harness.elements[".composer-actions"].querySelector(".retry-button");
+  assert.ok(retry, "rejected turn offers a retry button");
 
   const firstKey = mutationCalls(harness, "/api/v1/desk/chat/turn")[0].options.headers[
     "Idempotency-Key"
   ];
-  await submit({ preventDefault() {} });
+  await retry.listener("click")();
   await flush();
 
   const turnPosts = mutationCalls(harness, "/api/v1/desk/chat/turn");
@@ -1341,7 +1552,9 @@ test("network failure after turn leaves is unrecoverable and names the cause", a
     harness.elements["#desk-stale-message"].textContent,
     /could not reach Waffle|turn outcome is unknown/i,
   );
-  assert.equal(message.value, "Maybe delivered");
+  assert.equal(message.value, "", "composer clears; the message lives in the transcript");
+  const userMessage = harness.elements["#desk-transcript"].querySelector(".user-message");
+  assert.match(userMessage.textContent, /Maybe delivered/);
 });
 
 test("dropped SSE reconnects automatically from the last cursor", async () => {
