@@ -232,6 +232,8 @@ function createHarness({
   cancelHandler,
   confirmResult = true,
   storedLease = null,
+  sharedStorage = null,
+  denyStorage = false,
 } = {}) {
   const selectors = [
     ".desk-shell",
@@ -274,6 +276,7 @@ function createHarness({
     "#desk-workset",
     "#desk-help-refresh",
     "#desk-help",
+    "#desk-queue",
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
@@ -425,15 +428,27 @@ function createHarness({
   }
   FakeEventSource.instances = [];
 
-  const storage = new Map();
+  const storage = sharedStorage || new Map();
   if (storedLease) {
     storage.set("waffle.desk.today.owner.v1", JSON.stringify(storedLease));
   }
-  const sessionStorage = {
-    getItem: (key) => storage.get(key) ?? null,
-    removeItem: (key) => storage.delete(key),
-    setItem: (key, value) => storage.set(key, String(value)),
-  };
+  const sessionStorage = denyStorage
+    ? {
+        getItem() {
+          throw new Error("storage denied");
+        },
+        removeItem() {
+          throw new Error("storage denied");
+        },
+        setItem() {
+          throw new Error("storage denied");
+        },
+      }
+    : {
+        getItem: (key) => storage.get(key) ?? null,
+        removeItem: (key) => storage.delete(key),
+        setItem: (key, value) => storage.set(key, String(value)),
+      };
   const lifecycleListeners = new Map();
   const clipboardWrites = [];
   const context = vm.createContext({
@@ -1457,7 +1472,9 @@ test("turn remains locked until its POST and turn_done settle, then applies cano
   });
 
   assert.notEqual(harness.elements[".desk-shell"].dataset.phase, "idle");
-  assert.equal(message.disabled, true);
+  // The composer stays usable during a turn so the operator can queue a
+  // follow-up; submitting still does not start a second turn.
+  assert.equal(message.disabled, false);
   void submit({ preventDefault() {} });
   assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
 
@@ -1502,7 +1519,7 @@ test("cancel keeps the turn locked until its mutation and turn_done settle", asy
   });
 
   assert.equal(harness.elements[".desk-shell"].dataset.phase, "cancelling");
-  assert.equal(message.disabled, true);
+  assert.equal(message.disabled, false);
   message.value = "Must stay blocked";
   void submit({ preventDefault() {} });
   assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
@@ -1537,7 +1554,7 @@ test("cancel response before turn_done keeps the composer locked", async () => {
   await flush();
 
   assert.equal(harness.elements[".desk-shell"].dataset.phase, "cancelling");
-  assert.equal(message.disabled, true);
+  assert.equal(message.disabled, false);
   assert.equal(send.disabled, true);
   message.value = "Must stay blocked";
   await submit({ preventDefault() {} });
@@ -1766,4 +1783,228 @@ test("unparseable SSE frame does not tear down the desk", async () => {
   assert.equal(harness.elements["#desk-stale-status"].hidden, true);
   assert.equal(stream.closed, false);
   assert.equal(harness.elements["#desk-message"].disabled, false);
+});
+
+test("drafts persist per session across reloads and never leak into another session", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "work in progress";
+  message.listener("input")();
+  assert.equal(
+    JSON.parse(harness.sessionStorage.getItem("waffle.desk.today.drafts.v1"))["session-1"],
+    "work in progress",
+  );
+
+  // Same tab "reload" reuses the same storage and restores the draft.
+  const reloaded = createHarness({ sharedStorage: harness.storage });
+  await flush();
+  assert.equal(reloaded.elements["#desk-message"].value, "work in progress");
+  assert.equal(reloaded.elements["#desk-send"].disabled, false);
+
+  // A different session never sees another session's draft.
+  const other = createHarness({
+    sharedStorage: harness.storage,
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-2",
+        reattach_token: "lease-2",
+        state: defaultChatState({ session_id: "session-2" }),
+      }),
+  });
+  await flush();
+  assert.equal(other.elements["#desk-message"].value, "");
+});
+
+test("accepted send clears the draft; rejected send keeps it for retry", async () => {
+  let attempts = 0;
+  const harness = createHarness({
+    turnHandler: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return { ok: false, status: 422, json: async () => ({ message: "rejected" }) };
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "send me";
+  message.listener("input")();
+  const submit = harness.elements["#desk-composer"].listener("submit");
+  await submit({ preventDefault() {} });
+  await flush();
+  // Rejection keeps the draft stored (retry refills it) and holds the queue.
+  assert.ok(
+    JSON.parse(harness.sessionStorage.getItem("waffle.desk.today.drafts.v1"))["session-1"],
+  );
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+
+  // The retry button refills the text; the accepted resend clears the draft.
+  const retry = harness.elements[".composer-actions"].querySelector(".retry-button");
+  assert.ok(retry, "rejection offers retry");
+  await retry.listener("click")();
+  await flush();
+  assert.equal(
+    harness.sessionStorage.getItem("waffle.desk.today.drafts.v1"),
+    null,
+    "draft cleared after acceptance",
+  );
+});
+
+test("busy composer queues one follow-up and auto-dispatches after turn_done", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const submit = harness.elements["#desk-composer"].listener("submit");
+
+  message.value = "first";
+  const first = submit({ preventDefault() {} });
+
+  message.value = "follow up";
+  message.listener("input")();
+  message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/turn").length,
+    1,
+    "queuing never starts a second turn",
+  );
+  assert.equal(harness.elements["#desk-send"].textContent, "Queue follow-up");
+  const banner = harness.elements["#desk-queue"];
+  assert.equal(banner.hidden, false);
+  assert.match(banner.textContent, /Follow-up queued/);
+  assert.match(banner.textContent, /follow up/);
+  assert.match(
+    harness.elements["#desk-composer-status"].textContent,
+    /Follow-up queued/,
+  );
+
+  harness.turnResponse.resolve(jsonResponse({}));
+  await first;
+  await flush();
+  const stream = harness.EventSource.instances[0];
+  stream.emit("text_delta", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "text_delta",
+    data: { text: "Answer" },
+  });
+  stream.emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  await flush();
+
+  const turns = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turns.length, 2, "follow-up auto-dispatches after turn_done");
+  assert.equal(JSON.parse(turns[1].options.body).text, "follow up");
+  assert.notEqual(
+    turns[0].options.headers["Idempotency-Key"],
+    turns[1].options.headers["Idempotency-Key"],
+    "queued dispatch gets its own idempotency key",
+  );
+  assert.equal(harness.elements["#desk-queue"].hidden, true, "banner clears after dispatch");
+  // The composer keeps what the operator typed next.
+  assert.equal(message.value, "follow up");
+});
+
+test("cancel, rejection, and network failure hold the follow-up for review", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const submit = harness.elements["#desk-composer"].listener("submit");
+
+  message.value = "first";
+  const first = submit({ preventDefault() {} });
+  message.value = "queued item";
+  await submit({ preventDefault() {} });
+  await flush();
+  const banner = harness.elements["#desk-queue"];
+  assert.equal(banner.hidden, false);
+
+  // Cancel: the running turn is cancelled, the queue is held and never fires.
+  const cancellation = harness.elements["#desk-cancel"].listener("click")();
+  await flush();
+  harness.cancelResponse.resolve(jsonResponse({}));
+  await cancellation;
+  await flush();
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  harness.turnResponse.resolve(jsonResponse({}));
+  await first;
+  await flush();
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/turn").length,
+    1,
+    "cancelled turn never dispatches the queue",
+  );
+  assert.match(banner.textContent, /held for review/);
+});
+
+test("queued follow-up can be replaced with confirmation, edited, or removed", async () => {
+  const harness = createHarness({ confirmResult: false });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const submit = harness.elements["#desk-composer"].listener("submit");
+
+  message.value = "first";
+  void submit({ preventDefault() {} });
+  message.value = "queued item";
+  await submit({ preventDefault() {} });
+  await flush();
+  const banner = harness.elements["#desk-queue"];
+  assert.match(banner.textContent, /queued item/);
+
+  // Declined replacement keeps the original queue.
+  message.value = "different text";
+  await submit({ preventDefault() {} });
+  await flush();
+  assert.match(banner.textContent, /queued item/);
+
+  // Edit pulls the queued text back into the composer and clears the queue.
+  banner.querySelector(".queue-edit").listener("click")();
+  await flush();
+  assert.equal(message.value, "queued item");
+  assert.equal(harness.elements["#desk-queue"].hidden, true);
+
+  // Re-queue then Remove clears it.
+  await submit({ preventDefault() {} });
+  await flush();
+  assert.equal(harness.elements["#desk-queue"].hidden, false);
+  harness.elements["#desk-queue"].querySelector(".queue-remove").listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-queue"].hidden, true);
+  assert.equal(harness.sessionStorage.getItem("waffle.desk.today.queue.v1"), null);
+});
+
+test("storage-denied browsers still send and queue without crashing", async () => {
+  const harness = createHarness({ denyStorage: true });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "hello";
+  message.listener("input")();
+  message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "sending");
 });

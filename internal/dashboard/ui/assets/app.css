@@ -835,6 +835,59 @@ h3 {
   color: var(--danger);
 }
 
+.queue-banner {
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.75rem;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.queue-banner[hidden] {
+  display: none;
+}
+
+.queue-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.queue-text {
+  font-size: 0.85rem;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.queue-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.queue-actions button {
+  background: none;
+  border: 1px solid var(--rule-dark);
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+}
+
+.queue-actions button:hover,
+.queue-actions button:focus-visible {
+  border-color: var(--ginger-dark);
+}
+
 .composer-actions {
   display: flex;
   flex-wrap: wrap;

@@ -58,6 +58,128 @@ function forgetStoredOwner() {
   }
 }
 
+// Drafts and the single follow-up queue are browser-local and keyed by session
+// ID, so refresh and session switches in the same tab keep work in progress.
+// Storage failures degrade to page-lifetime behaviour without breaking send.
+const draftsStorageKey = "waffle.desk.today.drafts.v1";
+const queueStorageKey = "waffle.desk.today.queue.v1";
+
+function readDraftMap() {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(draftsStorageKey);
+    if (!raw) {
+      return {};
+    }
+    const map = JSON.parse(raw);
+    return map && typeof map === "object" ? map : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDraftMap(map) {
+  try {
+    const entries = Object.entries(map).filter(
+      ([, text]) => typeof text === "string" && text.trim() !== "",
+    );
+    if (entries.length === 0) {
+      globalThis.sessionStorage?.removeItem(draftsStorageKey);
+      return;
+    }
+    globalThis.sessionStorage?.setItem(
+      draftsStorageKey,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Storage denied: drafts are best-effort.
+  }
+}
+
+function getDraft(sessionID) {
+  if (!sessionID) {
+    return "";
+  }
+  return readDraftMap()[sessionID] || "";
+}
+
+function setDraft(sessionID, text) {
+  if (!sessionID) {
+    return;
+  }
+  const map = readDraftMap();
+  if (typeof text === "string" && text.trim() !== "") {
+    map[sessionID] = text;
+  } else {
+    delete map[sessionID];
+  }
+  saveDraftMap(map);
+}
+
+function clearDraft(sessionID) {
+  if (!sessionID) {
+    return;
+  }
+  const map = readDraftMap();
+  delete map[sessionID];
+  saveDraftMap(map);
+}
+
+function readQueue() {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(queueStorageKey);
+    if (!raw) {
+      return null;
+    }
+    const queue = JSON.parse(raw);
+    if (
+      !queue ||
+      typeof queue.sessionID !== "string" ||
+      typeof queue.text !== "string" ||
+      queue.text.trim() === "" ||
+      typeof queue.idempotencyKey !== "string"
+    ) {
+      globalThis.sessionStorage?.removeItem(queueStorageKey);
+      return null;
+    }
+    return {
+      sessionID: queue.sessionID,
+      text: queue.text,
+      idempotencyKey: queue.idempotencyKey,
+      held: queue.held === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistQueue(queue) {
+  state.queue = queue;
+  try {
+    if (queue) {
+      globalThis.sessionStorage?.setItem(queueStorageKey, JSON.stringify(queue));
+    } else {
+      globalThis.sessionStorage?.removeItem(queueStorageKey);
+    }
+  } catch {
+    // The in-memory queue still governs this page.
+  }
+  renderQueueBanner();
+  updateControls();
+}
+
+function holdQueue(reason) {
+  if (!state.queue) {
+    return;
+  }
+  persistQueue({ ...state.queue, held: true });
+  setStatusMessage(
+    elements.composerStatus,
+    `Follow-up held for review: ${reason}`,
+    true,
+    "composer",
+  );
+}
+
 const elements = {
   shell: document.querySelector(".desk-shell"),
   title: document.querySelector("#desk-session-title"),
@@ -100,6 +222,7 @@ const elements = {
   workset: document.querySelector("#desk-workset"),
   helpRefresh: document.querySelector("#desk-help-refresh"),
   help: document.querySelector("#desk-help"),
+  queue: document.querySelector("#desk-queue"),
 };
 
 const storedOwner = readStoredOwner();
@@ -131,6 +254,13 @@ const state = {
   turnToolContainer: null,
   typingMessage: null,
   lastUserText: "",
+  draftSessionID: "",
+  queue: (() => {
+    const stored = readQueue();
+    // A restored queue had an unknown turn outcome at refresh time, so it
+    // waits for explicit review instead of auto-dispatching.
+    return stored ? { ...stored, held: true } : null;
+  })(),
   slash: {
     open: false,
     filter: "",
@@ -215,8 +345,19 @@ function updateControls() {
     state.activeTurn !== null &&
     (state.currentPhase === phase.sending ||
       state.currentPhase === phase.streaming);
-  elements.message.disabled = !idle;
-  elements.send.disabled = !idle || elements.message.value.trim() === "";
+  // The composer stays usable while Waffle works so the operator can queue a
+  // follow-up; it is only locked while disconnected.
+  elements.message.disabled = state.currentPhase === phase.disconnected;
+  const busy = !idle && state.currentPhase !== phase.disconnected;
+  elements.send.disabled =
+    !state.clientID || elements.message.value.trim() === "";
+  if (busy) {
+    elements.send.textContent = "Queue follow-up";
+    elements.send.setAttribute("aria-label", "Queue follow-up");
+  } else {
+    elements.send.textContent = "Send message";
+    elements.send.setAttribute("aria-label", "Send message");
+  }
   elements.cancel.disabled = !cancellable;
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
@@ -234,6 +375,26 @@ function updateControls() {
       control.disabled = !idle;
     }
   }
+}
+
+// syncComposerDraft restores the current session's browser-local draft after
+// an open or session switch, without clobbering what the operator is typing.
+function syncComposerDraft() {
+  if (!state.sessionID || state.draftSessionID === state.sessionID) {
+    return;
+  }
+  state.draftSessionID = state.sessionID;
+  if (
+    state.currentPhase === phase.disconnected ||
+    state.activeTurn !== null
+  ) {
+    return;
+  }
+  const draft = getDraft(state.sessionID);
+  if (draft !== "") {
+    elements.message.value = draft;
+  }
+  updateControls();
 }
 
 function clearNode(node) {
@@ -769,6 +930,7 @@ function renderCanonicalState(chatState, includeHistory) {
     return;
   }
   state.sessionID = chatState.session_id || state.sessionID;
+  syncComposerDraft();
   state.modelAlias = chatState.model_alias || state.modelAlias;
   state.connectionLabel = chatState.connection_mode || state.connectionLabel || "Connected";
   elements.title.textContent = chatState.title || "Untitled conversation";
@@ -945,6 +1107,7 @@ function disconnect(message) {
     state.eventSource.close();
     state.eventSource = null;
   }
+  holdQueue("the connection dropped");
   state.activeTurn = null;
   state.activeOperation = null;
   state.streamingMessage = null;
@@ -1239,9 +1402,14 @@ function settleTurn(turn) {
   state.activeOperation = null;
   state.pendingTurn = null;
   setPhase(phase.idle);
+  maybeDispatchFollowUp(turn);
 }
 
-function turnIdempotencyKey(text) {
+function turnIdempotencyKey(text, provided) {
+  if (provided) {
+    state.pendingTurn = { text, idempotencyKey: provided };
+    return provided;
+  }
   if (state.pendingTurn && state.pendingTurn.text === text) {
     return state.pendingTurn.idempotencyKey;
   }
@@ -1250,22 +1418,159 @@ function turnIdempotencyKey(text) {
   return idempotencyKey;
 }
 
-async function submitTurn(event) {
+async function submitTurn(event, explicitText, idempotencyKey) {
   event.preventDefault();
-  const text = elements.message.value.trim();
-  if (state.currentPhase !== phase.idle || !text) {
+  const text = String(explicitText ?? elements.message.value).trim();
+  if (!text || state.clientID === "") {
     return;
   }
-  state.streamingMessage = null;
-  state.activeOperation = "turn";
+  if (state.currentPhase !== phase.idle) {
+    queueFollowUp(text);
+    return;
+  }
+  await sendTurn(text, turnIdempotencyKey(text, idempotencyKey), {
+    clearComposer: explicitText === undefined,
+  });
+}
+
+// queueFollowUp stores the single visible follow-up for the current session
+// while a turn is running. It is dispatched only after the running turn
+// completes successfully in the same session.
+function queueFollowUp(text) {
+  if (!state.sessionID) {
+    return;
+  }
+  if (state.queue && state.queue.sessionID !== state.sessionID) {
+    setStatusMessage(
+      elements.composerStatus,
+      "A follow-up for another session is held. Switch back to review it.",
+      true,
+      "composer",
+    );
+    return;
+  }
+  const existing = state.queue;
+  if (existing) {
+    if (existing.text === text) {
+      setStatusMessage(
+        elements.composerStatus,
+        "That message is already queued.",
+        false,
+        "composer",
+      );
+      return;
+    }
+    const replace = globalThis.confirm?.(
+      "Replace the queued follow-up with this message?",
+    );
+    if (!replace) {
+      elements.message.focus();
+      return;
+    }
+  }
+  persistQueue({
+    sessionID: state.sessionID,
+    text,
+    idempotencyKey: crypto.randomUUID(),
+    held: false,
+  });
+  setStatusMessage(
+    elements.composerStatus,
+    "Follow-up queued. It will send when Waffle finishes.",
+    false,
+    "composer",
+  );
+}
+
+function renderQueueBanner() {
+  if (!elements.queue) {
+    return;
+  }
+  clearNode(elements.queue);
+  const queue = state.queue;
+  if (!queue || queue.sessionID !== state.sessionID) {
+    elements.queue.hidden = true;
+    return;
+  }
+  elements.queue.hidden = false;
+  const label = document.createElement("p");
+  label.className = "queue-label";
+  label.textContent = queue.held
+    ? "Follow-up held for review"
+    : "Follow-up queued";
+  const text = document.createElement("p");
+  text.className = "queue-text";
+  text.textContent = queue.text;
+  const actions = document.createElement("div");
+  actions.className = "queue-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "queue-edit";
+  edit.textContent = "Edit";
+  edit.setAttribute("aria-label", "Edit queued follow-up");
+  edit.addEventListener("click", () => {
+    const current = state.queue;
+    if (!current) {
+      return;
+    }
+    elements.message.value = current.text;
+    persistQueue(null);
+    elements.message.focus();
+    setStatusMessage(
+      elements.composerStatus,
+      "Queued text is back in the composer.",
+      false,
+      "composer",
+    );
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "queue-remove";
+  remove.textContent = "Remove";
+  remove.setAttribute("aria-label", "Remove queued follow-up");
+  remove.addEventListener("click", () => {
+    persistQueue(null);
+    setStatusMessage(elements.composerStatus, "Follow-up removed.", false, "composer");
+  });
+  actions.append(edit, remove);
+  elements.queue.append(label, text, actions);
+}
+
+// maybeDispatchFollowUp fires the queued follow-up after the running turn
+// settles normally. Cancelled, rejected, and disconnected turns hold the queue
+// instead (see holdQueue), and a held or foreign-session queue never fires.
+function maybeDispatchFollowUp(turn) {
+  const queue = state.queue;
+  if (
+    turn.cancelled ||
+    !queue ||
+    queue.held ||
+    queue.sessionID !== state.sessionID
+  ) {
+    return;
+  }
+  const followUp = queue;
+  persistQueue(null);
+  setStatusMessage(
+    elements.composerStatus,
+    "Follow-up sent.",
+    false,
+    "composer",
+  );
+  void sendTurn(followUp.text, followUp.idempotencyKey, {
+    clearComposer: false,
+  });
+}
+
+async function sendTurn(text, idempotencyKey, options) {
   const generation = state.generation;
-  const idempotencyKey = turnIdempotencyKey(text);
   const turn = {
     id: ++state.turnSequence,
     generation,
     postSettled: false,
     eventSettled: false,
     cancelSettled: true,
+    cancelled: false,
     text,
     idempotencyKey,
   };
@@ -1275,7 +1580,9 @@ async function submitTurn(event) {
   setStatusMessage(elements.composerStatus, "", false, "composer");
   appendMessage("user", text, state.streamingMessage);
   showTypingIndicator();
-  elements.message.value = "";
+  if (options?.clearComposer) {
+    elements.message.value = "";
+  }
   updateControls();
   try {
     await postMutation("/api/v1/desk/chat/turn", {
@@ -1286,6 +1593,7 @@ async function submitTurn(event) {
       return;
     }
     state.pendingTurn = null;
+    clearDraft(state.sessionID);
     turn.postSettled = true;
     settleTurn(turn);
   } catch (error) {
@@ -1296,6 +1604,7 @@ async function submitTurn(event) {
     state.activeOperation = null;
     clearTypingIndicator();
     if (error.network) {
+      holdQueue("the send outcome is unknown");
       disconnect(
         error.safeMessage ||
           "The turn outcome is unknown. Refresh before sending another message.",
@@ -1303,12 +1612,14 @@ async function submitTurn(event) {
       return;
     }
     // Clear HTTP rejection: message stays, same Idempotency-Key on identical retry.
+    holdQueue("the send was rejected");
     setPhase(phase.idle);
     setStatusMessage(
       elements.composerStatus,
       error.safeMessage ||
         "The turn was rejected. Edit the message or send again to retry.",
       true,
+      "composer",
     );
     const retry = document.createElement("button");
     retry.type = "button";
@@ -1335,7 +1646,9 @@ async function cancelTurn() {
     return;
   }
   const turn = state.activeTurn;
+  turn.cancelled = true;
   turn.cancelSettled = false;
+  holdQueue("the running turn was cancelled");
   setPhase(phase.cancelling);
   setStatusMessage(elements.composerStatus, "", false, "composer");
   try {
@@ -1945,6 +2258,7 @@ async function fetchCommands() {
 }
 
 function onComposerInput() {
+  setDraft(state.sessionID, elements.message.value);
   updateControls();
   syncSlashMenu();
 }

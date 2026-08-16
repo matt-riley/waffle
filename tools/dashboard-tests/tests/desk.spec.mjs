@@ -482,6 +482,30 @@ test("Today renders Markdown, keyboard send, and paired tool evidence", async ({
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+test("busy composer queues a visible follow-up that is held on cancel", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the queue flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Wait until I cancel");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#desk-send")).toHaveText("Queue follow-up");
+  await expect(message).toBeEnabled();
+
+  await message.fill("queued follow-up");
+  await page.keyboard.press("Enter");
+  const banner = page.locator("#desk-queue");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("queued follow-up");
+  await expect(page.locator("#desk-composer-status")).toContainText("Follow-up queued");
+
+  await page.getByRole("button", { name: "Cancel turn", exact: true }).click();
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await expect(banner).toContainText("held for review");
+  await expect(page.locator("#desk-send")).toHaveText("Send message");
+});
+
 test("wide markdown tables scroll inside the response without page overflow", async ({ page }) => {
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");

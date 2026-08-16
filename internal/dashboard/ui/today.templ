@@ -49,6 +49,7 @@ templ Today(view ShellView) {
 					<textarea id="desk-message" name="message" rows="3" placeholder="Ask Waffle to help…"></textarea>
 					<p class="composer-hint">Enter sends. Shift+Enter adds a new line.</p>
 					<p id="desk-composer-status" class="composer-status" role="status" aria-live="polite" hidden></p>
+					<div class="queue-banner" id="desk-queue" aria-label="Follow-up queue" hidden></div>
 					<div class="composer-actions">
 						<button id="desk-cancel" type="button" class="cancel-button" disabled>Cancel turn</button>
 						<button id="desk-send" type="submit" class="send-button" disabled>Send message</button>
