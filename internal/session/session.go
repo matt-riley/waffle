@@ -24,6 +24,9 @@ var (
 	// ErrSessionWorkspaceActive is returned when a session still owns a live
 	// (open or idle) workspace and therefore cannot be deleted.
 	ErrSessionWorkspaceActive = errors.New("session workspace is active")
+	// ErrInvalidBranchBoundary is returned when a fork boundary would cut a
+	// tool-use/tool-result sequence into invalid history or is out of range.
+	ErrInvalidBranchBoundary = errors.New("invalid branch boundary")
 )
 
 // Store persists sessions and turns.
@@ -59,6 +62,11 @@ type Session struct {
 	// Pinned keeps a conversation visible ahead of ordinary recents without
 	// changing its last-activity ordering (#470).
 	Pinned bool
+	// ForkedFrom is the source session this conversation branched from, and
+	// ForkedAtSeq is the sequence of the completed exchange it was cut at
+	// (#471). Empty source means the session was started fresh.
+	ForkedFrom  string
+	ForkedAtSeq int64
 	// SummaryWatermark is the highest turn sequence the Summary covers (#411).
 	// A resumed session with new turns is eligible for idle reflection again
 	// even though a summary already exists.
@@ -365,7 +373,7 @@ func (s *Store) RestoreModelAliases(ctx context.Context, changes []ModelAliasCha
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
 	var created, updated, reflected string
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned)
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned, forked_from, forked_at_seq FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned, &sess.ForkedFrom, &sess.ForkedAtSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -473,7 +481,7 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned, forked_from, forked_at_seq
 		FROM sessions
 		WHERE ? = '' OR (updated_at > ? OR (updated_at = ? AND id > ?))
 		ORDER BY updated_at ASC, id ASC
@@ -486,7 +494,7 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 	for rows.Next() {
 		var sess Session
 		var created, updated, reflected string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned, &sess.ForkedFrom, &sess.ForkedAtSeq); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)
@@ -511,7 +519,7 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned, forked_from, forked_at_seq
 		FROM sessions ORDER BY pinned DESC, updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -524,7 +532,7 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	for rows.Next() {
 		var sess Session
 		var created, updated, reflected string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned, &sess.ForkedFrom, &sess.ForkedAtSeq); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)
@@ -547,7 +555,145 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	return out, rows.Err()
 }
 
-// AppendTurn stores one message at the end of a session.
+// Branch creates a new conversation that forks from sourceID at boundarySeq.
+// The canonical persisted prefix — turns with seq <= boundarySeq — is copied
+// into the new session together with the source's model alias, attached
+// skills, and working-set entries as independent snapshots, and the new
+// session records durable lineage (forked_from, forked_at_seq). The source
+// session is never modified. Usage accounting rows are deliberately not
+// copied: branching must not duplicate accounting for copied turns.
+//
+// The boundary is validated server-side: it must be a completed exchange, so
+// tool-use/tool-result sequences can never be cut into invalid history.
+// Everything runs in one transaction, so failure is atomic and leaves no
+// partial session or copied state.
+func (s *Store) Branch(ctx context.Context, sourceID string, boundarySeq int64) (*Session, error) {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return nil, errors.New("session id required")
+	}
+	if boundarySeq < 1 {
+		return nil, fmt.Errorf("%w: boundary must be at least turn 1", ErrInvalidBranchBoundary)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("branch: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Load the source session and its turns inside the transaction so the
+	// boundary validation and the copy see one consistent snapshot.
+	var source Session
+	var created, updated, reflected string
+	err = tx.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, forked_from, forked_at_seq FROM sessions WHERE id = ?`, sourceID).Scan(
+		&source.ID, &source.Title, &source.Summary, &source.ModelAlias, &source.ModelAliasVersion, &created, &updated, &source.SummaryWatermark, &reflected, &source.ForkedFrom, &source.ForkedAtSeq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("branch: load source session: %w", err)
+	}
+
+	type turnRow struct {
+		seq    int64
+		role   string
+		blocks string
+		text   string
+	}
+	var turns []turnRow
+	rows, err := tx.QueryContext(ctx, `SELECT seq, role, blocks, text FROM turns WHERE session_id = ? ORDER BY seq`, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("branch: load source turns: %w", err)
+	}
+	for rows.Next() {
+		var row turnRow
+		if err := rows.Scan(&row.seq, &row.role, &row.blocks, &row.text); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("branch: scan source turn: %w", err)
+		}
+		turns = append(turns, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("branch: read source turns: %w", err)
+	}
+	_ = rows.Close()
+
+	if boundarySeq > int64(len(turns)) {
+		return nil, fmt.Errorf("%w: session %s has %d turns, cannot branch at seq %d", ErrInvalidBranchBoundary, sourceID, len(turns), boundarySeq)
+	}
+	boundary := turns[boundarySeq-1]
+	if err := validateBranchBoundary(boundary.role, boundary.blocks, boundarySeq == int64(len(turns))); err != nil {
+		return nil, fmt.Errorf("%w: session %s seq %d: %v", ErrInvalidBranchBoundary, sourceID, boundarySeq, err)
+	}
+
+	// Copy the canonical prefix: turns, model alias, skills, and working-set
+	// entries all snapshot into the new session. The turn INSERT...SELECT
+	// reuses the FTS trigger so the searchable index stays consistent.
+	newID, err := id.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("branch: new session id: %w", err)
+	}
+	ts := s.nowStr()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO sessions (id, title, model_alias, model_alias_version, created_at, updated_at, forked_from, forked_at_seq)
+		VALUES (?, '', ?, ?, ?, ?, ?, ?)`,
+		newID, source.ModelAlias, source.ModelAliasVersion, ts, ts, sourceID, boundarySeq); err != nil {
+		return nil, fmt.Errorf("branch: create session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO turns (session_id, seq, role, blocks, text, created_at)
+		SELECT ?, seq, role, blocks, text, created_at FROM turns WHERE session_id = ? AND seq <= ?`,
+		newID, sourceID, boundarySeq); err != nil {
+		return nil, fmt.Errorf("branch: copy turns: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO session_skills (session_id, skill_name, attached_at)
+		SELECT ?, skill_name, attached_at FROM session_skills WHERE session_id = ?`,
+		newID, sourceID); err != nil {
+		return nil, fmt.Errorf("branch: copy skills: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO working_set_entries (session_id, id, kind, body, source, pinned, created_at, updated_at)
+		SELECT ?, id, kind, body, source, pinned, created_at, updated_at FROM working_set_entries WHERE session_id = ?`,
+		newID, sourceID); err != nil {
+		return nil, fmt.Errorf("branch: copy working set: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("branch: commit: %w", err)
+	}
+	return &Session{
+		ID: newID, ModelAlias: source.ModelAlias, ModelAliasVersion: source.ModelAliasVersion,
+		CreatedAt: s.clock(), UpdatedAt: s.clock(), ForkedFrom: sourceID, ForkedAtSeq: boundarySeq,
+	}, nil
+}
+
+// validateBranchBoundary rejects a boundary that would cut a tool loop into
+// invalid history. A completed exchange ends with an assistant turn that has
+// no pending tool_use blocks; a user turn is only a valid boundary when it is
+// the final turn (the transcript ends with the unanswered question). Tool-use
+// and tool-result turns between exchanges are never cut.
+func validateBranchBoundary(role, blocks string, isLast bool) error {
+	if role != string(llm.RoleAssistant) && role != string(llm.RoleUser) {
+		return fmt.Errorf("cannot branch inside a %q turn", role)
+	}
+	if role == string(llm.RoleAssistant) {
+		var parsed []llm.Block
+		if err := json.Unmarshal([]byte(blocks), &parsed); err != nil {
+			return fmt.Errorf("corrupt turn: %w", err)
+		}
+		for _, block := range parsed {
+			if block.Type == llm.BlockToolUse {
+				return errors.New("cannot branch mid tool-use exchange; branch after the exchange completes")
+			}
+		}
+		return nil
+	}
+	if !isLast {
+		return errors.New("cannot branch at a user turn that a later exchange completes; branch after the exchange completes")
+	}
+	return nil
+}
 func (s *Store) AppendTurn(ctx context.Context, sessionID string, msg llm.Message) error {
 	blocks, err := json.Marshal(msg.Blocks)
 	if err != nil {
@@ -572,10 +718,12 @@ func (s *Store) AppendTurn(ctx context.Context, sessionID string, msg llm.Messag
 	return tx.Commit()
 }
 
-// Turns loads a session's full history in order.
+// Turns loads a session's full history in order. Each message carries its
+// persisted sequence as Seq so callers can reference server-validated turn
+// boundaries (branching, #471).
 func (s *Store) Turns(ctx context.Context, sessionID string) (msgs []llm.Message, err error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role, blocks FROM turns WHERE session_id = ? ORDER BY seq`, sessionID)
+		`SELECT seq, role, blocks FROM turns WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -585,11 +733,12 @@ func (s *Store) Turns(ctx context.Context, sessionID string) (msgs []llm.Message
 		}
 	}()
 	for rows.Next() {
+		var seq int64
 		var role, blocks string
-		if err := rows.Scan(&role, &blocks); err != nil {
+		if err := rows.Scan(&seq, &role, &blocks); err != nil {
 			return nil, err
 		}
-		msg := llm.Message{Role: llm.Role(role)}
+		msg := llm.Message{Role: llm.Role(role), Seq: seq}
 		if err := json.Unmarshal([]byte(blocks), &msg.Blocks); err != nil {
 			return nil, fmt.Errorf("session %s: corrupt turn: %w", sessionID, err)
 		}

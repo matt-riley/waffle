@@ -181,7 +181,7 @@ the model.
 | `/pin <session>` | Pin a conversation so it stays visible ahead of recents. |
 | `/unpin <session>` | Unpin a conversation. |
 | `/delete <session>` | Delete a conversation; fails closed while a turn or workspace is live. |
-| `/branch <session> <keep>` | Branch a conversation at a completed boundary (edit and regenerate). |
+| `/branch [<turn>|<session> <keep>]` | Fork a conversation at a completed exchange: `/branch <turn>` forks this conversation from the transcript's turn sequence (empty branches from the final exchange); `/branch <session> <keep>` branches a named session at a completed boundary (edit and regenerate). |
 
 Outside the table's Markdown escaping, the exact working-set syntax is
 `/workset [list|replace <id> <text>|drop <id>|clear]`.

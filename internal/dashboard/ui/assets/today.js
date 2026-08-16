@@ -211,6 +211,8 @@ const elements = {
   sandbox: document.querySelector("#desk-sandbox"),
   modelErrorRow: document.querySelector("#desk-model-error-row"),
   modelError: document.querySelector("#desk-model-error"),
+  forkRow: document.querySelector("#desk-fork-row"),
+  fork: document.querySelector("#desk-fork"),
   newConversation: document.querySelector("#desk-new"),
   sessionRefresh: document.querySelector("#desk-session-refresh"),
   sessions: document.querySelector("#desk-sessions"),
@@ -895,6 +897,7 @@ function renderHistory(history) {
       article.dataset.branchKeep = String(lastUserIndex);
       article.dataset.promptText = lastUserText;
       attachTurnAction(article, "regenerate");
+      attachBranchButton(article, message.seq > 0 ? String(message.seq) : "");
     }
     index += 1;
   }
@@ -982,6 +985,49 @@ async function regenerateResponse(article) {
     true,
     "composer",
   );
+}
+
+// attachBranchButton adds a keyboard-accessible "Branch from here" action to
+// a completed assistant exchange (#471). The boundary is sent to the server,
+// which validates it; an empty boundary branches at the end of the transcript.
+function attachBranchButton(article, seq) {
+  if (!article || article.querySelector(".message-branch")) {
+    return;
+  }
+  const branch = document.createElement("button");
+  branch.type = "button";
+  branch.className = "message-branch";
+  branch.textContent = "Branch from here";
+  branch.setAttribute("aria-label", seq ? `Branch from this exchange (turn ${seq})` : "Branch from the end of this conversation");
+  branch.addEventListener("click", async () => {
+    if (state.currentPhase !== phase.idle) {
+      return;
+    }
+    const result = await runCommandOperation("Branching conversation", () =>
+      commandMutation("branch", seq),
+    );
+    if (result && result.state) {
+      renderCanonicalState(result.state, true);
+    }
+  });
+  article.appendChild(branch);
+}
+
+function renderLineage(lineage) {
+  if (!elements.forkRow || !elements.fork) {
+    return;
+  }
+  const forkedFrom = lineage?.forked_from || "";
+  if (!forkedFrom) {
+    elements.forkRow.hidden = true;
+    elements.fork.textContent = "";
+    return;
+  }
+  elements.forkRow.hidden = false;
+  const turn = Number(lineage.forked_at_seq) || 0;
+  elements.fork.textContent = turn > 0
+    ? `Branched from session ${forkedFrom} at turn ${turn}`
+    : `Branched from session ${forkedFrom}`;
 }
 
 function persistOwner() {
@@ -1077,6 +1123,7 @@ function renderCanonicalState(chatState, includeHistory) {
   }
   elements.workspace.textContent = chatState.workspace || "No workspace";
   elements.provider.textContent = chatState.provider_label || "Not reported";
+  renderLineage(chatState.lineage);
   if (elements.sandbox) {
     elements.sandbox.textContent = chatState.sandbox_mode || "Not reported";
   }
@@ -2486,6 +2533,8 @@ function finalizeStreamingMessage() {
     state.historyLength = state.promptIndex + 2;
   }
   attachCopyButton(state.streamingMessage);
+  // The finished exchange is the final completed boundary: branch at the end.
+  attachBranchButton(state.streamingMessage, "");
   state.streamingMessage = null;
   state.streamingText = "";
 }

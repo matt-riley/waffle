@@ -812,6 +812,25 @@ h3 {
   opacity: 0.55;
 }
 
+.message-branch {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.68rem;
+  padding: 0.15rem 0.3rem;
+  position: absolute;
+  right: 3.4rem;
+  top: 1.1rem;
+}
+
+.message-branch:hover,
+.message-branch:focus-visible {
+  color: var(--ginger-dark);
+}
+
 .retry-button {
   background: var(--paper);
   border-color: var(--ginger-dark);

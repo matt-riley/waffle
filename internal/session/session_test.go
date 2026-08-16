@@ -887,3 +887,170 @@ func TestSearchSummariesSurfacesFTSErrors(t *testing.T) {
 		t.Fatalf("error should identify the missing FTS table, got: %v", err)
 	}
 }
+
+func appendExchange(t *testing.T, s *Store, sessionID, userText, assistantText string) {
+	t.Helper()
+	if err := s.AppendTurn(context.Background(), sessionID, llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: userText}}}); err != nil {
+		t.Fatalf("append user turn: %v", err)
+	}
+	if err := s.AppendTurn(context.Background(), sessionID, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}}); err != nil {
+		t.Fatalf("append assistant turn: %v", err)
+	}
+}
+
+func seedBranchSource(t *testing.T, s *Store) *Session {
+	t.Helper()
+	ctx := context.Background()
+	sess, err := s.Create(ctx, "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendExchange(t, s, sess.ID, "hello", "hi there")
+	appendExchange(t, s, sess.ID, "what is 2+2?", "four")
+	if err := s.SetModelAlias(ctx, sess.ID, "fast"); err != nil {
+		t.Fatal(err)
+	}
+	// Attach a skill and add a working-set entry so snapshots are asserted.
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO session_skills (session_id, skill_name, attached_at) VALUES (?, 'planner', ?)`, sess.ID, s.nowStr()); err != nil {
+		t.Fatalf("attach skill: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO working_set_entries (session_id, id, kind, body, source, pinned, created_at, updated_at) VALUES (?, 'ws-1', 'goal', 'build a branch', 'user', 1, ?, ?)`, sess.ID, s.nowStr(), s.nowStr()); err != nil {
+		t.Fatalf("add working set entry: %v", err)
+	}
+	return sess
+}
+
+func TestBranchCopiesCanonicalPrefixAndLineage(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	source := seedBranchSource(t, s)
+
+	branch, err := s.Branch(ctx, source.ID, 4)
+	if err != nil {
+		t.Fatalf("Branch: %v", err)
+	}
+	if branch.ID == source.ID {
+		t.Fatal("branch must be a new session")
+	}
+	if branch.ForkedFrom != source.ID || branch.ForkedAtSeq != 4 {
+		t.Fatalf("lineage = %s/%d, want %s/4", branch.ForkedFrom, branch.ForkedAtSeq, source.ID)
+	}
+	if branch.ModelAlias != "fast" {
+		t.Fatalf("model alias = %q, want fast", branch.ModelAlias)
+	}
+	turns, err := s.Turns(ctx, branch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 4 {
+		t.Fatalf("branch turns = %d, want 4", len(turns))
+	}
+	for i, turn := range turns {
+		want := []string{"hello", "hi there", "what is 2+2?", "four"}[i]
+		if turn.Role != llm.RoleAssistant && i%2 == 0 {
+			continue
+		}
+		if i%2 == 1 && turn.Text() != want {
+			t.Fatalf("turn %d text = %q, want %q", i, turn.Text(), want)
+		}
+	}
+	// Persisted round-trip: a fresh load sees the same lineage.
+	loaded, err := s.Get(ctx, branch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ForkedFrom != source.ID || loaded.ForkedAtSeq != 4 {
+		t.Fatalf("persisted lineage = %s/%d", loaded.ForkedFrom, loaded.ForkedAtSeq)
+	}
+	// Source session is untouched and keeps all its turns.
+	sourceTurns, err := s.Turns(ctx, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceTurns) != 4 {
+		t.Fatalf("source turns changed to %d", len(sourceTurns))
+	}
+	if sourceTurns[3].Text() != "four" {
+		t.Fatalf("source last turn changed to %q", sourceTurns[3].Text())
+	}
+	// Skills and working-set entries copied as independent snapshots.
+	var skills, wsEntries int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_skills WHERE session_id = ?`, branch.ID).Scan(&skills); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM working_set_entries WHERE session_id = ?`, branch.ID).Scan(&wsEntries); err != nil {
+		t.Fatal(err)
+	}
+	if skills != 1 || wsEntries != 1 {
+		t.Fatalf("copied skills=%d working-set=%d, want 1/1", skills, wsEntries)
+	}
+}
+
+func TestBranchRejectsMidToolLoopBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.Create(ctx, "tool loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// user asks, assistant issues tool_use (seq 2), results land at seq 3.
+	if err := s.AppendTurn(ctx, sess.ID, llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: "run it"}}}); err != nil {
+		t.Fatal(err)
+	}
+	toolUse := llm.Block{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "tool-1", Name: "run", Input: json.RawMessage(`{}`)}}
+	if err := s.AppendTurn(ctx, sess.ID, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{toolUse}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendTurn(ctx, sess.ID, llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "tool-1", Content: "done"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	// The mid-loop assistant turn is not a completed exchange.
+	if _, err := s.Branch(ctx, sess.ID, 2); !errors.Is(err, ErrInvalidBranchBoundary) {
+		t.Fatalf("Branch at seq 2 = %v, want ErrInvalidBranchBoundary", err)
+	}
+	// The tool-result user turn is the end of the tool sequence: cutting
+	// right after results leaves valid continuation history.
+	afterResults, err := s.Branch(ctx, sess.ID, 3)
+	if err != nil {
+		t.Fatalf("Branch at seq 3: %v", err)
+	}
+	turns, err := s.Turns(ctx, afterResults.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 3 {
+		t.Fatalf("branch at seq 3 turns = %d, want 3", len(turns))
+	}
+	// Branching after the loop closes is a valid completed exchange.
+	appendExchange(t, s, sess.ID, "summarize", "it ran")
+	if _, err := s.Branch(ctx, sess.ID, 5); err != nil {
+		t.Fatalf("Branch at seq 5: %v", err)
+	}
+	// Out-of-range boundary fails closed.
+	if _, err := s.Branch(ctx, sess.ID, 99); !errors.Is(err, ErrInvalidBranchBoundary) {
+		t.Fatalf("Branch at seq 99 = %v, want ErrInvalidBranchBoundary", err)
+	}
+	// None of the rejected attempts created sessions; valid boundaries did.
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("sessions = %d, want 3 (source + two branches)", count)
+	}
+}
+
+func TestBranchFailsAtomicallyOnUnknownSource(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.Branch(ctx, "missing", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Branch missing source = %v, want ErrNotFound", err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("sessions = %d, want 0", count)
+	}
+}
