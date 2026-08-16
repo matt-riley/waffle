@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 	case chatpkg.CommandHelp, chatpkg.CommandModels, chatpkg.CommandNew,
 		chatpkg.CommandSessions, chatpkg.CommandResume, chatpkg.CommandStatus,
 		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill, chatpkg.CommandSkills,
-		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandExit:
+		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandBranch, chatpkg.CommandExit:
 		return r.runCommand(commandCtx, command, emit)
 	default:
 		return chatpkg.Result{}, fmt.Errorf("unknown chat command %q", command.Name)
@@ -113,6 +114,8 @@ func (r *chatRuntime) runCommand(ctx context.Context, command chatpkg.ParsedComm
 		return r.commandSkills(ctx, command.Args, emit)
 	case chatpkg.CommandRepo:
 		return r.commandRepo(ctx, command.Args, emit)
+	case chatpkg.CommandBranch:
+		return r.commandBranch(ctx, command.Args, emit)
 	case chatpkg.CommandWorkset:
 		return r.commandWorkset(ctx, command.Args)
 	case chatpkg.CommandExit:
@@ -729,6 +732,144 @@ func (r *chatRuntime) commandWorkset(ctx context.Context, args string) (chatpkg.
 	default:
 		return chatpkg.Result{}, errors.New("usage: /workset [list|replace <id> <text>|drop <id>|clear]")
 	}
+}
+
+// commandBranch forks the current conversation from a server-validated
+// completed exchange (#471). The canonical prefix is copied transactionally
+// with model alias, attached skills, and working-set entries as independent
+// snapshots; the source session is never modified and usage accounting is not
+// duplicated. The runtime then switches to the new branch. A live workspace
+// is never silently shared or rebound: the branch starts without it and the
+// result explains how to reopen the same repository in an isolated workspace.
+// An empty boundary branches at the final completed exchange (the end of the
+// transcript).
+func (r *chatRuntime) commandBranch(ctx context.Context, args string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	args = strings.TrimSpace(args)
+	r.mu.Lock()
+	if r.current == nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	if r.agentCancel != nil {
+		r.mu.Unlock()
+		return chatpkg.Result{Confirm: true, Text: "A turn is active; confirm before branching this conversation."}, nil
+	}
+	if r.blockTurns {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("a chat command is changing runtime state")
+	}
+	var seq int64
+	var err error
+	if args == "" {
+		n, countErr := r.sessions.TurnCount(ctx, r.current.ID)
+		if countErr != nil {
+			r.mu.Unlock()
+			return chatpkg.Result{}, countErr
+		}
+		seq = int64(n)
+	} else {
+		seq, err = strconv.ParseInt(args, 10, 64)
+		if err != nil || seq < 1 {
+			r.mu.Unlock()
+			return chatpkg.Result{}, errors.New("usage: /branch <turn>")
+		}
+	}
+	r.blockTurns = true
+	source := r.current
+	activeAgent := r.agent
+	activeSkills := append([]skill.Skill(nil), r.skills...)
+	profileName := r.profileName
+	workspaceLabel := r.workspace
+	r.mu.Unlock()
+	defer r.endExclusiveChange()
+
+	branch, err := r.sessions.Branch(ctx, source.ID, seq)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	history, err := r.sessions.Turns(ctx, branch.ID)
+	if err != nil {
+		return chatpkg.Result{}, fmt.Errorf("load branch session %s: %w", branch.ID, err)
+	}
+	// Build a clean profile agent so repository workspace tools and the live
+	// container are never silently shared with the branch (#471).
+	cleanAgent, cleanup, err := r.buildCleanProfileAgent(ctx, profileName)
+	if err != nil {
+		if cleanup != nil {
+			_ = cleanup(ctx)
+		}
+		return chatpkg.Result{}, err
+	}
+	cleanupAdopted := false
+	defer func() {
+		if !cleanupAdopted && cleanup != nil {
+			_ = cleanup(ctx)
+		}
+	}()
+	baseSystem := cleanAgent.System
+	profile, _ := r.cfg.Profile(profileName)
+	model, err := resolveRuntimeProfileModel(r.cfg, profile)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	modelError := ""
+	if branch.ModelAlias != "" {
+		if _, resolveErr := r.cfg.ResolveModel(branch.ModelAlias); resolveErr != nil {
+			modelError = resolveErr.Error()
+		} else {
+			model = branch.ModelAlias
+		}
+	}
+	attachedNames, err := (&skill.Attachments{DB: r.st.DB, Lifecycle: r.st.SkillLifecycleGuard()}).List(ctx, branch.ID)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	attachedSkills, attachedSystem, err := buildAttachedSkillContext(baseSystem, activeSkills, attachedNames)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	reflectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	reflectErr := r.reflectSession(reflectCtx)
+	cancel()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.current != source || r.agent != activeAgent {
+		return chatpkg.Result{}, errors.New("chat runtime changed while branching session")
+	}
+	if !r.sessionOwners.transfer(r, source.ID, branch.ID) {
+		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: branch.ID}
+	}
+	retired := newChatRuntimeCleanup(r.wsClient, r.agentCleanupContext)
+	if retired != nil {
+		r.retiredCleanup = append(r.retiredCleanup, retired)
+	}
+	cleanupAdopted = true
+	r.agent = cleanAgent
+	r.baseSystem = baseSystem
+	r.agentCleanupContext = cleanup
+	r.attachedSkills = attachedSkills
+	r.agent.System = attachedSystem
+	r.agent.Model = model
+	r.current = branch
+	r.ownedSessionID = branch.ID
+	r.history = history
+	r.persisted = len(history)
+	r.modelError = modelError
+	r.workspace = ""
+	state := r.stateLocked(r.capabilities)
+	text := fmt.Sprintf("branched session %s from %s at turn %d", branch.ID, source.ID, seq)
+	if workspaceLabel != "" {
+		text += "\nThe source conversation's workspace was not carried over; run /repo <owner/repo> to open the same repository in an isolated workspace."
+	}
+	if reflectErr != nil {
+		warning := "warning: " + reflectErr.Error()
+		text = warning + "\n" + text
+		if emit != nil {
+			emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: warning, IsError: true})
+		}
+	}
+	return chatpkg.Result{Text: text, State: &state}, nil
 }
 
 func (r *chatRuntime) commandModel(ctx context.Context, alias string) (chatpkg.Result, error) {

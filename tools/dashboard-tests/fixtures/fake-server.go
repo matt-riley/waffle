@@ -877,6 +877,9 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		emit(chat.Event{Kind: chat.EventTurnDone})
 		return nil
 	}
+	b.history = append(b.history,
+		llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: input}}},
+	)
 	if strings.Contains(strings.ToLower(input), "markdown") {
 		emit(chat.Event{
 			Kind:       chat.EventToolStarted,
@@ -894,10 +897,12 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 			Kind: chat.EventTextDelta,
 			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n```go\nfmt.Println(\"fixture\")\n```",
 		})
-		emit(chat.Event{Kind: chat.EventTurnDone})
-		return nil
+	} else {
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: "Fixture reply"})
 	}
-	emit(chat.Event{Kind: chat.EventTextDelta, Text: "Fixture reply"})
+	b.history = append(b.history,
+		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "Fixture reply"}}},
+	)
 	emit(chat.Event{Kind: chat.EventTurnDone})
 	return nil
 }
@@ -946,6 +951,22 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 	case "resume":
 		b.session = strings.TrimSpace(command.Args)
 		b.history = nil
+	case "branch":
+		b.sessions.mu.Lock()
+		b.sessions.sessions["session-branch"] = &session.Session{
+			ID:         "session-branch",
+			Title:      "Branched conversation",
+			Summary:    "Forked from the fixture exchange.",
+			ModelAlias: "primary",
+			CreatedAt:  fixtureNow,
+			UpdatedAt:  fixtureNow,
+		}
+		b.sessions.mu.Unlock()
+		b.session = "session-branch"
+		b.history = append([]llm.Message(nil), b.history...)
+		for i := range b.history {
+			b.history[i].Seq = int64(i + 1)
+		}
 	case "usage":
 		return chat.Result{Usage: []chat.UsageRow{{
 			SessionID:      b.session,
@@ -997,6 +1018,20 @@ func (b *fixtureChatBackend) Cancel() {}
 
 func (b *fixtureChatBackend) Close(context.Context) error { return nil }
 
+func (b *fixtureChatBackend) sessionLineage() string {
+	if b.session == "session-branch" {
+		return "session-primary"
+	}
+	return ""
+}
+
+func (b *fixtureChatBackend) sessionLineageSeq() int64 {
+	if b.session == "session-branch" {
+		return int64(len(b.history))
+	}
+	return 0
+}
+
 func (b *fixtureChatBackend) state() (chat.State, error) {
 	current, err := b.sessions.Get(context.Background(), b.session)
 	if err != nil {
@@ -1012,6 +1047,10 @@ func (b *fixtureChatBackend) state() (chat.State, error) {
 		SandboxMode:    "workspace-write",
 		Workspace:      "matt-riley/waffle",
 		History:        append([]llm.Message(nil), b.history...),
+		Lineage: chat.BranchLineage{
+			ForkedFrom:  b.sessionLineage(),
+			ForkedAtSeq: b.sessionLineageSeq(),
+		},
 		Models: []chat.Model{
 			{Alias: "primary", Provider: "fixture", Upstream: "primary-model", Current: current.ModelAlias == "primary"},
 			{Alias: "local", Provider: "fixture", Upstream: "local-model", Current: current.ModelAlias == "local"},

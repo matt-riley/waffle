@@ -262,6 +262,8 @@ function createHarness({
     "#desk-sandbox",
     "#desk-model-error-row",
     "#desk-model-error",
+    "#desk-fork-row",
+    "#desk-fork",
     "#desk-new",
     "#desk-session-refresh",
     "#desk-sessions",
@@ -1621,4 +1623,136 @@ test("unparseable SSE frame does not tear down the desk", async () => {
   assert.equal(harness.elements["#desk-stale-status"].hidden, true);
   assert.equal(stream.closed, false);
   assert.equal(harness.elements["#desk-message"].disabled, false);
+});
+
+test("completed exchanges expose a branch action that forks through the command API", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            { role: "user", seq: 1, blocks: [{ type: "text", text: "hello" }] },
+            { role: "assistant", seq: 2, blocks: [{ type: "text", text: "hi there" }] },
+            { role: "user", seq: 3, blocks: [{ type: "text", text: "what is 2+2?" }] },
+            { role: "assistant", seq: 4, blocks: [{ type: "text", text: "four" }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      assert.equal(command.name, "branch");
+      assert.equal(command.args, "4");
+      return jsonResponse({
+        state: defaultChatState({
+          session_id: "session-branch",
+          title: "Branched",
+          lineage: { forked_from: "session-1", forked_at_seq: 4 },
+          history: [
+            { role: "user", seq: 1, blocks: [{ type: "text", text: "hello" }] },
+            { role: "assistant", seq: 2, blocks: [{ type: "text", text: "hi there" }] },
+            { role: "user", seq: 3, blocks: [{ type: "text", text: "what is 2+2?" }] },
+            { role: "assistant", seq: 4, blocks: [{ type: "text", text: "four" }] },
+          ],
+        }),
+      });
+    },
+  });
+  await flush();
+  const buttons = harness.elements["#desk-transcript"].querySelectorAll(".message-branch");
+  assert.equal(buttons.length, 2, "one branch action per completed assistant exchange");
+  const last = buttons[buttons.length - 1];
+  assert.equal(last.getAttribute("aria-label"), "Branch from this exchange (turn 4)");
+  await last.listener("click")();
+  await flush();
+  // The branch state replaced the conversation: provenance row shows lineage.
+  assert.equal(
+    harness.elements["#desk-fork"].textContent,
+    "Branched from session session-1 at turn 4",
+  );
+  assert.equal(harness.elements["#desk-fork-row"].hidden, false);
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Branched");
+});
+
+test("branch provenance stays hidden for conversations started fresh", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({}),
+      }),
+  });
+  await flush();
+  assert.equal(harness.elements["#desk-fork-row"].hidden, true);
+  assert.equal(harness.elements["#desk-fork"].textContent, "");
+});
+
+test("branch action on a streamed exchange branches at the end of the transcript", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            { role: "user", seq: 1, blocks: [{ type: "text", text: "hello" }] },
+            { role: "assistant", seq: 2, blocks: [{ type: "text", text: "hi there" }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      assert.equal(command.name, "branch");
+      assert.equal(command.args, "");
+      return jsonResponse({
+        state: defaultChatState({ session_id: "session-branch-2" }),
+      });
+    },
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "another question";
+  void message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  harness.EventSource.instances[0].emit("text_delta", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "text_delta",
+    data: { text: "the answer" },
+  });
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: {
+      state: defaultChatState({
+        session_id: "session-1",
+        history: [
+          { role: "user", seq: 1, blocks: [{ type: "text", text: "hello" }] },
+          { role: "assistant", seq: 2, blocks: [{ type: "text", text: "hi there" }] },
+          { role: "user", seq: 3, blocks: [{ type: "text", text: "another question" }] },
+          { role: "assistant", seq: 4, blocks: [{ type: "text", text: "the answer" }] },
+        ],
+      }),
+    },
+  });
+  await flush();
+  const streamed = Array.from(
+    harness.elements["#desk-transcript"].querySelectorAll(".message-branch"),
+  ).pop();
+  assert.ok(streamed, "streamed exchange carries a branch action");
+  assert.equal(
+    streamed.getAttribute("aria-label"),
+    "Branch from the end of this conversation",
+  );
+  await streamed.listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Untitled conversation");
 });

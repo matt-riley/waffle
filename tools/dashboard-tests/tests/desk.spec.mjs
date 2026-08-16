@@ -476,6 +476,34 @@ test("Today renders Markdown, keyboard send, and paired tool evidence", async ({
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+test("Today branches a conversation from a completed exchange", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the branch flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  // Produce one completed exchange so its message carries the branch action.
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Summarize the fixture");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".waffle-message .message-body")).toHaveText(
+    "Fixture reply",
+  );
+  const branch = page.getByRole("button", {
+    name: "Branch from the end of this conversation",
+  });
+  await expect(branch).toBeVisible();
+  await branch.focus();
+  await page.keyboard.press("Enter");
+
+  await expect(page.locator("#desk-session-title")).toHaveText(
+    "Branched conversation",
+  );
+  await expect(page.locator("#desk-fork")).toHaveText(
+    "Branched from session session-primary at turn 2",
+  );
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
 test("Today exposes existing commands and resumes a recent session in place", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the command surface once.");
   await page.goto(deskURL("today"));

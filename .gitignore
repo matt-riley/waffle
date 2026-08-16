@@ -13,3 +13,4 @@
 *.db-shm
 .env
 .env.*
+tools/dashboard-tests/node_modules/

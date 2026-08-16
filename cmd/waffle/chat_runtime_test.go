@@ -2560,3 +2560,100 @@ func attachedSkillRef(refs []chatpkg.SkillRef, name string) chatpkg.SkillRef {
 	}
 	return chatpkg.SkillRef{Name: name}
 }
+
+func TestChatRuntimeBranchForksFromCompletedExchange(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID := state.SessionID
+	seed := func(user, assistant string) {
+		t.Helper()
+		if err := sessions.AppendTurn(ctx, sourceID, llm.UserText(user)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sessions.AppendTurn(ctx, sourceID, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistant}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("hello", "hi there")
+	seed("what is 2+2?", "four")
+
+	result, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandBranch, Args: "4"}, nil)
+	if err != nil {
+		t.Fatalf("branch command: %v", err)
+	}
+	if result.State == nil || result.State.SessionID == sourceID {
+		t.Fatalf("branch state = %+v, want a new session", result.State)
+	}
+	if result.State.Lineage.ForkedFrom != sourceID || result.State.Lineage.ForkedAtSeq != 4 {
+		t.Fatalf("lineage = %+v, want source %s at 4", result.State.Lineage, sourceID)
+	}
+	if !strings.Contains(result.Text, "branched session") {
+		t.Fatalf("text = %q", result.Text)
+	}
+	// The branch carries the copied prefix as its history.
+	if len(result.State.History) != 4 {
+		t.Fatalf("branch history = %d turns, want 4", len(result.State.History))
+	}
+	// The source session is untouched.
+	sourceTurns, err := sessions.Turns(ctx, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceTurns) != 4 {
+		t.Fatalf("source turns = %d, want 4", len(sourceTurns))
+	}
+	// Runtime is now on the branch.
+	runtime.mu.Lock()
+	currentID := runtime.current.ID
+	runtime.mu.Unlock()
+	if currentID != result.State.SessionID {
+		t.Fatalf("runtime current = %s, want %s", currentID, result.State.SessionID)
+	}
+}
+
+func TestChatRuntimeBranchRejectsInvalidBoundaryAndKeepsSession(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID := state.SessionID
+	// One full exchange, then a dangling tool_use (seq 3) — a mid-loop turn.
+	if err := sessions.AppendTurn(ctx, sourceID, llm.UserText("run it")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendTurn(ctx, sourceID, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendTurn(ctx, sourceID, llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "t1", Name: "run", Input: json.RawMessage(`{}`)}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandBranch, Args: "3"}, nil); err == nil {
+		t.Fatal("branch at a mid-loop turn should fail")
+	}
+	// Usage error for a non-numeric boundary.
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandBranch, Args: "four"}, nil); err == nil {
+		t.Fatal("branch with a non-numeric boundary should fail")
+	}
+	// The runtime is still on the source session and no branch exists.
+	runtime.mu.Lock()
+	currentID := runtime.current.ID
+	runtime.mu.Unlock()
+	if currentID != sourceID {
+		t.Fatalf("runtime current = %s, want %s", currentID, sourceID)
+	}
+	sessionsList, err := sessions.List(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range sessionsList {
+		if sess.ForkedFrom != "" {
+			t.Fatalf("unexpected branch %s recorded", sess.ID)
+		}
+	}
+}
