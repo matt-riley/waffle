@@ -57,6 +57,23 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: mise run dashboard-check
 
+  website:
+    name: website
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+        with:
+          version: 2026.7.12
+          install: true
+          cache: true
+          cache_save: false
+      - name: Install website dependencies
+        run: mise run website-install
+      - name: Build the website and run its tests
+        run: mise run website-check
+
   # The universal-ci reusable workflow ran build, test, and vet serially in one
   # job, and `go test -race ./...` is ~97% of that job's wall time. CI now runs
   # the race suite across five parallel runners: internal/workspace alone is

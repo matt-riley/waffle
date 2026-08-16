@@ -146,19 +146,180 @@ test('the website package cannot be published accidentally', async () => {
 });
 
 test('a blank configured site origin is treated as unset', () => {
-	const configURL = new URL('astro.config.mjs', websiteRoot).href;
+	const moduleURL = new URL('src/site-url.mjs', websiteRoot).href;
 	const output = execFileSync(
 		process.execPath,
 		[
 			'--input-type=module',
 			'--eval',
-			`const { default: config } = await import(${JSON.stringify(configURL)}); process.stdout.write(JSON.stringify(config.site ?? null));`,
+			`const { resolveSiteURL } = await import(${JSON.stringify(moduleURL)}); process.stdout.write(JSON.stringify([resolveSiteURL('   ') ?? null, resolveSiteURL(undefined) ?? null, resolveSiteURL(' https://example.com ') ?? null]));`,
 		],
-		{
-			encoding: 'utf8',
-			env: { ...process.env, PUBLIC_SITE_URL: '   ' },
-		},
+		{ encoding: 'utf8' },
 	);
 
-	assert.equal(JSON.parse(output), null);
+	assert.deepEqual(JSON.parse(output), [null, null, 'https://example.com']);
+});
+
+test('the astro config resolves its site origin through the tested helper', async () => {
+	const config = await read('astro.config.mjs');
+
+	// Match the intent, not the formatting: quote style, spacing, and semicolons
+	// are a formatter's business, and the behaviour under test is only that the
+	// config resolves its origin through the helper the test above covers.
+	assert.match(config, /import\s*\{\s*resolveSiteURL\s*\}\s*from\s*['"][^'"]*site-url\.mjs['"]/);
+	assert.match(config, /resolveSiteURL\(\s*process\.env\.PUBLIC_SITE_URL\s*,?\s*\)/);
+});
+
+/* ---------------------------------------------------------------------------
+   Documentation site (/docs/). Rules from website/DOCS-PLAN.md.
+   --------------------------------------------------------------------------- */
+
+const TIER_ONE_PAGES = [
+	'src/content/docs/docs/meet/what-waffle-is.md',
+	'src/content/docs/docs/meet/keeping-her-safe.mdx',
+];
+
+const TIER_TWO_PAGES = ['src/content/docs/docs/under-the-hood/architecture.md'];
+
+test('the docs mount leaves the hand-built homepage and 404 in place', async () => {
+	const [docsLanding, home, notFound, config] = await Promise.all([
+		read('dist/docs/index.html'),
+		read('dist/index.html'),
+		read('dist/404.html'),
+		read('astro.config.mjs'),
+	]);
+
+	assert.match(docsLanding, /<title>[^<]*Waffle[^<]*<\/title>/);
+	// The homepage must stay the bespoke one, not a Starlight-rendered route.
+	assert.match(home, /This is Waffle\./);
+	assert.match(notFound, /Nothing to see here/);
+	assert.match(config, /disable404Route:\s*true/);
+});
+
+test('both navigations reach the docs', async () => {
+	const builtHome = await read('dist/index.html');
+
+	for (const label of ['Primary', 'Footer']) {
+		assert.ok(
+			navDestinations(builtHome, label).includes('/docs/'),
+			`${label} navigation links to /docs/`,
+		);
+	}
+});
+
+test('brand tokens stay in sync between the marketing and docs stylesheets', async () => {
+	const [global, docs] = await Promise.all([
+		read('src/styles/global.css'),
+		read('src/styles/docs.css'),
+	]);
+
+	const shared = {
+		paper: 'color-paper',
+		'paper-warm': 'color-paper-warm',
+		ink: 'color-ink',
+		'ink-muted': 'color-ink-muted',
+		label: 'color-label',
+		ginger: 'color-ginger',
+		'ginger-light': 'color-ginger-light',
+	};
+
+	for (const [docsName, globalName] of Object.entries(shared)) {
+		const globalValue = global.match(new RegExp(`--${globalName}:\\s*(#[0-9a-fA-F]{6});`))?.[1];
+		const docsValue = docs.match(new RegExp(`--waffle-${docsName}:\\s*(#[0-9a-fA-F]{6});`))?.[1];
+
+		assert.ok(globalValue, `global.css defines --${globalName}`);
+		assert.ok(docsValue, `docs.css defines --waffle-${docsName}`);
+		assert.equal(
+			docsValue.toLowerCase(),
+			globalValue.toLowerCase(),
+			`--waffle-${docsName} must match --${globalName}`,
+		);
+	}
+});
+
+test('the docs stylesheet does not pull Tailwind into Starlight', async () => {
+	const docs = await read('src/styles/docs.css');
+
+	// Two resets in one page is how a themed docs site breaks. The marketing
+	// page owns Tailwind; the docs own Starlight.
+	assert.doesNotMatch(docs, /@import\s+["']tailwindcss["']/);
+});
+
+test('the docs theme defines both grounds so neither can be a media-query afterthought', async () => {
+	const docs = await read('src/styles/docs.css');
+
+	assert.match(docs, /:root\[data-theme="light"\]/);
+	assert.match(docs, /--sl-color-black:\s*var\(--waffle-evening\)/);
+	assert.match(docs, /--sl-color-black:\s*var\(--waffle-paper\)/);
+});
+
+test('ginger is never used for docs body text on the paper ground', async () => {
+	const docs = await read('src/styles/docs.css');
+
+	const lightBlock = docs.match(/:root\[data-theme="light"\][\s\S]*?\n\}/)?.[0];
+	assert.ok(lightBlock, 'docs.css defines a light theme block');
+
+	// #E99A42 measures 2.2:1 on paper: rules and fills only, never text.
+	for (const textToken of ['--sl-color-text', '--sl-color-text-accent', '--sl-color-white']) {
+		const value = lightBlock.match(new RegExp(`${textToken}:\\s*([^;]+);`))?.[1]?.trim();
+		assert.ok(value, `light theme defines ${textToken}`);
+		assert.doesNotMatch(
+			value,
+			/--waffle-ginger\b|--waffle-ginger-light\b|#e99a42|#f5c579/i,
+			`${textToken} must not resolve to ginger on the paper ground`,
+		);
+	}
+});
+
+test('cat art stays within its per-page budget and never doubles up', async () => {
+	for (const page of [...TIER_ONE_PAGES, ...TIER_TWO_PAGES]) {
+		const source = await read(page);
+		const callouts = [...source.matchAll(/<Callout\b/g)];
+
+		assert.ok(
+			callouts.length <= 2,
+			`${page} uses ${callouts.length} cat callouts; the budget is 2`,
+		);
+		assert.doesNotMatch(
+			source,
+			/<\/Callout>\s*<Callout\b/,
+			`${page} places two cat callouts back to back`,
+		);
+	}
+});
+
+test('every plain-language page descends into a technical counterpart', async () => {
+	for (const page of TIER_ONE_PAGES) {
+		const source = await read(page);
+
+		assert.match(source, /Nerd corner/, `${page} offers a Nerd corner descent`);
+		assert.match(source, /\/docs\/under-the-hood\//, `${page} links into the technical tier`);
+	}
+});
+
+test('every technical page offers a way back up to plain language', async () => {
+	for (const page of TIER_TWO_PAGES) {
+		const source = await read(page);
+
+		assert.match(source, /\/docs\/meet\//, `${page} links back to the plain-language tier`);
+	}
+});
+
+test('every sidebar entry points at a page that exists', async () => {
+	const config = await read('astro.config.mjs');
+	const slugs = [...config.matchAll(/slug:\s*'([^']+)'/g)].map((match) => match[1]);
+
+	assert.ok(slugs.length > 0, 'the sidebar declares at least one page');
+
+	for (const slug of slugs) {
+		const candidates = await Promise.all([
+			read(`src/content/docs/${slug}.md`),
+			read(`src/content/docs/${slug}.mdx`),
+		]);
+
+		assert.ok(
+			candidates.some((content) => content.length > 0),
+			`sidebar slug ${slug} resolves to a content file`,
+		);
+	}
 });
