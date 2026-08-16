@@ -352,8 +352,18 @@ test('the plain-language tier is complete and ordered without gaps', async () =>
 
 test('every sidebar label maps to a page in the same order the sidebar declares', async () => {
 	const config = await read('astro.config.mjs');
-	const meetGroup = config.match(/label: 'Meet Waffle',[\s\S]*?\n\t\t\t\t\},/)?.[0];
-	assert.ok(meetGroup, 'the sidebar declares a Meet Waffle group');
+
+	// Slice between the two group labels rather than matching a closing brace at
+	// a fixed indent: the group boundary is content, the indentation is a
+	// formatter's business, and this test exists to check declared order.
+	const start = config.indexOf("label: 'Meet Waffle'");
+	const end = config.indexOf("label: 'Under the hood'");
+
+	assert.notEqual(start, -1, 'the sidebar declares a Meet Waffle group');
+	assert.notEqual(end, -1, 'the sidebar declares an Under the hood group after it');
+	assert.ok(start < end, 'Meet Waffle is declared before Under the hood');
+
+	const meetGroup = config.slice(start, end);
 
 	const slugs = [...meetGroup.matchAll(/slug: '([^']+)'/g)].map((match) => match[1]);
 	assert.equal(slugs.length, TIER_ONE_PAGES.length, 'the sidebar lists every Tier 1 page');

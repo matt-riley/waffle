@@ -48,6 +48,15 @@ const SHOTS = [
 
 const VIEWPORT = { width: 1280, height: 860 };
 
+function stopFixture(child) {
+	if (!child?.pid) return;
+	try {
+		process.kill(-child.pid, "SIGTERM");
+	} catch {
+		child.kill("SIGTERM");
+	}
+}
+
 async function startFixture() {
 	const child = spawn("go", ["run", "./tools/dashboard-tests/fixtures/fake-server.go"], {
 		cwd: repositoryRoot,
@@ -66,33 +75,39 @@ async function startFixture() {
 	});
 
 	const output = readline.createInterface({ input: child.stdout });
-	const url = await new Promise((resolve, reject) => {
-		const timeout = setTimeout(() => {
-			reject(new Error(`dashboard fixture timed out\n${errors}`));
-		}, 120_000);
-		output.once("line", (line) => {
-			clearTimeout(timeout);
-			resolve(line);
-		});
-		child.once("exit", (code, signal) => {
-			clearTimeout(timeout);
-			reject(new Error(`dashboard fixture exited (code ${code}, signal ${signal})\n${errors}`));
-		});
-	});
 
-	if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) {
-		throw new Error(`unexpected dashboard fixture URL: ${url}\n${errors}`);
-	}
-
-	return { child, url };
-}
-
-function stopFixture(child) {
-	if (!child?.pid) return;
+	// Every failure path from here has to stop the child: it is detached, so an
+	// early return would leave a stray `go run` holding its port until the shell
+	// that started it goes away.
 	try {
-		process.kill(-child.pid, "SIGTERM");
-	} catch {
-		child.kill("SIGTERM");
+		const url = await new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				reject(new Error(`dashboard fixture timed out\n${errors}`));
+			}, 120_000);
+			const settle = (fn) => (value) => {
+				clearTimeout(timeout);
+				output.off("line", onLine);
+				child.off("exit", onExit);
+				fn(value);
+			};
+			const onLine = (line) => settle(resolve)(line);
+			const onExit = (code) =>
+				settle(reject)(new Error(`dashboard fixture exited (code ${code})\n${errors}`));
+
+			output.on("line", onLine);
+			child.on("exit", onExit);
+		});
+
+		if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) {
+			throw new Error(`unexpected dashboard fixture URL: ${url}\n${errors}`);
+		}
+
+		return { child, url };
+	} catch (error) {
+		stopFixture(child);
+		throw error;
+	} finally {
+		output.close();
 	}
 }
 
