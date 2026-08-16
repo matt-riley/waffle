@@ -642,6 +642,41 @@ test("assistant markdown renders structured inert DOM and copies a fenced block"
   assert.equal(copy.textContent, "Copied");
 });
 
+test("assistant inline markdown renders bold, italic, strike, and safe links; unsafe links stay literal", async () => {
+  const markdown = [
+    "**bold** with *italic* and ~~struck~~.",
+    "",
+    "Run `mise run test` and see [the docs](https://example.com/docs).",
+    "",
+    "Unsafe [label](javascript:alert(1)) stays literal.",
+  ].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+
+  const transcript = harness.elements["#desk-transcript"];
+  assert.equal(transcript.querySelectorAll("strong").length, 1);
+  assert.equal(transcript.querySelectorAll("em").length, 1);
+  assert.equal(transcript.querySelectorAll("del").length, 1);
+  assert.equal(transcript.querySelectorAll("a").length, 1);
+  const anchor = transcript.querySelector("a");
+  assert.equal(anchor.getAttribute("href"), "https://example.com/docs");
+  assert.equal(anchor.getAttribute("target"), "_blank");
+  assert.equal(anchor.getAttribute("rel"), "noopener noreferrer");
+  assert.equal(anchor.textContent, "the docs");
+  assert.match(transcript.textContent, /Unsafe \[label\]\(javascript:alert\(1\)\) stays literal\./);
+  assert.match(transcript.textContent, /Run mise run test and see/);
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
 test("Ctrl or Cmd Enter sends while plain Enter remains a newline", async () => {
   const harness = createHarness({
     turnHandler: async () => jsonResponse({}),

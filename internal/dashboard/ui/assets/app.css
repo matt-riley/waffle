@@ -447,6 +447,24 @@ h3 {
   padding: 0.08rem 0.25rem;
 }
 
+.message-body strong {
+  font-weight: 700;
+}
+
+.message-body em {
+  font-style: italic;
+}
+
+.message-body del {
+  text-decoration: line-through;
+}
+
+.message-body a {
+  color: var(--ginger-dark);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
 .code-block {
   position: relative;
 }

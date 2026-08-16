@@ -270,20 +270,67 @@ function clearControlErrors() {
 }
 
 function appendInlineMarkdown(node, text) {
-  const pattern = /`([^`\n]+)`/g;
+  // Inline pass for inline code, strikethrough, bold, italic, and links.
+  // Strong, emphasis, and link labels re-enter so `**run `go test`**` still
+  // renders its inner code. Every node is built with createElement and
+  // textContent so model output can never inject markup (pinned by the
+  // client harness's forbiddenMarkupAssignments assertions).
+  const inline =
+    /(`[^`\n]+`|~~[^~\n]+~~|\*\*.+?\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^)\s]+\))/g;
   let cursor = 0;
-  for (const match of text.matchAll(pattern)) {
+  for (const match of text.matchAll(inline)) {
     if (match.index > cursor) {
       node.appendChild(document.createTextNode(text.slice(cursor, match.index)));
     }
-    const code = document.createElement("code");
-    code.textContent = match[1];
-    node.appendChild(code);
-    cursor = match.index + match[0].length;
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      node.appendChild(code);
+    } else if (token.startsWith("~~")) {
+      const del = document.createElement("del");
+      del.textContent = token.slice(2, -2);
+      node.appendChild(del);
+    } else if (token.startsWith("**")) {
+      const strong = document.createElement("strong");
+      appendInlineMarkdown(strong, token.slice(2, -2));
+      node.appendChild(strong);
+    } else if (token.startsWith("*")) {
+      const em = document.createElement("em");
+      appendInlineMarkdown(em, token.slice(1, -1));
+      node.appendChild(em);
+    } else if (token.startsWith("[")) {
+      const close = token.lastIndexOf("](");
+      const label = token.slice(1, close);
+      const href = token.slice(close + 2, -1);
+      if (isSafeLink(href)) {
+        const anchor = document.createElement("a");
+        anchor.setAttribute("href", href);
+        anchor.setAttribute("target", "_blank");
+        anchor.setAttribute("rel", "noopener noreferrer");
+        appendInlineMarkdown(anchor, label);
+        node.appendChild(anchor);
+      } else {
+        node.appendChild(document.createTextNode(token));
+      }
+    }
+    cursor = match.index + token.length;
   }
   if (cursor < text.length) {
     node.appendChild(document.createTextNode(text.slice(cursor)));
   }
+}
+
+// isSafeLink reports whether a markdown link href may become an anchor href.
+// Only http(s), mailto, and relative targets are allowed; anything else
+// (notably javascript:) is rendered as plain text instead.
+function isSafeLink(href) {
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(href);
+  if (!scheme) {
+    return true;
+  }
+  const name = scheme[1].toLowerCase();
+  return name === "http" || name === "https" || name === "mailto";
 }
 
 async function copyCode(text, button) {
