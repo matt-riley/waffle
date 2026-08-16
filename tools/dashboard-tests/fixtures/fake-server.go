@@ -1074,6 +1074,9 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 		for i := range b.history {
 			b.history[i].Seq = int64(i + 1)
 		}
+	case "resume":
+		b.session = strings.TrimSpace(command.Args)
+		b.history = nil
 	case "usage":
 		return chat.Result{Usage: []chat.UsageRow{{
 			SessionID:      b.session,
