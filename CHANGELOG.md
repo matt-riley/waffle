@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/matt-riley/waffle/compare/v0.22.0...v0.23.0) (2026-08-16)
+
+
+### Features
+
+* **website:** migrate the operator guides and add the reference tier ([#449](https://github.com/matt-riley/waffle/issues/449)) ([89bbb27](https://github.com/matt-riley/waffle/commit/89bbb2708e2bd2050feaf56a8713f383f1ab6be7))
+
 ## [0.22.0](https://github.com/matt-riley/waffle/compare/v0.21.0...v0.22.0) (2026-08-16)
 
 
