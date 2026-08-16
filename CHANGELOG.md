@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/matt-riley/waffle/compare/v0.24.0...v0.25.0) (2026-08-16)
+
+
+### Features
+
+* **desk:** chat-like composer with slash menu, inline tools, and streaming feedback ([3ee3d47](https://github.com/matt-riley/waffle/commit/3ee3d4789fea4d0d8ecbe3b46c84d90e30d60f64))
+
 ## [0.24.0](https://github.com/matt-riley/waffle/compare/v0.23.0...v0.24.0) (2026-08-16)
 
 
