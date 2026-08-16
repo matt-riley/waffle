@@ -68,8 +68,12 @@ almost always a provider that needs connecting, and `waffle doctor` will say so.
 
 ## Next
 
-Read [Keeping her safe](/docs/meet/keeping-her-safe/) before you give her
-anything interesting to do. It is the page that matters most, and it is short.
+[What she can do](/docs/meet/what-she-can-do/), in more detail than the summary
+above.
+
+One page out of order, though: read [Keeping her
+safe](/docs/meet/keeping-her-safe/) before you give her anything interesting to
+do. It is short, and it is the page that matters most.
 
 ---
 

@@ -1,8 +1,8 @@
 # Waffle documentation site — plan
 
-Status: **in progress**. Decisions in §10 are settled. Phase 1a (infra) and
-Phase 1b (foundation) are built; Phase 2 onward is still ahead. This document
-stays the brief the remaining phases work from.
+Status: **in progress**. Decisions in §10 are settled. Phases 1a, 1b, and 2 are
+built; Phase 3 onward is still ahead. This document stays the brief the
+remaining phases work from.
 
 Design lineage: `design-exploration/BRAND_BRIEF.md`,
 `design-exploration/A-sunlit-kitten/CONCEPT.md`, `design-exploration/DECISION.md`.
@@ -341,7 +341,7 @@ subdomain.
 | 0 | This plan; decisions settled (§10) | done |
 | 1a | **Infra PR** (`matt-riley/infra`): catalog entry, `app-waffle-site` stack root, zone record, state-recovery mappings. Lands first so the Pages project exists before anything is pushed at it. | done — matt-riley/infra#60 |
 | 1b | **Foundation** (this repo): Starlight installed and themed to Sunlit Kitten, `/docs/` routing, accessible dark mode with its acceptance criteria, the four callout components, splash landing, search, `website` CI job. Ships with three real pages so the theme is proven against actual content, not lorem. | done |
-| 2 | **Tier 1 complete.** The remaining six plain-language pages, glossary, screenshot capture recipe. | 2–3 PRs |
+| 2 | **Tier 1 complete.** The remaining six plain-language pages, glossary, screenshot capture recipe. | done |
 | 3 | **Tier 2 + reference.** Migrate operator guides out of `docs/`, add config and CLI references with their drift tests. | 3–4 PRs |
 | 4 | **Polish.** Per-page OG images using canon art, search tuning, Lighthouse/a11y budget in CI, `docs/` pointer cleanup, optional `repository_dispatch` deploy ping. | 1 PR |
 

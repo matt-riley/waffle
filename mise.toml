@@ -98,3 +98,11 @@ run = "npm ci"
 description = "Build the website and run its tests"
 dir = "website"
 run = "npm test"
+
+[tasks.docs-screenshots]
+description = "Regenerate Waffle Desk screenshots for the documentation site"
+dir = "tools/dashboard-tests"
+run = """
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run capture-docs-screenshots
+"""

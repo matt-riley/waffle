@@ -180,3 +180,19 @@ starlight-theme-select,
 	overflow-x: auto;
 	max-width: 100%;
 }
+
+/* ---------- Screenshots ---------- */
+
+/*
+  One treatment for every captured image, so a screenshot reads as a framed
+  artefact rather than as page furniture. Regenerate them with
+  `mise run docs-screenshots`; see tools/dashboard-tests/capture-docs-screenshots.mjs.
+*/
+.sl-markdown-content img[src*="screenshot"],
+.sl-markdown-content img[src*="desk-"] {
+	border: 1px solid var(--waffle-code-border);
+	border-radius: 0.5rem;
+	box-shadow: 0 10px 28px color-mix(in srgb, #000 10%, transparent);
+	max-width: 100%;
+	height: auto;
+}

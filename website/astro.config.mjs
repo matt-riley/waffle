@@ -60,7 +60,13 @@ export default defineConfig({
 					label: 'Meet Waffle',
 					items: [
 						{ label: 'What Waffle is', slug: 'docs/meet/what-waffle-is' },
+						{ label: 'What she can do', slug: 'docs/meet/what-she-can-do' },
+						{ label: 'Bringing her home', slug: 'docs/meet/bringing-her-home' },
+						{ label: 'Talking to her', slug: 'docs/meet/talking-to-her' },
+						{ label: 'Teaching her', slug: 'docs/meet/teaching-her' },
 						{ label: 'Keeping her safe', slug: 'docs/meet/keeping-her-safe' },
+						{ label: "When something's wrong", slug: 'docs/meet/when-somethings-wrong' },
+						{ label: 'Glossary', slug: 'docs/meet/glossary' },
 					],
 				},
 				{
