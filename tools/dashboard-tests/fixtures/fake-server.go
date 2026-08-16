@@ -1009,6 +1009,16 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 				}},
 			})
 		}
+	case strings.Contains(strings.ToLower(input), "sources"):
+		assistantText = "The release queue is summarized in the fixture sources."
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+		emit(chat.Event{
+			Kind: chat.EventSources,
+			Sources: []chat.Source{
+				{ID: "s1", Label: "Waffle fixture docs", Kind: "web", URL: "https://example.com/docs", Snippet: "A fixture excerpt.", Provenance: "provider citation"},
+				{ID: "s2", Label: "Fixture plan", Kind: "workspace", Resource: "file-42"},
+			},
+		})
 	default:
 		assistantText = "Fixture reply"
 		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})

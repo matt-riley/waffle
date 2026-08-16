@@ -121,6 +121,9 @@ const (
 	// EventArtifact announces artifacts declared by the completed exchange
 	// (#480).
 	EventArtifact EventKind = "artifact"
+	// EventSources carries the safe citation projection for the completed
+	// exchange (#479).
+	EventSources EventKind = "sources"
 )
 
 // Artifact is the client-visible, redacted projection of a declared session
@@ -136,6 +139,19 @@ type Artifact struct {
 	ToolName  string `json:"tool_name,omitempty"`
 }
 
+// Source is the client-visible, redacted projection of a citation (#479).
+// Labels and snippets are safe display text; URL is restricted to safe
+// protocols; workspace resources are opaque IDs, never absolute paths.
+type Source struct {
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	Kind       string `json:"kind"`
+	URL        string `json:"url,omitempty"`
+	Resource   string `json:"resource,omitempty"`
+	Snippet    string `json:"snippet,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+}
+
 // Event is one presentation-neutral streamed backend update.
 type Event struct {
 	Kind       EventKind  `json:"kind"`
@@ -148,6 +164,7 @@ type Event struct {
 	Usage      llm.Usage  `json:"usage"`
 	State      *State     `json:"state"`
 	Artifacts  []Artifact `json:"artifacts,omitempty"`
+	Sources    []Source   `json:"sources,omitempty"`
 }
 
 type eventJSON struct {
@@ -161,6 +178,7 @@ type eventJSON struct {
 	Usage      usageJSON  `json:"usage"`
 	State      *State     `json:"state"`
 	Artifacts  []Artifact `json:"artifacts,omitempty"`
+	Sources    []Source   `json:"sources,omitempty"`
 }
 
 type usageJSON struct {
@@ -185,6 +203,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		},
 		State:     e.State,
 		Artifacts: e.Artifacts,
+		Sources:   e.Sources,
 	})
 }
 
@@ -208,6 +227,7 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 		},
 		State:     wire.State,
 		Artifacts: wire.Artifacts,
+		Sources:   wire.Sources,
 	}
 	return nil
 }

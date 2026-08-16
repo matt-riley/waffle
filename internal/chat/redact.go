@@ -90,6 +90,16 @@ func RedactMessage(message llm.Message, redact RedactFunc) llm.Message {
 			block.Source = &source
 			block.Source.URL = redact(block.Source.URL)
 		}
+		if len(block.Citations) > 0 {
+			block.Citations = append([]llm.Citation(nil), block.Citations...)
+			for i := range block.Citations {
+				block.Citations[i].Label = redact(block.Citations[i].Label)
+				block.Citations[i].URL = redact(block.Citations[i].URL)
+				block.Citations[i].Resource = redact(block.Citations[i].Resource)
+				block.Citations[i].Snippet = redact(block.Citations[i].Snippet)
+				block.Citations[i].Provenance = redact(block.Citations[i].Provenance)
+			}
+		}
 		if block.ToolUse != nil {
 			toolUse := *block.ToolUse
 			block.ToolUse = &toolUse
@@ -142,6 +152,16 @@ func RedactBlocks(blocks []llm.Block, redact RedactFunc) []llm.Block {
 			source := *out[i].Source
 			out[i].Source = &source
 			out[i].Source.URL = redact(out[i].Source.URL)
+		}
+		if len(out[i].Citations) > 0 {
+			out[i].Citations = append([]llm.Citation(nil), out[i].Citations...)
+			for j := range out[i].Citations {
+				out[i].Citations[j].Label = redact(out[i].Citations[j].Label)
+				out[i].Citations[j].URL = redact(out[i].Citations[j].URL)
+				out[i].Citations[j].Resource = redact(out[i].Citations[j].Resource)
+				out[i].Citations[j].Snippet = redact(out[i].Citations[j].Snippet)
+				out[i].Citations[j].Provenance = redact(out[i].Citations[j].Provenance)
+			}
 		}
 	}
 	return out

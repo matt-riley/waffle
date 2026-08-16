@@ -451,12 +451,17 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	// Collect artifacts declared only by this exchange's appended turns so a
 	// later turn never re-emits artifacts from earlier ones (#480 review).
 	artifacts := collectArtifacts(r.history[persistedStart:])
+	citations := collectCitations(r.history)
+
 	r.mu.Unlock()
 	if persistErr != nil {
 		emitEvent(chatpkg.Event{Kind: chatpkg.EventNotice, Text: fmt.Sprintf("persist turn: %v", persistErr), IsError: true})
 	}
 	if len(artifacts) > 0 {
 		emitEvent(chatpkg.Event{Kind: chatpkg.EventArtifact, Artifacts: artifacts})
+	}
+	if len(citations) > 0 {
+		emitEvent(chatpkg.Event{Kind: chatpkg.EventSources, Sources: citations})
 	}
 
 	emitMu.Lock()
@@ -491,6 +496,41 @@ func collectArtifacts(history []llm.Message) []chatpkg.Artifact {
 		}
 	}
 	return out
+}
+
+// collectCitations projects the final assistant exchange's provider-neutral
+// citations into the client-visible Source shape, in stable response order
+// (#479). Citations attached to earlier (tool-loop) assistant turns are not
+// re-emitted; the streaming client attaches the drawer to the completed
+// exchange. An empty result means the provider attested no sources.
+func collectCitations(history []llm.Message) []chatpkg.Source {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != llm.RoleAssistant {
+			continue
+		}
+		var sources []chatpkg.Source
+		next := 1
+		for _, block := range msg.Blocks {
+			if block.Type != llm.BlockText {
+				continue
+			}
+			for _, citation := range block.Citations {
+				sources = append(sources, chatpkg.Source{
+					ID:         fmt.Sprintf("s%d", next),
+					Label:      citation.Label,
+					Kind:       string(citation.Kind),
+					URL:        citation.URL,
+					Resource:   citation.Resource,
+					Snippet:    citation.Snippet,
+					Provenance: citation.Provenance,
+				})
+				next++
+			}
+		}
+		return sources
+	}
+	return nil
 }
 
 func truncateChatTitle(input string) string {

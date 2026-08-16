@@ -900,6 +900,55 @@ h3 {
   font-size: 0.78rem;
   margin: 0.5rem 0 0;
 }
+.sources-drawer {
+  border-top: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  margin-top: 0.6rem;
+  padding-top: 0.4rem;
+}
+
+.sources-drawer summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  list-style-position: inside;
+}
+
+.sources-drawer summary:hover,
+.sources-drawer summary:focus-visible {
+  color: var(--ginger-dark);
+}
+
+.sources-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.source-item {
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+}
+
+.source-label {
+  font-weight: 600;
+}
+
+.source-snippet {
+  color: var(--muted);
+  margin: 0.15rem 0 0;
+}
+
+.source-open,
+.source-kind {
+  display: inline-block;
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+}
+
+.source-open {
+  color: var(--ginger-dark);
+}
+
 .retry-button {
   background: var(--paper);
   border-color: var(--ginger-dark);

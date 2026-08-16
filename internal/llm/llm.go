@@ -85,6 +85,10 @@ type Block struct {
 	ToolUse    *ToolUse     `json:"tool_use,omitempty"`    // BlockToolUse
 	ToolResult *ToolResult  `json:"tool_result,omitempty"` // BlockToolResult
 	Artifact   *ArtifactRef `json:"artifact,omitempty"`    // BlockArtifact
+	// Citations carries provider-neutral source references supporting a text
+	// block (#479). Providers that cannot attest sources emit none; the field
+	// is additive and omitempty so persisted turns round-trip unchanged.
+	Citations []Citation `json:"citations,omitempty"`
 }
 
 // ArtifactRef is the safe, persisted metadata of a declared artifact
@@ -98,6 +102,41 @@ type ArtifactRef struct {
 	Digest    string `json:"digest,omitempty"`
 	// State is one of artifact.States (available, stale, missing).
 	State string `json:"state,omitempty"`
+}
+
+// CitationKind discriminates a citation's origin.
+type CitationKind string
+
+const (
+	// CitationWeb references an external web source reachable by URL.
+	CitationWeb CitationKind = "web"
+	// CitationWorkspace references a workspace-local resource by an opaque
+	// identifier; absolute host paths never travel in the citation.
+	CitationWorkspace CitationKind = "workspace"
+)
+
+// Citation is a provider-neutral source reference (docs/plan.md, "Sources &
+// citations", #479). It is safe-by-construction: labels and snippets are
+// display text, URL is restricted to safe protocols by the projection layer,
+// and workspace resources are opaque IDs, never paths.
+type Citation struct {
+	// ID is a stable identifier within the response so inline markers can
+	// associate text with one or more sources without untrusted HTML.
+	ID string `json:"id"`
+	// Kind is web or workspace.
+	Kind CitationKind `json:"kind"`
+	// Label is the safe display title of the source.
+	Label string `json:"label"`
+	// URL is the destination for web sources only (safe protocols only).
+	URL string `json:"url,omitempty"`
+	// Resource is an opaque workspace-local resource identifier for
+	// workspace sources; never an absolute path.
+	Resource string `json:"resource,omitempty"`
+	// Snippet is a bounded excerpt of the cited text (optional).
+	Snippet string `json:"snippet,omitempty"`
+	// Provenance is a short, safe description of where the source came from
+	// (for example "provider citation" or a workspace label).
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // ToolUse is the model asking for a tool invocation.

@@ -894,7 +894,7 @@ function renderHistory(history) {
     for (const ref of artifactRefsFromMessage(message)) {
       elements.transcript.appendChild(renderArtifactCard(ref));
     }
-    const text = messageText(message);
+    const text = messageTextWithMarkers(message);
     const role = message.role === "user" ? "user" : "assistant";
     if (text === "") {
       // Tool-result carriers and tool-use frames have no visible text; they
@@ -919,6 +919,7 @@ function renderHistory(history) {
         attachTurnAction(article, "regenerate");
         attachBranchButton(article, message.seq > 0 ? String(message.seq) : "");
       }
+      attachSourcesDrawer(article, messageSources(message));
     }
     index += 1;
   }
@@ -1236,6 +1237,107 @@ async function copyReference(id, button) {
     button.textContent = "Copy reference";
   }, 1500);
 }
+// messageTextWithMarkers renders an assistant message's text with stable
+// inline citation markers ("[1]", "[2]") appended per cited block, matching
+// the response-level source drawer (#479). Markers are plain text, so model
+// or provider content can never inject markup.
+function messageTextWithMarkers(message) {
+  let text = "";
+  let count = 0;
+  if (!message || !Array.isArray(message.blocks)) {
+    return text;
+  }
+  for (const block of message.blocks) {
+    if (!block || block.type !== "text") {
+      continue;
+    }
+    text += block.text || "";
+    if (Array.isArray(block.citations)) {
+      for (const citation of block.citations) {
+        count += 1;
+        text += ` [${count}]`;
+      }
+    }
+  }
+  return text;
+}
+
+// messageSources collects the provider-neutral citations carried by an
+// assistant message's text blocks, in stable block order (#479).
+function messageSources(message) {
+  const sources = [];
+  if (!message || !Array.isArray(message.blocks)) {
+    return sources;
+  }
+  for (const block of message.blocks) {
+    if (block && block.type === "text" && Array.isArray(block.citations)) {
+      for (const citation of block.citations) {
+        sources.push({
+          id: citation.id || `s${sources.length + 1}`,
+          label: citation.label || "Unnamed source",
+          kind: citation.kind || "workspace",
+          url: citation.url || "",
+          resource: citation.resource || "",
+          snippet: citation.snippet || "",
+          provenance: citation.provenance || "",
+        });
+      }
+    }
+  }
+  return sources;
+}
+
+// attachSourcesDrawer appends a keyboard-operable, response-level source
+// drawer to a completed exchange (#479). Web sources become safe links
+// (http/https only); workspace sources render as opaque labels — never
+// absolute paths. A message with no sources gets no drawer and never implies
+// nonexistent citations.
+function attachSourcesDrawer(article, sources) {
+  if (!article || !Array.isArray(sources) || sources.length === 0) {
+    return;
+  }
+  if (article.querySelector(".sources-drawer")) {
+    return;
+  }
+  const details = document.createElement("details");
+  details.className = "sources-drawer";
+  const summary = document.createElement("summary");
+  summary.textContent = `Sources (${sources.length})`;
+  const list = document.createElement("ul");
+  list.className = "sources-list";
+  for (const source of sources) {
+    const item = document.createElement("li");
+    item.className = "source-item";
+    const label = document.createElement("span");
+    label.className = "source-label";
+    label.textContent = source.label || "Unnamed source";
+    item.appendChild(label);
+    if (source.snippet) {
+      const snippet = document.createElement("p");
+      snippet.className = "source-snippet";
+      snippet.textContent = source.snippet;
+      item.appendChild(snippet);
+    }
+    if (source.kind === "web" && isSafeLink(source.url)) {
+      const open = document.createElement("a");
+      open.className = "source-open";
+      open.setAttribute("href", source.url);
+      open.setAttribute("target", "_blank");
+      open.setAttribute("rel", "noopener noreferrer");
+      open.textContent = "Open source";
+      item.appendChild(open);
+    } else {
+      const kind = document.createElement("span");
+      kind.className = "source-kind";
+      kind.textContent = "Workspace source";
+      item.appendChild(kind);
+    }
+    list.appendChild(item);
+  }
+  details.append(summary, list);
+  article.appendChild(details);
+}
+
 function persistOwner() {
   if (!state.clientID || !state.reattachToken) {
     return;
@@ -1528,6 +1630,11 @@ function handleDeskEvent(event) {
       }
       appendDelta(data.text || "");
       break;
+    case "sources":
+      if (state.streamingMessage) {
+        attachSourcesDrawer(state.streamingMessage, data.sources || []);
+      }
+      break;
     case "tool_started":
     case "tool_finished":
       appendToolActivity(envelope.type, data);
@@ -1625,6 +1732,8 @@ function openEventStream() {
     "tool_finished",
     "notice",
     "artifact",
+    "sources",
+
     "turn_done",
   ]) {
     eventSource.addEventListener(kind, handleCurrentEvent);

@@ -2840,3 +2840,151 @@ test("streamed artifact event appends a card after the tool chips", async () => 
   assert.equal(card.querySelector(".artifact-name").textContent, "summary.md");
 });
 
+
+
+test("restored history renders inline citation markers and a safe source drawer", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [
+                {
+                  type: "text",
+                  text: "The answer is based on two sources.",
+                  citations: [
+                    {
+                      id: "s1",
+                      label: "Example docs",
+                      kind: "web",
+                      url: "https://example.com/docs",
+                      snippet: "A bounded excerpt.",
+                      provenance: "provider citation",
+                    },
+                    {
+                      id: "s2",
+                      label: "Workspace plan",
+                      kind: "workspace",
+                      resource: "file-42",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  assert.match(
+    article.querySelector(".message-body").textContent,
+    /The answer is based on two sources\. \[1\] \[2\]/,
+  );
+  const drawer = article.querySelector(".sources-drawer");
+  assert.ok(drawer, "source drawer rendered");
+  assert.match(drawer.querySelector("summary").textContent, /Sources \(2\)/);
+  const items = drawer.querySelectorAll(".source-item");
+  assert.equal(items.length, 2);
+  const web = items[0];
+  assert.equal(web.querySelector(".source-label").textContent, "Example docs");
+  const open = web.querySelector(".source-open");
+  assert.ok(open, "web source renders an open link");
+  assert.equal(open.getAttribute("href"), "https://example.com/docs");
+  assert.equal(open.getAttribute("rel"), "noopener noreferrer");
+  assert.match(web.querySelector(".source-snippet").textContent, /bounded excerpt/);
+  const workspace = items[1];
+  assert.equal(workspace.querySelector(".source-label").textContent, "Workspace plan");
+  assert.equal(workspace.querySelector(".source-open"), null, "workspace sources never link");
+  assert.match(workspace.querySelector(".source-kind").textContent, /Workspace source/);
+});
+
+test("unsafe citation URLs and hostile schemes never become links", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [
+                {
+                  type: "text",
+                  text: "Careful.",
+                  citations: [
+                    { id: "s1", label: "Bad", kind: "web", url: "javascript:alert(1)" },
+                    { id: "s2", label: "Missing metadata" },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const drawer = article.querySelector(".sources-drawer");
+  assert.equal(drawer.querySelectorAll(".source-open").length, 0, "unsafe URLs render plain");
+  assert.equal(
+    drawer.querySelector(".source-kind").textContent,
+    "Workspace source",
+    "unknown kinds degrade to workspace labels",
+  );
+});
+
+test("streaming sources event attaches the drawer to the completed exchange", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({}),
+      }),
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "research this";
+  void message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  harness.EventSource.instances[0].emit("text_delta", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "text_delta",
+    data: { text: "Here is the answer" },
+  });
+  harness.EventSource.instances[0].emit("sources", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "sources",
+    data: {
+      sources: [
+        { id: "s1", label: "Example docs", kind: "web", url: "https://example.com/docs" },
+      ],
+    },
+  });
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState({ session_id: "session-1" }) },
+  });
+  await flush();
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const drawer = article.querySelector(".sources-drawer");
+  assert.ok(drawer, "streamed exchange carries the source drawer");
+  assert.match(drawer.querySelector("summary").textContent, /Sources \(1\)/);
+  assert.equal(drawer.querySelector(".source-label").textContent, "Example docs");
+});
+
