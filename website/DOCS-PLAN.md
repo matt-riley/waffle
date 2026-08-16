@@ -1,7 +1,8 @@
 # Waffle documentation site — plan
 
-Status: **agreed**. Decisions in §10 are settled; nothing in `website/` has been
-built yet. This document is the brief Phase 1 works from.
+Status: **in progress**. Decisions in §10 are settled. Phase 1a (infra) and
+Phase 1b (foundation) are built; Phase 2 onward is still ahead. This document
+stays the brief the remaining phases work from.
 
 Design lineage: `design-exploration/BRAND_BRIEF.md`,
 `design-exploration/A-sunlit-kitten/CONCEPT.md`, `design-exploration/DECISION.md`.
@@ -338,9 +339,9 @@ subdomain.
 | Phase | Contents | Rough size |
 | --- | --- | --- |
 | 0 | This plan; decisions settled (§10) | done |
-| 1a | **Infra PR** (`matt-riley/infra`): catalog entry, `app-waffle-site` stack root, zone record, state-recovery mappings. Lands first so the Pages project exists before anything is pushed at it. | 1 PR, small |
-| 1b | **Foundation** (this repo): Starlight installed and themed to Sunlit Kitten, `/docs/` routing, accessible dark mode with its acceptance criteria, the four callout components, splash landing, search, `website` CI job. Ships with three real pages so the theme is proven against actual content, not lorem. | 1 PR, meaty |
-| 2 | **Tier 1 complete.** All eight plain-language pages, glossary, screenshot capture recipe, docs entry in the homepage nav (note: `website/tests/site.test.mjs` asserts the current nav shape and will need updating). | 2–3 PRs |
+| 1a | **Infra PR** (`matt-riley/infra`): catalog entry, `app-waffle-site` stack root, zone record, state-recovery mappings. Lands first so the Pages project exists before anything is pushed at it. | done — matt-riley/infra#60 |
+| 1b | **Foundation** (this repo): Starlight installed and themed to Sunlit Kitten, `/docs/` routing, accessible dark mode with its acceptance criteria, the four callout components, splash landing, search, `website` CI job. Ships with three real pages so the theme is proven against actual content, not lorem. | done |
+| 2 | **Tier 1 complete.** The remaining six plain-language pages, glossary, screenshot capture recipe. | 2–3 PRs |
 | 3 | **Tier 2 + reference.** Migrate operator guides out of `docs/`, add config and CLI references with their drift tests. | 3–4 PRs |
 | 4 | **Polish.** Per-page OG images using canon art, search tuning, Lighthouse/a11y budget in CI, `docs/` pointer cleanup, optional `repository_dispatch` deploy ping. | 1 PR |
 
@@ -361,6 +362,23 @@ thirty.
 5. **Tier 1 scope.** All eight pages — no trimmed first cut.
 
 Nothing is left blocking. Phase 1a can start against `matt-riley/infra`.
+
+## 10a. Deviations from this plan
+
+Recorded as they happen, so the plan and the tree do not quietly diverge.
+
+- **Homepage nav entry moved from Phase 2 to Phase 1b.** Shipping a docs site
+  with no link to it from the homepage made no sense for a single saved commit
+  of effort. `SiteHeader`, `SiteFooter`, and the nav test moved together.
+- **Docs pages carry no Tailwind.** The plan said "themed Starlight"; the
+  implementation makes that concrete by giving `/docs/` its own stylesheet with
+  no Tailwind import, because two CSS resets in one page is how themed docs
+  break. Token *values* are shared with `global.css` and a test enforces that
+  they stay identical.
+- **Syntax themes are `github-light` / `github-dark`, not warm-tinted ones.**
+  Warmth comes from the code card (background, border, radius) rather than from
+  recolouring syntax tokens, because both stock themes ship contrast-checked
+  colours and a hand-tinted theme is the usual way dark-mode code fails AA.
 
 ## 11. Risks
 

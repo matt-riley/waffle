@@ -1,0 +1,25 @@
+---
+/*
+  Overrides Starlight's SiteTitle so the docs carry the same lowercase wordmark
+  as the marketing header, and so the logo links back to the homepage rather
+  than to the docs root.
+*/
+---
+
+<a href="/" class="waffle-wordmark">waffle</a>
+
+<style>
+	.waffle-wordmark {
+		font-family: var(--waffle-font-display);
+		font-weight: 800;
+		font-size: 1.125rem;
+		letter-spacing: -0.025em;
+		color: var(--sl-color-white);
+		text-decoration: none;
+		line-height: 1;
+	}
+
+	.waffle-wordmark:hover {
+		color: var(--sl-color-text-accent);
+	}
+</style>

@@ -88,3 +88,13 @@ run = "pnpm --dir tools/brand-assets test && node tools/brand-assets/validate-ra
 [tasks.brand-rig-check]
 description = "Validate the Waffle layered standing rig when present"
 run = "node tools/brand-assets/validate-rig.mjs --optional assets/brand/waffle/rigs/standing-v1/rig.json assets/brand/waffle/rigs/standing-v2/rig.json"
+
+[tasks.website-install]
+description = "Install website dependencies (marketing homepage + docs site)"
+dir = "website"
+run = "npm ci"
+
+[tasks.website-check]
+description = "Build the website and run its tests"
+dir = "website"
+run = "npm test"

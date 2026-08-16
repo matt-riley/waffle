@@ -1,0 +1,182 @@
+/*
+  Waffle Desk-free docs theme: Concept A "Sunlit Kitten" mapped onto Starlight.
+
+  This file deliberately does NOT import Tailwind. The marketing page at / is a
+  Tailwind page; the docs at /docs/ are a Starlight page. They share token
+  VALUES, not token machinery — mixing two resets is how docs themes break.
+
+  The shared values below are duplicated from src/styles/global.css on purpose
+  and kept honest by tests/site.test.mjs ("brand tokens stay in sync"). Change
+  one, change both, or the build fails.
+
+  Contrast, measured against paper #FBF7F0:
+    ink        #1A1612  17.0:1  body, headings
+    ink-muted  #5C4A3A   7.9:1  secondary text
+    label      #8D481F   6.4:1  links, labels, small text
+    ginger     #E99A42   2.2:1  RULES AND FILLS ONLY — never text on paper
+  On the evening ground #17130F, ginger reaches 8.2:1 and ginger-light 11.6:1,
+  so the accent may carry text there. That inversion is intentional.
+*/
+
+:root {
+	--waffle-paper: #fbf7f0;
+	--waffle-paper-warm: #f5ede0;
+	--waffle-ink: #1a1612;
+	--waffle-ink-muted: #5c4a3a;
+	--waffle-label: #8d481f;
+	--waffle-ginger: #e99a42;
+	--waffle-ginger-light: #f5c579;
+
+	/* Evening ground — docs only; the marketing page stays daylight. */
+	--waffle-evening: #17130f;
+	--waffle-evening-raised: #211b15;
+	--waffle-evening-text: #f2e9dc;
+	--waffle-evening-muted: #c4b2a0;
+
+	--sl-font: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+	--waffle-font-display: "Nunito", ui-sans-serif, system-ui, sans-serif;
+
+	/* A serif at this size runs ~68ch here, which is the long-form target. */
+	--sl-content-width: 46rem;
+	--sl-text-body: 1.0625rem;
+	--sl-line-height: 1.7;
+}
+
+/* ---------- Evening (dark) — Starlight's default :root ---------- */
+
+:root,
+::backdrop {
+	--sl-color-white: #f7f1e7;
+	--sl-color-gray-1: #efe6d9;
+	--sl-color-gray-2: #e0d3c2;
+	--sl-color-gray-3: var(--waffle-evening-muted);
+	--sl-color-gray-4: #8a7563;
+	--sl-color-gray-5: #5a4a3c;
+	--sl-color-gray-6: #2c2419;
+	--sl-color-gray-7: var(--waffle-evening-raised);
+	--sl-color-black: var(--waffle-evening);
+
+	--sl-color-accent-high: var(--waffle-ginger-light);
+	--sl-color-accent: var(--waffle-ginger);
+	--sl-color-accent-low: #3a2a16;
+
+	--sl-color-text: var(--waffle-evening-text);
+	--sl-color-text-accent: var(--waffle-ginger-light);
+	--sl-color-bg-nav: var(--waffle-evening);
+	--sl-color-bg-sidebar: var(--waffle-evening);
+	--sl-color-bg-inline-code: #2a2219;
+	--sl-color-hairline-light: #33291d;
+	--sl-color-hairline-shade: #241d15;
+
+	--waffle-code-bg: var(--waffle-evening-raised);
+	--waffle-code-border: #3a2f22;
+	--waffle-focus-ring: var(--waffle-ginger-light);
+}
+
+/* ---------- Paper (light) ---------- */
+
+:root[data-theme="light"],
+[data-theme="light"] ::backdrop {
+	--sl-color-white: var(--waffle-ink);
+	--sl-color-gray-1: #241e18;
+	--sl-color-gray-2: #3a2e24;
+	--sl-color-gray-3: var(--waffle-ink-muted);
+	--sl-color-gray-4: #7d6a58;
+	--sl-color-gray-5: #b9a894;
+	--sl-color-gray-6: #ece0cf;
+	--sl-color-gray-7: #f7f0e6;
+	--sl-color-black: var(--waffle-paper);
+
+	--sl-color-accent-high: #6e3616;
+	--sl-color-accent: var(--waffle-label);
+	--sl-color-accent-low: #f3ddc2;
+
+	--sl-color-text: var(--waffle-ink-muted);
+	--sl-color-text-accent: var(--waffle-label);
+	--sl-color-bg-nav: var(--waffle-paper);
+	--sl-color-bg-sidebar: var(--waffle-paper);
+	--sl-color-bg-inline-code: #efe4d3;
+	--sl-color-hairline-light: #e8dcc9;
+	--sl-color-hairline-shade: #efe6d6;
+
+	--waffle-code-bg: var(--waffle-paper-warm);
+	--waffle-code-border: #dfd0b8;
+	--waffle-focus-ring: var(--waffle-label);
+}
+
+/* ---------- Type ---------- */
+
+body {
+	font-optical-sizing: auto;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-wrap: pretty;
+}
+
+:is(h1, h2, h3, h4, h5, h6),
+.site-title,
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) {
+	font-family: var(--waffle-font-display);
+	font-weight: 800;
+	letter-spacing: -0.02em;
+	text-wrap: balance;
+}
+
+/* Chrome — sidebar, nav, table of contents — is UI, so it takes the display
+   face. Only the prose itself stays in the serif. */
+.sidebar-content,
+starlight-toc,
+mobile-starlight-toc,
+site-search,
+.right-sidebar,
+.pagination-links,
+starlight-theme-select,
+.sl-flex > a[rel~="next"],
+.sl-flex > a[rel~="prev"] {
+	font-family: var(--waffle-font-display);
+}
+
+/* ---------- Chrome ---------- */
+
+.sidebar-content a[aria-current="page"],
+.sidebar-content a[aria-current="page"]:hover {
+	color: var(--sl-color-text-accent);
+	background-color: transparent;
+	font-weight: 700;
+	box-shadow: inset 2px 0 0 var(--waffle-ginger);
+}
+
+.sidebar-content ul li {
+	border-inline-start: none;
+}
+
+:focus-visible {
+	outline: 2px solid var(--waffle-focus-ring);
+	outline-offset: 2px;
+	border-radius: 0.25rem;
+}
+
+/* ---------- Code: a warm card on paper, not a dark slab ---------- */
+
+.expressive-code .frame pre,
+.expressive-code .frame .header {
+	background-color: var(--waffle-code-bg) !important;
+	border-color: var(--waffle-code-border) !important;
+}
+
+.expressive-code .frame {
+	border-radius: 0.5rem;
+	overflow: hidden;
+}
+
+.sl-markdown-content code:not(:where(.expressive-code *)) {
+	border-radius: 0.3rem;
+	padding: 0.15em 0.35em;
+}
+
+/* Wide content scrolls inside itself; the page never scrolls sideways. */
+.sl-markdown-content table {
+	display: block;
+	overflow-x: auto;
+	max-width: 100%;
+}

@@ -4,7 +4,18 @@ Personal project homepage for [Waffle](https://github.com/matt-riley/waffle) —
 
 Design direction: **Concept A · Sunlit Kitten** (see `../design-exploration/A-sunlit-kitten/`).
 
-Documentation site plan (proposal, not yet built): [`DOCS-PLAN.md`](DOCS-PLAN.md).
+Documentation site plan and conventions: [`DOCS-PLAN.md`](DOCS-PLAN.md).
+
+The site has two halves that share a brand and nothing else:
+
+- `/` — hand-built marketing homepage (Astro components, Tailwind, GSAP).
+- `/docs/` — Starlight, themed to the same palette in `src/styles/docs.css`.
+  Content lives in `src/content/docs/docs/`; the extra nesting level is what
+  puts the docs under `/docs/` while leaving `/` bespoke.
+
+Docs pages deliberately do **not** load Tailwind. Shared token values are
+duplicated between `src/styles/global.css` and `src/styles/docs.css` and kept
+identical by `tests/site.test.mjs`.
 
 ## Develop
 

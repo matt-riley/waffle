@@ -1,0 +1,121 @@
+---
+title: Keeping her safe
+description: What Waffle can and cannot reach, why the sandbox exists, and what you are actually trusting when you let her run something.
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/docs/Callout.astro';
+
+This is the page to read before you give Waffle anything interesting to do.
+
+An assistant that can run commands on your computer is genuinely useful and
+genuinely dangerous, and those are the same feature. Waffle's answer is to start
+with everything switched off and make you switch things on deliberately.
+
+## The one-sentence version
+
+Waffle can only do what you have explicitly allowed, she cannot see your
+passwords or API keys even while using them, and anything she runs in a sandbox
+cannot reach the internet unless you said it could.
+
+## What "deny by default" means in practice
+
+When Waffle wants to do something — run a command, open a file, fetch a page —
+the request goes through a set of rules you control. Each rule can **allow** an
+action, **deny** it, or **ask you first**. Anything no rule permits is refused.
+
+Every one of those decisions is written down. You can go back later and read
+exactly what she asked to do and what the answer was.
+
+<Callout kind="careful">
+Rules match on the command she is about to run, including the beginning of a
+shell command. They do not chase every trick a shell can play to disguise one
+command as another. Treat the rules as a strong fence, not a sealed box, and
+don't hand a broadly-allowed profile to anything you would not run yourself.
+</Callout>
+
+## The sandbox
+
+For real work — anything touching a code repository, anything long-running —
+Waffle can run tools inside a container instead of directly on your machine.
+
+Inside that container:
+
+- She sees the files you gave her and not the rest of your disk.
+- The network is **off** by default. Not filtered — off. The container drops its
+  route out, so a tool that tries to phone home simply cannot.
+- If you need her to reach specific hosts, you list them, and traffic goes
+  through a gateway on your machine that permits only that list.
+
+## Your secrets stay yours
+
+This is the part worth understanding, because it is the part people assume is
+impossible.
+
+Waffle needs credentials — a model provider key, a Git token — but the sandbox
+never receives them. Instead, the sandbox gets a short-lived token that means
+"I'm allowed to ask the host to do this specific thing." The real credential
+stays on your machine, held in an encrypted store, and is used on your side of
+the boundary.
+
+Those tokens expire after a day. Long work renews them; leaked ones stop
+working.
+
+The practical consequence: if something goes wrong inside a sandbox, your API
+key was not in there to be stolen.
+
+<Callout kind="nerd" title="Nerd corner: how the boundary is actually drawn">
+Credentials live in an age-encrypted store on the host. Sandboxes authenticate
+to a host-side broker with scoped `wk_` session tokens carrying a 24-hour TTL;
+expired tokens stop authorising the proxy, git-credential, and API faces and are
+swept from memory. Network isolation is a dropped default route rather than a
+filter, so it fails closed rather than fails open. Secrets are scrubbed from
+anything rendered or logged. See
+[How it fits together](/docs/under-the-hood/architecture/).
+</Callout>
+
+## Different jobs, different privileges
+
+Not everything Waffle does deserves the same trust. Talking to you at your
+keyboard is one thing; running a scheduled job at 3am with nobody watching is
+another.
+
+So Waffle separates them. The profile you chat with can be given real
+permissions. The profiles that run unattended jobs, pick up tracker issues, or
+sit in a group conversation are more restricted by default — no shell on your
+actual machine, and no writing to her durable notes.
+
+A profile can always be made **more** restrictive. It can never be used to widen
+what its group already allows. That direction is one-way on purpose: it means
+you can reason about the ceiling without auditing every profile underneath it.
+
+## What you are still trusting
+
+Being straight about the limits:
+
+- **You are trusting the model.** Rules constrain what Waffle *can* do, not what
+  she *decides* to try. A model that has read a malicious web page may try
+  something odd; the rules are what stop it mattering.
+- **You are trusting whatever you allowed.** If you allow arbitrary shell
+  commands on your host, you have allowed arbitrary shell commands on your host.
+- **Content she fetches is not trusted input.** Notes derived from fetched web
+  pages are always queued for your review before they become durable memory,
+  whatever your other settings say.
+
+## If something looks wrong
+
+Stop her first, ask questions after:
+
+```sh
+waffle pause     # stop processing, keep everything
+waffle status    # what is running, what is connected
+waffle doctor    # check the installation over
+```
+
+Nothing is lost by pausing. `waffle resume` picks up where you left off.
+
+---
+
+**Nerd corner:** [How it fits together](/docs/under-the-hood/architecture/) —
+the trust boundaries, the broker, and the network lock in full.

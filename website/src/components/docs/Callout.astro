@@ -1,0 +1,115 @@
+---
+import { Image } from 'astro:assets';
+import pleased from '../../assets/waffle/expressions/pleased.png';
+import startled from '../../assets/waffle/expressions/startled.png';
+import focused from '../../assets/waffle/expressions/focused.png';
+import sleepy from '../../assets/waffle/expressions/sleepy.png';
+
+/*
+  Four callouts, each bound to one canon expression, so a reader learns the
+  vocabulary by face rather than by colour. See website/DOCS-PLAN.md §4.
+
+  Budget: at most two cat images per page, never two in a row. That rule is the
+  guard against mascot fatigue and is enforced by tests/site.test.mjs.
+*/
+const KINDS = {
+	tip: { art: pleased, label: "Waffle's tip", alt: 'Waffle looking pleased with herself' },
+	careful: { art: startled, label: 'Careful', alt: 'Waffle looking startled' },
+	nerd: { art: focused, label: 'Nerd corner', alt: 'Waffle concentrating hard' },
+	later: { art: sleepy, label: 'Later', alt: 'Waffle half asleep' },
+} as const;
+
+export type CalloutKind = keyof typeof KINDS;
+
+interface Props {
+	kind: CalloutKind;
+	title?: string;
+	/** Nerd-corner detail collapses by default so plain-language pages stay plain. */
+	open?: boolean;
+}
+
+const { kind, title, open = false } = Astro.props;
+const { art, label, alt } = KINDS[kind];
+const heading = title ?? label;
+const collapsible = kind === 'nerd';
+---
+
+<aside class:list={['waffle-callout', `waffle-callout--${kind}`]} aria-label={heading}>
+	<Image src={art} alt={alt} width={56} height={56} class="waffle-callout__face" loading="lazy" />
+	<div class="waffle-callout__body">
+		{
+			collapsible ? (
+				<details open={open}>
+					<summary>{heading}</summary>
+					<div class="waffle-callout__content">
+						<slot />
+					</div>
+				</details>
+			) : (
+				<>
+					<p class="waffle-callout__title">{heading}</p>
+					<div class="waffle-callout__content">
+						<slot />
+					</div>
+				</>
+			)
+		}
+	</div>
+</aside>
+
+<style>
+	.waffle-callout {
+		display: flex;
+		gap: 0.875rem;
+		align-items: flex-start;
+		margin-block: 1.5rem;
+		padding: 1rem 1.125rem;
+		border-radius: 0.6rem;
+		border: 1px solid var(--waffle-code-border);
+		border-inline-start: 3px solid var(--waffle-ginger);
+		background-color: var(--waffle-code-bg);
+	}
+
+	.waffle-callout--careful {
+		border-inline-start-color: var(--sl-color-red);
+	}
+
+	.waffle-callout__face {
+		flex: none;
+		width: 3.5rem;
+		height: auto;
+		margin-block-start: -0.15rem;
+	}
+
+	.waffle-callout__body {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.waffle-callout__title,
+	.waffle-callout summary {
+		margin: 0;
+		font-family: var(--waffle-font-display);
+		font-weight: 800;
+		font-size: 0.9375rem;
+		color: var(--sl-color-white);
+	}
+
+	.waffle-callout summary {
+		cursor: pointer;
+	}
+
+	.waffle-callout__content :global(> :first-child) {
+		margin-block-start: 0.35rem;
+	}
+
+	.waffle-callout__content :global(> :last-child) {
+		margin-block-end: 0;
+	}
+
+	@media (max-width: 30rem) {
+		.waffle-callout__face {
+			display: none;
+		}
+	}
+</style>
