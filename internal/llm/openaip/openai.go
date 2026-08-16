@@ -216,6 +216,12 @@ func (p *Provider) toWire(req llm.Request) (wireRequest, error) {
 	if system != "" {
 		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: wireContent{Text: system}})
 	}
+	// seenToolCallIDs tracks assistant tool_call ids in this request so tool
+	// results can be validated against them. Interrupted turns and session
+	// resume can persist a tool result without its preceding assistant
+	// tool_call; strict providers (e.g. Kimi K3) reject those orphaned tool
+	// messages with 400, so they are dropped here instead of failing the turn.
+	seenToolCallIDs := make(map[string]struct{})
 	for _, m := range req.Messages {
 		// Canonical layer owns size/type limits; the translator only
 		// propagates them (never silently drops or truncates media).
@@ -226,7 +232,21 @@ func (p *Provider) toWire(req llm.Request) (wireRequest, error) {
 		if err != nil {
 			return wireRequest{}, err
 		}
-		w.Messages = append(w.Messages, msgs...)
+		for _, wm := range msgs {
+			if wm.Role == "assistant" {
+				for _, tc := range wm.ToolCalls {
+					if tc.ID != "" {
+						seenToolCallIDs[tc.ID] = struct{}{}
+					}
+				}
+			}
+		}
+		for _, wm := range msgs {
+			if wm.Role == "tool" && !isSeenToolCall(seenToolCallIDs, wm.ToolCallID) {
+				continue
+			}
+			w.Messages = append(w.Messages, wm)
+		}
 	}
 	for _, t := range req.Tools {
 		wt := wireTool{Type: "function"}
@@ -236,6 +256,18 @@ func (p *Provider) toWire(req llm.Request) (wireRequest, error) {
 		w.Tools = append(w.Tools, wt)
 	}
 	return w, nil
+}
+
+// isSeenToolCall reports whether id is a non-empty tool_call id that an
+// assistant tool_call in this same request declared. Tool results without a
+// matching assistant tool_call (empty id, or the tool_use message is missing
+// from the request) are orphans that strict providers reject.
+func isSeenToolCall(seen map[string]struct{}, id string) bool {
+	if id == "" {
+		return false
+	}
+	_, ok := seen[id]
+	return ok
 }
 
 // translateMessage maps one canonical message to one or more wire messages:

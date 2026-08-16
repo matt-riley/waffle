@@ -295,6 +295,60 @@ func TestToolResultRoundTrip(t *testing.T) {
 	}
 }
 
+// TestOrphanedToolResultDropped is a regression for provider 400s caused by
+// tool_result blocks whose tool_use is missing from the request (interrupted
+// turns and session resume can persist tool results without their tool_use;
+// Kimi K3 and other strict providers reject those). The translator must drop
+// them instead of failing the turn.
+func TestOrphanedToolResultDropped(t *testing.T) {
+	var body map[string]any
+	srv := messagesServer(t, &body, []string{
+		`{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+
+	history := []llm.Message{
+		llm.UserText("list files"),
+		{Role: llm.RoleAssistant, Blocks: []llm.Block{
+			{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "toolu_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		}},
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "toolu_1", Content: "a.txt"}},
+		}},
+		// Orphaned: no assistant tool_use with this id anywhere in history.
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "toolu_orphan", Content: "ghost"}},
+		}},
+		// Orphaned: empty tool_use_id.
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "", Content: "ghost2"}},
+		}},
+	}
+	p := New("k", srv.URL)
+	if _, err := p.Complete(context.Background(), llm.Request{Messages: history}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want 3 (orphans dropped): %v", len(msgs), msgs)
+	}
+	user := msgs[2].(map[string]any)
+	content := user["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("user content blocks = %d, want 1", len(content))
+	}
+	result := content[0].(map[string]any)
+	if result["type"] != "tool_result" || result["tool_use_id"] != "toolu_1" {
+		t.Errorf("tool_result = %v", result)
+	}
+}
+
 // TestCompleteClosesStreamBody is a regression for issue #100: Complete must
 // call stream.Close() so the HTTP response body is released after every call.
 func TestCompleteClosesStreamBody(t *testing.T) {

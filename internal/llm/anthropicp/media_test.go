@@ -42,6 +42,9 @@ func TestToParamsEmitsImageAndDocumentBlocks(t *testing.T) {
 	params, err := toParams(llm.Request{
 		Messages: []llm.Message{
 			llm.UserText("what does this say?"),
+			{Role: llm.RoleAssistant, Blocks: []llm.Block{
+				{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "toolu_1", Name: "bash", Input: json.RawMessage(`{}`)}},
+			}},
 			{Role: llm.RoleUser, Blocks: []llm.Block{
 				{Type: llm.BlockText, Text: "first"},
 				img,
@@ -68,7 +71,7 @@ func TestToParamsEmitsImageAndDocumentBlocks(t *testing.T) {
 		t.Fatalf("unmarshal wire: %v", err)
 	}
 	messages := body["messages"].([]any)
-	content := messages[1].(map[string]any)["content"].([]any)
+	content := messages[2].(map[string]any)["content"].([]any)
 
 	type srcShape struct{ srcType, mediaType, data, url string }
 

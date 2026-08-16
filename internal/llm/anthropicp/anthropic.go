@@ -167,6 +167,12 @@ func toParams(req llm.Request) (anthropic.MessageNewParams, error) {
 		params.Tools[len(params.Tools)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 
+	// seenToolUseIDs tracks tool_use ids in this request so tool_result blocks
+	// can be validated against them. Interrupted turns and session resume can
+	// persist a tool result without its preceding assistant tool_use; Anthropic
+	// (and strict providers like Kimi K3) reject those orphaned tool_results
+	// with 400, so they are dropped here instead of failing the turn.
+	seenToolUseIDs := make(map[string]struct{})
 	for _, m := range req.Messages {
 		// Canonical layer owns size/type limits; the translator only
 		// propagates them (never silently drops or truncates media).
@@ -177,6 +183,25 @@ func toParams(req llm.Request) (anthropic.MessageNewParams, error) {
 		if err != nil {
 			return params, err
 		}
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+				seenToolUseIDs[b.OfToolUse.ID] = struct{}{}
+			}
+		}
+		filtered := blocks[:0]
+		for _, b := range blocks {
+			if b.OfToolResult != nil {
+				id := b.OfToolResult.ToolUseID
+				if id == "" {
+					continue // orphaned tool_result with no tool_use id
+				}
+				if _, ok := seenToolUseIDs[id]; !ok {
+					continue // tool_result whose tool_use is not in this request
+				}
+			}
+			filtered = append(filtered, b)
+		}
+		blocks = filtered
 		if len(blocks) == 0 {
 			continue
 		}

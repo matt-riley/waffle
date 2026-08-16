@@ -161,6 +161,48 @@ func TestToolResultTranslation(t *testing.T) {
 	}
 }
 
+// TestOrphanedToolResultDropped is a regression for provider 400s caused by
+// tool messages whose assistant tool_call is missing from the request
+// (interrupted turns and session resume can persist tool results without
+// their tool_use; Kimi K3 and other strict providers reject those). The
+// translator must drop them instead of failing the turn.
+func TestOrphanedToolResultDropped(t *testing.T) {
+	var body map[string]any
+	srv := sseServer(t, &body, `{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`)
+	defer srv.Close()
+
+	history := []llm.Message{
+		llm.UserText("list files"),
+		{Role: llm.RoleAssistant, Blocks: []llm.Block{
+			{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "call_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		}},
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "call_1", Content: "a.txt"}},
+		}},
+		// Orphaned: no assistant tool_call with this id anywhere in history.
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "call_orphan", Content: "ghost"}},
+		}},
+		// Orphaned: empty tool_call_id.
+		{Role: llm.RoleUser, Blocks: []llm.Block{
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "", Content: "ghost2"}},
+		}},
+	}
+	p := New("k", srv.URL+"/v1")
+	if _, err := p.Complete(context.Background(), llm.Request{Model: "m", Messages: history}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("wire messages = %d, want 3 (orphans dropped): %v", len(msgs), msgs)
+	}
+	toolMsg := msgs[2].(map[string]any)
+	if toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "call_1" {
+		t.Errorf("tool message = %v", toolMsg)
+	}
+}
+
 func TestHTTPErrorSurfaced(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"bad key"}}`, http.StatusUnauthorized)
