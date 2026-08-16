@@ -111,7 +111,8 @@ The issue close-out/support evidence is recorded at:
 - https://github.com/matt-riley/waffle/issues/29#issuecomment-4952865252
 
 Doctor always exercises the queue on the host filesystem when docker mode is configured. When the daemon is available it also probes container start and host↔container bind-mount write/read (the same mount class as `inbound.db`/`outbound.db`). Full multi-minute concurrent stress remains opt-in via the build tags above.
-# Gated MCP sandbox proof
+
+## Gated MCP sandbox proof
 
 The #77 restricted-executor integration test requires a working Docker daemon
 and permission to pull `alpine:3.20`:

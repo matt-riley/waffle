@@ -102,4 +102,13 @@ func TestCLIReferenceCoversEveryCommand(t *testing.T) {
 			t.Errorf("CLI reference documents %q, which is not a command in `waffle help`", heading)
 		}
 	}
+
+	// Allowing the exception is not the same as requiring it. Without this,
+	// deleting the runner entry would leave the guard silently satisfied.
+	if !documented[runnerIsIntentionallyUnlisted] {
+		t.Errorf(
+			"CLI reference has no %q entry; it is absent from `waffle help` on purpose, so nothing else would catch its removal",
+			runnerIsIntentionallyUnlisted,
+		)
+	}
 }

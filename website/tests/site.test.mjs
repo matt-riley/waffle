@@ -481,10 +481,53 @@ test('the built site has no broken internal links', async () => {
 		const html = readFileSync(file, 'utf8');
 		for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
 			if (/^\/(_astro|pagefind|favicon)/.test(href)) continue;
-			if (!href.endsWith('/')) continue;
-			if (!routes.has(href)) broken.push(`${relative(distDir, file)} -> ${href}`);
+			// A link to an emitted asset is fine; anything else is a page route,
+			// with or without its trailing slash. Skipping the slashless form
+			// would silently exempt exactly the links most likely to be wrong.
+			const last = href.split('/').pop();
+			if (last.includes('.')) continue;
+			const route = href.endsWith('/') ? href : `${href}/`;
+			if (!routes.has(route)) broken.push(`${relative(distDir, file)} -> ${href}`);
 		}
 	}
 
 	assert.deepEqual([...new Set(broken)].sort(), [], 'internal links must resolve to built routes');
+});
+
+test('no docs page introduces a second H1 alongside its frontmatter title', async () => {
+	const { readdirSync, readFileSync, statSync } = await import('node:fs');
+	const { join, relative } = await import('node:path');
+
+	const contentDir = new URL('src/content/docs/docs/', websiteRoot).pathname;
+	const walk = (dir) =>
+		readdirSync(dir).flatMap((entry) => {
+			const full = join(dir, entry);
+			return statSync(full).isDirectory() ? walk(full) : [full];
+		});
+
+	const offenders = [];
+	for (const file of walk(contentDir).filter((f) => /\.mdx?$/.test(f))) {
+		let fence = null;
+		readFileSync(file, 'utf8')
+			.split('\n')
+			.forEach((line, index) => {
+				// Shell comments inside fenced blocks start with '#' too; migrated
+				// guides are full of them, so fences have to be tracked.
+				const opener = line.match(/^\s*(```+|~~~+)/);
+				if (opener) {
+					const token = opener[1][0].repeat(3);
+					if (fence === null) fence = token;
+					else if (line.trim().startsWith(fence)) fence = null;
+					return;
+				}
+				if (fence === null && /^# \S/.test(line)) {
+					offenders.push(`${relative(contentDir, file)}:${index + 1}`);
+				}
+			});
+	}
+
+	// The page title comes from frontmatter, so a literal H1 in the body is a
+	// second one — which is what a migrated guide leaves behind if only its
+	// first heading was stripped.
+	assert.deepEqual(offenders, [], 'docs bodies must start at H2');
 });
