@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1025,6 +1026,32 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 			return chat.Result{}, err
 		}
 		return chat.Result{}, nil
+	case "branch":
+		id, keepStr, ok := strings.Cut(command.Args, " ")
+		keep, err := strconv.Atoi(strings.TrimSpace(keepStr))
+		if !ok || id == "" || err != nil {
+			return chat.Result{}, errors.New("usage: /branch <session> <keep>")
+		}
+		branchID := fmt.Sprintf("session-branch-%d", keep)
+		b.sessions.mu.Lock()
+		if _, exists := b.sessions.sessions[branchID]; !exists {
+			b.sessions.sessions[branchID] = &session.Session{
+				ID:         branchID,
+				Title:      "Branch",
+				Summary:    "A fixture branch.",
+				ModelAlias: "primary",
+				CreatedAt:  fixtureNow,
+				UpdatedAt:  fixtureNow,
+			}
+		}
+		b.sessions.mu.Unlock()
+		b.session = branchID
+		b.history = nil
+		st, err := b.state()
+		if err != nil {
+			return chat.Result{}, err
+		}
+		return chat.Result{State: &st}, nil
 	case "resume":
 		b.session = strings.TrimSpace(command.Args)
 		b.history = nil

@@ -2245,3 +2245,137 @@ test("declined delete leaves the conversation intact", async () => {
   );
   assert.equal(harness.elements["#desk-session-title"].textContent, "Alpha");
 });
+
+test("edit and regenerate branch at exact boundaries and fail closed mid-turn", async () => {
+  const branchCalls = [];
+  const turnTexts = [];
+  const branchState = () =>
+    defaultChatState({
+      session_id: "s2",
+      history: [
+        { role: "user", blocks: [{ type: "text", text: "First prompt" }] },
+        { role: "assistant", blocks: [{ type: "text", text: "First answer" }] },
+      ],
+    });
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "s1",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "First prompt" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "First answer" }] },
+            { role: "user", blocks: [{ type: "text", text: "Second prompt" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Second answer" }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "branch") {
+        branchCalls.push(command.args);
+        return jsonResponse({ state: branchState() });
+      }
+      return jsonResponse({});
+    },
+    turnHandler: async ({ options }) => {
+      turnTexts.push(JSON.parse(options.body).text);
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const transcript = harness.elements["#desk-transcript"];
+  const edits = transcript.querySelectorAll(".message-edit");
+  const regens = transcript.querySelectorAll(".message-regenerate");
+  assert.equal(edits.length, 2, "every completed prompt offers Edit");
+  assert.equal(regens.length, 2, "every completed response offers Regenerate");
+
+  // Edit the second prompt: branch ends before it and the exact text prefills.
+  await edits[1].listener("click")();
+  await flush();
+  assert.deepEqual(branchCalls, ["s1 2"]);
+  assert.equal(harness.elements["#desk-message"].value, "Second prompt");
+  assert.match(harness.elements["#desk-composer-status"].textContent, /branch/i);
+
+  // Regenerate the remaining answer: branch before its prompt and re-send it.
+  const regen = transcript.querySelector(".message-regenerate");
+  await regen.listener("click")();
+  await flush();
+  assert.deepEqual(branchCalls, ["s1 2", "s2 0"]);
+  assert.deepEqual(turnTexts, ["First prompt"], "regenerate re-sends the prompt in the branch");
+
+  // Turn actions fail closed while another turn is running.
+  const message = harness.elements["#desk-message"];
+  message.value = "third";
+  const submit = harness.elements["#desk-composer"].listener("submit");
+  const pending = submit({ preventDefault() {} });
+  await flush();
+  for (const button of transcript.querySelectorAll(".message-edit")) {
+    assert.equal(button.disabled, true, "edit disabled during a turn");
+  }
+  harness.turnResponse.resolve(jsonResponse({}));
+  await pending;
+  await flush();
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  await flush();
+  // The completed in-session turn pair exposes actions after finalize.
+  assert.ok(transcript.querySelectorAll(".message-edit").length >= 1);
+  assert.ok(transcript.querySelectorAll(".message-regenerate").length >= 1);
+  for (const button of transcript.querySelectorAll(".message-edit")) {
+    assert.equal(button.disabled, false, "edit re-enabled when idle");
+  }
+});
+
+test("branch boundaries stay exact across tool-result carriers in history", async () => {
+  const branchCalls = [];
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "s1",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Inspect repo" }] },
+            { role: "assistant", blocks: [{ type: "tool_use", tool_use: { id: "tu-1", name: "read" } }] },
+            { role: "user", blocks: [{ type: "tool_result", tool_result: { tool_use_id: "tu-1", content: "ok" } }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Repo inspected" }] },
+            { role: "user", blocks: [{ type: "text", text: "Now build it" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Built." }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "branch") {
+        branchCalls.push(command.args);
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "s2",
+            history: [{ role: "user", blocks: [{ type: "text", text: "Inspect repo" }] }],
+          }),
+        });
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const transcript = harness.elements["#desk-transcript"];
+  // Only text-bearing messages render, but boundaries count every history slot.
+  assert.equal(transcript.querySelectorAll(".message").length, 4);
+  assert.equal(transcript.querySelectorAll(".message-edit").length, 2);
+  const edits = transcript.querySelectorAll(".message-edit");
+  await edits[0].listener("click")();
+  await flush();
+  assert.deepEqual(branchCalls, ["s1 0"]);
+  await transcript.querySelectorAll(".message-edit")[0].listener("click")();
+  await flush();
+  assert.deepEqual(branchCalls, ["s1 0", "s2 0"]);
+});

@@ -2654,3 +2654,99 @@ func attachedSkillRef(refs []chatpkg.SkillRef, name string) chatpkg.SkillRef {
 	}
 	return chatpkg.SkillRef{Name: name}
 }
+
+func TestChatRuntimeBranchCommandKeepsBoundariesAndNeverRewritesSource(t *testing.T) {
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	source, err := sessions.Create(ctx, "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUse := llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+		Type:    llm.BlockToolUse,
+		ToolUse: &llm.ToolUse{ID: "tu-1", Name: "read", Input: json.RawMessage(`{}`)},
+	}}}
+	toolResult := llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{
+		Type:       llm.BlockToolResult,
+		ToolResult: &llm.ToolResult{ToolUseID: "tu-1", Content: "ok"},
+	}}}
+	steps := []llm.Message{
+		llm.UserText("inspect"),
+		toolUse,
+		toolResult,
+		{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "inspected"}}},
+	}
+	for _, msg := range steps {
+		if err := sessions.AppendTurn(ctx, source.ID, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run := func(keep int) (chatpkg.Result, error) {
+		return runtime.Command(ctx, chatpkg.ParsedCommand{
+			Name: chatpkg.CommandBranch,
+			Args: fmt.Sprintf("%s %d", source.ID, keep),
+		}, nil)
+	}
+
+	// Mid-chain and tool-result boundaries fail closed.
+	if _, err := run(2); err == nil {
+		t.Fatal("branch after an unanswered tool use should fail")
+	}
+	if _, err := run(3); err == nil {
+		t.Fatal("branch ending on a tool-result carrier should fail")
+	}
+	if _, err := run(4); err == nil {
+		t.Fatal("branch at the assistant-final boundary should fail")
+	}
+
+	// Branch at the prompt: the new session keeps exactly that prefix.
+	result, err := run(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || result.State.SessionID == source.ID || result.State.SessionID == "" {
+		t.Fatalf("branch state = %+v", result.State)
+	}
+	branchTurns, err := sessions.Turns(ctx, result.State.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branchTurns) != 1 || branchTurns[0].Text() != "inspect" {
+		t.Fatalf("branch turns = %+v", branchTurns)
+	}
+	sourceTurns, err := sessions.Turns(ctx, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceTurns) != len(steps) {
+		t.Fatalf("source turns changed after branch: %d", len(sourceTurns))
+	}
+
+	// Empty prefix branches to a fresh conversation.
+	result, err = run(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || result.State.SessionID == "" {
+		t.Fatalf("fresh branch state = %+v", result.State)
+	}
+	freshTurns, err := sessions.Turns(ctx, result.State.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freshTurns) != 0 {
+		t.Fatalf("fresh branch turns = %d", len(freshTurns))
+	}
+
+	// Usage errors.
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandBranch, Args: ""}, nil); err == nil {
+		t.Fatal("branch without args should fail")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandBranch, Args: source.ID + " nope"}, nil); err == nil {
+		t.Fatal("branch with non-numeric keep should fail")
+	}
+}

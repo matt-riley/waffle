@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"html"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
 	usagepkg "github.com/matt-riley/waffle/internal/usage"
@@ -61,7 +63,7 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 		chatpkg.CommandSessions, chatpkg.CommandResume, chatpkg.CommandStatus,
 		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill, chatpkg.CommandSkills,
 		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandRename,
-		chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete, chatpkg.CommandExit:
+		chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete, chatpkg.CommandBranch, chatpkg.CommandExit:
 		return r.runCommand(commandCtx, command, emit)
 	default:
 		return chatpkg.Result{}, fmt.Errorf("unknown chat command %q", command.Name)
@@ -80,7 +82,7 @@ func invalidatesNewConfirmation(command chatpkg.ParsedCommand) bool {
 	case chatpkg.CommandWorkset:
 		verb, _, _ := strings.Cut(args, " ")
 		return verb == "replace" || verb == "drop" || verb == "clear"
-	case chatpkg.CommandRename, chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete:
+	case chatpkg.CommandRename, chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete, chatpkg.CommandBranch:
 		return args != ""
 	default:
 		return false
@@ -126,6 +128,8 @@ func (r *chatRuntime) runCommand(ctx context.Context, command chatpkg.ParsedComm
 		return r.commandPin(ctx, command.Args, false)
 	case chatpkg.CommandDelete:
 		return r.commandDelete(ctx, command.Args, emit)
+	case chatpkg.CommandBranch:
+		return r.commandBranch(ctx, command.Args, emit)
 	case chatpkg.CommandExit:
 		err := r.Close(ctx)
 		result := chatpkg.Result{ShouldClose: true}
@@ -274,12 +278,172 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	return dropped, nil
 }
 
+// commandBranch creates a new conversation from the first keep turns of the
+// source conversation at a validated completed boundary. It never rewrites
+// the source session. Edit-and-continue and regenerate both use this: the
+// client branches to before a prompt and then sends the (edited or identical)
+// text as a fresh, permission-governed turn.
 func (r *chatRuntime) commandSessions(ctx context.Context, title string) (chatpkg.Result, error) {
 	sessions, err := r.sessions.List(ctx, 50)
 	if err != nil {
 		return chatpkg.Result{}, err
 	}
 	return chatpkg.Result{Title: title, Sessions: chatSessions(sessions)}, nil
+}
+
+func (r *chatRuntime) commandBranch(ctx context.Context, args string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	id, keepStr, ok := strings.Cut(args, " ")
+	id = strings.TrimSpace(id)
+	keep, err := strconv.Atoi(strings.TrimSpace(keepStr))
+	if !ok || id == "" || err != nil || keep < 0 {
+		return chatpkg.Result{}, errors.New("usage: /branch <session> <keep>")
+	}
+	r.mu.Lock()
+	if r.current == nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	if r.agentCancel != nil {
+		r.mu.Unlock()
+		return chatpkg.Result{Confirm: true, Text: "A turn is active; confirm before branching."}, nil
+	}
+	if r.blockTurns {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("a chat command is changing runtime state")
+	}
+	r.blockTurns = true
+	activeAgent := r.agent
+	baseSystem := r.baseSystem
+	activeSkills := append([]skill.Skill(nil), r.skills...)
+	r.mu.Unlock()
+	defer r.endExclusiveChange()
+
+	source, err := r.sessions.Get(ctx, id)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	turns, err := r.sessions.Turns(ctx, source.ID)
+	if err != nil {
+		return chatpkg.Result{}, fmt.Errorf("load session %s: %w", source.ID, err)
+	}
+	turns = session.Repair(turns)
+	if keep > len(turns) {
+		return chatpkg.Result{}, errors.New("branch boundary is beyond the conversation length")
+	}
+	prefix := turns[:keep]
+	if err := validBranchPrefix(prefix); err != nil {
+		return chatpkg.Result{}, err
+	}
+
+	profile, _ := r.cfg.Profile(r.profileName)
+	model, err := resolveRuntimeProfileModel(r.cfg, profile)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	modelError := ""
+	if source.ModelAlias != "" {
+		if _, err := r.cfg.ResolveModel(source.ModelAlias); err != nil {
+			modelError = err.Error()
+		} else {
+			model = source.ModelAlias
+		}
+	}
+	nextSkills, nextSystem, err := buildAttachedSkillContext(baseSystem, activeSkills, nil)
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+
+	current, err := r.sessions.Create(ctx, "")
+	if err != nil {
+		return chatpkg.Result{}, err
+	}
+	if len(prefix) > 0 {
+		for _, msg := range prefix {
+			if err := r.sessions.AppendTurn(ctx, current.ID, msg); err != nil {
+				return chatpkg.Result{}, fmt.Errorf("copy turn into branch: %w", err)
+			}
+		}
+		if err := r.sessions.SetTitle(ctx, current.ID, source.Title); err != nil {
+			return chatpkg.Result{}, fmt.Errorf("name branch: %w", err)
+		}
+		if source.ModelAlias != "" {
+			if err := r.sessions.SetModelAlias(ctx, current.ID, source.ModelAlias); err != nil {
+				return chatpkg.Result{}, fmt.Errorf("carry model into branch: %w", err)
+			}
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.agent != activeAgent || r.baseSystem != baseSystem || r.agentCancel != nil {
+		return chatpkg.Result{}, errors.New("chat runtime changed while branching")
+	}
+	if !r.sessionOwners.transfer(r, r.current.ID, current.ID) {
+		return chatpkg.Result{}, sessionAlreadyActiveError{sessionID: current.ID}
+	}
+	r.current = current
+	r.ownedSessionID = current.ID
+	r.history = prefix
+	r.persisted = len(prefix)
+	r.modelError = modelError
+	if r.agent != nil {
+		r.agent.Model = model
+		r.agent.System = nextSystem
+	}
+	r.attachedSkills = nextSkills
+	state := r.stateLocked(r.capabilities)
+	text := fmt.Sprintf("branched %s (%d turns kept)", current.ID, len(prefix))
+	if emit != nil {
+		emit(chatpkg.Event{Kind: chatpkg.EventNotice, Text: "Branch created. Earlier tool side effects are not undone.", IsError: true})
+	}
+	return chatpkg.Result{Text: text, State: &state}, nil
+}
+
+// validBranchPrefix rejects a branch boundary that cuts through tool use: the
+// retained prefix must end on a completed plain prompt (or be empty), and
+// every assistant tool use inside it must be answered by a tool result.
+func validBranchPrefix(prefix []llm.Message) error {
+	if len(prefix) == 0 {
+		return nil
+	}
+	last := prefix[len(prefix)-1]
+	if last.Role != llm.RoleUser {
+		return errors.New("branch boundary must end on a completed user prompt")
+	}
+	for _, block := range last.Blocks {
+		if block.Type == llm.BlockToolResult {
+			return errors.New("cannot branch across an unfinished tool result")
+		}
+	}
+	for i, msg := range prefix {
+		if msg.Role != llm.RoleAssistant {
+			continue
+		}
+		var uses []string
+		for _, block := range msg.Blocks {
+			if block.Type == llm.BlockToolUse && block.ToolUse != nil {
+				uses = append(uses, block.ToolUse.ID)
+			}
+		}
+		if len(uses) == 0 {
+			continue
+		}
+		if i+1 >= len(prefix) {
+			return errors.New("cannot branch after an unanswered tool use")
+		}
+		answered := make(map[string]bool, len(uses))
+		for _, block := range prefix[i+1].Blocks {
+			if block.Type == llm.BlockToolResult && block.ToolResult != nil {
+				answered[block.ToolResult.ToolUseID] = true
+			}
+		}
+		for _, id := range uses {
+			if !answered[id] {
+				return errors.New("cannot branch after an unanswered tool use")
+			}
+		}
+	}
+	return nil
 }
 
 // commandRename renames a conversation. The title is the remainder of the

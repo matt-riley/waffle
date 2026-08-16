@@ -119,7 +119,7 @@ func TestCommandsAreCanonicalAndImmutable(t *testing.T) {
 		CommandHelp, CommandExit, CommandModel, CommandModels, CommandNew,
 		CommandSessions, CommandResume, CommandStatus, CommandUsage,
 		CommandPermissions, CommandSkill, CommandSkills, CommandRepo, CommandWorkset,
-		CommandRename, CommandPin, CommandUnpin, CommandDelete,
+		CommandRename, CommandPin, CommandUnpin, CommandDelete, CommandBranch,
 	}
 	first := Commands()
 	if got := commandNames(first); !reflect.DeepEqual(got, want) {

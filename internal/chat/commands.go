@@ -28,6 +28,7 @@ const (
 	CommandPin         Name = "pin"
 	CommandUnpin       Name = "unpin"
 	CommandDelete      Name = "delete"
+	CommandBranch      Name = "branch"
 )
 
 // Command describes one canonical chat command and its completion/help
@@ -64,6 +65,7 @@ var commandRegistry = [...]Command{
 	{Name: CommandPin, Usage: "/pin <session>", Description: "pin a conversation"},
 	{Name: CommandUnpin, Usage: "/unpin <session>", Description: "unpin a conversation"},
 	{Name: CommandDelete, Usage: "/delete <session>", Description: "delete a conversation"},
+	{Name: CommandBranch, Usage: "/branch <session> <keep>", Description: "branch a conversation at a completed boundary"},
 }
 
 // Commands returns a deep copy of the canonical command registry in stable

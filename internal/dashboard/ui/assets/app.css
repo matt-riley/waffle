@@ -785,6 +785,33 @@ h3 {
   color: var(--ginger-dark);
 }
 
+.message-edit,
+.message-regenerate {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  box-shadow: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.68rem;
+  margin-top: 0.4rem;
+  padding: 0.15rem 0.3rem;
+}
+
+.message-edit:hover,
+.message-regenerate:hover,
+.message-edit:focus-visible,
+.message-regenerate:focus-visible {
+  border-color: var(--rule-dark);
+  color: var(--ginger-dark);
+}
+
+.message-edit[disabled],
+.message-regenerate[disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .retry-button {
   background: var(--paper);
   border-color: var(--ginger-dark);

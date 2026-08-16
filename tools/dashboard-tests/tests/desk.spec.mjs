@@ -506,6 +506,37 @@ test("busy composer queues a visible follow-up that is held on cancel", async ({
   await expect(page.locator("#desk-send")).toHaveText("Send message");
 });
 
+test("completed turns edit and regenerate through safe branches", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the branch flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Show markdown");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const reply = page.locator(".waffle-message .message-body");
+  await expect(reply.locator("table")).toBeVisible();
+
+  // The completed turn pair exposes Edit and Regenerate.
+  const edit = page.getByRole("button", { name: "Edit and continue" });
+  const regenerate = page.getByRole("button", { name: "Regenerate response" });
+  await expect(edit).toBeVisible();
+  await expect(regenerate).toBeVisible();
+
+  // Regenerate branches and re-sends the prompt in the new branch.
+  await regenerate.click();
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await expect(page.locator(".user-message .message-body").last()).toHaveText("Show markdown");
+  await expect(reply.last()).toContainText("Fixture markdown");
+  await expect(page.locator("#desk-composer-status")).toContainText(/branch/i);
+
+  // Edit prefills the exact prompt and says the next send creates a branch.
+  await page.getByRole("button", { name: "Edit and continue" }).last().click();
+  await expect(message).toHaveValue("Show markdown");
+  await expect(page.locator("#desk-composer-status")).toContainText(/branch/i);
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
 test("wide markdown tables scroll inside the response without page overflow", async ({ page }) => {
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");

@@ -257,6 +257,9 @@ const state = {
   typingMessage: null,
   lastUserText: "",
   draftSessionID: "",
+  historyLength: 0,
+  promptArticle: null,
+  promptIndex: -1,
   queue: (() => {
     const stored = readQueue();
     // A restored queue had an unknown turn outcome at refresh time, so it
@@ -381,6 +384,21 @@ function updateControls() {
   ]) {
     if (control) {
       control.disabled = !idle;
+    }
+  }
+  updateTurnActionAvailability();
+}
+
+// updateTurnActionAvailability fails closed: edit/regenerate are only offered
+// on completed turns while the desk is idle.
+function updateTurnActionAvailability() {
+  if (!elements.transcript) {
+    return;
+  }
+  const idle = state.currentPhase === phase.idle && state.clientID !== "";
+  for (const selector of [".message-edit", ".message-regenerate"]) {
+    for (const button of elements.transcript.querySelectorAll(selector)) {
+      button.disabled = !idle;
     }
   }
 }
@@ -851,9 +869,36 @@ function renderHistory(history) {
   state.typingMessage = null;
   state.turnToolContainer = null;
   state.toolRows = new Map();
+  let lastUserIndex = -1;
+  let lastUserText = "";
+  let index = 0;
   for (const message of history) {
-    appendMessage(message.role === "user" ? "user" : "assistant", messageText(message));
+    const text = messageText(message);
+    const role = message.role === "user" ? "user" : "assistant";
+    if (text === "") {
+      // Tool-result carriers and tool-use frames have no visible text; they
+      // still occupy a history position so branch boundaries stay exact.
+      index += 1;
+      continue;
+    }
+    const article = appendMessage(role, text);
+    if (!article) {
+      index += 1;
+      continue;
+    }
+    if (role === "user") {
+      lastUserIndex = index;
+      lastUserText = text;
+      article.dataset.branchKeep = String(index);
+      attachTurnAction(article, "edit");
+    } else if (lastUserIndex >= 0) {
+      article.dataset.branchKeep = String(lastUserIndex);
+      article.dataset.promptText = lastUserText;
+      attachTurnAction(article, "regenerate");
+    }
+    index += 1;
   }
+  state.historyLength = index;
   if (!elements.transcript.hasChildNodes()) {
     const empty = document.createElement("p");
     empty.className = "empty-transcript";
@@ -861,6 +906,82 @@ function renderHistory(history) {
     elements.transcript.appendChild(empty);
     elements.emptyTranscript = empty;
   }
+}
+
+// attachTurnAction adds Edit (user prompts) or Regenerate (assistant
+// responses) to a completed message. The keep boundary is stored on the
+// article so branching stays exact after re-renders.
+function attachTurnAction(article, kind) {
+  if (!article || article.querySelector(".message-edit") || article.querySelector(".message-regenerate")) {
+    return;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = kind === "edit" ? "message-edit" : "message-regenerate";
+  button.textContent = kind === "edit" ? "Edit" : "Regenerate";
+  button.setAttribute(
+    "aria-label",
+    kind === "edit" ? "Edit and continue" : "Regenerate response",
+  );
+  button.addEventListener("click", () => {
+    if (kind === "edit") {
+      void branchToComposer(article);
+    } else {
+      void regenerateResponse(article);
+    }
+  });
+  article.appendChild(button);
+}
+
+// branchToComposer creates a branch ending before the selected prompt and
+// prefills the composer with its exact text so submission continues the
+// branch as a fresh, permission-governed turn.
+async function branchToComposer(article) {
+  if (state.currentPhase !== phase.idle) {
+    return;
+  }
+  const keep = Number(article.dataset.branchKeep);
+  const text = article.dataset.rawText || "";
+  const branched = await runCommandOperation("Branching conversation", () =>
+    commandMutation("branch", `${state.sessionID} ${keep}`),
+  );
+  if (!branched || !branched.state) {
+    return;
+  }
+  renderCanonicalState(branched.state, true);
+  elements.message.value = text;
+  elements.message.focus();
+  setStatusMessage(
+    elements.composerStatus,
+    "This is a branch of the original conversation. Earlier tool side effects are not undone.",
+    false,
+    "composer",
+  );
+  updateControls();
+}
+
+// regenerateResponse branches to before the prompt that produced the selected
+// response and immediately re-sends the identical prompt in the new branch.
+async function regenerateResponse(article) {
+  if (state.currentPhase !== phase.idle) {
+    return;
+  }
+  const keep = Number(article.dataset.branchKeep);
+  const text = article.dataset.promptText || "";
+  const branched = await runCommandOperation("Branching conversation", () =>
+    commandMutation("branch", `${state.sessionID} ${keep}`),
+  );
+  if (!branched || !branched.state) {
+    return;
+  }
+  renderCanonicalState(branched.state, true);
+  await sendTurn(text, crypto.randomUUID(), { clearComposer: true });
+  setStatusMessage(
+    elements.composerStatus,
+    "Regenerating in a new branch. Earlier tool side effects are not undone.",
+    true,
+    "composer",
+  );
 }
 
 function persistOwner() {
@@ -1587,7 +1708,12 @@ async function sendTurn(text, idempotencyKey, options) {
   state.lastUserText = text;
   setPhase(phase.sending);
   setStatusMessage(elements.composerStatus, "", false, "composer");
-  appendMessage("user", text, state.streamingMessage);
+  const promptArticle = appendMessage("user", text, state.streamingMessage);
+  if (promptArticle) {
+    state.promptArticle = promptArticle;
+    state.promptIndex = state.historyLength;
+    promptArticle.dataset.branchKeep = String(state.historyLength);
+  }
   showTypingIndicator();
   if (options?.clearComposer) {
     elements.message.value = "";
@@ -2348,6 +2474,17 @@ function finalizeStreamingMessage() {
   }
   state.streamingMessage.querySelector(".stream-caret")?.remove();
   state.streamingMessage.dataset.rawText = state.streamingText;
+  // The completed turn pair is a safe branch boundary.
+  if (state.promptIndex >= 0) {
+    const promptArticle = state.promptArticle;
+    if (promptArticle) {
+      attachTurnAction(promptArticle, "edit");
+    }
+    state.streamingMessage.dataset.branchKeep = String(state.promptIndex);
+    state.streamingMessage.dataset.promptText = state.promptArticle?.dataset.rawText || state.lastUserText;
+    attachTurnAction(state.streamingMessage, "regenerate");
+    state.historyLength = state.promptIndex + 2;
+  }
   attachCopyButton(state.streamingMessage);
   state.streamingMessage = null;
   state.streamingText = "";
