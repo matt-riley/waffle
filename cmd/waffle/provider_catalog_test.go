@@ -73,10 +73,11 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		"ALIAS=UPSTREAM",
 	}
 	// README.md is intentionally a pointer now (it no longer documents every
-	// capability); the durable documentation lives in docs/ and the example
-	// config, which are checked here.
+	// capability), and so is docs/deploy.md since the guide moved to the
+	// documentation site. The durable documentation is the migrated page and
+	// the example config, which are checked here.
 	for _, path := range []string{
-		filepath.Join("..", "..", "docs", "deploy.md"),
+		filepath.Join("..", "..", "website", "src", "content", "docs", "docs", "under-the-hood", "deployment.md"),
 		filepath.Join("..", "..", "config.example.toml"),
 	} {
 		body, err := os.ReadFile(path)
@@ -85,11 +86,11 @@ func TestProviderDocumentationAcceptance(t *testing.T) {
 		}
 		requireAll(path, string(body), documentationRequirements)
 	}
-	deployBody, err := os.ReadFile(filepath.Join("..", "..", "docs", "deploy.md"))
+	deployBody, err := os.ReadFile(filepath.Join("..", "..", "website", "src", "content", "docs", "docs", "under-the-hood", "deployment.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireAll("docs/deploy.md OpenRouter routing", string(deployBody), []string{
+	requireAll("deployment.md OpenRouter routing", string(deployBody), []string{
 		"exact openrouter.ai host and all of its subdomains",
 		"eu.openrouter.ai",
 		"account-filtered through /models/user",

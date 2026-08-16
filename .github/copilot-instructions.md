@@ -13,7 +13,7 @@
   docs-screenshots` regenerates the Desk screenshots used in the docs.
 - `mise run vet`, `mise run fmt`, and `mise run lint` run repository checks.
 - For focused work, use `go test ./internal/<package> -run '^TestName$' -count=1`.
-- Sandbox queue checks are opt-in: `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1`; Docker-specific coverage is documented in `docs/sandbox-queue.md`.
+- Sandbox queue checks are opt-in: `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1`; Docker-specific coverage is documented in `website/src/content/docs/docs/under-the-hood/sandbox.md`.
 
 ## Architecture
 

@@ -616,7 +616,9 @@ func TestManagerRemoveProviderRejectsStaleExpectedRevisionUnderCommitLock(t *tes
 }
 
 func TestDeploymentDocsDescribeModelAndProviderRemovalSemantics(t *testing.T) {
-	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "deploy.md"))
+	// The deployment guide moved to the documentation site; this contract
+	// follows it, so the guard still points at the copy people edit.
+	docs, err := os.ReadFile(filepath.Join("..", "..", "website", "src", "content", "docs", "docs", "under-the-hood", "deployment.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +631,7 @@ func TestDeploymentDocsDescribeModelAndProviderRemovalSemantics(t *testing.T) {
 		"Provider removal remains blocked while any model alias references the connection",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("docs/deploy.md missing model-removal guidance %q", want)
+			t.Errorf("deployment.md missing model-removal guidance %q", want)
 		}
 	}
 }
