@@ -88,6 +88,8 @@ if (panel || banner) {
     }
     const disclosure = target.closest("details");
     if (disclosure) disclosure.open = true;
+    const form = target.closest("form");
+    if (form) form.hidden = false;
     target.scrollIntoView({ block: "center" });
     target.focus();
     return true;
@@ -118,6 +120,8 @@ if (panel || banner) {
       if (!reveal("#profile-name")) {
         return "The profile editor is on the Capabilities section.";
       }
+      const form = document.querySelector("#profile-form");
+      if (form) form.hidden = false;
       const name = document.querySelector("#profile-name");
       const system = document.querySelector("#profile-system");
       const title = document.querySelector("#profile-form-title");

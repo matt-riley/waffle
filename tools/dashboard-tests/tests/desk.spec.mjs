@@ -225,12 +225,15 @@ test("setup reports each prerequisite and routes to the control that fixes it", 
     .click();
   await expect(page.locator("#capability-default-alias")).toBeFocused();
 
+  await openCapabilityTab(page, "Setup");
   await checklist
     .locator("[data-step='profile']")
     .getByRole("button", { name: "Create a starter profile", exact: true })
     .click();
   await expect(page.locator("#profile-name")).toHaveValue("main");
   await expect(page.locator("#profile-system")).not.toHaveValue("");
+
+  await openCapabilityTab(page, "Setup");
 
   // AC4: creating the identity is a guarded mutation that returns no key
   // material, and the step only flips because the server says it did.
@@ -322,7 +325,9 @@ test("form-and-list sections swap real embedded htmx fragments", async ({ page }
 
 test("Tasks htmx schedule form creates, edits, and reports filter state", async ({ page }) => {
   await page.goto(deskURL("tasks"));
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
   const form = page.locator("#task-schedule-form");
+  await expect(form.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await form.getByLabel("Name").fill("Invalid fixture schedule");
   await form.getByLabel("Cron schedule").fill("not-a-cron");
   await form.getByLabel("Prompt").fill("This must not be saved");
@@ -371,6 +376,8 @@ test("Tasks htmx schedule form creates, edits, and reports filter state", async 
 
 test("Capabilities htmx catalogue add, search, and prospective test use fragments", async ({ page }) => {
   await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Tools & connections");
+  await openCapabilityDisclosure(page, "Enroll a provider");
 
   const providerForm = page.locator("#capability-provider-form");
   await providerForm.getByLabel("Connection name").fill("fixture");
@@ -388,6 +395,8 @@ test("Capabilities htmx catalogue add, search, and prospective test use fragment
   await expect(page.locator("#capability-provider-status")).toContainText("Connection test succeeded.");
   await expect(providerForm.getByLabel("Credential")).toHaveValue("");
 
+  await openCapabilityTab(page, "Models");
+  await openCapabilityDisclosure(page, "Browse a provider catalogue");
   const catalogue = page.locator("#capability-catalogue-form");
   await catalogue.getByLabel("Enrolled connection").selectOption("fixture");
   const refreshed = page.waitForResponse(
@@ -410,6 +419,7 @@ test("Capabilities htmx catalogue add, search, and prospective test use fragment
   );
   await results.getByRole("button", { name: "Add as alias", exact: true }).click();
   await added;
+  await openCapabilityDisclosure(page, "Add a model");
   await expect(page.locator("#capability-model-form #capability-model-status")).toContainText("Capability change accepted.");
   await expect(results.getByRole("button", { name: "Enrolled", exact: true })).toBeDisabled();
 
@@ -566,6 +576,7 @@ test("session model remains scoped away from the Waffle-wide default", async ({ 
 
   await page.getByRole("link", { name: "Capabilities", exact: true }).click();
   await expect(page).toHaveURL(/section=capabilities/);
+  await openCapabilityTab(page, "Models");
   const globalDefault = page.locator("#capability-models .capability-card").filter({
     hasText: "primary",
   });
@@ -748,6 +759,8 @@ test("reduced motion suppresses animation and preserves an overflow-free desk", 
 test("skill installation stays inactive until explicit activation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the staged install flow once.");
   await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Skills");
+  await openCapabilityDisclosure(page, "Add a skill for review");
   await page.getByLabel("Local skill path").fill("/allowed/fixture-reviewed");
   await page.getByRole("button", { name: "Stage review", exact: true }).click();
 
@@ -770,6 +783,7 @@ test("skill installation stays inactive until explicit activation", async ({ pag
   await expect(page.locator("#capability-restart-status")).toBeVisible();
   await page.reload();
   await expect(page.getByText("Capabilities are current.", { exact: true })).toBeVisible();
+  await openCapabilityTab(page, "Skills");
   await expect(installed).toContainText("Active");
   await expect(
     installed.getByRole("button", { name: "Activate", exact: true }),
@@ -780,6 +794,8 @@ test("provider enrollment clears and never renders its credential", async ({ pag
   test.skip(test.info().project.name !== "desktop", "Run the credential boundary flow once.");
   const credential = "desk-secret-canary";
   await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Tools & connections");
+  await openCapabilityDisclosure(page, "Enroll a provider");
   const providerForm = page.locator("#capability-provider-form");
   await providerForm.getByLabel("Connection name").fill("secondary");
   await providerForm.getByLabel("Provider type").selectOption("openai");
@@ -795,6 +811,7 @@ test("provider enrollment clears and never renders its credential", async ({ pag
   expect((await enrollment).status()).toBe(202);
   await expect(page.getByText("Capabilities are current.", { exact: true })).toBeVisible();
   await expect(providerForm.getByLabel("Credential")).toHaveValue("");
+  await openCapabilityTab(page, "Models");
   await expect(
     page.locator("#capability-models .capability-card").filter({ hasText: "secondary" }),
   ).toContainText("fixture-secondary");
@@ -815,6 +832,17 @@ test("200 percent zoom preserves keyboard-discoverable content", async ({ page }
 
 function deskURL(section) {
   return `${baseURL}/desk/?section=${encodeURIComponent(section)}`;
+}
+
+async function openCapabilityTab(page, name) {
+  await page.locator(".capability-tabs").getByRole("link", { name, exact: true }).click();
+}
+
+async function openCapabilityDisclosure(page, summary) {
+  const disclosure = page.locator("details.capability-disclosure").filter({ hasText: summary });
+  if (!(await disclosure.evaluate((element) => element.open))) {
+    await disclosure.locator("summary").click();
+  }
 }
 
 async function expectNoHorizontalOverflow(page) {

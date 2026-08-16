@@ -133,7 +133,10 @@
 		const cancel = input(form, "task-schedule-cancel");
 		const submit = input(form, "task-schedule-submit");
 		if (enabledRow) enabledRow.hidden = true;
-		if (cancel) cancel.hidden = true;
+		if (cancel) {
+			cancel.hidden = false;
+			cancel.textContent = "Cancel";
+		}
 		if (submit) submit.textContent = "Create schedule";
 		delete form.dataset.waffleRedactedFields;
 	}
@@ -184,7 +187,10 @@
 		const cancel = input(form, "task-schedule-cancel");
 		const submit = input(form, "task-schedule-submit");
 		if (enabledRow) enabledRow.hidden = false;
-		if (cancel) cancel.hidden = false;
+		if (cancel) {
+			cancel.hidden = false;
+			cancel.textContent = "Cancel edit";
+		}
 		if (submit) submit.textContent = "Save schedule";
 		openTaskScheduleDialog();
 		form.querySelector?.("#task-schedule-name")?.focus?.();
