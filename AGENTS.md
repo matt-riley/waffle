@@ -10,8 +10,9 @@ Use mise to install the pinned toolchain and run standard tasks:
 
 - `mise install` installs Go and other pinned tools.
 - `mise run build` creates the version-stamped `bin/waffle` binary.
-- `mise run test` runs `go test -race ./...` and zero-network evaluations.
+- `mise run test` regenerates templ components, fails if `internal/dashboard/ui/*_templ.go` is dirty, runs the Waffle Desk client tests, then `go test -race ./...` and the zero-network `waffle eval`.
 - `mise run fmt`, `mise run vet`, and `mise run lint` check formatting, static analysis, and lint rules.
+- `mise run website-check` builds the website and runs its tests; `mise run docs-screenshots` regenerates the Waffle Desk screenshots used in the documentation site.
 - `mise run brand-check` tests and validates brand raster assets and manifests.
 
 For focused iteration, run `go test ./internal/agent -run TestName`. Run locally with `go run ./cmd/waffle chat` after configuring the required provider and secrets. Sandbox-specific checks are documented in `docs/sandbox-queue.md`.

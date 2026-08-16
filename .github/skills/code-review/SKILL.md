@@ -62,7 +62,7 @@ Each of these has been reviewed before and is intentional.
 - **Do not ask for assertions that pin formatting.** Tests here match intent —
   a formatter run must never fail a test whose subject has not changed.
 - **Check the test file before saying something is untested.** Tests sit beside
-  their implementation as `*_test.go`, and the website's live in
+  their implementation as `*_test.go`. The website's tests live in
   `website/tests/`.
 
 ## Conventions
