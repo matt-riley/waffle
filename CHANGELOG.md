@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.0](https://github.com/matt-riley/waffle/compare/v0.23.0...v0.24.0) (2026-08-16)
+
+
+### Features
+
+* **desk:** rebuild Desk around a conversation-first layout ([#452](https://github.com/matt-riley/waffle/issues/452)) ([cd89a7c](https://github.com/matt-riley/waffle/commit/cd89a7c20dfe47fe225cd7a0b76fb092331e7a90))
+* **desk:** render inline emphasis and links in chat markdown ([c76530d](https://github.com/matt-riley/waffle/commit/c76530d4ffdbb10398eddc1383b19fd06efd9e50))
+
+
+### Bug Fixes
+
+* **llm:** drop orphaned tool results before sending to providers ([3df43d3](https://github.com/matt-riley/waffle/commit/3df43d3a99643f35f70617e6598fe751cd203a3d))
+
 ## [0.23.0](https://github.com/matt-riley/waffle/compare/v0.22.0...v0.23.0) (2026-08-16)
 
 
