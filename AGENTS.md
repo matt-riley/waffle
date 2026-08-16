@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Waffle is a Go 1.25.12 application. The executable and command handlers live in `cmd/waffle/`; core behavior is organized into focused packages under `internal/`, including `agent`, `gateway`, `sandbox`, `store`, and providers in `internal/llm/`. Keep Go tests beside their implementation as `*_test.go`. Ordered SQL migrations belong in `internal/store/migrations/`, evaluation scenarios in `evals/`, and architecture or operations documentation in `docs/`. Brand source assets live in `assets/brand/`, with supporting scripts and tests in `tools/brand-assets/`. Use `config.example.toml` as the configuration reference.
+Waffle is a Go application; `mise.toml` pins the toolchain (currently 1.26.5) and `go.mod` declares the language version (currently 1.25.13). The executable and command handlers live in `cmd/waffle/`; core behavior is organized into focused packages under `internal/`, including `agent`, `gateway`, `sandbox`, `store`, and providers in `internal/llm/`. Keep Go tests beside their implementation as `*_test.go`. Ordered SQL migrations belong in `internal/store/migrations/`, evaluation scenarios in `evals/`, and architecture or operations documentation in `docs/`. Brand source assets live in `assets/brand/`, with supporting scripts and tests in `tools/brand-assets/`. Use `config.example.toml` as the configuration reference.
 
 ## Build, Test, and Development Commands
 

@@ -2,9 +2,15 @@
 
 ## Commands
 
-- `mise install` installs Go 1.25.12.
+- `mise install` installs the pinned toolchain — Go, Node, and pnpm. `mise.toml`
+  is the authority on versions; `go.mod` declares the Go *language* version,
+  which is deliberately a different number from the toolchain pin.
 - `mise run build` produces the version-stamped binary at `bin/waffle`.
-- `mise run test` runs `go test -race ./...` and zero-network evaluations.
+- `mise run test` regenerates templ components, fails if
+  `internal/dashboard/ui/*_templ.go` is dirty, runs the Desk client tests, then
+  `go test -race ./...` and the zero-network `waffle eval`.
+- `mise run website-check` builds the site and runs its tests; `mise run
+  docs-screenshots` regenerates the Desk screenshots used in the docs.
 - `mise run vet`, `mise run fmt`, and `mise run lint` run repository checks.
 - For focused work, use `go test ./internal/<package> -run '^TestName$' -count=1`.
 - Sandbox queue checks are opt-in: `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1`; Docker-specific coverage is documented in `docs/sandbox-queue.md`.
@@ -42,6 +48,52 @@ policies when changing gateway, broker, MCP, sandbox, or workspace code.
 Memory spans transcript/FTS sessions, a session-local working set, and
 workspace `MEMORY.md` notes. Keep the working set session-scoped; durable notes
 are maintained through the memory tools and indexed in SQLite.
+
+## The website (`website/`)
+
+`website/` is an Astro site with two halves that share a brand and almost
+nothing else. Review them by different rules; `website/DOCS-PLAN.md` is the
+brief they are built to.
+
+- **`/`** — hand-built marketing homepage: Astro components, Tailwind, GSAP.
+- **`/docs/`** — Starlight. Content lives in `src/content/docs/docs/`; the extra
+  nesting level is what puts the docs under `/docs/` while leaving `/` bespoke.
+
+Conventions that look like defects but are deliberate. Please do not report
+these:
+
+- **Docs pages load no Tailwind.** `src/styles/docs.css` intentionally omits it.
+  Two CSS resets in one page is how a themed docs site breaks.
+- **Brand tokens are duplicated** between `src/styles/global.css` and
+  `src/styles/docs.css`. That is deliberate — the two halves share values, not
+  machinery — and `tests/site.test.mjs` fails if they ever disagree.
+- **`docs.css` mirrors Starlight's own selector lists**, including
+  `:root, ::backdrop` and `[data-theme="light"] ::backdrop`, copied from
+  `@astrojs/starlight/style/props.css`. Overrides must land on exactly the
+  selectors carrying the values they replace; narrowing them leaves backdrops on
+  Starlight's stock palette.
+- **`tools/dashboard-tests/capture-docs-screenshots.mjs` re-implements a small
+  fixture bootstrap** rather than importing it from `tests/desk.spec.mjs`.
+  Importing that module would execute its test registrations. Both drive the
+  same fixture binary, which is the part that has to agree.
+
+Rules worth enforcing in review:
+
+- **Ginger `#E99A42` must never be text on the paper ground** — it measures
+  2.2:1. It is for rules, borders, and fills. On the evening (dark) ground it
+  reaches 8.2:1 and may carry text. A test enforces the paper-side ban.
+- **At most two cat images per docs page, never two in a row.** Enforced by
+  test. It is the guard against mascot fatigue.
+- **Every plain-language page ends with a Nerd corner link** into its technical
+  counterpart, and every technical page links back up.
+- **Tests assert intent, not formatting.** Do not add assertions that pin exact
+  whitespace, quote style, or indentation of a source file — a formatter run
+  must not fail a test whose subject has not changed.
+- **Screenshots are generated, never hand-taken.** They come from the
+  deterministic Desk fixture via `mise run docs-screenshots`, and captures are
+  reproducible byte-for-byte.
+- Cat art comes only from `assets/brand/waffle/`. Never invent a new cat, and
+  keep the canon anchors (forehead M, grey-green eyes, pale muzzle, ringed tail).
 
 ## Repository Conventions
 
