@@ -468,11 +468,32 @@ test("Today renders Markdown, keyboard send, and paired tool evidence", async ({
   await expect(reply.locator("code")).toContainText(["mise", 'fmt.Println("fixture")']);
   await expect(reply.getByRole("button", { name: "Copy" })).toBeVisible();
 
+  const table = reply.locator("table");
+  await expect(table).toBeVisible();
+  await expect(table.locator("thead th")).toHaveCount(2);
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+  await expect(table.locator("td").first()).toHaveText("mise");
+
   const tool = page.locator("#desk-transcript .tool-chip");
   await expect(tool).toHaveCount(1);
   await expect(tool).toContainText("fixture_read");
   await expect(tool).toContainText("18 ms");
   await expect(tool).toHaveClass(/is-success/);
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
+test("wide markdown tables scroll inside the response without page overflow", async ({ page }) => {
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByLabel("Message Waffle").fill("wide table");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const table = page.locator(".waffle-message table");
+  await expect(table).toBeVisible();
+  await expect(table.locator("thead th")).toHaveCount(6);
+  const scroll = page.locator(".table-scroll");
+  await expect(scroll).toBeVisible();
+  await expect(scroll).toHaveAttribute("aria-label", "Table");
+  await expectNoHorizontalOverflow(page);
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 

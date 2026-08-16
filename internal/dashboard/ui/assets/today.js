@@ -367,6 +367,111 @@ async function copyCode(text, button) {
   }
 }
 
+// splitTableRow splits a pipe-table row into trimmed cells, tolerating an
+// optional leading/trailing pipe and escaped pipes (\|) inside cells.
+function splitTableRow(line) {
+  const cells = [];
+  let current = "";
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === "\\" && line[i + 1] === "|") {
+      current += "|";
+      i += 1;
+    } else if (ch === "|") {
+      cells.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current);
+  if (cells.length > 1 && cells[0].trim() === "") cells.shift();
+  if (cells.length > 1 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map((cell) => cell.trim());
+}
+
+// isTableDelimiter reports whether a line is a GFM delimiter row: every cell
+// is made of only :, -, and spaces and contains at least one hyphen.
+function isTableDelimiter(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+// tableRowsAt returns the row range of a pipe table starting at index, or
+// null when the header/delimiter pair is not a complete table. The delimiter
+// row must match the header row in cell count (GFM) so stray pipes and
+// horizontal rules stay paragraphs.
+function tableRowsAt(lines, index) {
+  if (index + 1 >= lines.length) return null;
+  const header = lines[index];
+  const delimiter = lines[index + 1];
+  if (!header.includes("|") || !isTableDelimiter(delimiter)) return null;
+  if (splitTableRow(header).length !== splitTableRow(delimiter).length) return null;
+  const rows = [header, delimiter];
+  let cursor = index + 2;
+  while (cursor < lines.length) {
+    const line = lines[cursor];
+    if (line.includes("|") && !isTableDelimiter(line)) {
+      rows.push(line);
+      cursor += 1;
+    } else {
+      break;
+    }
+  }
+  return { start: index, end: cursor, rows };
+}
+
+// delimiterAlign maps a GFM alignment marker to a CSS text-align value.
+function delimiterAlign(cell) {
+  const left = cell.startsWith(":");
+  const right = cell.endsWith(":");
+  if (left && right) return "center";
+  if (left) return "left";
+  if (right) return "right";
+  return null;
+}
+
+// renderTable builds a semantic table inside a labelled scroll container.
+// Cells are rendered with the same inline pass as paragraphs, so model
+// content can never inject markup.
+function renderTable(node, table) {
+  const wrap = document.createElement("div");
+  wrap.className = "table-scroll";
+  wrap.setAttribute("role", "group");
+  wrap.setAttribute("aria-label", "Table");
+  const tableEl = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const headerCells = splitTableRow(table.rows[0]);
+  const delimiterCells = splitTableRow(table.rows[1]);
+  headerCells.forEach((cell, column) => {
+    const th = document.createElement("th");
+    th.setAttribute("scope", "col");
+    const align = delimiterAlign(delimiterCells[column]);
+    if (align) th.style.textAlign = align;
+    appendInlineMarkdown(th, cell);
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  tableEl.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (let row = 2; row < table.rows.length; row += 1) {
+    const cells = splitTableRow(table.rows[row]);
+    const tr = document.createElement("tr");
+    cells.forEach((cell, column) => {
+      const td = document.createElement("td");
+      const align = delimiterAlign(delimiterCells[column]);
+      if (align) td.style.textAlign = align;
+      appendInlineMarkdown(td, cell);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  tableEl.appendChild(tbody);
+  wrap.appendChild(tableEl);
+  node.appendChild(wrap);
+}
+
 function renderMarkdown(node, text) {
   clearNode(node);
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
@@ -428,6 +533,12 @@ function renderMarkdown(node, text) {
       node.appendChild(list);
       continue;
     }
+    const table = tableRowsAt(lines, index);
+    if (table) {
+      renderTable(node, table);
+      index = table.end;
+      continue;
+    }
     if (line.trim() === "") {
       index += 1;
       continue;
@@ -460,6 +571,7 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   }
   const article = document.createElement("article");
   article.className = `message ${role === "user" ? "user-message" : "waffle-message"}`;
+  article.dataset.rawText = text;
   const label = document.createElement("p");
   label.className = "message-author";
   label.textContent = role === "user" ? "You" : "Waffle";
@@ -1554,7 +1666,9 @@ function attachCopyButton(article) {
   copy.textContent = "Copy";
   copy.setAttribute("aria-label", "Copy message");
   copy.addEventListener("click", async () => {
-    const plain = body.textContent || "";
+    // Prefer the original markdown so tables and code keep their delimiters;
+    // fall back to the rendered text for legacy nodes without raw text.
+    const plain = (article.dataset.rawText ?? body.textContent) || "";
     try {
       await navigator.clipboard.writeText(plain);
     } catch {
@@ -1579,6 +1693,7 @@ function finalizeStreamingMessage() {
     return;
   }
   state.streamingMessage.querySelector(".stream-caret")?.remove();
+  state.streamingMessage.dataset.rawText = state.streamingText;
   attachCopyButton(state.streamingMessage);
   state.streamingMessage = null;
   state.streamingText = "";

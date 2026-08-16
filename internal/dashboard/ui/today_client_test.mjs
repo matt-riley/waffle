@@ -18,6 +18,7 @@ class FakeElement {
     this.value = "";
     this.selected = false;
     this.attributes = new Map();
+    this.style = {};
     this._textContent = "";
     this.classList = {
       toggle: (name, force) => {
@@ -683,6 +684,150 @@ test("assistant inline markdown renders bold, italic, strike, and safe links; un
   assert.match(transcript.textContent, /Unsafe \[label\]\(javascript:alert\(1\)\) stays literal\./);
   assert.match(transcript.textContent, /Run mise run test and see/);
   assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
+test("assistant markdown renders tables as semantic responsive tables", async () => {
+  const markdown = [
+    "| Name | Cost | Fit |",
+    "| :--- | ---: | :---: |",
+    "| mise | $0 | `free` |",
+    "| figma | $12 | [docs](https://figma.com) |",
+  ].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+
+  const transcript = harness.elements["#desk-transcript"];
+  const table = transcript.querySelector("table");
+  assert.ok(table, "table element rendered");
+  const wrap = transcript.querySelector(".table-scroll");
+  assert.ok(wrap, "table wrapped in a scroll container");
+  assert.equal(wrap.getAttribute("role"), "group");
+  assert.equal(wrap.getAttribute("aria-label"), "Table");
+  assert.equal(transcript.querySelectorAll("th").length, 3);
+  for (const th of transcript.querySelectorAll("th")) {
+    assert.equal(th.getAttribute("scope"), "col");
+  }
+  assert.equal(transcript.querySelectorAll("tr").length, 3);
+  const tds = table.querySelectorAll("td");
+  assert.equal(tds.length, 6);
+  assert.equal(tds[0].style.textAlign, "left");
+  assert.equal(tds[1].style.textAlign, "right");
+  assert.equal(tds[2].style.textAlign, "center");
+  assert.equal(tds[3].style.textAlign, "left");
+  assert.equal(tds[0].querySelector("code"), null);
+  assert.equal(tds[2].querySelector("code").textContent, "free");
+  const link = tds[5].querySelector("a");
+  assert.equal(link.getAttribute("href"), "https://figma.com");
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
+test("streaming table settles once the delimiter row completes", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState(),
+      }),
+  });
+  await flush();
+  const transcript = harness.elements["#desk-transcript"];
+  const emit = (text) => {
+    harness.EventSource.instances[0].emit("text_delta", {
+      resource: "chat",
+      resource_id: "client-1",
+      type: "text_delta",
+      data: { text },
+    });
+  };
+  emit("| Name |");
+  await flush();
+  assert.equal(transcript.querySelector("table"), null, "header alone is not a table");
+  emit(" Cost |");
+  await flush();
+  assert.equal(transcript.querySelector("table"), null, "missing delimiter is not a table");
+  emit("\n| :--- |");
+  await flush();
+  assert.equal(transcript.querySelector("table"), null, "split delimiter stays text");
+  emit(" :---: |\n| mise | $0 |");
+  await flush();
+  const table = transcript.querySelector("table");
+  assert.ok(table, "complete table renders");
+  assert.equal(transcript.querySelectorAll("th").length, 2);
+  assert.equal(table.querySelectorAll("td").length, 2);
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
+test("ragged and incomplete table syntax stays readable text", async () => {
+  const markdown = ["| A | B", "not a delimiter", "| 1 | 2", "plain paragraph with | pipe"].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+  const transcript = harness.elements["#desk-transcript"];
+  assert.equal(transcript.querySelector("table"), null);
+  assert.match(transcript.textContent, /\| A \| B/);
+  assert.match(transcript.textContent, /plain paragraph with \| pipe/);
+});
+
+test("table cells render unsafe model content inert", async () => {
+  const markdown = [
+    "| Name | Link |",
+    "| --- | --- |",
+    "| <script>globalThis.pwned = true</script> | [bad](javascript:alert(1)) |",
+  ].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+  const transcript = harness.elements["#desk-transcript"];
+  assert.equal(transcript.querySelectorAll("script").length, 0);
+  assert.equal(transcript.querySelectorAll("a").length, 0, "unsafe link stays literal");
+  assert.match(transcript.textContent, /<script>globalThis\.pwned = true<\/script>/);
+  assert.match(transcript.textContent, /javascript:alert\(1\)/);
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
+test("message copy preserves raw markdown table delimiters", async () => {
+  const markdown = ["| Name | Cost |", "| :--- | ---: |", "| mise | $0 |"].join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+  const copy = harness.elements["#desk-transcript"].querySelector(".message-copy");
+  assert.ok(copy);
+  await copy.listener("click")();
+  assert.deepEqual(harness.clipboardWrites, [markdown]);
 });
 
 test("Ctrl or Cmd Enter sends the message", async () => {

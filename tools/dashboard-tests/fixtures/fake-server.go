@@ -892,7 +892,19 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		})
 		emit(chat.Event{
 			Kind: chat.EventTextDelta,
-			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n```go\nfmt.Println(\"fixture\")\n```",
+			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n| Name | Cost |\n| :--- |",
+		})
+		emit(chat.Event{
+			Kind: chat.EventTextDelta,
+			Text: " :---: |\n| mise | $0 |\n| figma | $12 |\n\n```go\nfmt.Println(\"fixture\")\n```",
+		})
+		emit(chat.Event{Kind: chat.EventTurnDone})
+		return nil
+	}
+	if strings.Contains(strings.ToLower(input), "wide table") {
+		emit(chat.Event{
+			Kind: chat.EventTextDelta,
+			Text: "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n",
 		})
 		emit(chat.Event{Kind: chat.EventTurnDone})
 		return nil
