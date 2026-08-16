@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.26.0](https://github.com/matt-riley/waffle/compare/v0.25.0...v0.26.0) (2026-08-16)
+
+
+### Features
+
+* **desk:** add conversation rename, pin, and delete actions ([eff1605](https://github.com/matt-riley/waffle/commit/eff160574aa94489fad0f69e29ca369c5b80ea9e))
+* **desk:** add safe edit and regenerate controls for completed turns ([9fc20b7](https://github.com/matt-riley/waffle/commit/9fc20b7ee16469371134619545fb545f93262dec))
+* **desk:** make recent conversations a filterable, selected, collapsible listbox ([335cb44](https://github.com/matt-riley/waffle/commit/335cb447b6dc43ab8149bb269aa968ef5f03bdf1))
+* **desk:** preserve per-session drafts and queue one follow-up ([1f50719](https://github.com/matt-riley/waffle/commit/1f50719314241f0aea5dc5786a4bcb0dba86d99d))
+
+
+### Bug Fixes
+
+* **desk:** render Markdown tables as semantic responsive tables ([94fe0ca](https://github.com/matt-riley/waffle/commit/94fe0ca84136bf5c9178ad624611fa316e680c39))
+
 ## [0.25.0](https://github.com/matt-riley/waffle/compare/v0.24.0...v0.25.0) (2026-08-16)
 
 
