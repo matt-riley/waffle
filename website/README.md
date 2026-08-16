@@ -17,6 +17,19 @@ Docs pages deliberately do **not** load Tailwind. Shared token values are
 duplicated between `src/styles/global.css` and `src/styles/docs.css` and kept
 identical by `tests/site.test.mjs`.
 
+## Screenshots
+
+Desk screenshots under `src/assets/screenshots/` are generated, not taken by
+hand. Regenerate them from the repository root:
+
+```sh
+mise run docs-screenshots
+```
+
+That drives the same deterministic Go fixture as the Desk browser gate, so a
+capture is reproducible and contains no real data. It uses system Chrome by
+default; set `PLAYWRIGHT_CHROMIUM_PATH` to use another Chromium build.
+
 ## Develop
 
 ```sh

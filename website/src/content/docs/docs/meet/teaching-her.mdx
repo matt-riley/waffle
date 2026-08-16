@@ -1,0 +1,137 @@
+---
+title: Teaching her
+description: Memory, notes, and skills — how Waffle learns your context without you repeating yourself.
+sidebar:
+  order: 5
+---
+
+import Callout from '../../../../components/docs/Callout.astro';
+
+The difference between an assistant you enjoy and one you tolerate is mostly
+whether you have to explain yourself every time. This is the page about not
+having to.
+
+## Three kinds of memory
+
+They sound alike. They behave completely differently, and knowing which is
+which saves a lot of confusion.
+
+**The conversation.** Everything said in the current session. She has it all
+while you are talking, and it is searchable afterwards. Nothing to manage.
+
+**The working set.** Goals and constraints for the task in front of you —
+"we're targeting Postgres 16", "don't touch the vendor directory". She holds
+these deliberately during a session. They are **not** permanent; they vanish
+when the session ends. That is the point: a constraint for today's task should
+not silently govern next month's.
+
+Inspect or correct it any time:
+
+```text
+/workset list
+/workset replace <id> <corrected text>
+/workset drop <id>
+/workset clear
+```
+
+**Durable notes.** The things worth keeping — how your projects are laid out,
+your preferences, decisions and why. These survive everything and are what she
+carries into a brand-new conversation.
+
+<Callout kind="tip">
+If she keeps forgetting something between conversations, it is in the working
+set and you wanted a durable note. Ask her to remember it properly, and it moves
+up a layer.
+</Callout>
+
+## Keeping durable memory honest
+
+Durable memory is the part that can go wrong quietly, so there is a gate on it.
+A setting decides what happens when she wants to write a permanent note:
+
+- **auto** — she writes it.
+- **notify** — she writes it and tells you.
+- **review** — it waits in a queue until you approve it.
+
+On `review`, you drain the queue yourself:
+
+```sh
+waffle candidates list                  # what is pending
+waffle candidates show <id>             # full text and where it came from
+waffle candidates approve <id>
+waffle candidates deny <id> --reason "duplicate"
+```
+
+Regardless of that setting, **anything derived from untrusted content is always
+queued** — if she read a web page and wants to remember something from it, you
+approve it. That is not configurable, and it is the single most useful default
+in the memory system.
+
+## Deleting things
+
+```sh
+waffle forget <query>
+```
+
+Previews what matches, and removes only what you confirm. Honest about its
+limits: it cannot reach into your provider's logs, messages already delivered to
+you, or backups you already took.
+
+## Skills
+
+A skill is a written instruction she can reuse — a way of doing something you
+would otherwise re-explain. It is a folder with a `SKILL.md` file in it: a name,
+a description, and the instructions.
+
+```markdown
+---
+name: standup
+description: Summarize yesterday's commits and open PRs into a standup update.
+---
+
+Pull the last 24h of commits and open PRs. Group into Yesterday / Today /
+Blockers. Keep it to five lines.
+```
+
+Use one on purpose with `/skill standup`, or let her reach for it herself —
+every skill's description is visible to her, so a matching task can pull it in
+without you asking.
+
+```sh
+waffle skills ls        # what exists, and which are active
+```
+
+Skills you write by hand are active immediately.
+
+## Learning from her own mistakes
+
+There is a loop that reviews her recent history for things that keep going
+wrong, and proposes skills to fix them:
+
+```sh
+waffle learn
+```
+
+It mines, it proposes, it shows you which conversations triggered each
+proposal. What it writes is **inactive** — a suggestion, not a change. Nothing
+becomes live until you say so:
+
+```sh
+waffle skills activate <name>
+```
+
+Worth running on a schedule, weekly rather than hourly:
+
+```sh
+waffle cron add learn-weekly 0 3 * * 0 /learn
+```
+
+<Callout kind="later">
+Skip this section entirely on a new install. It has nothing to mine until she
+has a few weeks of history, and an empty proposal list tells you nothing.
+</Callout>
+
+---
+
+**Nerd corner:** [How it fits together](/docs/under-the-hood/architecture/) —
+the three memory layers, the write gate, and how the learning loop is bounded.

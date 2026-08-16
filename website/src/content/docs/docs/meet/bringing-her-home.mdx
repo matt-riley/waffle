@@ -1,0 +1,132 @@
+---
+title: Bringing her home
+description: Installing Waffle, connecting a model provider, and getting to your first conversation.
+sidebar:
+  order: 3
+---
+
+import Callout from '../../../../components/docs/Callout.astro';
+
+Start to finish, this takes about ten minutes, most of which is deciding which
+model you want her to think with.
+
+## Before you start
+
+You need a machine you control — a laptop is fine — and an account with a model
+provider (Anthropic, OpenAI, OpenRouter, or anything OpenAI-compatible,
+including a local Ollama). Waffle has no model of her own; she borrows one.
+
+## 1. Install
+
+If you already have the Go toolchain:
+
+```sh
+go install github.com/matt-riley/waffle/cmd/waffle@latest
+```
+
+That writes the binary to `$(go env GOPATH)/bin/waffle`. Put that directory on
+your `PATH`.
+
+From a clone instead, which pins the exact toolchain:
+
+```sh
+git clone https://github.com/matt-riley/waffle.git
+cd waffle
+mise install
+mise run build      # produces bin/waffle
+```
+
+## 2. Run setup
+
+```sh
+waffle setup
+```
+
+This is the only command with real decisions in it. It walks through:
+
+1. **Creating her encrypted store** — where credentials live. Nothing readable
+   sits on disk in plain text.
+2. **Connecting a model provider** — you paste a key once; it goes straight
+   into the encrypted store.
+3. **Choosing a model** — you register short local names for the models you
+   want, and pick a default.
+4. **Writing a starter profile** — the settings your interactive chat uses.
+5. **Offering to enable Waffle Desk** — the browser view. Optional, off unless
+   you say yes, and it prints the address if you do.
+
+Re-running `waffle setup` is safe. Steps that are already done say so and are
+skipped.
+
+<Callout kind="tip">
+You do not have to get this right first time. Every one of these can be changed
+later — `waffle provider add` for another provider, `waffle setup` again for
+anything you skipped.
+</Callout>
+
+## 3. Say hello
+
+```sh
+waffle chat
+```
+
+That opens the conversation. Type; press `Enter` to send. `Alt+Enter` gives you
+a new line without sending. Typing `/` opens the command list. `/exit` closes
+cleanly.
+
+If chat tells you no providers are configured, step 2 did not finish — run
+`waffle setup` again and watch for the provider step.
+
+## Installed, or Ready?
+
+Waffle distinguishes two states, and the difference explains most first-run
+confusion:
+
+- **Installed** — the binary, state directory, and commands exist. She is
+  there, but has no validated model to think with.
+- **Ready** — Installed, *plus* a working model, checked and selected.
+
+Finishing setup without completing the provider step leaves you Installed. She
+will start and refuse to answer, which looks like a bug and is not one.
+`waffle doctor` says which state you are in.
+
+## Adding Telegram (optional)
+
+If you want to message her from your phone, create a bot with Telegram's
+BotFather, put the token in her config, then:
+
+```sh
+waffle serve          # in one terminal; this owns background work
+```
+
+Message your bot. It replies with a pairing code. Approve it on the machine:
+
+```sh
+waffle pair approve <code>
+```
+
+That binds *your* account. Anyone else who messages gets a code and nothing
+else, forever, unless you approve them too.
+
+## Where everything lives
+
+One directory: `~/.waffle`. Her database, notes, configuration, and encrypted
+secrets. Back that up and you have backed her up:
+
+```sh
+waffle backup /absolute/path/to/backup-dir
+```
+
+The encryption identity is deliberately **not** included by default — back that
+up separately with `waffle secret export-identity`, or the backup cannot be
+decrypted.
+
+## Next
+
+[Talking to her](/docs/meet/talking-to-her/) covers the three ways in and when
+each is worth using. Before you give her much to do, read [Keeping her
+safe](/docs/meet/keeping-her-safe/).
+
+---
+
+**Nerd corner:** [How it fits together](/docs/under-the-hood/architecture/) —
+what setup actually writes, and where.

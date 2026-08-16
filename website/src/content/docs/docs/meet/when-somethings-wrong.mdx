@@ -1,0 +1,165 @@
+---
+title: When something's wrong
+description: How to stop her, work out what happened, and get back to a working state.
+sidebar:
+  order: 7
+---
+
+import Callout from '../../../../components/docs/Callout.astro';
+
+Nothing here is destructive. You can run all of it while confused.
+
+## Stop first
+
+If she is doing something you did not intend, or you just want everything to
+hold still:
+
+```sh
+waffle pause
+```
+
+New work stops. Nothing is lost, nothing is deleted. `waffle resume` picks up
+where you left off.
+
+In a conversation, `Escape` or `Ctrl+C` cancels the current turn without
+stopping anything else.
+
+## The three questions
+
+Almost every problem is one of these.
+
+### "She won't answer me"
+
+Nine times in ten this is a model provider that is not connected, which is the
+**Installed but not Ready** state from [Bringing her
+home](/docs/meet/bringing-her-home/).
+
+```sh
+waffle doctor
+```
+
+It checks the installation over and names what is missing. If it points at a
+provider or a model, run `waffle setup` again — completed steps are skipped, so
+you land on the one that did not finish.
+
+If you have Waffle Desk enabled, its **Capabilities** view answers the same
+question with a checklist, marking each prerequisite configured or missing and
+offering the fix inline where it can:
+
+![The Waffle Desk Capabilities view, listing setup prerequisites. Three are
+marked missing with buttons to fix them; the provider connection is marked
+configured.](../../../../assets/screenshots/desk-capabilities.png)
+
+If she used to answer and now does not, check the model still exists:
+
+```text
+/models
+```
+
+A model alias removed from your configuration leaves chat blocking turns and
+showing the unavailable name, on purpose, so a silent substitution never
+happens. Pick another with `/model <alias>`.
+
+### "She won't do the thing I asked"
+
+Usually a permission, not a failure. In chat:
+
+```text
+/permissions
+```
+
+That shows exactly what she is allowed to do right now, including the sandbox
+mode. If the tool she needs is denied, or the profile is a restricted one, that
+is your answer.
+
+```text
+/status
+```
+
+Shows which profile you are actually in — easy to be in a restricted one
+without realising, particularly after `waffle chat --profile something`.
+
+### "Something ran that I did not expect"
+
+```sh
+waffle status      # active and recent runs
+waffle usage       # what has been spent
+waffle session ls  # past conversations
+```
+
+Every permission decision is recorded, so "what did she ask to do, and what was
+the answer" is always answerable after the fact.
+
+<Callout kind="careful">
+If you think a credential has been exposed, rotate it at the provider first and
+update it in Waffle second. Rotating at the source is what actually revokes
+access; changing it locally only stops her using the old one.
+</Callout>
+
+## Scheduled jobs that never ran
+
+Cron jobs only fire while the background service is running. If `waffle serve`
+is not up, nothing scheduled happens — no error, just silence.
+
+```sh
+waffle cron ls          # jobs, next run, last status
+waffle cron run <id>    # run one now and watch it
+```
+
+Running one by hand is the fastest way to tell a broken job from a service that
+was not running.
+
+## Running as a managed service
+
+On a host where Waffle runs as a system service, the units are the first place
+to look:
+
+```sh
+systemctl status waffle.service waffle-chat.socket
+journalctl -u waffle.service -u waffle-chat.socket --since '15 minutes ago'
+```
+
+<Callout kind="careful">
+Do not reach for `sudo waffle chat` to work around a service that will not
+start. The ordinary command is the correct one; running it with `sudo` bypasses
+the service that is meant to own the agent and hides the real failure instead of
+fixing it.
+</Callout>
+
+## Getting back to a known-good state
+
+Take a backup before anything drastic:
+
+```sh
+waffle backup /absolute/path/to/backup-dir
+```
+
+The encryption identity is not included by default — export it separately with
+`waffle secret export-identity` and keep it somewhere else, or the backup cannot
+be decrypted. A backup you cannot decrypt is not a backup.
+
+Restore with:
+
+```sh
+waffle restore /absolute/path/to/backup-dir
+```
+
+If you updated her and things got worse:
+
+```sh
+waffle rollback
+```
+
+That puts the previous binary back.
+
+## When it is genuinely broken
+
+Waffle is a developer preview: config keys, flags, and stored data can still
+change between releases. If something looks like a real bug, the project takes
+reports from people who actually ran it. Security problems go through the
+project's private reporting process, never a public issue.
+
+---
+
+**Nerd corner:** [How it fits together](/docs/under-the-hood/architecture/) —
+health checks, the serve lock, and what state lives where.

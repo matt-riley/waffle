@@ -176,7 +176,13 @@ test('the astro config resolves its site origin through the tested helper', asyn
 
 const TIER_ONE_PAGES = [
 	'src/content/docs/docs/meet/what-waffle-is.md',
+	'src/content/docs/docs/meet/what-she-can-do.md',
+	'src/content/docs/docs/meet/bringing-her-home.mdx',
+	'src/content/docs/docs/meet/talking-to-her.md',
+	'src/content/docs/docs/meet/teaching-her.mdx',
 	'src/content/docs/docs/meet/keeping-her-safe.mdx',
+	'src/content/docs/docs/meet/when-somethings-wrong.mdx',
+	'src/content/docs/docs/meet/glossary.md',
 ];
 
 const TIER_TWO_PAGES = ['src/content/docs/docs/under-the-hood/architecture.md'];
@@ -322,4 +328,87 @@ test('every sidebar entry points at a page that exists', async () => {
 			`sidebar slug ${slug} resolves to a content file`,
 		);
 	}
+});
+
+test('the plain-language tier is complete and ordered without gaps', async () => {
+	const orders = new Map();
+
+	for (const page of TIER_ONE_PAGES) {
+		const source = await read(page);
+		const order = Number(source.match(/sidebar:\n\s+order:\s*(\d+)/)?.[1]);
+
+		assert.ok(Number.isInteger(order), `${page} declares a sidebar order`);
+		assert.ok(!orders.has(order), `sidebar order ${order} is used twice (${page})`);
+		orders.set(order, page);
+	}
+
+	// Plan §3 lists eight pages; a gap or a duplicate means the reading order
+	// silently reshuffled.
+	assert.deepEqual(
+		[...orders.keys()].sort((a, b) => a - b),
+		[1, 2, 3, 4, 5, 6, 7, 8],
+	);
+});
+
+test('every sidebar label maps to a page in the same order the sidebar declares', async () => {
+	const config = await read('astro.config.mjs');
+
+	// Slice between the two group labels rather than matching a closing brace at
+	// a fixed indent: the group boundary is content, the indentation is a
+	// formatter's business, and this test exists to check declared order.
+	const start = config.indexOf("label: 'Meet Waffle'");
+	const end = config.indexOf("label: 'Under the hood'");
+
+	assert.notEqual(start, -1, 'the sidebar declares a Meet Waffle group');
+	assert.notEqual(end, -1, 'the sidebar declares an Under the hood group after it');
+	assert.ok(start < end, 'Meet Waffle is declared before Under the hood');
+
+	const meetGroup = config.slice(start, end);
+
+	const slugs = [...meetGroup.matchAll(/slug: '([^']+)'/g)].map((match) => match[1]);
+	assert.equal(slugs.length, TIER_ONE_PAGES.length, 'the sidebar lists every Tier 1 page');
+
+	const declared = [];
+	for (const slug of slugs) {
+		const [md, mdx] = await Promise.all([
+			read(`src/content/docs/${slug}.md`),
+			read(`src/content/docs/${slug}.mdx`),
+		]);
+		const source = md || mdx;
+		assert.ok(source, `sidebar slug ${slug} resolves to a content file`);
+		declared.push(Number(source.match(/sidebar:\n\s+order:\s*(\d+)/)?.[1]));
+	}
+
+	assert.deepEqual(
+		declared,
+		[...declared].sort((a, b) => a - b),
+		'sidebar order and frontmatter order disagree',
+	);
+});
+
+test('every screenshot referenced by the docs exists and is regenerable', async () => {
+	const referenced = new Set();
+
+	for (const page of [...TIER_ONE_PAGES, ...TIER_TWO_PAGES]) {
+		const source = await read(page);
+		for (const match of source.matchAll(/\]\(([^)]*assets\/screenshots\/[^)]+)\)/g)) {
+			referenced.add(match[1].split('/').pop());
+		}
+	}
+
+	for (const file of referenced) {
+		const bytes = await read(`src/assets/screenshots/${file}`);
+		assert.ok(bytes.length > 0, `screenshot ${file} exists`);
+	}
+
+	// Screenshots rot silently, so the recipe that regenerates them has to stay
+	// wired up rather than living in someone's shell history.
+	const [capture, mise] = await Promise.all([
+		read('../tools/dashboard-tests/capture-docs-screenshots.mjs'),
+		read('../mise.toml'),
+	]);
+
+	assert.match(capture, /website\/src\/assets\/screenshots/);
+	assert.match(mise, /\[tasks\.docs-screenshots\]/);
+	assert.match(mise, /capture-docs-screenshots/);
 });
