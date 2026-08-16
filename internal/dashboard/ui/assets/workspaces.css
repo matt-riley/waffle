@@ -31,6 +31,16 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+@media (min-width: 75rem) {
+  .workspaces-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.workspaces-grid[data-waffle-fragment] + .workspaces-empty {
+  display: none;
+}
+
 .workspace-card {
   background: var(--paper);
   border: 1px solid var(--ink);
@@ -46,7 +56,8 @@
   gap: 0.3rem;
 }
 
-.workspace-card h2 {
+.workspace-card h2,
+.workspace-card h3 {
   font-size: clamp(1.05rem, 2vw, 1.35rem);
   overflow-wrap: anywhere;
 }
@@ -78,6 +89,7 @@
 }
 
 .workspace-facts,
+.workspace-card .waffle-fragment-facts,
 .workspace-evidence {
   display: grid;
   gap: 0.55rem;
@@ -86,6 +98,7 @@
 }
 
 .workspace-facts div,
+.workspace-card .waffle-fragment-facts div,
 .workspace-evidence div {
   border-top: 1px solid var(--rule);
   min-width: 0;
@@ -93,6 +106,7 @@
 }
 
 .workspace-facts dt,
+.workspace-card .waffle-fragment-facts dt,
 .workspace-evidence dt {
   color: var(--muted);
   font-size: 0.68rem;
@@ -100,6 +114,7 @@
 }
 
 .workspace-facts dd,
+.workspace-card .waffle-fragment-facts dd,
 .workspace-evidence dd {
   margin: 0.2rem 0 0;
   overflow-wrap: anywhere;
@@ -120,10 +135,19 @@
 }
 
 .workspace-actions,
+.workspace-card .waffle-fragment-actions,
 .workspace-dialog-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
+}
+
+.workspace-card .waffle-fragment-kind {
+  color: var(--muted);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  margin: 0;
+  text-transform: uppercase;
 }
 
 .workspaces-empty,
@@ -201,6 +225,7 @@
 @media (max-width: 520px) {
   .workspaces-header,
   .workspace-facts,
+  .workspace-card .waffle-fragment-facts,
   .workspace-evidence,
   .workspace-dialog-actions {
     display: grid;

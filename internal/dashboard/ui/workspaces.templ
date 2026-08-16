@@ -8,7 +8,7 @@ templ Workspaces(view ShellView) {
 	<section class="workspaces" data-section={ view.ActiveSection } aria-labelledby="workspaces-title">
 		<header class="workspaces-header">
 			<div>
-				<p class="eyebrow">Workspaces / guarded repositories</p>
+				<p class="eyebrow">Workspaces</p>
 				<h1 id="workspaces-title">Where Waffle is working</h1>
 			</div>
 			<button id="workspace-open-button" class="workspace-primary" type="button">Open repository</button>
@@ -20,7 +20,6 @@ templ Workspaces(view ShellView) {
 		<dialog id="workspace-open-dialog" aria-labelledby="workspace-open-title">
 			<form id="workspace-open-form" hx-post="/api/v1/desk/workspaces/open" hx-target="#workspace-open-status" hx-swap="innerHTML" data-waffle-json="true">
 				<header class="workspace-dialog-header">
-					<p class="panel-index">01 / repository</p>
 					<h2 id="workspace-open-title">Open a guarded workspace</h2>
 					<p>Use an exact owner/repo. The configured profile and network posture stay visible on the workspace.</p>
 				</header>
@@ -40,7 +39,6 @@ templ Workspaces(view ShellView) {
 		<dialog id="workspace-close-dialog" aria-labelledby="workspace-close-title">
 			<div class="workspace-close-content">
 				<header class="workspace-dialog-header">
-					<p class="panel-index">02 / safety check</p>
 					<h2 id="workspace-close-title">Review workspace close</h2>
 					<p>The repository is inspected again when you confirm. Unsaved or unpushed work always stops the close.</p>
 				</header>

@@ -12,7 +12,6 @@ templ ProfileEditor() {
 	<section class="capability-panel" id="profile-editor" aria-labelledby="profile-editor-title">
 		<header class="panel-heading">
 			<div>
-				<p class="panel-index">04 / agent profiles</p>
 				<h2 id="profile-editor-title">Agent profiles</h2>
 				<p class="posture-note">A profile may only narrow its agent group. Changes take effect after Waffle restarts.</p>
 			</div>
@@ -21,7 +20,7 @@ templ ProfileEditor() {
 		<div class="profile-errors" id="profile-errors" role="status" aria-live="polite" hidden></div>
 		<div class="profile-list" id="profile-list"></div>
 
-		<form id="profile-form" class="profile-form" aria-describedby="profile-form-status">
+		<form id="profile-form" class="profile-form" aria-describedby="profile-form-status" hidden>
 			<h3 id="profile-form-title">New profile</h3>
 			<label for="profile-name">Name</label>
 			<input id="profile-name" name="name" placeholder="reviewer" autocomplete="off" required/>
@@ -62,6 +61,7 @@ templ ProfileEditor() {
 
 			<p id="profile-form-status" class="profile-form-status" role="status" aria-live="polite"></p>
 			<div class="profile-form-actions">
+				<button id="profile-form-cancel" type="button">Cancel</button>
 				<button type="submit">Review change</button>
 			</div>
 		</form>
@@ -70,7 +70,6 @@ templ ProfileEditor() {
 			<div class="profile-review-content">
 				<header class="panel-heading">
 					<div>
-						<p class="panel-index">05 / review</p>
 						<h2 id="profile-review-title">Review change</h2>
 						<p class="posture-note">Nothing is written until you confirm.</p>
 					</div>

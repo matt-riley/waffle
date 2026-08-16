@@ -11,6 +11,7 @@ if (root) {
     errors: document.querySelector("#profile-errors"),
     newButton: document.querySelector("#profile-new"),
     form: document.querySelector("#profile-form"),
+    formCancel: document.querySelector("#profile-form-cancel"),
     formTitle: document.querySelector("#profile-form-title"),
     name: document.querySelector("#profile-name"),
     system: document.querySelector("#profile-system"),
@@ -176,6 +177,7 @@ if (root) {
     elements.allowedChildren.value = joinList(profile?.allowed_children);
     clearFieldInvalid();
     elements.formStatus.textContent = "";
+    elements.form.hidden = false;
   }
 
   function appendText(parent, tag, className, text) {
@@ -414,6 +416,10 @@ if (root) {
     fillForm(null, { name: "" });
     elements.formTitle.textContent = "New profile";
     elements.name.focus();
+  });
+  elements.formCancel?.addEventListener("click", () => {
+    elements.form.hidden = true;
+    elements.formStatus.textContent = "";
   });
   elements.form.addEventListener("submit", (event) => {
     event.preventDefault();
