@@ -10,7 +10,7 @@ Waffle is a personal AI agent written in Go: one binary (`waffle`) containing th
 
 ## Commands
 
-`mise` owns the pinned toolchain (Go 1.25.13, Node 26.1.0, pnpm 11.9.0). `mise install` installs it; `mise tasks` lists everything. The tasks that matter:
+`mise` owns the pinned toolchain (Go 1.26.5, Node 26.1.0, pnpm 11.9.0); `go.mod` declares the language version separately (currently 1.25.13), and the two are not the same number. `mise install` installs it; `mise tasks` lists everything. The tasks that matter:
 
 - `mise run build` — version-stamped `bin/waffle`.
 - `mise run test` — regenerates templ components, fails if `internal/dashboard/ui/*_templ.go` is dirty, runs the Desk client tests, then `go test -race ./...` and the zero-network `waffle eval`.
