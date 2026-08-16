@@ -62,8 +62,12 @@ templ Today(view ShellView) {
 					<button type="button" id="desk-new" disabled>New conversation</button>
 					<button type="button" id="desk-session-refresh" disabled>Recent conversations</button>
 				</div>
-				<div class="session-list" id="desk-sessions" aria-live="polite">
-					<p>Load recent conversations to switch sessions.</p>
+				<div class="session-finder" id="desk-sessions" hidden>
+					<label class="visually-hidden" for="desk-session-filter">Find a conversation</label>
+					<input type="search" id="desk-session-filter" placeholder="Find a conversation…" autocomplete="off" />
+					<div class="session-list" id="desk-session-options" role="listbox" aria-label="Recent conversations" aria-live="polite">
+						<p>Load recent conversations to switch sessions.</p>
+					</div>
 				</div>
 				<dl class="context-list">
 					<div class="visually-hidden">

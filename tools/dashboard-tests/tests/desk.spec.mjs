@@ -532,7 +532,8 @@ test("Today exposes existing commands and resumes a recent session in place", as
   await expect(page.locator("#desk-transcript")).toContainText("Fresh start");
 
   await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
-  await page.getByRole("button", { name: /Release review ·/ }).click();
+  await expect(page.getByRole("option", { name: /Release review/ })).toBeVisible();
+  await page.getByRole("option", { name: /Release review/ }).click();
   await expect(page.locator("#desk-session-title")).toHaveText("Release review");
 
   for (const [summary, button, result] of [

@@ -268,6 +268,8 @@ function createHarness({
     "#desk-new",
     "#desk-session-refresh",
     "#desk-sessions",
+    "#desk-session-filter",
+    "#desk-session-options",
     "#desk-usage-refresh",
     "#desk-usage",
     "#desk-permissions-refresh",
@@ -306,11 +308,20 @@ function createHarness({
     },
   });
   const document = {
+    get activeElement() {
+      return activeElement;
+    },
     body,
     createElement: (tagName) => new FakeElement(tagName),
     createTextNode: (text) => new FakeTextNode(text),
     execCommand: () => true,
     querySelector: (selector) => elements[selector] || null,
+  };
+  // Track programmatic focus so listbox arrow navigation is observable.
+  let activeElement = null;
+  FakeElement.prototype.focus = function () {
+    this.focused = true;
+    activeElement = this;
   };
   const railCalls = [];
   const waffleDeskRail = {
@@ -1253,20 +1264,44 @@ test("sessions list resumes selected history in place and failed resume leaves i
   await flush();
   await harness.elements["#desk-session-refresh"].listener("click")();
   await flush();
-  const sessionButton = harness.elements["#desk-sessions"].querySelector("button");
+  const sessionButton = harness.elements["#desk-session-options"].querySelector("button");
+  assert.ok(sessionButton, "first open renders the session list");
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.match(sessionButton.textContent, /Second session.*25 Jul 2026/i);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "true",
+  );
   await sessionButton.listener("click")();
   await flush();
   assert.equal(harness.elements["#desk-session-title"].textContent, "Second session");
   assert.match(harness.elements["#desk-transcript"].textContent, /Restored/);
+  // The resumed session is now marked as the current one.
+  const selected = harness.elements["#desk-session-options"]
+    .querySelectorAll("button")
+    .find((node) => node.classList.contains("is-selected"));
+  assert.ok(selected);
+  assert.equal(selected.getAttribute("aria-current"), "true");
+  assert.equal(selected.getAttribute("aria-selected"), "true");
 
   failResume = true;
-  await harness.elements["#desk-session-refresh"].listener("click")();
-  await flush();
-  await harness.elements["#desk-sessions"].querySelector("button").listener("click")();
+  await harness.elements["#desk-session-options"].querySelector("button").listener("click")();
   await flush();
   assert.equal(harness.elements["#desk-session-title"].textContent, "Second session");
-  assert.match(harness.elements["#desk-transcript"].textContent, /Restored/);
+  assert.match(
+    harness.elements["#desk-session-options"].textContent,
+    /Second session/,
+    "failed resume leaves the list intact",
+  );
+
+  // A second click on the trigger collapses the disclosure and restores focus.
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
 });
 
 test("usage permissions workset and help commands render existing sanitized results", async () => {
@@ -2007,4 +2042,61 @@ test("storage-denied browsers still send and queue without crashing", async () =
   await flush();
   assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
   assert.equal(harness.elements[".desk-shell"].dataset.phase, "sending");
+});
+
+test("session list filters, disambiguates labels, arrows navigate, Escape closes", async () => {
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            { id: "s1", title: "Release review", summary: "Wave 1", updated_at: "2026-08-16T09:00:00Z", model_alias: "kimi" },
+            { id: "s2", title: "Untitled", summary: "Brave search setup", updated_at: "2026-08-15T10:00:00Z", model_alias: "kimi" },
+            { id: "s3", title: "Untitled", summary: "Desk polish", updated_at: "2026-08-14T11:00:00Z" },
+          ],
+        });
+      }
+      return jsonResponse({ state: defaultChatState() });
+    },
+  });
+  await flush();
+  const refresh = harness.elements["#desk-session-refresh"];
+  await refresh.listener("click")();
+  await flush();
+  const options = harness.elements["#desk-session-options"];
+  assert.equal(options.querySelectorAll("button").length, 3);
+  // Duplicate titles carry distinct recency context.
+  assert.match(options.textContent, /16 Aug 2026 · kimi/);
+  assert.match(options.textContent, /15 Aug 2026/);
+
+  // Filter narrows matches.
+  const filter = harness.elements["#desk-session-filter"];
+  filter.value = "brave";
+  filter.listener("input")();
+  assert.equal(options.querySelectorAll("button").length, 1);
+  assert.match(options.textContent, /Brave search setup/);
+
+  // No-match state stays readable.
+  filter.value = "zzz";
+  filter.listener("input")();
+  assert.equal(options.querySelectorAll("button").length, 0);
+  assert.match(options.textContent, /No conversations match/);
+
+  // Arrow keys move focus among options.
+  filter.value = "";
+  filter.listener("input")();
+  const buttons = options.querySelectorAll("button");
+  const keydown = harness.elements["#desk-sessions"].listener("keydown");
+  keydown({ key: "ArrowDown", preventDefault() {} });
+  assert.equal(buttons[0].focused, true);
+  keydown({ key: "ArrowDown", preventDefault() {} });
+  assert.equal(buttons[1].focused, true);
+  keydown({ key: "ArrowUp", preventDefault() {} });
+  assert.equal(buttons[0].focused, true);
+
+  // Escape closes the disclosure and restores focus to the trigger.
+  keydown({ key: "Escape", preventDefault() {} });
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(refresh.focused, true);
 });

@@ -214,6 +214,8 @@ const elements = {
   newConversation: document.querySelector("#desk-new"),
   sessionRefresh: document.querySelector("#desk-session-refresh"),
   sessions: document.querySelector("#desk-sessions"),
+  sessionFilter: document.querySelector("#desk-session-filter"),
+  sessionOptions: document.querySelector("#desk-session-options"),
   usageRefresh: document.querySelector("#desk-usage-refresh"),
   usage: document.querySelector("#desk-usage"),
   permissionsRefresh: document.querySelector("#desk-permissions-refresh"),
@@ -267,6 +269,11 @@ const state = {
     index: 0,
     commands: [],
     items: [],
+  },
+  sessionsList: {
+    open: false,
+    items: [],
+    filter: "",
   },
 };
 
@@ -931,6 +938,7 @@ function renderCanonicalState(chatState, includeHistory) {
   }
   state.sessionID = chatState.session_id || state.sessionID;
   syncComposerDraft();
+  markSessionSelection();
   state.modelAlias = chatState.model_alias || state.modelAlias;
   state.connectionLabel = chatState.connection_mode || state.connectionLabel || "Connected";
   elements.title.textContent = chatState.title || "Untitled conversation";
@@ -1773,32 +1781,194 @@ async function resumeSession(sessionID) {
   });
 }
 
-function renderSessions(sessions) {
-  clearNode(elements.sessions);
-  const available = Array.isArray(sessions) ? sessions : [];
-  if (available.length === 0) {
-    elements.sessions.textContent = "No recent conversations.";
+// toggleSessions opens or closes the recent-conversation disclosure. The first
+// open loads the list; subsequent opens reuse the cached items.
+async function toggleSessions() {
+  if (state.sessionsList.open) {
+    closeSessionsList();
     return;
   }
-  for (const session of available) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "session-choice";
-    button.textContent = `${session.title || "Untitled conversation"} · ${formatSessionUpdated(
-      session.updated_at,
-    )}`;
-    button.addEventListener("click", () => resumeSession(session.id || ""));
-    elements.sessions.appendChild(button);
+  if (state.sessionsList.items.length === 0) {
+    const result = await runCommandOperation("Loading conversations", () =>
+      commandMutation("sessions"),
+    );
+    if (!result) {
+      return;
+    }
+    state.sessionsList.items = Array.isArray(result.sessions)
+      ? result.sessions
+      : [];
+  }
+  openSessionsList();
+}
+
+function openSessionsList() {
+  state.sessionsList.open = true;
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.setAttribute("aria-expanded", "true");
+  }
+  renderSessionList();
+  if (elements.sessionFilter) {
+    elements.sessionFilter.value = state.sessionsList.filter;
+    elements.sessionFilter.focus();
   }
 }
 
-async function refreshSessions() {
-  const result = await runCommandOperation("Loading conversations", () =>
-    commandMutation("sessions"),
-  );
-  if (result) {
-    renderSessions(result.sessions);
+function closeSessionsList() {
+  if (!state.sessionsList.open) {
+    return;
   }
+  state.sessionsList.open = false;
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.setAttribute("aria-expanded", "false");
+    elements.sessionRefresh.focus();
+  }
+  if (elements.sessions) {
+    elements.sessions.hidden = true;
+  }
+}
+
+function renderSessions(sessions) {
+  state.sessionsList.items = Array.isArray(sessions) ? sessions : [];
+  if (state.sessionsList.open) {
+    renderSessionList();
+  }
+}
+
+// renderSessionList paints the bounded, filterable listbox. The current
+// conversation is programmatically and visually selected.
+function renderSessionList() {
+  if (!elements.sessionOptions) {
+    return;
+  }
+  clearNode(elements.sessionOptions);
+  if (elements.sessions) {
+    elements.sessions.hidden = false;
+  }
+  const available = state.sessionsList.items;
+  if (available.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No recent conversations.";
+    elements.sessionOptions.appendChild(empty);
+    return;
+  }
+  const filter = state.sessionsList.filter.trim().toLowerCase();
+  const matches = filter
+    ? available.filter((session) => {
+        const haystack = [
+          session.title,
+          session.summary,
+          session.id,
+          session.model_alias,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(filter);
+      })
+    : available;
+  if (matches.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No conversations match.";
+    elements.sessionOptions.appendChild(empty);
+    return;
+  }
+  for (const session of matches) {
+    const selected = session.id === state.sessionID;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "session-choice";
+    button.setAttribute("role", "option");
+    button.setAttribute("data-session-id", session.id || "");
+    button.setAttribute(
+      "aria-selected",
+      selected ? "true" : "false",
+    );
+    if (selected) {
+      button.classList.add("is-selected");
+      button.setAttribute("aria-current", "true");
+    }
+    const title = document.createElement("span");
+    title.className = "session-title";
+    const titleText =
+      session.title || session.summary || "Untitled conversation";
+    title.textContent = titleText;
+    const meta = document.createElement("span");
+    meta.className = "session-meta";
+    const parts = [formatSessionUpdated(session.updated_at)];
+    if (session.model_alias) {
+      parts.push(session.model_alias);
+    }
+    meta.textContent = parts.join(" · ");
+    if (session.summary && session.summary !== titleText) {
+      const detail = document.createElement("span");
+      detail.className = "session-detail";
+      detail.textContent = session.summary;
+      button.append(title, detail, meta);
+    } else {
+      button.append(title, meta);
+    }
+    button.addEventListener("click", () => resumeSession(session.id || ""));
+    elements.sessionOptions.appendChild(button);
+  }
+}
+
+// markSessionSelection re-marks the current conversation after canonical state
+// changes without rebuilding the list.
+function markSessionSelection() {
+  if (!elements.sessionOptions || !state.sessionsList.open) {
+    return;
+  }
+  for (const child of elements.sessionOptions.childNodes) {
+    if (!child.classList?.contains("session-choice")) {
+      continue;
+    }
+    const selected = child.getAttribute("data-session-id") === state.sessionID;
+    child.classList.toggle("is-selected", selected);
+    if (selected) {
+      child.setAttribute("aria-current", "true");
+    } else {
+      child.removeAttribute("aria-current");
+    }
+    child.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+}
+
+function onSessionFilterInput() {
+  state.sessionsList.filter = elements.sessionFilter.value;
+  renderSessionList();
+}
+
+// handleSessionsKeydown gives the listbox arrows/selection and Escape closes
+// the disclosure with focus restored to its trigger.
+function handleSessionsKeydown(event) {
+  if (!state.sessionsList.open) {
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSessionsList();
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+    return;
+  }
+  const options = [...elements.sessionOptions.childNodes].filter((node) =>
+    node.classList?.contains("session-choice"),
+  );
+  if (options.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const active = document.activeElement;
+  let index = options.indexOf(active);
+  if (index === -1) {
+    index = event.key === "ArrowDown" ? -1 : 0;
+  }
+  index =
+    (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) %
+    options.length;
+  options[index].focus();
 }
 
 function renderUsage(rows) {
@@ -2321,7 +2491,9 @@ if (elements.form) {
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
   elements.newConversation?.addEventListener("click", newConversation);
-  elements.sessionRefresh?.addEventListener("click", refreshSessions);
+  elements.sessionRefresh?.addEventListener("click", toggleSessions);
+  elements.sessionFilter?.addEventListener("input", onSessionFilterInput);
+  elements.sessions?.addEventListener("keydown", handleSessionsKeydown);
   elements.usageRefresh?.addEventListener("click", () =>
     refreshResultPanel("usage", "Loading usage", renderUsage),
   );
