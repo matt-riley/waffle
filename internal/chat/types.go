@@ -33,6 +33,7 @@ type Session struct {
 	Summary    string    `json:"summary"`
 	ModelAlias string    `json:"model_alias"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	Pinned     bool      `json:"pinned"`
 }
 
 // UsageRow is one persisted usage-accounting row.

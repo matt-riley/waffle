@@ -535,7 +535,6 @@ test("Today exposes existing commands and resumes a recent session in place", as
   await expect(page.getByRole("option", { name: /Release review/ })).toBeVisible();
   await page.getByRole("option", { name: /Release review/ }).click();
   await expect(page.locator("#desk-session-title")).toHaveText("Release review");
-
   for (const [summary, button, result] of [
     ["Usage", "Load usage", /3 requests · 120 in · 45 out · 10 reserved/],
     ["Permissions", "Load permissions", /Sandbox: workspace-write/],
@@ -548,6 +547,54 @@ test("Today exposes existing commands and resumes a recent session in place", as
     await expect(panel.locator(".context-panel-result")).toContainText(result);
   }
   await expect(page.locator("#desk-sandbox")).toHaveText("workspace-write");
+});
+
+test("conversation rows rename, pin, and delete with a named confirmation", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the manage flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  // Create a disposable conversation to manage, independent of test order.
+  page.once("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  await expect(page.locator("#desk-session-title")).toHaveText("Fresh conversation");
+  await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
+  const freshChoice = page.getByRole("option", { name: /Fresh conversation/ });
+  await expect(freshChoice).toBeVisible();
+
+  const trigger = page.getByRole("button", { name: "Actions for Fresh conversation" });
+  await trigger.click();
+  const popover = trigger.locator("..").locator(".session-menu-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("Rename");
+  await expect(popover).toContainText("Pin");
+  await expect(popover).toContainText("Delete");
+
+  // Inline rename persists into the list.
+  await popover.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page.getByLabel("Conversation title").fill("Fresh conversation v2");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("option", { name: /Fresh conversation v2/ })).toBeVisible();
+
+  // Pin moves the row ahead with a Pinned label.
+  const triggerV2 = page.getByRole("button", { name: "Actions for Fresh conversation v2" });
+  await triggerV2.click();
+  const popoverV2 = triggerV2.locator("..").locator(".session-menu-popover");
+  await popoverV2.getByRole("menuitem", { name: "Pin", exact: true }).click();
+  await expect(page.getByRole("option", { name: /Pinned/ })).toBeVisible();
+
+  // Delete names the conversation in the confirmation before mutating.
+  let dialogText = "";
+  page.once("dialog", async (dialog) => {
+    dialogText = dialog.message();
+    await dialog.accept();
+  });
+  await triggerV2.click();
+  await triggerV2.locator("..").locator(".session-menu-popover").getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await expect.poll(() => dialogText).toMatch(/Fresh conversation v2/);
+  await expect(page.getByRole("option", { name: /Fresh conversation v2/ })).toHaveCount(0);
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
 test("Today reload and navigate-away recovery returns to a usable single desk", async ({ page }) => {

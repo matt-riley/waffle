@@ -642,6 +642,94 @@ func TestDeleteRemovesSessionTurnsAndFTS(t *testing.T) {
 	}
 }
 
+func TestSetPinnedPersistsWithoutTouchingRecency(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	a, err := s.Create(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Create(ctx, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeA, err := s.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPinned(ctx, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Pinned {
+		t.Fatal("pinned flag did not persist")
+	}
+	if !after.UpdatedAt.Equal(beforeA.UpdatedAt) {
+		t.Fatalf("pinning changed updated_at: %v -> %v", beforeA.UpdatedAt, after.UpdatedAt)
+	}
+	if err := s.SetPinned(ctx, a.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err = s.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Pinned {
+		t.Fatal("unpin did not persist")
+	}
+	// Pinned sessions sort before ordinary recents.
+	if err := s.SetPinned(ctx, b.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != b.ID {
+		t.Fatalf("pinned session not first in list: %+v", list)
+	}
+}
+
+func TestDeleteFailsClosedOnLiveWorkspaceAndCleansClosedOnes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.Create(ctx, "workspace session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insertWorkspace := func(status string) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at)
+			VALUES (?, 'repo', 'url', 'img', 'c', 'v', ?, ?, ?, ?)`,
+			"ws-"+status, sess.ID, status, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertWorkspace("open")
+	if err := s.Delete(ctx, sess.ID); !errors.Is(err, ErrSessionWorkspaceActive) {
+		t.Fatalf("delete with open workspace = %v, want ErrSessionWorkspaceActive", err)
+	}
+	// Close it, then deletion succeeds and removes the workspace row.
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET status = 'closed' WHERE session_id = ?`, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workspaces WHERE session_id = ?`, sess.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("closed workspace rows remain after session delete: %d", count)
+	}
+}
+
 func TestRetainDeletesOnlyExpiredUnboundSessions(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

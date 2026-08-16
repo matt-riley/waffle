@@ -275,6 +275,7 @@ const state = {
     items: [],
     filter: "",
   },
+  sessionMenuOpen: null,
 };
 
 function pushRailConnection(railState) {
@@ -1835,8 +1836,9 @@ function renderSessions(sessions) {
   }
 }
 
-// renderSessionList paints the bounded, filterable listbox. The current
-// conversation is programmatically and visually selected.
+// renderSessionList paints the bounded, filterable listbox. Every row is a
+// resume choice plus a keyboard-accessible action menu (rename, pin, delete).
+// The current conversation is programmatically and visually selected.
 function renderSessionList() {
   if (!elements.sessionOptions) {
     return;
@@ -1874,6 +1876,8 @@ function renderSessionList() {
     return;
   }
   for (const session of matches) {
+    const row = document.createElement("div");
+    row.className = "session-row";
     const selected = session.id === state.sessionID;
     const button = document.createElement("button");
     button.type = "button";
@@ -1895,7 +1899,11 @@ function renderSessionList() {
     title.textContent = titleText;
     const meta = document.createElement("span");
     meta.className = "session-meta";
-    const parts = [formatSessionUpdated(session.updated_at)];
+    const parts = [];
+    if (session.pinned) {
+      parts.push("Pinned");
+    }
+    parts.push(formatSessionUpdated(session.updated_at));
     if (session.model_alias) {
       parts.push(session.model_alias);
     }
@@ -1909,8 +1917,170 @@ function renderSessionList() {
       button.append(title, meta);
     }
     button.addEventListener("click", () => resumeSession(session.id || ""));
-    elements.sessionOptions.appendChild(button);
+    row.appendChild(button);
+    attachSessionActions(row, session);
+    elements.sessionOptions.appendChild(row);
   }
+}
+
+// attachSessionActions adds the per-row action menu whose accessible name
+// includes the conversation title (#470).
+function attachSessionActions(row, session) {
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "session-menu-trigger";
+  trigger.textContent = "⋯";
+  trigger.setAttribute(
+    "aria-label",
+    `Actions for ${session.title || "Untitled conversation"}`,
+  );
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  const popover = document.createElement("div");
+  popover.className = "session-menu-popover";
+  popover.setAttribute("role", "menu");
+  popover.hidden = true;
+  popover.append(
+    menuItem("Rename", () => beginSessionRename(row, session)),
+    menuItem(session.pinned ? "Unpin" : "Pin", () =>
+      toggleSessionPin(session),
+    ),
+    menuItem("Delete", () => deleteSession(session)),
+  );
+  trigger.addEventListener("click", () =>
+    toggleSessionMenu(trigger, popover),
+  );
+  row.append(trigger, popover);
+}
+
+function menuItem(label, action) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "session-menu-item";
+  item.setAttribute("role", "menuitem");
+  item.textContent = label;
+  item.addEventListener("click", () => {
+    closeSessionMenus();
+    void action();
+  });
+  return item;
+}
+
+function closeSessionMenus() {
+  if (!state.sessionMenuOpen) {
+    return;
+  }
+  state.sessionMenuOpen.popover.hidden = true;
+  state.sessionMenuOpen.trigger.setAttribute("aria-expanded", "false");
+  state.sessionMenuOpen = null;
+}
+
+function toggleSessionMenu(trigger, popover) {
+  if (state.sessionMenuOpen && state.sessionMenuOpen.popover === popover) {
+    closeSessionMenus();
+    return;
+  }
+  closeSessionMenus();
+  popover.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  state.sessionMenuOpen = { trigger, popover };
+  popover.querySelector("button")?.focus();
+}
+
+async function refreshSessionList() {
+  const result = await runCommandOperation("Updating conversations", () =>
+    commandMutation("sessions"),
+  );
+  if (result) {
+    state.sessionsList.items = Array.isArray(result.sessions)
+      ? result.sessions
+      : [];
+    if (state.sessionsList.open) {
+      renderSessionList();
+    }
+  }
+}
+
+async function toggleSessionPin(session) {
+  const pin = !session.pinned;
+  const result = await runCommandOperation(
+    pin ? "Pinning conversation" : "Unpinning conversation",
+    () => commandMutation(pin ? "pin" : "unpin", session.id),
+  );
+  if (!result) {
+    return;
+  }
+  await refreshSessionList();
+}
+
+async function deleteSession(session) {
+  const title = session.title || "Untitled conversation";
+  const confirmed = globalThis.confirm?.(
+    `Delete conversation "${title}"? This cannot be undone.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+  const result = await runCommandOperation("Deleting conversation", () =>
+    commandMutation("delete", session.id),
+  );
+  if (!result) {
+    return;
+  }
+  if (result.state) {
+    renderCanonicalState(result.state, true);
+  }
+  // The deleted conversation's browser-local work is gone with it.
+  clearDraft(session.id);
+  if (state.queue && state.queue.sessionID === session.id) {
+    persistQueue(null);
+  }
+  await refreshSessionList();
+}
+
+// beginSessionRename swaps the row for an inline bounded title form.
+function beginSessionRename(row, session) {
+  closeSessionMenus();
+  const form = document.createElement("form");
+  form.className = "session-rename";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = session.title || "";
+  input.maxLength = 200;
+  input.setAttribute("aria-label", "Conversation title");
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  form.append(input, save, cancel);
+  for (const child of [...row.childNodes]) {
+    child.remove();
+  }
+  row.appendChild(form);
+  input.focus();
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const title = input.value.trim();
+    if (!title) {
+      input.focus();
+      return;
+    }
+    const result = await runCommandOperation("Renaming conversation", () =>
+      commandMutation("rename", `${session.id} ${title}`),
+    );
+    if (!result) {
+      return;
+    }
+    if (session.id === state.sessionID) {
+      elements.title.textContent = title;
+    }
+    await refreshSessionList();
+  });
+  cancel.addEventListener("click", () => {
+    void refreshSessionList();
+  });
 }
 
 // markSessionSelection re-marks the current conversation after canonical state
@@ -1919,10 +2089,7 @@ function markSessionSelection() {
   if (!elements.sessionOptions || !state.sessionsList.open) {
     return;
   }
-  for (const child of elements.sessionOptions.childNodes) {
-    if (!child.classList?.contains("session-choice")) {
-      continue;
-    }
+  for (const child of elements.sessionOptions.querySelectorAll(".session-choice")) {
     const selected = child.getAttribute("data-session-id") === state.sessionID;
     child.classList.toggle("is-selected", selected);
     if (selected) {
@@ -1947,15 +2114,19 @@ function handleSessionsKeydown(event) {
   }
   if (event.key === "Escape") {
     event.preventDefault();
+    if (state.sessionMenuOpen) {
+      const trigger = state.sessionMenuOpen.trigger;
+      closeSessionMenus();
+      trigger.focus();
+      return;
+    }
     closeSessionsList();
     return;
   }
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
     return;
   }
-  const options = [...elements.sessionOptions.childNodes].filter((node) =>
-    node.classList?.contains("session-choice"),
-  );
+  const options = [...elements.sessionOptions.querySelectorAll(".session-choice")];
   if (options.length === 0) {
     return;
   }

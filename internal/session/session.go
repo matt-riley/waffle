@@ -21,6 +21,9 @@ import (
 var (
 	ErrNotFound          = errors.New("session not found")
 	ErrModelAliasChanged = errors.New("session model alias changed")
+	// ErrSessionWorkspaceActive is returned when a session still owns a live
+	// (open or idle) workspace and therefore cannot be deleted.
+	ErrSessionWorkspaceActive = errors.New("session workspace is active")
 )
 
 // Store persists sessions and turns.
@@ -53,6 +56,9 @@ type Session struct {
 	ModelAliasVersion int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	// Pinned keeps a conversation visible ahead of ordinary recents without
+	// changing its last-activity ordering (#470).
+	Pinned bool
 	// SummaryWatermark is the highest turn sequence the Summary covers (#411).
 	// A resumed session with new turns is eligible for idle reflection again
 	// even though a summary already exists.
@@ -116,6 +122,24 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read set-title result: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetPinned pins or unpins a conversation without touching updated_at, so
+// pinning never changes last-activity ordering.
+func (s *Store) SetPinned(ctx context.Context, id string, pinned bool) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET pinned = ? WHERE id = ?`, pinned, id)
+	if err != nil {
+		return fmt.Errorf("set session pinned: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read set-pinned result: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -341,7 +365,7 @@ func (s *Store) RestoreModelAliases(ctx context.Context, changes []ModelAliasCha
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	var sess Session
 	var created, updated, reflected string
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected)
+	err := s.db.QueryRowContext(ctx, `SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned FROM sessions WHERE id = ?`, id).Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -449,7 +473,7 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned
 		FROM sessions
 		WHERE ? = '' OR (updated_at > ? OR (updated_at = ? AND id > ?))
 		ORDER BY updated_at ASC, id ASC
@@ -462,7 +486,7 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 	for rows.Next() {
 		var sess Session
 		var created, updated, reflected string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)
@@ -487,8 +511,8 @@ func (s *Store) ListUpdatedAfter(ctx context.Context, updatedAt, id string, limi
 
 func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at
-		FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
+		SELECT id, title, summary, model_alias, model_alias_version, created_at, updated_at, summary_watermark, reflected_at, pinned
+		FROM sessions ORDER BY pinned DESC, updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +524,7 @@ func (s *Store) list(ctx context.Context, limit int) (out []Session, err error) 
 	for rows.Next() {
 		var sess Session
 		var created, updated, reflected string
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Summary, &sess.ModelAlias, &sess.ModelAliasVersion, &created, &updated, &sess.SummaryWatermark, &reflected, &sess.Pinned); err != nil {
 			return nil, err
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, created)
@@ -665,6 +689,24 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Fail closed when the session still owns a live workspace: deleting it
+	// would strand an open container on a deleted session (#470).
+	var live int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workspaces WHERE session_id = ? AND status != 'closed'`, id).Scan(&live); err != nil {
+		return fmt.Errorf("check session workspaces: %w", err)
+	}
+	if live > 0 {
+		return ErrSessionWorkspaceActive
+	}
+	// Closed workspaces still reference the session; remove them so no rows
+	// dangle after deletion.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session workspaces: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM issue_claims WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session issue claims: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_groups WHERE session_id = ?`, id); err != nil {
 		return fmt.Errorf("delete session binding: %w", err)
 	}

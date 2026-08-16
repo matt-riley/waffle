@@ -1445,6 +1445,100 @@ func TestChatRuntimeCommandResults(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeManageConversationCommands(t *testing.T) {
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	currentID := runtime.current.ID
+
+	other, err := sessions.Create(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename with a bounded, space-containing title.
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandRename, Args: other.ID + " Release review"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := sessions.Get(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Title != "Release review" {
+		t.Fatalf("renamed title = %q", loaded.Title)
+	}
+
+	// Pin sorts the conversation ahead of recents without touching recency.
+	before, err := sessions.Get(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandPin, Args: other.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	list, err := sessions.List(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].ID != other.ID || !list[0].Pinned {
+		t.Fatalf("pinned list head = %+v", list[0])
+	}
+	after, err := sessions.Get(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("pin changed updated_at: %v -> %v", before.UpdatedAt, after.UpdatedAt)
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandUnpin, Args: other.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err = sessions.Get(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Pinned {
+		t.Fatal("unpin did not persist")
+	}
+
+	// Delete the non-current conversation: no state swap, row is gone.
+	got, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandDelete, Args: other.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.Get(ctx, other.ID); !errors.Is(err, session.ErrNotFound) {
+		t.Fatalf("deleted session still readable: %v", err)
+	}
+	if got.State != nil {
+		t.Fatalf("delete of another conversation returned state: %+v", got)
+	}
+
+	// Delete the current conversation: a fresh session replaces it.
+	got, err = runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandDelete, Args: currentID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == nil || got.State.SessionID == currentID || got.State.SessionID == "" {
+		t.Fatalf("delete-current result = %+v", got)
+	}
+
+	// Usage and missing-target errors fail closed.
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandRename, Args: ""}, nil); err == nil {
+		t.Fatal("rename without args should fail")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandPin, Args: ""}, nil); err == nil {
+		t.Fatal("pin without args should fail")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandDelete, Args: ""}, nil); err == nil {
+		t.Fatal("delete without args should fail")
+	}
+	if _, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandDelete, Args: "missing-session"}, nil); err == nil {
+		t.Fatal("delete of a missing session should fail")
+	}
+}
+
 func TestChatRuntimeCommandUsageErrors(t *testing.T) {
 	runtime, _ := newRuntimeFixture(t, configuredChatModels())
 	if _, err := runtime.Open(context.Background(), chatpkg.OpenOptions{}); err != nil {

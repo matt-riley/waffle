@@ -374,6 +374,55 @@ func (s *fixtureSessions) SearchSummaries(context.Context, string, int) ([]sessi
 	}, nil
 }
 
+func (s *fixtureSessions) SetTitle(_ context.Context, id, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	value.Title = title
+	return nil
+}
+
+func (s *fixtureSessions) SetPinned(_ context.Context, id string, pinned bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.sessions[id]
+	if !ok {
+		return session.ErrNotFound
+	}
+	value.Pinned = pinned
+	return nil
+}
+
+func (s *fixtureSessions) List(_ context.Context, _ int) ([]session.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]session.Session, 0, len(s.sessions))
+	for _, value := range s.sessions {
+		copy := *value
+		out = append(out, copy)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Pinned != out[j].Pinned {
+			return out[i].Pinned
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+func (s *fixtureSessions) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[id]; !ok {
+		return session.ErrNotFound
+	}
+	delete(s.sessions, id)
+	return nil
+}
+
 func (s *fixtureSessions) SetModelAlias(_ context.Context, id, alias string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -939,22 +988,43 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 			}},
 		}}
 	case "sessions":
-		return chat.Result{Sessions: []chat.Session{
-			{
-				ID:         "session-primary",
-				Title:      "Release review",
-				Summary:    "Reviewing the release queue.",
-				ModelAlias: "primary",
-				UpdatedAt:  fixtureNow,
-			},
-			{
-				ID:         "session-fresh",
-				Title:      "Fresh conversation",
-				Summary:    "A fresh fixture session.",
-				ModelAlias: "primary",
-				UpdatedAt:  fixtureNow,
-			},
-		}}, nil
+		all, err := b.sessions.List(context.Background(), 50)
+		if err != nil {
+			return chat.Result{}, err
+		}
+		sessions := make([]chat.Session, 0, len(all))
+		for _, value := range all {
+			sessions = append(sessions, chat.Session{
+				ID:         value.ID,
+				Title:      value.Title,
+				Summary:    value.Summary,
+				ModelAlias: value.ModelAlias,
+				UpdatedAt:  value.UpdatedAt,
+				Pinned:     value.Pinned,
+			})
+		}
+		return chat.Result{Sessions: sessions}, nil
+	case "rename":
+		id, title, ok := strings.Cut(command.Args, " ")
+		id = strings.TrimSpace(id)
+		title = strings.TrimSpace(title)
+		if !ok || id == "" || title == "" {
+			return chat.Result{}, errors.New("usage: /rename <session> <title>")
+		}
+		if err := b.sessions.SetTitle(context.Background(), id, title); err != nil {
+			return chat.Result{}, err
+		}
+		return chat.Result{}, nil
+	case "pin", "unpin":
+		if err := b.sessions.SetPinned(context.Background(), strings.TrimSpace(command.Args), command.Name == "pin"); err != nil {
+			return chat.Result{}, err
+		}
+		return chat.Result{}, nil
+	case "delete":
+		if err := b.sessions.Delete(context.Background(), strings.TrimSpace(command.Args)); err != nil {
+			return chat.Result{}, err
+		}
+		return chat.Result{}, nil
 	case "resume":
 		b.session = strings.TrimSpace(command.Args)
 		b.history = nil

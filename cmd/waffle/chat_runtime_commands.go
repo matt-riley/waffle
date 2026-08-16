@@ -60,7 +60,8 @@ func (r *chatRuntime) command(ctx context.Context, command chatpkg.ParsedCommand
 	case chatpkg.CommandHelp, chatpkg.CommandModels, chatpkg.CommandNew,
 		chatpkg.CommandSessions, chatpkg.CommandResume, chatpkg.CommandStatus,
 		chatpkg.CommandUsage, chatpkg.CommandPermissions, chatpkg.CommandSkill, chatpkg.CommandSkills,
-		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandExit:
+		chatpkg.CommandRepo, chatpkg.CommandWorkset, chatpkg.CommandRename,
+		chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete, chatpkg.CommandExit:
 		return r.runCommand(commandCtx, command, emit)
 	default:
 		return chatpkg.Result{}, fmt.Errorf("unknown chat command %q", command.Name)
@@ -79,6 +80,8 @@ func invalidatesNewConfirmation(command chatpkg.ParsedCommand) bool {
 	case chatpkg.CommandWorkset:
 		verb, _, _ := strings.Cut(args, " ")
 		return verb == "replace" || verb == "drop" || verb == "clear"
+	case chatpkg.CommandRename, chatpkg.CommandPin, chatpkg.CommandUnpin, chatpkg.CommandDelete:
+		return args != ""
 	default:
 		return false
 	}
@@ -115,6 +118,14 @@ func (r *chatRuntime) runCommand(ctx context.Context, command chatpkg.ParsedComm
 		return r.commandRepo(ctx, command.Args, emit)
 	case chatpkg.CommandWorkset:
 		return r.commandWorkset(ctx, command.Args)
+	case chatpkg.CommandRename:
+		return r.commandRename(ctx, command.Args)
+	case chatpkg.CommandPin:
+		return r.commandPin(ctx, command.Args, true)
+	case chatpkg.CommandUnpin:
+		return r.commandPin(ctx, command.Args, false)
+	case chatpkg.CommandDelete:
+		return r.commandDelete(ctx, command.Args, emit)
 	case chatpkg.CommandExit:
 		err := r.Close(ctx)
 		result := chatpkg.Result{ShouldClose: true}
@@ -271,12 +282,97 @@ func (r *chatRuntime) commandSessions(ctx context.Context, title string) (chatpk
 	return chatpkg.Result{Title: title, Sessions: chatSessions(sessions)}, nil
 }
 
+// commandRename renames a conversation. The title is the remainder of the
+// arguments after the session id and is bounded to keep labels readable.
+func (r *chatRuntime) commandRename(ctx context.Context, args string) (chatpkg.Result, error) {
+	id, title, ok := strings.Cut(args, " ")
+	id = strings.TrimSpace(id)
+	title = strings.TrimSpace(title)
+	if !ok || id == "" || title == "" {
+		return chatpkg.Result{}, errors.New("usage: /rename <session> <title>")
+	}
+	if len([]rune(title)) > 200 {
+		return chatpkg.Result{}, errors.New("title is too long (maximum 200 characters)")
+	}
+	if err := r.sessions.SetTitle(ctx, id, title); err != nil {
+		return chatpkg.Result{}, err
+	}
+	return chatpkg.Result{Text: fmt.Sprintf("renamed conversation %s", id)}, nil
+}
+
+// commandPin pins or unpins a conversation without changing its recency.
+func (r *chatRuntime) commandPin(ctx context.Context, args string, pinned bool) (chatpkg.Result, error) {
+	id := strings.TrimSpace(args)
+	if id == "" {
+		verb := "pin"
+		if !pinned {
+			verb = "unpin"
+		}
+		return chatpkg.Result{}, fmt.Errorf("usage: /%s <session>", verb)
+	}
+	if err := r.sessions.SetPinned(ctx, id, pinned); err != nil {
+		return chatpkg.Result{}, err
+	}
+	verb := "pinned"
+	if !pinned {
+		verb = "unpinned"
+	}
+	return chatpkg.Result{Text: fmt.Sprintf("%s conversation %s", verb, id)}, nil
+}
+
+// commandDelete removes a conversation. Deleting the current conversation
+// fails closed while a turn is active and otherwise starts a fresh session so
+// the desk always has a valid authoritative session to render.
+func (r *chatRuntime) commandDelete(ctx context.Context, id string, emit func(chatpkg.Event)) (chatpkg.Result, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return chatpkg.Result{}, errors.New("usage: /delete <session>")
+	}
+	r.mu.Lock()
+	if r.current == nil {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	currentID := r.current.ID
+	active := r.agentCancel != nil
+	r.mu.Unlock()
+	if id == currentID && active {
+		return chatpkg.Result{}, errors.New("a turn is active in this conversation; wait for it to finish before deleting")
+	}
+	if _, err := r.sessions.Get(ctx, id); err != nil {
+		return chatpkg.Result{}, err
+	}
+	if err := r.sessions.Delete(ctx, id); err != nil {
+		if errors.Is(err, session.ErrSessionWorkspaceActive) {
+			return chatpkg.Result{}, errors.New("this conversation owns a live workspace; close it before deleting")
+		}
+		return chatpkg.Result{}, err
+	}
+	if id != currentID {
+		return chatpkg.Result{Text: fmt.Sprintf("deleted conversation %s", id)}, nil
+	}
+	// The current conversation was deleted: open a fresh one in its place.
+	dropped, err := r.resetSession(ctx)
+	if err != nil {
+		return chatpkg.Result{}, fmt.Errorf("deleted %s but could not start a fresh session: %w", id, err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.stateLocked(r.capabilities)
+	text := fmt.Sprintf("deleted conversation %s; started %s", id, r.current.ID)
+	if dropped > 0 {
+		text += fmt.Sprintf("; dropped %d unpinned model assumptions", dropped)
+	}
+	return chatpkg.Result{Text: text, State: &state}, nil
+}
+
 func chatSessions(sessions []session.Session) []chatpkg.Session {
 	out := make([]chatpkg.Session, len(sessions))
 	for i, value := range sessions {
 		out[i] = chatpkg.Session{
 			ID: value.ID, Title: value.Title, Summary: value.Summary,
 			ModelAlias: value.ModelAlias, UpdatedAt: value.UpdatedAt,
+			Pinned: value.Pinned,
 		}
 	}
 	return out

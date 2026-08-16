@@ -177,6 +177,10 @@ the model.
 | `/skills [attach <name>\|detach <name>]` | List active/session skills, attach an active skill to this session, or detach it without deactivating it. |
 | `/repo <owner/repo>` | Open and bind a repository workspace. |
 | `/workset [list\|replace <id> <text>\|drop <id>\|clear]` | Inspect or correct the session working set. |
+| `/rename <session> <title>` | Rename a conversation; pinned and recents lists update. |
+| `/pin <session>` | Pin a conversation so it stays visible ahead of recents. |
+| `/unpin <session>` | Unpin a conversation. |
+| `/delete <session>` | Delete a conversation; fails closed while a turn or workspace is live. |
 
 Outside the table's Markdown escaping, the exact working-set syntax is
 `/workset [list|replace <id> <text>|drop <id>|clear]`.

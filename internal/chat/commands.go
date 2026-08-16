@@ -24,6 +24,10 @@ const (
 	CommandSkills      Name = "skills"
 	CommandRepo        Name = "repo"
 	CommandWorkset     Name = "workset"
+	CommandRename      Name = "rename"
+	CommandPin         Name = "pin"
+	CommandUnpin       Name = "unpin"
+	CommandDelete      Name = "delete"
 )
 
 // Command describes one canonical chat command and its completion/help
@@ -56,6 +60,10 @@ var commandRegistry = [...]Command{
 	{Name: CommandSkills, Usage: "/skills [attach <name>|detach <name>]", Description: "list or change session skills"},
 	{Name: CommandRepo, Usage: "/repo <owner/repo>", Description: "open a repository workspace"},
 	{Name: CommandWorkset, Usage: "/workset [list|replace <id> <text>|drop <id>|clear]", Description: "inspect or correct the working set"},
+	{Name: CommandRename, Usage: "/rename <session> <title>", Description: "rename a conversation"},
+	{Name: CommandPin, Usage: "/pin <session>", Description: "pin a conversation"},
+	{Name: CommandUnpin, Usage: "/unpin <session>", Description: "unpin a conversation"},
+	{Name: CommandDelete, Usage: "/delete <session>", Description: "delete a conversation"},
 }
 
 // Commands returns a deep copy of the canonical command registry in stable

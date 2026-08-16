@@ -2065,7 +2065,8 @@ test("session list filters, disambiguates labels, arrows navigate, Escape closes
   await refresh.listener("click")();
   await flush();
   const options = harness.elements["#desk-session-options"];
-  assert.equal(options.querySelectorAll("button").length, 3);
+  const choices = () => options.querySelectorAll(".session-choice");
+  assert.equal(choices().length, 3);
   // Duplicate titles carry distinct recency context.
   assert.match(options.textContent, /16 Aug 2026 · kimi/);
   assert.match(options.textContent, /15 Aug 2026/);
@@ -2074,19 +2075,19 @@ test("session list filters, disambiguates labels, arrows navigate, Escape closes
   const filter = harness.elements["#desk-session-filter"];
   filter.value = "brave";
   filter.listener("input")();
-  assert.equal(options.querySelectorAll("button").length, 1);
+  assert.equal(choices().length, 1);
   assert.match(options.textContent, /Brave search setup/);
 
   // No-match state stays readable.
   filter.value = "zzz";
   filter.listener("input")();
-  assert.equal(options.querySelectorAll("button").length, 0);
+  assert.equal(choices().length, 0);
   assert.match(options.textContent, /No conversations match/);
 
   // Arrow keys move focus among options.
   filter.value = "";
   filter.listener("input")();
-  const buttons = options.querySelectorAll("button");
+  const buttons = choices();
   const keydown = harness.elements["#desk-sessions"].listener("keydown");
   keydown({ key: "ArrowDown", preventDefault() {} });
   assert.equal(buttons[0].focused, true);
@@ -2099,4 +2100,148 @@ test("session list filters, disambiguates labels, arrows navigate, Escape closes
   keydown({ key: "Escape", preventDefault() {} });
   assert.equal(harness.elements["#desk-sessions"].hidden, true);
   assert.equal(refresh.focused, true);
+});
+
+test("conversation action menu renames, pins, and deletes through the live command surface", async () => {
+  let sessions = [
+    { id: "s1", title: "Alpha", summary: "", updated_at: "2026-08-16T09:00:00Z", model_alias: "kimi" },
+    { id: "s2", title: "Beta", summary: "", updated_at: "2026-08-15T10:00:00Z" },
+  ];
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({ session_id: "s1", title: "Alpha" }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({ sessions });
+      }
+      if (command.name === "rename") {
+        const [id, ...rest] = command.args.split(" ");
+        const title = rest.join(" ");
+        sessions = sessions.map((s) => (s.id === id ? { ...s, title } : s));
+        return jsonResponse({});
+      }
+      if (command.name === "pin" || command.name === "unpin") {
+        sessions = sessions.map((s) =>
+          s.id === command.args ? { ...s, pinned: command.name === "pin" } : s,
+        );
+        sessions = [
+          ...sessions.filter((s) => s.pinned),
+          ...sessions.filter((s) => !s.pinned),
+        ];
+        return jsonResponse({});
+      }
+      if (command.name === "delete") {
+        sessions = sessions.filter((s) => s.id !== command.args);
+        if (command.args === "s1") {
+          return jsonResponse({
+            state: defaultChatState({ session_id: "fresh", title: "Fresh conversation" }),
+          });
+        }
+        return jsonResponse({});
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const options = harness.elements["#desk-session-options"];
+  const rows = () => options.querySelectorAll(".session-row");
+
+  // The action menu names the conversation and offers all three actions.
+  const firstTrigger = rows()[0].querySelector(".session-menu-trigger");
+  assert.equal(firstTrigger.getAttribute("aria-label"), "Actions for Alpha");
+  firstTrigger.listener("click")();
+  const firstPopover = rows()[0].querySelector(".session-menu-popover");
+  assert.equal(firstPopover.hidden, false);
+  assert.equal(firstTrigger.getAttribute("aria-expanded"), "true");
+  assert.match(firstPopover.textContent, /Rename/);
+  assert.match(firstPopover.textContent, /Pin/);
+  assert.match(firstPopover.textContent, /Delete/);
+  // Escape closes the menu and restores focus to the trigger.
+  harness.elements["#desk-sessions"].listener("keydown")({
+    key: "Escape",
+    preventDefault() {},
+  });
+  assert.equal(firstPopover.hidden, true);
+  assert.equal(firstTrigger.focused, true);
+
+  // Rename the second conversation inline.
+  const betaRow = rows()[1];
+  betaRow.querySelector(".session-menu-trigger").listener("click")();
+  const betaItems = betaRow.querySelector(".session-menu-popover").querySelectorAll("button");
+  betaItems.find((item) => item.textContent === "Rename").listener("click")();
+  const form = betaRow.querySelector(".session-rename");
+  const input = form.querySelector("input");
+  input.value = "Release review";
+  form.listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.match(options.textContent, /Release review/);
+
+  // Pin the renamed conversation: it moves ahead and carries the Pinned label.
+  const releaseRow = rows().find((row) => row.textContent.includes("Release review"));
+  assert.ok(releaseRow, "renamed row present");
+  releaseRow.querySelector(".session-menu-trigger").listener("click")();
+  const pinnedItems = releaseRow.querySelector(".session-menu-popover").querySelectorAll("button");
+  pinnedItems.find((item) => item.textContent === "Pin").listener("click")();
+  await flush();
+  assert.match(rows()[0].textContent, /Release review/);
+  assert.match(rows()[0].textContent, /Pinned/);
+
+  // Delete the non-current conversation after confirmation.
+  await rows()[0].querySelector(".session-menu-trigger").listener("click")();
+  const deleteItems = rows()[0].querySelector(".session-menu-popover").querySelectorAll("button");
+  deleteItems.find((item) => item.textContent === "Delete").listener("click")();
+  await flush();
+  assert.equal(rows().length, 1);
+  assert.match(rows()[0].textContent, /Alpha/);
+
+  // Delete the current conversation: the desk renders the fresh replacement.
+  rows()[0].querySelector(".session-menu-trigger").listener("click")();
+  const currentDelete = rows()[0].querySelector(".session-menu-popover").querySelectorAll("button");
+  currentDelete.find((item) => item.textContent === "Delete").listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh conversation");
+  assert.equal(harness.elements["#desk-session-options"].textContent, "No recent conversations.");
+});
+
+test("declined delete leaves the conversation intact", async () => {
+  const harness = createHarness({
+    confirmResult: false,
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({ session_id: "s1", title: "Alpha" }),
+      }),
+    commandHandler: async () =>
+      jsonResponse({
+        sessions: [
+          { id: "s1", title: "Alpha", summary: "", updated_at: "2026-08-16T09:00:00Z" },
+        ],
+      }),
+  });
+  await flush();
+  const options = harness.elements["#desk-session-options"];
+  // Prime the list so a row exists.
+  harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const row = options.querySelector(".session-row");
+  row.querySelector(".session-menu-trigger").listener("click")();
+  const items = row.querySelector(".session-menu-popover").querySelectorAll("button");
+  items.find((item) => item.textContent === "Delete").listener("click")();
+  await flush();
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/command").filter((call) =>
+      JSON.parse(call.options.body).command.name === "delete",
+    ).length,
+    0,
+    "declined delete never mutates",
+  );
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Alpha");
 });
