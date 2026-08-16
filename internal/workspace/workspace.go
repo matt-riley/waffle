@@ -498,7 +498,7 @@ func (m *Manager) containerOpts(ws *Workspace, token, egress string) ContainerOp
 	// allowlist routes HTTP(S) through the broker proxy. none also points
 	// proxy-aware apps at the broker so non-broker HTTPS fails under an
 	// empty/deny-all allowlist; raw TCP on the bridge may still reach the
-	// internet — see docs/deploy.md.
+	// internet — see website/src/content/docs/docs/under-the-hood/deployment.md.
 	if egress == "allowlist" || egress == "none" {
 		proxy = m.ProxyURL
 		if proxy == "" && m.BrokerURL != "" {

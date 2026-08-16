@@ -24,7 +24,7 @@ Focused iteration: `go test ./internal/agent -run TestName`. CI shards the race 
 
 Run locally: `go run ./cmd/waffle setup` (secret identity, provider enrollment, `[agent.profile.main]`, optional Desk), then `go run ./cmd/waffle chat`. Manual alternative: `./waffle secret init`, then `waffle provider add` (or `printf '%s' sk-ant-... | ./waffle secret set anthropic/api-key`), then chat.
 
-Opt-in test tags, documented in `docs/sandbox-queue.md`:
+Opt-in test tags, documented in `website/src/content/docs/docs/under-the-hood/sandbox.md`:
 `go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1` (add `-tags=sandbox_docker` when Docker is available). Live provider evals require `WAFFLE_EVAL_LIVE=1` and a configured provider; they skip otherwise.
 
 ## Architecture

@@ -332,7 +332,7 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	// Absence is fine — agent keeps search/read. MCP codeintel servers are
 	// validated at config load and launched via ConnectRestricted (#77);
 	// when MCP is unavailable the agent keeps this go/parser fallback
-	// (see docs/code-intelligence.md).
+	// (see website/src/content/docs/docs/under-the-hood/code-intelligence.md).
 	var codeTools tool.Toolbox
 	codeIntelRoot := b.Config.CodeIntel.Root
 	if codeIntelRoot == "" {

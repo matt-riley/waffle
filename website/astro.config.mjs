@@ -71,7 +71,25 @@ export default defineConfig({
 				},
 				{
 					label: 'Under the hood',
-					items: [{ label: 'How it fits together', slug: 'docs/under-the-hood/architecture' }],
+					items: [
+						{ label: 'How it fits together', slug: 'docs/under-the-hood/architecture' },
+						{ label: 'Chat clients', slug: 'docs/under-the-hood/chat-clients' },
+						{
+							label: 'Skills, profiles, and jobs',
+							slug: 'docs/under-the-hood/skills-profiles-and-jobs',
+						},
+						{ label: 'Waffle Desk', slug: 'docs/under-the-hood/waffle-desk' },
+						{ label: 'The sandbox queue', slug: 'docs/under-the-hood/sandbox' },
+						{ label: 'Code intelligence', slug: 'docs/under-the-hood/code-intelligence' },
+						{ label: 'Deploying and running', slug: 'docs/under-the-hood/deployment' },
+					],
+				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'Command reference', slug: 'docs/reference/cli' },
+						{ label: 'Configuration reference', slug: 'docs/reference/configuration' },
+					],
 				},
 			],
 		}),

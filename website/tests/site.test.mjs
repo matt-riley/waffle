@@ -412,3 +412,79 @@ test('every screenshot referenced by the docs exists and is regenerable', async 
 	assert.match(mise, /\[tasks\.docs-screenshots\]/);
 	assert.match(mise, /capture-docs-screenshots/);
 });
+
+/* ---------------------------------------------------------------------------
+   Reference pages. Drift guards from website/DOCS-PLAN.md §7.
+   --------------------------------------------------------------------------- */
+
+test('configuration reference covers every section of the contract', async () => {
+	const [contract, reference] = await Promise.all([
+		read('../config.example.toml'),
+		read('src/content/docs/docs/reference/configuration.md'),
+	]);
+
+	// A real TOML table header is the whole line, commented out or not. Matching
+	// loosely would pick up the many prose mentions of table names in comments.
+	const sections = [
+		...new Set(
+			[...contract.matchAll(/^[ \t]*#?[ \t]*\[([a-z][a-z0-9_.]*)\][ \t]*$/gm)].map((m) => m[1]),
+		),
+	];
+
+	assert.ok(sections.length > 10, `parsed ${sections.length} sections from the contract`);
+
+	const documented = new Set(
+		[...reference.matchAll(/^## `\[([a-z][a-z0-9_.]*)\]`\s*$/gm)].map((m) => m[1]),
+	);
+
+	for (const section of sections) {
+		assert.ok(
+			documented.has(section),
+			`[${section}] exists in config.example.toml but has no entry in the configuration reference`,
+		);
+	}
+
+	for (const section of documented) {
+		assert.ok(
+			sections.includes(section),
+			`the configuration reference documents [${section}], which is not in config.example.toml`,
+		);
+	}
+});
+
+test('the built site has no broken internal links', async () => {
+	const { readdirSync, readFileSync, statSync } = await import('node:fs');
+	const { join, relative, dirname } = await import('node:path');
+
+	const distDir = new URL('dist/', websiteRoot).pathname;
+
+	const walk = (dir) =>
+		readdirSync(dir).flatMap((entry) => {
+			const full = join(dir, entry);
+			return statSync(full).isDirectory() ? walk(full) : [full];
+		});
+
+	const pages = walk(distDir).filter((file) => file.endsWith('.html'));
+	assert.ok(pages.length > 0, 'the build produced HTML');
+
+	// Every directory-style route the build actually emitted.
+	const routes = new Set(
+		pages.map((file) => {
+			const rel = relative(distDir, file);
+			const dir = dirname(rel);
+			return dir === '.' ? '/' : `/${dir}/`;
+		}),
+	);
+
+	const broken = [];
+	for (const file of pages) {
+		const html = readFileSync(file, 'utf8');
+		for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
+			if (/^\/(_astro|pagefind|favicon)/.test(href)) continue;
+			if (!href.endsWith('/')) continue;
+			if (!routes.has(href)) broken.push(`${relative(distDir, file)} -> ${href}`);
+		}
+	}
+
+	assert.deepEqual([...new Set(broken)].sort(), [], 'internal links must resolve to built routes');
+});

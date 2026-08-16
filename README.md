@@ -39,8 +39,9 @@ bot, then `waffle pair approve` on the host.
 On a laptop, `waffle chat` is direct: it opens your config, secrets, and
 SQLite store in-process. On a managed host, `waffle serve` owns the agent and
 `waffle chat` attaches to the service socket without `sudo`. First run and the
-socket path are in [docs/chat.md](docs/chat.md). Installed vs Ready, provider
-enrollment, and host rollout are in [docs/deploy.md](docs/deploy.md).
+socket path are in [Chat clients](https://waffle.mattriley.tools/docs/under-the-hood/chat-clients/). Installed
+vs Ready, provider enrollment, and host rollout are in
+[Deploying and running Waffle](https://waffle.mattriley.tools/docs/under-the-hood/deployment/).
 
 ## What it is not
 
@@ -68,10 +69,12 @@ then, treat tags as preview.
 ## Docs
 
 - [Architecture and trust model](docs/plan.md)
-- [First run and chat](docs/chat.md)
-- [Skills, profiles, cron, learning](docs/usage-guide.md)
-- [Waffle Desk](docs/waffle-desk.md)
-- [Managed host install](docs/deploy.md)
+- [Start here — Meet Waffle](https://waffle.mattriley.tools/docs/meet/what-waffle-is/) (plain language)
+- [First run and chat](https://waffle.mattriley.tools/docs/under-the-hood/chat-clients/)
+- [Skills, profiles, cron, learning](https://waffle.mattriley.tools/docs/under-the-hood/skills-profiles-and-jobs/)
+- [Waffle Desk](https://waffle.mattriley.tools/docs/under-the-hood/waffle-desk/)
+- [Managed host install](https://waffle.mattriley.tools/docs/under-the-hood/deployment/)
+- [Command reference](https://waffle.mattriley.tools/docs/reference/cli/) · [Configuration reference](https://waffle.mattriley.tools/docs/reference/configuration/)
 - [Prior art](docs/research.md)
 - [Configuration contract](config.example.toml)
 

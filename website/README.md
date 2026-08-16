@@ -13,6 +13,12 @@ The site has two halves that share a brand and nothing else:
   Content lives in `src/content/docs/docs/`; the extra nesting level is what
   puts the docs under `/docs/` while leaving `/` bespoke.
 
+The operator guides that used to live in the repository's `docs/` directory are
+now here, under `src/content/docs/docs/under-the-hood/`. The originals are
+pointers. Several Go tests assert the content of these pages — edit them with
+that in mind, and run `go test ./cmd/waffle ./internal/providerconfig` after
+substantive changes.
+
 Docs pages deliberately do **not** load Tailwind. Shared token values are
 duplicated between `src/styles/global.css` and `src/styles/docs.css` and kept
 identical by `tests/site.test.mjs`.

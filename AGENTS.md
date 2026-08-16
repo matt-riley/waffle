@@ -15,7 +15,7 @@ Use mise to install the pinned toolchain and run standard tasks:
 - `mise run website-check` builds the website and runs its tests; `mise run docs-screenshots` regenerates the Waffle Desk screenshots used in the documentation site.
 - `mise run brand-check` tests and validates brand raster assets and manifests.
 
-For focused iteration, run `go test ./internal/agent -run TestName`. Run locally with `go run ./cmd/waffle chat` after configuring the required provider and secrets. Sandbox-specific checks are documented in `docs/sandbox-queue.md`.
+For focused iteration, run `go test ./internal/agent -run TestName`. Run locally with `go run ./cmd/waffle chat` after configuring the required provider and secrets. Sandbox-specific checks are documented in `website/src/content/docs/docs/under-the-hood/sandbox.md`.
 
 ## Coding Style & Naming Conventions
 

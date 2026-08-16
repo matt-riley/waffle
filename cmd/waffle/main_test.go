@@ -24,7 +24,9 @@ func TestHelpDocumentsChatFlags(t *testing.T) {
 }
 
 func TestChatDocumentationMatchesCommandContract(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "chat.md")
+	// The guide moved to the documentation site; this contract moved with it.
+	// A drift guard is only useful if it points at the copy people actually edit.
+	path := filepath.Join("..", "..", "website", "src", "content", "docs", "docs", "under-the-hood", "chat-clients.md")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -33,11 +35,11 @@ func TestChatDocumentationMatchesCommandContract(t *testing.T) {
 
 	for _, command := range chatpkg.Commands() {
 		if !strings.Contains(document, "`"+command.Usage+"`") {
-			t.Errorf("docs/chat.md does not document canonical usage %q", command.Usage)
+			t.Errorf("chat-clients.md does not document canonical usage %q", command.Usage)
 		}
 		for _, alias := range command.Aliases {
 			if !strings.Contains(document, "`/"+alias+"`") {
-				t.Errorf("docs/chat.md does not document alias %q for %q", alias, command.Name)
+				t.Errorf("chat-clients.md does not document alias %q for %q", alias, command.Name)
 			}
 		}
 	}
@@ -50,7 +52,7 @@ func TestChatDocumentationMatchesCommandContract(t *testing.T) {
 		"does not fall back",
 	} {
 		if !strings.Contains(document, term) {
-			t.Errorf("docs/chat.md does not document %q", term)
+			t.Errorf("chat-clients.md does not document %q", term)
 		}
 	}
 }

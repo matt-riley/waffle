@@ -1,8 +1,8 @@
 # Waffle documentation site — plan
 
-Status: **in progress**. Decisions in §10 are settled. Phases 1a, 1b, and 2 are
-built; Phase 3 onward is still ahead. This document stays the brief the
-remaining phases work from.
+Status: **in progress**. Decisions in §10 are settled. Phases 1a, 1b, 2, and 3
+are built; only Phase 4 (polish) remains. This document stays the brief it
+works from.
 
 Design lineage: `design-exploration/BRAND_BRIEF.md`,
 `design-exploration/A-sunlit-kitten/CONCEPT.md`, `design-exploration/DECISION.md`.
@@ -205,8 +205,11 @@ Today `docs/` mixes two audiences: operator guides (`chat.md`, `deploy.md`,
 `usage-guide.md`, `waffle-desk.md`, `code-intelligence.md`, `sandbox-queue.md`)
 and contributor material (`plan.md`, `research.md`, the audits and issue notes).
 
-Agreed: **the site becomes canonical for operator-facing material; contributor
-material stays in the repo.** As each operator guide is absorbed into Tier 2,
+Agreed, and now done: **the site becomes canonical for operator-facing
+material; contributor material stays in the repo.** `chat.md`, `deploy.md`,
+`usage-guide.md`, `waffle-desk.md`, `sandbox-queue.md`, and
+`code-intelligence.md` are pointers; `plan.md`, `research.md`, and the audit
+notes stay in-repo and are linked, never mirrored. As each operator guide is absorbed into Tier 2,
 the in-repo file is replaced by a short pointer so existing README links and
 bookmarks keep working. `plan.md`, `research.md`, and the audit notes are linked
 from the site but never mirrored.
@@ -219,9 +222,10 @@ the wrong one will be the one someone follows.
 
 Documentation rots quietly. Three mechanical guards, each a CI failure:
 
-1. **CLI coverage test.** A Go test in `cmd/waffle` asserts every subcommand in
-   the dispatch switch has a reference page, and every reference page maps to a
-   real subcommand. A new command lands undocumented → CI red.
+1. **CLI coverage test.** `TestCLIReferenceCoversEveryCommand` in `cmd/waffle`
+   parses the real `usage()` output — not a hand-maintained list — and asserts
+   every command has a reference entry and every entry maps to a real command.
+   `runner` is the one documented exception, named in the test with its reason.
 2. **Config coverage test.** The configuration reference derives from
    `config.example.toml`; a test asserts every `[section]` in the contract has
    prose on the site.
@@ -342,7 +346,7 @@ subdomain.
 | 1a | **Infra PR** (`matt-riley/infra`): catalog entry, `app-waffle-site` stack root, zone record, state-recovery mappings. Lands first so the Pages project exists before anything is pushed at it. | done — matt-riley/infra#60 |
 | 1b | **Foundation** (this repo): Starlight installed and themed to Sunlit Kitten, `/docs/` routing, accessible dark mode with its acceptance criteria, the four callout components, splash landing, search, `website` CI job. Ships with three real pages so the theme is proven against actual content, not lorem. | done |
 | 2 | **Tier 1 complete.** The remaining six plain-language pages, glossary, screenshot capture recipe. | done |
-| 3 | **Tier 2 + reference.** Migrate operator guides out of `docs/`, add config and CLI references with their drift tests. | 3–4 PRs |
+| 3 | **Tier 2 + reference.** Migrate operator guides out of `docs/`, add config and CLI references with their drift tests. | done |
 | 4 | **Polish.** Per-page OG images using canon art, search tuning, Lighthouse/a11y budget in CI, `docs/` pointer cleanup, optional `repository_dispatch` deploy ping. | 1 PR |
 
 Phase 1b is deliberately front-loaded with theming risk: if Starlight cannot be
@@ -362,6 +366,16 @@ thirty.
 5. **Tier 1 scope.** All eight pages — no trimmed first cut.
 
 Nothing is left blocking. Phase 1a can start against `matt-riley/infra`.
+
+## 7a. Guards that already existed
+
+The migration turned up three pre-existing Go tests asserting the *content* of
+the moved guides — chat command coverage in `cmd/waffle/main_test.go`, OpenRouter
+routing in `cmd/waffle/provider_catalog_test.go`, and model-removal semantics in
+`internal/providerconfig/manager_test.go`. They were repointed at the migrated
+pages rather than deleted: a drift guard is only useful if it points at the copy
+people actually edit. Their passing against the new locations is also the best
+evidence the migration preserved the content.
 
 ## 10a. Deviations from this plan
 
