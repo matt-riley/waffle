@@ -4,6 +4,8 @@ Personal project homepage for [Waffle](https://github.com/matt-riley/waffle) —
 
 Design direction: **Concept A · Sunlit Kitten** (see `../design-exploration/A-sunlit-kitten/`).
 
+Documentation site plan (proposal, not yet built): [`DOCS-PLAN.md`](DOCS-PLAN.md).
+
 ## Develop
 
 ```sh
