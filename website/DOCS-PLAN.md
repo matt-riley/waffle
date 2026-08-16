@@ -1,12 +1,13 @@
 # Waffle documentation site — plan
 
-Status: **proposal**. Nothing in `website/` has been changed yet. This document
-is the thing to argue with before any of it gets built.
+Status: **agreed**. Decisions in §10 are settled; nothing in `website/` has been
+built yet. This document is the brief Phase 1 works from.
 
 Design lineage: `design-exploration/BRAND_BRIEF.md`,
 `design-exploration/A-sunlit-kitten/CONCEPT.md`, `design-exploration/DECISION.md`.
 Character rules: `assets/brand/waffle/canon/character-canon.md`.
 Operator vocabulary: `CONTEXT.md`.
+Deployment control plane: `matt-riley/infra` (Cloudflare Pages + Terraform).
 
 ## 1. Who this is for
 
@@ -107,13 +108,32 @@ reading. Existing tokens in `website/src/styles/global.css` carry over unchanged
 This is the "ginger is accent only" rule from the brief, restated as an
 accessibility constraint so it survives contact with a docs site.
 
-### Dark mode ("evening")
+### Dark mode ("evening") — agreed, and accessible
 
 Docs get read at night; the marketing page does not need it but the docs do.
-Proposed ground `#17130F`, raised surface `#211B15`, text `#F2E9DC`, muted
-`#C4B2A0`. On that ground `ginger #E99A42` reaches 8.2:1 and `ginger-light
-#F5C579` reaches 11.6:1, so on dark the accent *may* carry text. Cat PNGs are
-transparent and sit correctly on both grounds.
+Ground `#17130F`, raised surface `#211B15`, text `#F2E9DC`, muted `#C4B2A0`. On
+that ground `ginger #E99A42` reaches 8.2:1 and `ginger-light #F5C579` reaches
+11.6:1, so on dark the accent *may* carry text — the paper-mode ban on ginger
+text does not apply in reverse. Cat PNGs are transparent and sit correctly on
+both grounds.
+
+"Accessible" here means specific, checkable things, all of which are Phase 1
+acceptance criteria rather than aspirations:
+
+- Every text/background pair in both themes meets WCAG AA (4.5:1 body, 3:1
+  large text and UI borders). The tables above are the source values.
+- The theme toggle is a real `<button>` with an accessible name and pressed
+  state, is keyboard reachable, and never traps focus.
+- Default follows `prefers-color-scheme`; an explicit choice persists and wins.
+- No flash of the wrong theme — the choice is applied by a tiny inline script in
+  `<head>` before first paint, matching the pattern the site already uses for
+  the motion guard.
+- Focus rings stay visible in both themes (the current `:focus-visible` ginger
+  ring needs a lighter variant on the evening ground).
+- Code blocks get a light and a dark syntax theme, both AA-checked — a single
+  theme tinted two ways is what usually fails here.
+- Cat art and screenshots are checked on both grounds; anything that only reads
+  on paper gets a dark-mode variant or is dropped.
 
 ### How the cat appears
 
@@ -152,7 +172,7 @@ regenerate instead of going stale.
 
 ## 5. Technical approach
 
-**Recommendation: Astro Starlight, heavily themed, mounted at `/docs/`.**
+**Agreed: Astro Starlight, heavily themed, mounted at `/docs/`.**
 
 Why: it brings sidebar, table of contents, prev/next, Pagefind search,
 Expressive Code code blocks, heading anchors, and a properly keyboard- and
@@ -184,7 +204,7 @@ Today `docs/` mixes two audiences: operator guides (`chat.md`, `deploy.md`,
 `usage-guide.md`, `waffle-desk.md`, `code-intelligence.md`, `sandbox-queue.md`)
 and contributor material (`plan.md`, `research.md`, the audits and issue notes).
 
-Proposal: **the site becomes canonical for operator-facing material; contributor
+Agreed: **the site becomes canonical for operator-facing material; contributor
 material stays in the repo.** As each operator guide is absorbed into Tier 2,
 the in-repo file is replaced by a short pointer so existing README links and
 bookmarks keep working. `plan.md`, `research.md`, and the audit notes are linked
@@ -211,43 +231,136 @@ nav and the Tier 1 → Tier 2 descent links.
 
 ## 8. Build, CI, and hosting
 
-**Gap to close first:** `website/` has tests (`npm test`) and no CI job at all —
-nothing in `.github/workflows/ci.yml` touches it. Phase 1 adds a `website` job:
-install, build, `node --test`, link check.
+### Waffle-repo CI (gap to close first)
 
-Hosting is undecided (§10). Default recommendation is GitHub Pages via Actions:
-the output is fully static, Pagefind works statically, it adds no vendor, and it
-deploys from the repo that already gates the code. Cloudflare Pages is the
-alternative if a custom domain and edge redirects are wanted.
+`website/` has tests (`npm test`) and **no CI job at all** — nothing in
+`.github/workflows/ci.yml` touches it. Phase 1 adds a `website` job: install,
+build, `node --test`, link check. Without it the site can go red and merge.
+
+### Hosting: Cloudflare Pages, driven from `matt-riley/infra`
+
+Deployment is owned by the infra repo's control plane, not by this repo. The
+site follows the checked-in `provider: cloudflare` + `deploy_kind: pages-static`
+contract (`docs/operator/add-cloudflare-pages-app.md`), the same path as
+`snurble`. Four changes, all in `matt-riley/infra`:
+
+**1. Catalog entry — `catalog/apps/waffle-site.yaml`.** The filename must *not*
+be `waffle.yaml`: that is already the Hetzner host entry (`provider: hetzner`,
+`deploy_kind: binary-systemd`), the deploy workflow resolves apps by filename,
+and its discover step filters to `provider: cloudflare`, so the host entry stays
+untouched.
+
+```yaml
+app_id: waffle-site
+source_repo: matt-riley/waffle
+provider: cloudflare
+deploy_kind: pages-static
+environment: prod
+terraform_stack: stacks/prod/cloudflare/app-waffle-site
+zone_stack: stacks/prod/cloudflare/zone-mattriley-tools
+zone_name: mattriley.tools
+project_name: waffle-site
+pages_project_name: waffle-site
+production_branch: main
+custom_domain: waffle.mattriley.tools
+domain:
+  apex: waffle.mattriley.tools
+  aliases: []
+build:
+  package_manager: npm
+  node_version: "26"
+  working_directory: website
+  output_directory: dist
+  env:
+    PUBLIC_SITE_URL: https://waffle.mattriley.tools
+```
+
+Field notes, each checked against the workflow rather than assumed:
+
+- Install, build, and `wrangler pages deploy` all run in
+  `source/<working_directory>`, so `output_directory` is relative to `website/`
+  and is just `dist`.
+- `npm`, because `website/package-lock.json` is the lockfile and the workflow
+  runs `npm ci`. The repo's pnpm pin is for brand tooling, not the site.
+- `node_version: "26"` matches the mise pin (26.1.0); drop to `"24"` if
+  `setup-node` cannot resolve 26.
+- **`build.env.PUBLIC_SITE_URL` is load-bearing.** `astro.config.mjs` already
+  reads it, and without it every canonical and OG URL builds relative. This is
+  the one field whose absence degrades silently rather than failing the build.
+
+**2. Terraform root — `stacks/prod/cloudflare/app-waffle-site/`.** Copy the
+`app-snurble/` file set (`backend.tf` with its own R2 state key, `main.tf`
+calling `modules/cloudflare/pages-static-site`, `providers.tf`, `variables.tf`,
+`outputs.tf`, `terraform.tfvars`).
+
+**3. One DNS record.** Append to `additional_pages_records` in
+`stacks/prod/cloudflare/zone-mattriley-tools/terraform.tfvars`:
+
+```hcl
+{ name = "waffle", pages_project_name = "waffle-site" },
+```
+
+The existing zone root already handles subdomains under `mattriley.tools` — the
+`snurble` precedent — so **no new zone root is needed**. `waffle.mattriley.tools`
+is currently unused; the Hetzner host is reached over the tailnet, not this zone.
+
+**4. State-recovery mappings.** `.github/workflows/recover-terraform-state.yml`
+hardcodes per-app imports (Pages domain + DNS record). A new app that skips this
+is silently absent from R2 state recovery — add both mappings in the same PR.
+
+### Sequencing trap
+
+Terraform plan/apply trigger only on `bootstrap/**`, `modules/**`, and
+`stacks/**`. A catalog-only PR **will not run Terraform**, so the catalog entry
+and the stack root must land in the same infra PR or the Pages project is never
+created and the first deploy fails.
+
+### Deploy trigger and latency
+
+The Cloudflare deploy workflow runs on `workflow_dispatch`,
+`repository_dispatch` (`deploy-app`), and a daily 08:00 UTC schedule. It
+compares the source repo's production-branch SHA against the latest production
+Pages deployment and no-ops when they match — so merges to waffle `main` go live
+within a day on their own. Recommendation: accept the daily reconcile at first
+and add a `repository_dispatch` ping from waffle CI in Phase 4 only if the
+latency is annoying in practice. That keeps the initial cross-repo surface to
+one PR.
+
+### URLs
+
+Marketing homepage at `https://waffle.mattriley.tools/`, docs at
+`https://waffle.mattriley.tools/docs/`. One Pages project, one origin, one
+deploy — which is also why docs live at `/docs/` rather than on a `docs.`
+subdomain.
 
 ## 9. Phases
 
 | Phase | Contents | Rough size |
 | --- | --- | --- |
-| 0 | This plan; decisions in §10 settled | done on review |
-| 1 | **Foundation.** Starlight installed and themed to Sunlit Kitten, `/docs/` routing, dark mode tokens, the four callout components, splash landing, search, CI job, deploy pipeline. Ships with three real pages so the theme is proven against actual content, not lorem. | 1 PR, meaty |
-| 2 | **Tier 1 complete.** Eight plain-language pages, glossary, screenshot capture recipe, nav entry on the homepage. | 2–3 PRs |
+| 0 | This plan; decisions settled (§10) | done |
+| 1a | **Infra PR** (`matt-riley/infra`): catalog entry, `app-waffle-site` stack root, zone record, state-recovery mappings. Lands first so the Pages project exists before anything is pushed at it. | 1 PR, small |
+| 1b | **Foundation** (this repo): Starlight installed and themed to Sunlit Kitten, `/docs/` routing, accessible dark mode with its acceptance criteria, the four callout components, splash landing, search, `website` CI job. Ships with three real pages so the theme is proven against actual content, not lorem. | 1 PR, meaty |
+| 2 | **Tier 1 complete.** All eight plain-language pages, glossary, screenshot capture recipe, docs entry in the homepage nav (note: `website/tests/site.test.mjs` asserts the current nav shape and will need updating). | 2–3 PRs |
 | 3 | **Tier 2 + reference.** Migrate operator guides out of `docs/`, add config and CLI references with their drift tests. | 3–4 PRs |
-| 4 | **Polish.** Per-page OG images using canon art, search tuning, Lighthouse/a11y budget in CI, `docs/` pointer cleanup. | 1 PR |
+| 4 | **Polish.** Per-page OG images using canon art, search tuning, Lighthouse/a11y budget in CI, `docs/` pointer cleanup, optional `repository_dispatch` deploy ping. | 1 PR |
 
-Phase 1 is deliberately front-loaded with theming risk: if Starlight cannot be
+Phase 1b is deliberately front-loaded with theming risk: if Starlight cannot be
 made to look like Waffle, we find out while there are three pages to port, not
 thirty.
 
-## 10. Open decisions
+## 10. Settled decisions
 
-1. **Hosting and domain.** GitHub Pages (recommended) or Cloudflare Pages? Is
-   there a domain, or is `matt-riley.github.io/waffle` fine for now? This
-   affects `PUBLIC_SITE_URL`, canonical URLs, and whether docs sit at `/docs/`
-   or on a `docs.` subdomain.
-2. **Fate of `docs/*.md`.** Absorb operator guides into the site and leave
-   pointers (recommended), or keep both and accept the drift risk?
-3. **Framework.** Starlight (recommended) or hand-rolled? This is the one
-   decision that is expensive to reverse after Phase 2.
-4. **Dark mode.** Confirm the docs get an "evening" palette. It is extra design
-   surface the marketing page has so far avoided.
-5. **Scope of Tier 1.** Eight pages as listed, or trim `teaching-her` and
-   `talking-to-her` into one for a first cut?
+1. **Hosting.** Cloudflare Pages via the `matt-riley/infra` control plane,
+   following the `snurble` pattern. Domain `waffle.mattriley.tools`, docs at
+   `/docs/` on the same origin. Wiring in §8.
+2. **`docs/*.md`.** Absorb the operator guides into the site; leave pointers
+   behind. Contributor material stays in-repo. (§6)
+3. **Framework.** Starlight. (§5)
+4. **Dark mode.** Yes, with the accessibility criteria in §4 as Phase 1
+   acceptance, not aspiration.
+5. **Tier 1 scope.** All eight pages — no trimmed first cut.
+
+Nothing is left blocking. Phase 1a can start against `matt-riley/infra`.
 
 ## 11. Risks
 
@@ -263,3 +376,6 @@ thirty.
   a joke or a command they must type.
 - **Scope creep into marketing.** The homepage is finished and stays finished;
   this work adds `/docs/`, not a redesign.
+- **Cross-repo sequencing.** The site cannot deploy until the infra PR is
+  merged and applied, and a catalog-only infra PR does not run Terraform at all
+  (§8). Phase 1a exists to get that wrong early and cheaply.
