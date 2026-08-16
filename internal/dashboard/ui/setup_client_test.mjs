@@ -23,6 +23,22 @@ class FakeElement {
     this._textContent = "";
     this.focused = false;
     this.scrolled = false;
+    this.classList = {
+      names: new Set(),
+      toggle(name, force) {
+        if (force === undefined) {
+          if (this.names.has(name)) this.names.delete(name);
+          else this.names.add(name);
+          return;
+        }
+        if (force) this.names.add(name);
+        else this.names.delete(name);
+      },
+    };
+  }
+
+  closest() {
+    return null;
   }
 
   get textContent() {
@@ -119,6 +135,7 @@ function createHarness(routes, { present = SELECTORS } = {}) {
       }
       throw new Error(`unexpected fetch ${path}`);
     },
+    location: { hash: "" },
     setTimeout,
     clearTimeout,
     URL,

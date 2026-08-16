@@ -205,7 +205,61 @@ if (typeof document.querySelectorAll === "function") {
   });
 }
 
+function initCapabilityTabs() {
+  const nav = document.querySelector(".capability-tabs");
+  if (!nav || typeof nav.addEventListener !== "function") {
+    return;
+  }
+  const panels = document.querySelectorAll(".capability-grid > .capability-panel");
+  if (!panels.length) {
+    return;
+  }
+
+  function activate(id) {
+    for (const panel of panels) {
+      panel.classList?.toggle?.("is-active", panel.id === id);
+    }
+    for (const link of nav.querySelectorAll("a[href^='#']")) {
+      const current = link.getAttribute("href") === `#${id}`;
+      if (current) {
+        link.setAttribute("aria-current", "true");
+      } else {
+        link.removeAttribute("aria-current");
+      }
+    }
+  }
+
+  nav.addEventListener("click", (event) => {
+    const link = event.target?.closest?.("a[href^='#']");
+    if (!link) {
+      return;
+    }
+    const id = link.getAttribute("href")?.slice(1);
+    if (!id || !document.getElementById(id)) {
+      return;
+    }
+    event.preventDefault();
+    activate(id);
+    if (globalThis.history?.replaceState) {
+      globalThis.history.replaceState(null, "", `#${id}`);
+    }
+  });
+
+  globalThis.addEventListener?.("hashchange", () => {
+    const id = (globalThis.location?.hash || "").slice(1);
+    if (id && document.getElementById(id)) {
+      activate(id);
+    }
+  });
+
+  const initial = (globalThis.location?.hash || "").slice(1);
+  if (initial && document.getElementById(initial)) {
+    activate(initial);
+  }
+}
+
 void hydrateRail();
+initCapabilityTabs();
 
 const section = document.querySelector(".desk-shell")?.dataset.activeSection || "today";
 const moduleName = {

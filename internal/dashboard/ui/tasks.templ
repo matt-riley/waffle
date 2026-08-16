@@ -4,34 +4,37 @@ templ Tasks(view ShellView) {
 	<section class="tasks" data-section={ view.ActiveSection } aria-labelledby="tasks-title">
 		<header class="tasks-header">
 			<div>
-				<p class="eyebrow">Tasks / scheduled work</p>
+				<p class="eyebrow">Tasks</p>
 				<h1 id="tasks-title">What Waffle is carrying</h1>
 			</div>
-			<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
+			<div class="tasks-header-actions">
+				<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
+				<button id="task-schedule-open" type="button">New schedule</button>
+			</div>
 		</header>
 		<div class="task-filters" aria-label="Filter tasks">
-				<button id="task-filter-all" class="task-filter" type="button" data-task-filter="all" aria-pressed="true" hx-get="/api/v1/desk/tasks?filter=all" hx-target="#tasks-list" hx-swap="outerHTML">All</button>
-				<button id="task-filter-active" class="task-filter" type="button" data-task-filter="active" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=active" hx-target="#tasks-list" hx-swap="outerHTML">Active</button>
-				<button id="task-filter-scheduled" class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=scheduled" hx-target="#tasks-list" hx-swap="outerHTML">Scheduled</button>
-				<button id="task-filter-completed" class="task-filter" type="button" data-task-filter="completed" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=completed" hx-target="#tasks-list" hx-swap="outerHTML">Completed</button>
-				<button id="task-filter-attention" class="task-filter" type="button" data-task-filter="attention" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=attention" hx-target="#tasks-list" hx-swap="outerHTML">Attention</button>
+			<button id="task-filter-all" class="task-filter" type="button" data-task-filter="all" aria-pressed="true" hx-get="/api/v1/desk/tasks?filter=all" hx-target="#tasks-list" hx-swap="outerHTML">All</button>
+			<button id="task-filter-active" class="task-filter" type="button" data-task-filter="active" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=active" hx-target="#tasks-list" hx-swap="outerHTML">Active</button>
+			<button id="task-filter-scheduled" class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=scheduled" hx-target="#tasks-list" hx-swap="outerHTML">Scheduled</button>
+			<button id="task-filter-completed" class="task-filter" type="button" data-task-filter="completed" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=completed" hx-target="#tasks-list" hx-swap="outerHTML">Completed</button>
+			<button id="task-filter-attention" class="task-filter" type="button" data-task-filter="attention" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=attention" hx-target="#tasks-list" hx-swap="outerHTML">Attention</button>
 		</div>
 		<div class="tasks-errors" id="tasks-errors" role="status" aria-live="polite" hidden></div>
 		<div class="tasks-layout">
 			<section class="tasks-board" aria-labelledby="tasks-board-title">
 				<div class="panel-heading">
 					<div>
-						<p class="panel-index">01 / evidence</p>
 						<h2 id="tasks-board-title">Runs and schedules</h2>
 					</div>
 				</div>
 				<div class="task-list" id="tasks-list" hx-get="/api/v1/desk/tasks?filter=all" hx-trigger="load" hx-target="this" hx-swap="outerHTML"></div>
 				<p class="tasks-empty" id="tasks-empty">Loading task evidence…</p>
 			</section>
+		</div>
+		<dialog id="task-schedule-dialog" aria-labelledby="schedule-editor-title">
 			<aside class="schedule-editor" aria-labelledby="schedule-editor-title">
 				<div class="panel-heading">
 					<div>
-						<p class="panel-index">02 / schedule</p>
 						<h2 id="schedule-editor-title">Set the next rhythm</h2>
 					</div>
 				</div>
@@ -66,6 +69,6 @@ templ Tasks(view ShellView) {
 					<div id="task-schedule-status" class="schedule-status" aria-live="polite"></div>
 				</form>
 			</aside>
-		</div>
+		</dialog>
 	</section>
 }

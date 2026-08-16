@@ -138,6 +138,14 @@
 		delete form.dataset.waffleRedactedFields;
 	}
 
+	function openTaskScheduleDialog() {
+		document.querySelector("#task-schedule-dialog")?.showModal?.();
+	}
+
+	function closeTaskScheduleDialog() {
+		document.querySelector("#task-schedule-dialog")?.close?.();
+	}
+
 	function beginTaskEdit(button) {
 		const card = button.closest?.("[data-task-id]");
 		const form = document.querySelector("#task-schedule-form");
@@ -178,6 +186,7 @@
 		if (enabledRow) enabledRow.hidden = false;
 		if (cancel) cancel.hidden = false;
 		if (submit) submit.textContent = "Save schedule";
+		openTaskScheduleDialog();
 		form.querySelector?.("#task-schedule-name")?.focus?.();
 	}
 
@@ -361,7 +370,10 @@
 				action.setAttribute("aria-disabled", "true");
 			}
 		}
-		if (form?.dataset.waffleJsonKind === "task-schedule") resetTaskSchedule(form);
+		if (form?.dataset.waffleJsonKind === "task-schedule") {
+			resetTaskSchedule(form);
+			closeTaskScheduleDialog();
+		}
 		if (event.detail.xhr?.responseText?.includes('id="capability-restart-status"')) beginRestartPolling();
       }
       if (path.endsWith("/open") || path.endsWith("/close") || path.endsWith("/forget")) {
@@ -390,6 +402,24 @@
 		if (taskEdit) {
 			event.preventDefault();
 			beginTaskEdit(taskEdit);
+			return;
+		}
+		const scheduleOpen = event.target?.closest?.("#task-schedule-open");
+		if (scheduleOpen) {
+			event.preventDefault();
+			const form = document.querySelector("#task-schedule-form");
+			if (form) resetTaskSchedule(form);
+			openTaskScheduleDialog();
+			document.querySelector("#task-schedule-name")?.focus?.();
+			return;
+		}
+		const scheduleCancel = event.target?.closest?.("#task-schedule-cancel");
+		if (scheduleCancel) {
+			event.preventDefault();
+			const form = document.querySelector("#task-schedule-form");
+			if (form) resetTaskSchedule(form);
+			closeTaskScheduleDialog();
+			document.querySelector("#task-schedule-open")?.focus?.();
 			return;
 		}
     const open = event.target?.closest?.("#workspace-open-button");

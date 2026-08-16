@@ -135,7 +135,7 @@ func SetupChecklist() templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\"><header class=\"panel-heading\"><div><p class=\"panel-index\">00 / setup</p><h2 id=\"setup-checklist-title\">Setup</h2><p class=\"posture-note\">The prerequisites <code>waffle setup</code> walks, as this running Waffle sees them. Changes made here take effect after a restart.</p></div></header><p class=\"capability-form-status\" id=\"setup-status\" role=\"status\" aria-live=\"polite\">Checking setup…</p><ol class=\"setup-steps\" id=\"setup-steps\"></ol></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\"><header class=\"panel-heading\"><div><h2 id=\"setup-checklist-title\">Setup</h2><p class=\"posture-note\">The prerequisites <code>waffle setup</code> walks, as this running Waffle sees them. Changes made here take effect after a restart.</p></div></header><p class=\"capability-form-status\" id=\"setup-status\" role=\"status\" aria-live=\"polite\">Checking setup…</p><ol class=\"setup-steps\" id=\"setup-steps\"></ol></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

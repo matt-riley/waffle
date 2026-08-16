@@ -1,10 +1,6 @@
 .memory {
-  --memory-ink: #2d251f;
-  --memory-muted: #73665c;
-  --memory-line: rgba(61, 46, 35, 0.14);
-  --memory-paper: rgba(255, 252, 246, 0.82);
-  color: var(--memory-ink);
-  padding: clamp(1.25rem, 3vw, 3rem);
+  margin: 0 auto;
+  max-width: 76rem;
 }
 
 .memory-header,
@@ -17,35 +13,37 @@
 }
 
 .memory-header {
-  align-items: flex-end;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--rule-dark);
+  gap: 1rem;
   justify-content: space-between;
-  gap: 2rem;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
 }
 
 .memory-header h1 {
-  font-size: clamp(2.4rem, 6vw, 5.5rem);
-  letter-spacing: -0.06em;
-  line-height: 0.9;
-  margin: 0.3rem 0 0.8rem;
+  margin: 0 0 0.45rem;
 }
 
 .memory-header > div > p:last-child {
-  color: var(--memory-muted);
+  color: var(--muted);
+  margin: 0;
   max-width: 46rem;
 }
 
 .memory-conversation-link {
-  border-bottom: 1px solid currentColor;
-  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
   flex: none;
-  padding-bottom: 0.2rem;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.9rem;
   text-decoration: none;
 }
 
 .memory-layout {
   align-items: flex-start;
-  gap: clamp(1rem, 3vw, 2.5rem);
+  gap: 1rem;
 }
 
 .memory-search-panel {
@@ -54,11 +52,11 @@
 }
 
 .memory-attach-panel {
-  background: #2d251f;
-  border-radius: 1.4rem;
-  color: #fffaf2;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: var(--shadow);
   flex: 0 1 21rem;
-  padding: 1.4rem;
+  padding: 1rem 1.1rem;
   position: sticky;
   top: 1rem;
 }
@@ -71,17 +69,7 @@
   display: block;
   font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  margin: 1.4rem 0 0.45rem;
-  text-transform: uppercase;
-}
-
-.memory-attach-panel input {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.2);
-  border-radius: 0.75rem;
-  color: inherit;
-  padding: 0.8rem;
+  margin: 1rem 0 0.45rem;
 }
 
 .memory-search-form label {
@@ -95,33 +83,18 @@
 }
 
 .memory-search-row input {
-  background: var(--memory-paper);
-  border-color: var(--memory-line);
-  border-radius: 999px;
   flex: 1;
   min-width: 0;
-  padding: 0.9rem 1.2rem;
   width: auto;
 }
 
-.memory-search-row button,
-.memory-hit-actions button,
-.memory-dialog-actions button {
-  border: 1px solid var(--memory-line);
-  border-radius: 999px;
-  cursor: pointer;
-  padding: 0.75rem 1rem;
-}
-
 .memory-search-row button {
-  background: #f47b35;
-  border-color: #f47b35;
-  color: #1d1713;
-  font-weight: 750;
+  background: var(--ginger);
+  font-weight: 700;
 }
 
 .memory-status {
-  color: var(--memory-muted);
+  color: var(--muted);
   min-height: 1.4em;
 }
 
@@ -131,15 +104,14 @@
 }
 
 .memory-hit {
-  background: var(--memory-paper);
-  border: 1px solid var(--memory-line);
-  border-radius: 1.15rem;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: var(--shadow);
   padding: 1rem;
 }
 
 .memory-hit.is-archived {
-  background: rgba(238, 232, 224, 0.62);
-  opacity: 0.78;
+  opacity: 0.72;
 }
 
 .memory-hit-metadata {
@@ -150,12 +122,11 @@
 
 .memory-source-chip,
 .memory-archive-chip {
-  border: 1px solid var(--memory-line);
-  border-radius: 999px;
+  border: 1px solid var(--rule-dark);
   font-size: 0.72rem;
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  padding: 0.3rem 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.45rem;
   text-transform: uppercase;
 }
 
@@ -169,15 +140,15 @@
 
 .memory-source-id,
 .memory-provenance {
-  color: var(--memory-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.76rem;
 }
 
 .memory-excerpt {
-  font-size: clamp(1rem, 2vw, 1.15rem);
+  font-size: 1rem;
   line-height: 1.5;
-  margin: 0.9rem 0;
+  margin: 0.75rem 0;
 }
 
 .memory-hit-actions {
@@ -185,31 +156,28 @@
   gap: 0.5rem;
 }
 
-.memory-hit-actions button {
-  background: transparent;
-}
-
 .memory-hit-actions .memory-forget-button,
 .memory-dialog-actions .danger-button {
-  border-color: #a13d31;
-  color: #8b2d24;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .memory-forget-dialog {
-  border: 0;
-  border-radius: 1.2rem;
-  box-shadow: 0 1.5rem 5rem rgba(35, 25, 18, 0.3);
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  color: var(--ink);
   max-width: min(32rem, calc(100vw - 2rem));
   padding: 1.5rem;
 }
 
 .memory-forget-dialog::backdrop {
-  background: rgba(34, 27, 22, 0.62);
+  background: rgb(33 29 25 / 55%);
 }
 
 .memory-dialog-actions {
-  justify-content: flex-end;
   gap: 0.6rem;
+  justify-content: flex-end;
   margin-top: 1.4rem;
 }
 

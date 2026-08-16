@@ -22,9 +22,11 @@ html {
   background: var(--cream);
   color: var(--ink);
   font-family: "Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif;
+  height: 100%;
 }
 
 body {
+  height: 100%;
   margin: 0;
   min-width: 320px;
   overflow-x: hidden;
@@ -110,6 +112,15 @@ textarea {
   display: none !important;
 }
 
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 .skip-link {
   background: var(--ink);
   color: var(--paper);
@@ -126,8 +137,9 @@ textarea {
 
 .desk-shell {
   display: grid;
-  grid-template-columns: 11.5rem minmax(0, 1fr);
-  min-height: 100vh;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  height: 100%;
+  min-height: 100dvh;
 }
 
 .desk-navigation {
@@ -219,23 +231,39 @@ code,
 }
 
 main {
+  min-height: 0;
   min-width: 0;
-  padding: clamp(1rem, 3vw, 2.75rem);
+  overflow: auto;
+  padding: clamp(1rem, 2.4vw, 2rem);
+}
+
+.desk-shell[data-active-section="today"] main,
+.desk-shell[data-active-section=""] main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 1rem 1.25rem 1rem;
 }
 
 .today {
-  margin: 0 auto;
-  max-width: 76rem;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  margin: 0;
+  max-width: none;
+  min-height: 0;
 }
 
 .today-header {
-  align-items: start;
+  align-items: center;
   border-bottom: 1px solid var(--rule-dark);
   display: flex;
-  gap: 1rem;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
   justify-content: space-between;
-  margin-bottom: 1rem;
-  padding-bottom: 1rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.65rem;
 }
 
 .eyebrow,
@@ -260,10 +288,10 @@ h2 {
 }
 
 h1 {
-  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-size: clamp(1.35rem, 2.4vw, 1.85rem);
   font-weight: 600;
   letter-spacing: -0.035em;
-  line-height: 1;
+  line-height: 1.1;
   margin: 0;
 }
 
@@ -282,10 +310,10 @@ h3 {
 .connection {
   align-items: center;
   border: 1px solid var(--rule-dark);
-  display: inline-flex;
+  display: none;
   font-size: 0.78rem;
   gap: 0.45rem;
-  margin: 0.3rem 0 0;
+  margin: 0;
   padding: 0.45rem 0.65rem;
 }
 
@@ -335,8 +363,10 @@ h3 {
 
 .today-columns {
   display: grid;
-  gap: 1.25rem;
-  grid-template-columns: minmax(0, 1fr) minmax(15rem, 20rem);
+  flex: 1;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
+  min-height: 0;
 }
 
 .conversation,
@@ -345,7 +375,13 @@ h3 {
   border: 1px solid var(--ink);
   box-shadow: var(--shadow);
   min-width: 0;
-  padding: clamp(1rem, 2vw, 1.5rem);
+  padding: clamp(0.85rem, 1.6vw, 1.25rem);
+}
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .panel-heading {
@@ -371,13 +407,13 @@ h3 {
 
 .message-list {
   border-left: 1px solid rgba(221, 113, 40, 0.45);
-  border-bottom: 1px solid var(--rule);
   display: grid;
+  flex: 1;
   gap: 0.8rem;
-  max-height: min(52vh, 34rem);
-  min-height: 17rem;
+  max-height: none;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0.5rem 0.35rem 1rem 3.1rem;
+  padding: 0.5rem 0.35rem 1rem 2.4rem;
   scroll-behavior: smooth;
 }
 
@@ -509,8 +545,13 @@ h3 {
 }
 
 .tool-ledger {
-  border-bottom: 1px solid var(--rule);
-  padding: 0.85rem 0;
+  border-top: 1px solid var(--rule);
+  flex: none;
+  padding: 0.65rem 0 0;
+}
+
+.tool-ledger:not(:has(.activity-row)) {
+  display: none;
 }
 
 .tool-ledger-heading {
@@ -564,9 +605,27 @@ h3 {
 }
 
 .composer {
+  border-top: 1px solid var(--rule);
   display: grid;
-  gap: 0.55rem;
-  padding-top: 1rem;
+  flex: none;
+  gap: 0.45rem;
+  padding-top: 0.85rem;
+}
+
+.composer textarea {
+  min-height: 4.5rem;
+}
+
+.composer-session {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.session-skill-row {
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .composer label,
@@ -607,7 +666,16 @@ h3 {
 }
 
 .task-context {
-  align-self: start;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.context-title {
+  font-size: 1.05rem;
+  margin: 0 0 0.75rem;
 }
 
 .context-heading {
@@ -703,32 +771,6 @@ h3 {
   padding-left: 1rem;
 }
 
-.quick-actions {
-  border-top: 2px solid var(--ink);
-  display: grid;
-  padding-top: 0.9rem;
-}
-
-.quick-actions a {
-  align-items: center;
-  border-top: 1px solid var(--rule);
-  display: flex;
-  justify-content: space-between;
-  min-height: 2.75rem;
-  padding: 0.65rem 0.15rem;
-  text-decoration: none;
-}
-
-.quick-actions a::after {
-  color: var(--ginger-dark);
-  content: "→";
-  font-size: 1.1rem;
-}
-
-.quick-actions a:hover {
-  color: var(--ginger-dark);
-}
-
 .tasks {
   margin: 0 auto;
   max-width: 76rem;
@@ -742,6 +784,14 @@ h3 {
   justify-content: space-between;
   margin-bottom: 1rem;
   padding-bottom: 1rem;
+}
+
+.tasks-header-actions {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  justify-content: flex-end;
 }
 
 .tasks-attention {
@@ -780,7 +830,34 @@ h3 {
 .tasks-layout {
   display: grid;
   gap: 1.25rem;
-  grid-template-columns: minmax(0, 1fr) minmax(18rem, 23rem);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#tasks-list[data-waffle-fragment] + .tasks-empty {
+  display: none;
+}
+
+#task-schedule-dialog {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  color: var(--ink);
+  max-height: calc(100vh - 2rem);
+  max-width: min(34rem, calc(100vw - 2rem));
+  overflow: auto;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  width: 100%;
+}
+
+#task-schedule-dialog::backdrop {
+  background: rgb(33 29 25 / 55%);
+}
+
+#task-schedule-dialog .schedule-editor {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
 }
 
 .tasks-board,
@@ -827,27 +904,46 @@ h3 {
   text-transform: uppercase;
 }
 
-.task-facts {
+.task-facts,
+.task-card .waffle-fragment-facts {
   display: grid;
   gap: 0.4rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
 }
 
-.task-facts div {
+.task-facts div,
+.task-card .waffle-fragment-facts div {
   border-top: 1px solid var(--rule);
   padding-top: 0.45rem;
 }
 
-.task-facts dt {
+.task-facts dt,
+.task-card .waffle-fragment-facts dt {
   color: var(--muted);
   font-size: 0.65rem;
   text-transform: uppercase;
 }
 
-.task-facts dd {
+.task-facts dd,
+.task-card .waffle-fragment-facts dd {
   margin: 0.15rem 0 0;
   overflow-wrap: anywhere;
+}
+
+.task-card .waffle-fragment-kind {
+  color: var(--muted);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.task-card .waffle-fragment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
 }
 
 .task-evidence {
@@ -931,18 +1027,24 @@ h3 {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .composer-session {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .task-context {
     display: grid;
     gap: 0 1.5rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
   }
 
-  .context-heading {
+  .context-title,
+  .context-heading,
+  .conversation-actions,
+  .session-list,
+  .context-list,
+  .context-panels {
     grid-column: 1 / -1;
-  }
-
-  .quick-actions {
-    border-top-width: 1px;
   }
 
   .tasks-layout {
@@ -953,14 +1055,23 @@ h3 {
 @media (max-width: 768px) {
   .desk-shell {
     display: block;
+    height: auto;
+    min-height: 100dvh;
     padding-bottom: 4.75rem;
+  }
+
+  .desk-shell[data-active-section="today"] main,
+  .desk-shell[data-active-section=""] main {
+    display: block;
+    overflow: auto;
+    padding: 1rem 0.85rem 1.25rem;
   }
 
   .desk-navigation {
     bottom: 0;
     display: block;
     left: 0;
-    padding: 0.35rem 0.5rem;
+    padding: 0.35rem 0.35rem;
     position: fixed;
     right: 0;
     z-index: 3;
@@ -987,16 +1098,26 @@ h3 {
   .section-links a {
     align-items: center;
     display: flex;
-    font-size: 0.68rem;
+    font-size: 0.62rem;
     justify-content: center;
+    line-height: 1.15;
     min-height: 2.75rem;
     overflow-wrap: anywhere;
-    padding: 0.65rem 0.2rem;
+    padding: 0.45rem 0.15rem;
     text-align: center;
+  }
+
+  .today-header .connection {
+    display: inline-flex;
+  }
+
+  .conversation {
+    min-height: calc(100dvh - 8.75rem);
   }
 
   .message-list {
     max-height: none;
+    min-height: 12rem;
   }
 }
 
@@ -1007,12 +1128,14 @@ h3 {
 
   .today-header,
   .stale-banner,
-  .tasks-header {
+  .tasks-header,
+  .tasks-header-actions {
     align-items: stretch;
     display: grid;
   }
 
-  .task-facts {
+  .task-facts,
+  .task-card .waffle-fragment-facts {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1045,12 +1168,14 @@ h3 {
   }
 
   .composer-actions,
+  .session-skill-row,
   .task-context {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .composer-actions button {
+  .composer-actions button,
+  .tasks-header-actions button {
     width: 100%;
   }
 

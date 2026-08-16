@@ -64,10 +64,62 @@
   text-decoration: none;
 }
 
+#capability-tab-setup {
+  display: none;
+}
+
+#capability-tab-setup.is-needed,
+.capabilities:has(#setup-checklist:target) #capability-tab-setup {
+  display: inline-block;
+}
+
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)) .capability-tabs a[href="#capability-models-panel"],
+.capabilities:has(#capability-models-panel:target) .capability-tabs a[href="#capability-models-panel"],
+.capabilities:has(#capability-skills-panel:target) .capability-tabs a[href="#capability-skills-panel"],
+.capabilities:has(#capability-connections-panel:target) .capability-tabs a[href="#capability-connections-panel"],
+.capabilities:has(#profile-editor:target) .capability-tabs a[href="#profile-editor"],
+.capabilities:has(#setup-checklist:target) .capability-tabs a[href="#setup-checklist"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
 .capability-grid {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.capability-panel {
+  display: none;
+}
+
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)) #capability-models-panel,
+.capability-panel:target,
+.capability-panel.is-active {
+  display: block;
+}
+
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) #setup-checklist {
+  display: block;
+}
+
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) #capability-models-panel {
+  display: none;
+}
+
+.capabilities:has(.capability-panel.is-active) .capability-tabs a[aria-current="true"],
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) .capability-tabs a[href="#setup-checklist"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) .capability-tabs a[href="#capability-models-panel"] {
+  background: var(--paper);
+  color: inherit;
+}
+
+#profile-editor:not(:target):not(.is-active) {
+  display: none;
 }
 
 .capability-panel {
@@ -86,9 +138,24 @@
 }
 
 .capability-panel form {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.capability-disclosure {
   border-top: 1px solid var(--rule);
   margin-top: 1rem;
-  padding-top: 1rem;
+  padding-top: 0.75rem;
+}
+
+.capability-disclosure summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.capability-disclosure[open] summary {
+  margin-bottom: 0.75rem;
 }
 
 .capability-card {
@@ -239,11 +306,8 @@
 }
 
 .session-skill-field {
-  border-top: 1px solid var(--rule);
   display: grid;
-  gap: 0.55rem;
-  margin-top: 1rem;
-  padding-top: 1rem;
+  gap: 0.45rem;
 }
 
 .session-skill-field p {
@@ -254,11 +318,7 @@
 
 @media (max-width: 70rem) {
   .capability-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  #capability-connections-panel {
-    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -271,9 +331,5 @@
 
   .capability-grid {
     grid-template-columns: 1fr;
-  }
-
-  #capability-connections-panel {
-    grid-column: auto;
   }
 }

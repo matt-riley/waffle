@@ -82,6 +82,12 @@ if (panel || banner) {
   function reveal(selector) {
     const target = document.querySelector(selector);
     if (!target) return false;
+    const panel = target.closest(".capability-panel");
+    if (panel?.id) {
+      globalThis.location.hash = panel.id;
+    }
+    const disclosure = target.closest("details");
+    if (disclosure) disclosure.open = true;
     target.scrollIntoView({ block: "center" });
     target.focus();
     return true;
@@ -191,8 +197,16 @@ if (panel || banner) {
         ? "Waffle is fully set up."
         : `${outstanding.length} ${outstanding.length === 1 ? "prerequisite is" : "prerequisites are"} outstanding.`;
     }
+    const complete = view?.complete === true || outstanding.length === 0;
+    if (panel) {
+      panel.classList.toggle("is-needed", !complete);
+    }
+    const setupTab = document.querySelector("#capability-tab-setup");
+    if (setupTab) {
+      setupTab.classList.toggle("is-needed", !complete);
+    }
     if (banner) {
-      banner.hidden = view?.complete === true || outstanding.length === 0;
+      banner.hidden = complete;
       if (elements.bannerMessage && outstanding.length > 0) {
         elements.bannerMessage.textContent = `Still outstanding: ${
           outstanding.map((step) => step.title).join(", ")

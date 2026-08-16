@@ -165,28 +165,19 @@ func TestTodayRendersConversationControlsAndContext(t *testing.T) {
 		`aria-label="Tool activity"`,
 		`<label for="desk-message">`,
 		`<textarea id="desk-message"`,
-		`rows="4"`,
+		`rows="3"`,
 		`<button id="desk-send" type="submit"`,
 		`<button id="desk-cancel" type="button"`,
 		`<label for="desk-model">`,
 		`<select id="desk-model"`,
+		`id="desk-skill"`,
 		`id="desk-connection"`,
 		`id="desk-profile"`,
 		`id="desk-workspace"`,
+		`class="composer-session"`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("Today view missing %q", required)
-		}
-	}
-	for section, label := range map[string]string{
-		"tasks":        "Review tasks",
-		"workspaces":   "Open a workspace",
-		"memory":       "Search memory",
-		"capabilities": "Browse capabilities",
-	} {
-		link := regexp.MustCompile(`<a href="/desk/\?section=` + section + `"[^>]*>` + label + `</a>`)
-		if !link.MatchString(body) {
-			t.Errorf("Today view missing quick action %q", label)
 		}
 	}
 }

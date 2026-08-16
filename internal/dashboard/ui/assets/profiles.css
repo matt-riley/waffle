@@ -1,5 +1,5 @@
 #profile-editor {
-  display: block;
+  min-width: 0;
 }
 
 .profile-errors {
