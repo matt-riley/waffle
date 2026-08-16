@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.22.0](https://github.com/matt-riley/waffle/compare/v0.21.0...v0.22.0) (2026-08-16)
+
+
+### Features
+
+* **website:** complete the plain-language documentation tier, and fix the CI cache that never saved ([#447](https://github.com/matt-riley/waffle/issues/447)) ([7d4f8bf](https://github.com/matt-riley/waffle/commit/7d4f8bf37284125e03d854fe8802285c82534bce))
+* **website:** plan and build the documentation site foundation ([#446](https://github.com/matt-riley/waffle/issues/446)) ([5d967e2](https://github.com/matt-riley/waffle/commit/5d967e2dc484cc3ae999ef4413576cb8cd5f2b2b))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/pelletier/go-toml to v2 ([#443](https://github.com/matt-riley/waffle/issues/443)) ([982c038](https://github.com/matt-riley/waffle/commit/982c038fb0a38543b891d44f7740c75cfc938acd))
+
 ## [0.21.0](https://github.com/matt-riley/waffle/compare/v0.20.0...v0.21.0) (2026-08-14)
 
 
