@@ -468,9 +468,10 @@ test("Today renders Markdown, keyboard send, and paired tool evidence", async ({
   await expect(reply.locator("code")).toContainText(["mise", 'fmt.Println("fixture")']);
   await expect(reply.getByRole("button", { name: "Copy" })).toBeVisible();
 
-  const tool = page.locator("#desk-tool-activity .activity-row");
+  const tool = page.locator("#desk-transcript .tool-chip");
   await expect(tool).toHaveCount(1);
-  await expect(tool).toContainText("fixture_read · 18 ms · succeeded");
+  await expect(tool).toContainText("fixture_read");
+  await expect(tool).toContainText("18 ms");
   await expect(tool).toHaveClass(/is-success/);
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
