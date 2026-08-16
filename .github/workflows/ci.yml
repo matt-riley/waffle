@@ -164,12 +164,17 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The only job that writes the mise cache. Without this the cache key is
+      # never populated, so `cache: true` in every other job always misses and
+      # each one re-downloads the mise tarball from GitHub releases — six
+      # download attempts per run, every run, each a chance to fail the whole
+      # job on a transient connection reset before any test body executes.
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
         with:
           version: 2026.7.12
           install: true
           cache: true
-          cache_save: false
+          cache_save: true
       - name: Detect Go cache metadata
         id: metadata
         shell: bash
