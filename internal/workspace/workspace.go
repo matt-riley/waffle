@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	neturl "net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1231,6 +1232,101 @@ const gitStatusScript = `cd /work/repo && ` +
 	`else printf 'tracking\t0\n'; fi && ` +
 	`printf 'sha\t%s\n' "$(git rev-parse --short HEAD 2>/dev/null || true)" && ` +
 	`printf 'subject\t%s\n' "$(git log -1 --format=%s 2>/dev/null || true)"`
+
+// ReadFile returns a repo-relative file's content from an already-running
+// workspace (project context, #478). The path must be a safe repo-relative
+// path; symlinks resolve beneath the repo root and any escape fails closed.
+// Workspaces that are not running report ErrWorkspaceNotRunning, which the
+// project surface maps to visibly-stale resources.
+func (m *Manager) ReadFile(ctx context.Context, id, repoPath string) ([]byte, error) {
+	lock := workspaceLifecycleLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	ws, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if ws.Status != StatusOpen {
+		return nil, ErrWorkspaceNotRunning
+	}
+	if !safeRepoPath(repoPath) {
+		return nil, fmt.Errorf("unsafe project path %q", repoPath)
+	}
+
+	client, err := m.newInspectionClient(ws)
+	if err != nil {
+		return nil, fmt.Errorf("connect workspace for project read: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	target := shellQuote("/work/repo/" + repoPath)
+	// Resolve symlinks first and verify the target stays beneath the repo
+	// root; then confirm it is a regular file. readlink -f prints a path even
+	// for missing files, so existence is checked explicitly.
+	resolved, err := m.bashOutput(ctx, client,
+		`if test -f `+target+`; then readlink -f -- `+target+`; else exit 3; fi`)
+	if err != nil {
+		if isMissingFileError(err) || strings.Contains(err.Error(), "exit 3") || strings.Contains(err.Error(), "no such file") {
+			return nil, ErrProjectFileMissing
+		}
+		return nil, fmt.Errorf("resolve project file: %w", err)
+	}
+	resolved = strings.TrimSpace(resolved)
+	if resolved != "/work/repo" && !strings.HasPrefix(resolved, "/work/repo/") {
+		return nil, fmt.Errorf("project path %q escapes the workspace root", repoPath)
+	}
+
+	sizeOut, err := m.bashOutput(ctx, client, `wc -c < `+shellQuote(resolved))
+	if err != nil {
+		return nil, fmt.Errorf("size project file: %w", err)
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse project file size: %w", err)
+	}
+	if size > projectMaxFileBytes {
+		return nil, fmt.Errorf("project file exceeds the %d-byte cap", projectMaxFileBytes)
+	}
+
+	content, err := m.bashOutput(ctx, client, `cat -- `+shellQuote(resolved))
+	if err != nil {
+		return nil, fmt.Errorf("read project file: %w", err)
+	}
+	return []byte(content), nil
+}
+
+// ErrProjectFileMissing is returned when a workspace file cannot be read
+// because it is absent or unreadable; the project surface maps it to a
+// visibly stale/missing resource.
+var ErrProjectFileMissing = errors.New("workspace file is missing or unreadable")
+
+// safeRepoPath mirrors project.ValidPath for the workspace layer: a safe
+// repo-relative path has no absolute prefix, no traversal, and no shell-
+// dangerous characters.
+func safeRepoPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "\\") {
+		return false
+	}
+	clean := path.Clean(p)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return false
+	}
+	if path.IsAbs(clean) {
+		return false
+	}
+	for _, r := range p {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-' || r == '/' || r == ' ' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// projectMaxFileBytes caps workspace file reads for project context.
+const projectMaxFileBytes = 1 << 20
 
 // InspectGit reads git state from an already-running workspace. It never
 // starts, stops, or transitions a workspace: an idle or closed workspace

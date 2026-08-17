@@ -21,6 +21,9 @@ const (
 	KindFact         = "fact"
 	KindOpenQuestion = "open_question"
 	KindAssumption   = "assumption"
+	// KindProject marks an entry placed by an attached project-context
+	// resource (#478); provenance lives in the entry body.
+	KindProject = "project"
 )
 
 // Sources for provenance.
@@ -318,7 +321,7 @@ func ValidateProposal(p Proposal) error {
 
 func validateKind(k string) error {
 	switch k {
-	case KindGoal, KindConstraint, KindDecision, KindFact, KindOpenQuestion, KindAssumption:
+	case KindGoal, KindConstraint, KindDecision, KindFact, KindOpenQuestion, KindAssumption, KindProject:
 		return nil
 	default:
 		return fmt.Errorf("invalid kind %q", k)
