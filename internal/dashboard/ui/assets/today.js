@@ -5,6 +5,7 @@ const phase = Object.freeze({
   streaming: "streaming",
   cancelling: "cancelling",
   disconnected: "disconnected",
+  recovering: "recovering",
 });
 
 const reconnectConfig = Object.freeze({
@@ -189,6 +190,8 @@ const elements = {
   stale: document.querySelector("#desk-stale-status"),
   staleMessage: document.querySelector("#desk-stale-message"),
   refresh: document.querySelector("#desk-refresh"),
+  staleLabel: document.querySelector("#desk-stale-label"),
+  recoverNew: document.querySelector("#desk-recover-new"),
   phase: document.querySelector("#desk-phase"),
   transcript: document.querySelector("#desk-transcript"),
   emptyTranscript: document.querySelector("#desk-empty-transcript"),
@@ -317,6 +320,7 @@ function phaseLabel(next) {
     [phase.streaming]: "Waffle is working",
     [phase.cancelling]: "Cancelling",
     [phase.disconnected]: "Disconnected",
+    [phase.recovering]: "Conversation in use",
   };
   return labels[next] || next;
 }
@@ -330,13 +334,22 @@ function setPhase(next) {
     elements.phase.textContent = phaseLabel(next);
   }
   const disconnected = next === phase.disconnected;
-  elements.stale.hidden = !disconnected;
-  elements.connection.classList.toggle("is-disconnected", disconnected);
+  const recovering = next === phase.recovering;
+  elements.stale.hidden = !disconnected && !recovering;
+  elements.connection.classList.toggle("is-disconnected", disconnected || recovering);
   if (disconnected) {
     state.reconnecting = false;
     elements.connection.classList.remove("is-reconnecting");
     elements.connectionText.textContent = "Disconnected";
     elements.connectionDetail.textContent = "Stale";
+    pushRailConnection(
+      globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected",
+    );
+  } else if (recovering) {
+    state.reconnecting = false;
+    elements.connection.classList.remove("is-reconnecting");
+    elements.connectionText.textContent = "In use";
+    elements.connectionDetail.textContent = "Another surface";
     pushRailConnection(
       globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected",
     );
@@ -361,6 +374,7 @@ function setPhase(next) {
 
 function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
+  const recovering = state.currentPhase === phase.recovering;
   if (!idle) {
     closeSlashMenu();
   }
@@ -369,9 +383,10 @@ function updateControls() {
     (state.currentPhase === phase.sending ||
       state.currentPhase === phase.streaming);
   // The composer stays usable while Waffle works so the operator can queue a
-  // follow-up; it is only locked while disconnected.
+  // follow-up; it is only locked while disconnected. During an ownership
+  // conflict the textarea keeps the draft while the recovery actions decide.
   elements.message.disabled = state.currentPhase === phase.disconnected;
-  const busy = !idle && state.currentPhase !== phase.disconnected;
+  const busy = !idle && !recovering && state.currentPhase !== phase.disconnected;
   elements.send.disabled =
     !state.clientID || elements.message.value.trim() === "";
   if (busy) {
@@ -385,7 +400,12 @@ function updateControls() {
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
   elements.skillToggle.disabled = !idle || state.skills.length === 0;
-  elements.refresh.disabled = state.currentPhase !== phase.disconnected;
+  elements.refresh.disabled =
+    state.currentPhase !== phase.disconnected &&
+    state.currentPhase !== phase.recovering;
+  if (elements.recoverNew) {
+    elements.recoverNew.disabled = !recovering;
+  }
   for (const control of [
     elements.newConversation,
     elements.sessionRefresh,
@@ -1776,7 +1796,7 @@ function openEventStream() {
   });
 }
 
-async function openDesk() {
+async function openDesk({ forceNewSession = false } = {}) {
   clearReconnectTimer();
   state.generation += 1;
   state.streamGeneration += 1;
@@ -1793,6 +1813,7 @@ async function openDesk() {
   }
   setPhase(phase.opening);
   clearControlErrors();
+  resetOwnershipConflict();
   try {
     const bootstrap = validateBootstrap(await getBootstrap());
     if (generation !== state.generation) {
@@ -1835,34 +1856,21 @@ async function openDesk() {
       owner = null;
     }
     const openBody = {
-      continue: requested === "",
-      session_id: requested,
+      continue: requested === "" && !forceNewSession,
+      session_id: forceNewSession ? "" : requested,
       profile: "",
       capabilities: [],
     };
-    if (owner) {
+    if (owner && !forceNewSession) {
       openBody.reattach_client_id = owner.client_id;
       openBody.reattach_token = owner.reattach_token;
     }
-    let opened;
-    try {
-      opened = await postMutation("/api/v1/desk/chat/open", openBody);
-    } catch (error) {
-      if (!owner || error.safeCode !== "chat_client_not_found") {
-        throw error;
-      }
-      state.clientID = "";
-      state.reattachToken = "";
-      state.storedOwner = null;
-      forgetStoredOwner();
-      opened = await postMutation("/api/v1/desk/chat/open", {
-        continue: requested === "",
-        session_id: requested,
-        profile: "",
-        capabilities: [],
-      });
-    }
+    const opened = await openChatWithRecovery(openBody, owner, generation);
     if (generation !== state.generation) {
+      return;
+    }
+    if (!opened) {
+      // The recoverable ownership conflict is showing inline recovery.
       return;
     }
     state.clientID = opened.client_id || "";
@@ -1890,6 +1898,61 @@ async function openDesk() {
       return;
     }
     disconnect(error.safeMessage || "Waffle Desk could not open. Refresh to try again.");
+  }
+}
+
+// openChatWithRecovery opens (or reattaches to) the desk chat. A reaped
+// owner falls back to a fresh open. A live session_active conflict is a
+// real second surface — serve already waited out a draining previous
+// owner — so the desk offers inline recovery instead of retries (#454).
+async function openChatWithRecovery(openBody, owner, generation) {
+  for (;;) {
+    try {
+      return await postMutation("/api/v1/desk/chat/open", openBody);
+    } catch (error) {
+      if (error.safeCode === "session_active") {
+        if (generation !== state.generation) {
+          return null;
+        }
+        showOwnershipConflict();
+        return null;
+      }
+      if (!owner || error.safeCode !== "chat_client_not_found") {
+        throw error;
+      }
+      state.clientID = "";
+      state.reattachToken = "";
+      state.storedOwner = null;
+      forgetStoredOwner();
+      owner = null;
+      openBody = {
+        continue: openBody.continue,
+        session_id: openBody.session_id,
+        profile: "",
+        capabilities: [],
+      };
+    }
+  }
+}
+
+function showOwnershipConflict() {
+  if (elements.staleLabel) {
+    elements.staleLabel.textContent = "This conversation is in use.";
+  }
+  elements.staleMessage.textContent =
+    "Another surface is using this conversation. Start a new conversation here, or try again when it is free.";
+  if (elements.recoverNew) {
+    elements.recoverNew.hidden = false;
+  }
+  setPhase(phase.recovering);
+}
+
+function resetOwnershipConflict() {
+  if (elements.staleLabel) {
+    elements.staleLabel.textContent = "This desk is out of date.";
+  }
+  if (elements.recoverNew) {
+    elements.recoverNew.hidden = true;
   }
 }
 
@@ -3331,6 +3394,7 @@ if (elements.form) {
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
+  elements.recoverNew?.addEventListener("click", () => openDesk({ forceNewSession: true }));
   elements.newConversation?.addEventListener("click", newConversation);
   elements.sessionRefresh?.addEventListener("click", toggleSessions);
   elements.sessionFilter?.addEventListener("input", onSessionFilterInput);

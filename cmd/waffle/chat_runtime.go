@@ -186,7 +186,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	if err != nil {
 		return chatpkg.State{}, err
 	}
-	if !r.sessionOwners.acquire(r, current.ID) {
+	if !r.sessionOwners.acquireWait(r, current.ID, sessionOwnerDrainWait) {
 		return chatpkg.State{}, sessionAlreadyActiveError{sessionID: current.ID}
 	}
 	ownershipAcquired := true

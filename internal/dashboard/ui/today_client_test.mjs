@@ -246,8 +246,10 @@ function createHarness({
     "#desk-connection-text",
     "#desk-connection-detail",
     "#desk-stale-status",
+    "#desk-stale-label",
     "#desk-stale-message",
     "#desk-refresh",
+    "#desk-recover-new",
     "#desk-phase",
     "#desk-transcript",
     "#desk-empty-transcript",
@@ -1300,6 +1302,65 @@ test("new conversation with an empty history atomically replaces the previous tr
     harness.elements["#desk-transcript"].textContent,
     /The desk is ready\. What are we working on\?/,
   );
+});
+
+test("ownership conflict offers inline recovery instead of a fatal screen", async () => {
+  let openAttempts = 0;
+  const harness = createHarness({
+    openHandler: async () => {
+      openAttempts += 1;
+      return jsonResponse(
+        { code: "session_active", message: "chat session is already active" },
+        false,
+      );
+    },
+  });
+  await flush();
+  assert.equal(openAttempts, 1);
+  assert.equal(harness.elements["#desk-phase"].textContent, "Conversation in use");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
+  assert.match(harness.elements["#desk-stale-message"].textContent, /Another surface/);
+  assert.match(harness.elements["#desk-stale-label"].textContent, /in use/);
+  assert.doesNotMatch(harness.elements["#desk-stale-label"].textContent, /out of date/);
+  assert.equal(harness.elements["#desk-recover-new"].hidden, false);
+  assert.equal(harness.elements["#desk-recover-new"].disabled, false);
+  assert.equal(harness.elements["#desk-refresh"].disabled, false);
+});
+
+test("Start a new conversation recovery opens a fresh session", async () => {
+  let openAttempts = 0;
+  const openBodies = [];
+  const harness = createHarness({
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      openBodies.push(JSON.parse(options.body));
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-3",
+        reattach_token: "lease-3",
+        state: defaultChatState({
+          session_id: "session-3",
+          title: "Fresh recovery",
+        }),
+      });
+    },
+  });
+  await flush();
+  assert.equal(harness.elements["#desk-recover-new"].hidden, false);
+  await harness.elements["#desk-recover-new"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh recovery");
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+  const recoveryOpen = openBodies[openBodies.length - 1];
+  assert.equal(openAttempts, 2);
+  assert.equal(recoveryOpen.continue, false);
+  assert.equal(recoveryOpen.session_id, "");
+  assert.equal(recoveryOpen.reattach_client_id, undefined);
 });
 
 test("declining new conversation confirmation preserves the current session", async () => {

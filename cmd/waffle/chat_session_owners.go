@@ -16,6 +16,10 @@ func (e sessionAlreadyActiveError) Error() string {
 func (sessionAlreadyActiveError) ErrorCode() string     { return "session_active" }
 func (e sessionAlreadyActiveError) SafeMessage() string { return e.Error() }
 
+// sessionOwnerDrainWait is how long Open waits for a closing owner to
+// release. Live owners still fail immediately.
+const sessionOwnerDrainWait = time.Second
+
 // chatSessionOwners scopes session ownership to one serve process. Direct
 // runtimes leave the coordinator nil and retain their standalone behavior.
 type chatSessionOwners struct {
@@ -27,18 +31,29 @@ func newChatSessionOwners() *chatSessionOwners {
 	return &chatSessionOwners{owners: make(map[string]*chatRuntime)}
 }
 
-func (o *chatSessionOwners) acquire(owner *chatRuntime, sessionID string) bool {
+// acquireWait takes the session if it is free. A live owner still fails
+// immediately. An owner already in close/cleanup is waited out up to wait
+// so a same-tab reload does not lose the race against pagehide teardown.
+func (o *chatSessionOwners) acquireWait(owner *chatRuntime, sessionID string, wait time.Duration) bool {
 	if o == nil || sessionID == "" {
 		return true
 	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	current := o.owners[sessionID]
-	if current != nil && current != owner {
-		return false
+	deadline := time.Now().Add(wait)
+	for {
+		o.mu.Lock()
+		current := o.owners[sessionID]
+		if current == nil || current == owner {
+			o.owners[sessionID] = owner
+			o.mu.Unlock()
+			return true
+		}
+		draining := current.draining()
+		o.mu.Unlock()
+		if !draining || wait <= 0 || !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	o.owners[sessionID] = owner
-	return true
 }
 
 func (o *chatSessionOwners) transfer(owner *chatRuntime, from, to string) bool {
@@ -75,4 +90,13 @@ func (o *chatSessionOwners) releaseContext(ctx context.Context, owner *chatRunti
 		delete(o.owners, sessionID)
 	}
 	return nil
+}
+
+func (r *chatRuntime) draining() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed || r.cleanupStarted
 }

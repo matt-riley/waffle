@@ -16,10 +16,13 @@ templ Today(view ShellView) {
 		@SetupBanner()
 		<div class="stale-banner" id="desk-stale-status" role="status" aria-live="polite" hidden>
 			<div>
-				<strong>This desk is out of date.</strong>
+				<strong id="desk-stale-label">This desk is out of date.</strong>
 				<span id="desk-stale-message">The transcript is still here, but sending is paused.</span>
 			</div>
-			<button type="button" id="desk-refresh">Refresh Desk</button>
+			<div class="stale-actions">
+				<button type="button" id="desk-recover-new" hidden>Start a new conversation</button>
+				<button type="button" id="desk-refresh">Refresh Desk</button>
+			</div>
 		</div>
 		<div class="today-columns">
 			<section class="conversation" aria-labelledby="desk-session-title">
