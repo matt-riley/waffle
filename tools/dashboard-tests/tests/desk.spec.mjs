@@ -122,18 +122,15 @@ async function expectSectionObstructionFree(page, section, lastSelector) {
 // intentional and reviewable in CI artifacts; regenerate with
 // `npx playwright test --update-snapshots` after a deliberate visual change.
 const visualSections = [
-  ["today", "today", ".today"],
-  ["tasks", "tasks", ".tasks-board"],
-  ["workspaces", "workspaces", ".workspaces-grid"],
-  ["memory", "memory", ".memory-search-panel"],
-  ["capabilities", "capabilities", "#desk-capabilities"],
+  ["today", "today", ".today", "#desk-phase:has-text('Ready')"],
+  ["tasks", "tasks", ".tasks-board", "#tasks-list article, #tasks-list .waffle-fragment-empty"],
+  ["workspaces", "workspaces", ".workspaces-grid", ".workspaces-grid article, .workspaces-grid .waffle-fragment-empty"],
+  ["memory", "memory", ".memory-search-panel", "#memory-status"],
+  ["capabilities", "capabilities", "#desk-capabilities", ""],
 ];
 
 for (const [name, section, settled] of visualSections) {
   test(`visual baseline ${name} renders scannable and unclipped at every width`, async ({ page }) => {
-    // The obstruction probe below re-navigates; the prior page's pagehide
-    // closes the chat owner, so the reattach 404s and silently opens fresh.
-    allowDiagnostics("404", "Response Status Error Code 404");
     await page.goto(deskURL(section));
     if (section === "today") {
       await expect(page.locator("#desk-phase")).toHaveText("Ready");
@@ -144,12 +141,10 @@ for (const [name, section, settled] of visualSections) {
         timeout: 10_000,
       });
     } else {
-      await expect(page.locator(settled)).toBeVisible();
-      // Section fragments settle their async content.
-      await page.waitForTimeout(600);
+      // Wait for the async fragment to settle rather than a fixed delay.
+      const settleSelector = visualSections.find(([name]) => name === section)[3];
+      await expect(page.locator(settleSelector).first()).toBeVisible({ timeout: 10_000 });
     }
-    // The rendered surface must not clip vertically or overlap the fixed nav.
-    await expectSectionObstructionFree(page, section, settled);
     await expect(page).toHaveScreenshot(`desk-visual-${name}-${test.info().project.name}.png`, {
       animations: "disabled",
       caret: "hide",
