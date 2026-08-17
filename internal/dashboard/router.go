@@ -254,7 +254,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 		if format != "markdown" && format != "json" {
 			format = "markdown"
 		}
-		state, err := config.ChatClients.Export(ExportLease{
+		state, err := config.ChatClients.Export(ChatClientLease{
 			ClientID:      request.ClientID,
 			ReattachToken: request.ReattachToken,
 		})
