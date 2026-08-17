@@ -402,6 +402,14 @@
 		syncScheduleDeliverUI(form);
 		void loadScheduleOptions(form).then(() => {
 			if (deliverSelect && channel) deliverSelect.value = channel;
+			const profileSelect = input(form, "task-schedule-profile");
+			const profile = values.profile;
+			if (profileSelect && profile && !redacted.includes("profile")) {
+				if (![...profileSelect.options].some((option) => option.value === profile)) {
+					profileSelect.add(new Option(profile, profile));
+				}
+				profileSelect.value = profile;
+			}
 			syncScheduleDeliverUI(form);
 		});
 		void schedulePreview(form);

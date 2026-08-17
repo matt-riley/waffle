@@ -41,6 +41,11 @@ test("skill-import disclosure is removed while imports are disabled", () => {
   assert.match(shim, /waffleSourceAvailable/);
 });
 
+test("editing a schedule restores profile after options reload", () => {
+  assert.match(shim, /loadScheduleOptions\(form\)\.then/);
+  assert.match(shim, /profileSelect\.value = profile/);
+});
+
 test("the four migrated sections declare server fragments and Today stays bespoke", () => {
   for (const section of ["capabilities", "tasks", "workspaces", "memory"]) {
     assert.match(templates[section], /hx-(get|post)=/);
