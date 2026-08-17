@@ -1164,6 +1164,9 @@ type ModelTarget struct {
 	Provider  string `toml:"provider"`
 	Model     string `toml:"model"`
 	MaxTokens int    `toml:"max_tokens"`
+	// Description is an optional operator-authored "use for" note shown in
+	// the Desk model picker. It never changes the alias or upstream target.
+	Description string `toml:"description"`
 }
 
 // ResolvedModel is the complete deterministic target for one model alias.

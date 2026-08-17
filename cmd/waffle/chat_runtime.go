@@ -253,6 +253,9 @@ func (r *chatRuntime) modelsLocked() []chatpkg.Model {
 		models = append(models, chatpkg.Model{
 			Alias: alias, Provider: target.ConnectionName,
 			Upstream: target.UpstreamModel, Current: alias == current,
+			Default:     alias == r.cfg.Agent.DefaultModel,
+			Utility:     alias == r.cfg.Agent.UtilityModel,
+			Description: strings.TrimSpace(r.cfg.Models[alias].Description),
 		})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Alias < models[j].Alias })

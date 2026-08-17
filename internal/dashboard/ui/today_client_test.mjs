@@ -273,6 +273,7 @@ function createHarness({
     "#desk-dictate-hint",
     "#desk-composer-status",
     "#desk-model",
+    "#desk-model-detail",
     "#desk-model-status",
     "#desk-skill",
     "#desk-skill-toggle",
@@ -3402,4 +3403,35 @@ test("dictation stays disabled and explains when recognition is unsupported", as
     harness.elements["#desk-dictate-hint"].textContent,
     /not available in this browser/i,
   );
+});
+
+test("model choices explain roles, upstream, and operator description", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          model_alias: "primary",
+          models: [
+            { alias: "primary", provider: "fixture", upstream: "primary-model", current: true, default: true, utility: true, description: "Everyday reasoning and tool use." },
+            { alias: "local", provider: "fixture", upstream: "local-model", current: false, description: "" },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const detail = harness.elements["#desk-model-detail"];
+  // The current pick shows roles, provider → upstream, and the description.
+  assert.match(detail.textContent, /Waffle-wide default/);
+  assert.match(detail.textContent, /Utility model/);
+  assert.match(detail.textContent, /This conversation/);
+  assert.match(detail.textContent, /fixture → primary-model/);
+  assert.match(detail.textContent, /Everyday reasoning and tool use/);
+
+  // Switching to an alias without a description labels it honestly.
+  harness.elements["#desk-model"].value = "local";
+  await harness.elements["#desk-model"].listener("change")({ preventDefault() {} });
+  assert.match(detail.textContent, /No operator description configured/);
+  assert.match(detail.textContent, /fixture → local-model/);
 });

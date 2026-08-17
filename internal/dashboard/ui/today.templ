@@ -39,6 +39,7 @@ templ Today(view ShellView) {
 							<select id="desk-model" name="model" disabled>
 								<option value={ view.ModelAlias }>{ view.ModelAlias }</option>
 							</select>
+							<p id="desk-model-detail" class="model-detail" aria-live="polite"></p>
 							<p id="desk-model-status">Changes this conversation only.</p>
 						</div>
 						<div class="model-field session-skill-field">
