@@ -241,6 +241,50 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			writeJSON(w, http.StatusOK, struct{}{})
 		})))
 	}
+	mux.Handle("POST /api/v1/desk/chat/export", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ClientID      string `json:"client_id"`
+			ReattachToken string `json:"reattach_token"`
+			Format        string `json:"format"`
+		}
+		if !decodeChatRequest(w, r, &request) {
+			return
+		}
+		format := request.Format
+		if format != "markdown" && format != "json" {
+			format = "markdown"
+		}
+		state, err := config.ChatClients.Export(ChatClientLease{
+			ClientID:      request.ClientID,
+			ReattachToken: request.ReattachToken,
+		})
+		if err != nil {
+			writeChatError(w, err, "export_failed")
+			return
+		}
+		safe := config.ChatClients.safeChatState(state)
+		if format == "json" {
+			writeJSON(w, http.StatusOK, struct {
+				Format    string               `json:"format"`
+				Version   int                  `json:"version"`
+				SessionID string               `json:"session_id"`
+				Title     string               `json:"title"`
+				Profile   string               `json:"profile"`
+				Workspace string               `json:"workspace"`
+				Messages  []chat.ExportMessage `json:"messages"`
+			}{
+				Format: "waffle-desk-transcript", Version: 1,
+				SessionID: safe.SessionID, Title: safe.Title, Profile: safe.Profile,
+				Workspace: safe.Workspace,
+				Messages:  chat.ExportMessages(safe.History),
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="conversation.md"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chat.ExportMarkdown(safe.Title, safe.Profile, safe.History)))
+	})))
 	mux.Handle("POST /api/v1/desk/chat/close", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ClientID      string `json:"client_id"`

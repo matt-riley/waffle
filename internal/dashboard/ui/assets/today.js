@@ -243,6 +243,8 @@ const elements = {
   fork: document.querySelector("#desk-fork"),
   newConversation: document.querySelector("#desk-new"),
   sessionRefresh: document.querySelector("#desk-session-refresh"),
+  exportFormat: document.querySelector("#desk-export-format"),
+  exportButton: document.querySelector("#desk-export"),
   sessions: document.querySelector("#desk-sessions"),
   sessionFilter: document.querySelector("#desk-session-filter"),
   sessionOptions: document.querySelector("#desk-session-options"),
@@ -433,6 +435,10 @@ function updateControls() {
     if (!available) {
       dictation.stop();
     }
+  }
+  if (elements.exportButton) {
+    elements.exportButton.disabled = !idle;
+    elements.exportFormat.disabled = !idle;
   }
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
@@ -2471,6 +2477,71 @@ async function newConversation() {
   });
 }
 
+// exportConversation downloads the owner-local transcript in the chosen
+// format. The server validates the live reattach proof; a client ID alone is
+// never enough to export (#476).
+async function exportConversation() {
+  const format = elements.exportFormat?.value || "markdown";
+  const button = elements.exportButton;
+  if (!button || button.disabled || !state.clientID || !state.reattachToken) {
+    return;
+  }
+  const previous = button.textContent;
+  button.textContent = "Exporting…";
+  try {
+    const response = await fetch("/api/v1/desk/chat/export", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {
+        Accept: format === "json" ? "application/json" : "text/markdown",
+        "Content-Type": "application/json",
+        "X-Waffle-Desk-Token": state.requestToken,
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        client_id: state.clientID,
+        reattach_token: state.reattachToken,
+        format,
+      }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setStatusMessage(
+        elements.composerStatus,
+        payload.message || "The conversation could not be exported.",
+        true,
+        "composer",
+      );
+      return;
+    }
+    const text = await response.text();
+    const filename = format === "json"
+      ? `conversation-${state.sessionID || "session"}.json`
+      : `conversation-${state.sessionID || "session"}.md`;
+    const blob = new Blob([text], {
+      type: format === "json" ? "application/json" : "text/markdown",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    setStatusMessage(
+      elements.composerStatus,
+      "The conversation could not be exported.",
+      true,
+      "composer",
+    );
+  } finally {
+    button.textContent = previous;
+  }
+}
+
 function formatSessionUpdated(value) {
   const updated = new Date(value);
   if (Number.isNaN(updated.getTime())) {
@@ -3541,6 +3612,7 @@ if (elements.form) {
   elements.scheduleDraft?.addEventListener("click", () => {
     handoffSchedule(elements.message.value);
   });
+  elements.exportButton?.addEventListener("click", exportConversation);
   elements.dictate?.addEventListener("click", startDictation);
   elements.dictate?.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && dictation.listening()) {

@@ -1563,3 +1563,41 @@ func TestChatClientProjectsSafeSources(t *testing.T) {
 		t.Fatalf("canary leaked: %s", data)
 	}
 }
+
+func TestChatClientExportRequiresCurrentProofAndDoesNotRotate(t *testing.T) {
+	clients := NewChatClients(func(ctx context.Context) (chat.Backend, error) {
+		return &fakeChatBackend{openState: chat.State{
+			SessionID: "session-x",
+			Title:     "Release review",
+			History:   []llm.Message{{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: "hi"}}}},
+		}}, nil
+	}, bytes.NewReader(bytes.Repeat([]byte{7}, 64)))
+	lease, _, err := clients.OpenWithLease(context.Background(), chat.OpenOptions{}, ChatClientLease{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exported, err := clients.Export(lease)
+	if err != nil {
+		t.Fatalf("export with current proof: %v", err)
+	}
+	if exported.SessionID != "session-x" || len(exported.History) != 1 {
+		t.Fatalf("exported state = %+v", exported)
+	}
+
+	// Export must not rotate the proof: the page's stored lease still works.
+	if _, err := clients.Export(lease); err != nil {
+		t.Fatalf("second export with same proof: %v", err)
+	}
+
+	// A client ID alone, or a different proof, never exports.
+	if _, err := clients.Export(ChatClientLease{ClientID: lease.ClientID}); err == nil {
+		t.Fatal("export without proof succeeded")
+	}
+	if _, err := clients.Export(ChatClientLease{ClientID: lease.ClientID, ReattachToken: "wrong"}); err == nil {
+		t.Fatal("export with wrong proof succeeded")
+	}
+	if _, err := clients.Export(ChatClientLease{ClientID: "unknown", ReattachToken: "x"}); err == nil {
+		t.Fatal("export with unknown client succeeded")
+	}
+}

@@ -1024,3 +1024,23 @@ func (c *ChatClients) projectChatArtifacts(artifacts []chat.Artifact) []chat.Art
 	}
 	return projected
 }
+
+// Export returns the redacted transcript for the proven browser owner without
+// rotating the reattach proof, so the export never invalidates the page's
+// live lease. Only the current proof is accepted: expired or different-client
+// proofs are rejected.
+func (c *ChatClients) Export(lease ChatClientLease) (chat.State, error) {
+	if c == nil || lease.ClientID == "" || lease.ReattachToken == "" {
+		return chat.State{}, errChatClientNotFound
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	client, ok := c.clients[lease.ClientID]
+	if !ok || client.isRetiring() {
+		return chat.State{}, errChatClientNotFound
+	}
+	if !sameReattachToken(client.reattachToken, lease.ReattachToken) {
+		return chat.State{}, errChatClientNotFound
+	}
+	return cloneChatState(client.state), nil
+}
