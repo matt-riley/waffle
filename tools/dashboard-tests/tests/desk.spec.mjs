@@ -530,6 +530,31 @@ test("a Today prompt hands off into the reviewed schedule editor", async ({ page
 
 test("completed responses expose a keyboard-friendly read-aloud control", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the read-aloud flow once.");
+  await page.addInitScript(() => {
+    class FakeUtterance {
+      constructor(text) {
+        this.text = text;
+        this.onend = null;
+        this.onerror = null;
+        this.voice = null;
+      }
+    }
+    const synth = {
+      speaking: false,
+      getVoices() {
+        return [{ default: true, name: "Test", lang: "en-US" }];
+      },
+      addEventListener() {},
+      speak() {
+        this.speaking = true;
+      },
+      cancel() {
+        this.speaking = false;
+      },
+    };
+    Object.defineProperty(window, "speechSynthesis", { configurable: true, value: synth });
+    window.SpeechSynthesisUtterance = FakeUtterance;
+  });
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const message = page.getByLabel("Message Waffle");

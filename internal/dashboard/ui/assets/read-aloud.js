@@ -170,7 +170,13 @@ function start(article, button) {
           stop();
         }
       };
-      last.onerror = () => {
+      last.onerror = (event) => {
+        // cancel() during start, or a replaced utterance, reports
+        // interrupted/canceled — that is not a failed read.
+        const reason = event?.error;
+        if (reason === "interrupted" || reason === "canceled") {
+          return;
+        }
         if (speakingArticle === article) {
           stop();
         }
