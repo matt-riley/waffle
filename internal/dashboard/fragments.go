@@ -176,6 +176,9 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 			if choice.Pinned {
 				label += " · Pinned"
 			}
+			if id := shortSessionID(choice.ID); id != "" {
+				label += " · " + id
+			}
 			options = append(options, ui.MemorySessionOption{ID: choice.ID, Label: label})
 		}
 		return ui.MemorySessionPicker(ui.MemorySessionPickerView{Choices: options})
@@ -659,6 +662,14 @@ func memoryStatusMessage(hits int, sectionErrors []*SectionError) string {
 	default:
 		return fmt.Sprintf("%d results", hits)
 	}
+}
+
+func shortSessionID(id string) string {
+	id = strings.TrimSpace(id)
+	if len(id) <= 8 {
+		return id
+	}
+	return id[len(id)-8:]
 }
 
 func memorySessionRecency(value time.Time) string {

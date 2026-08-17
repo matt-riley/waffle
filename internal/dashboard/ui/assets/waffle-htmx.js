@@ -471,18 +471,19 @@
 			);
 		}
 	});
-	document.body.addEventListener("htmx:afterSettle", () => {
+	document.body.addEventListener("htmx:afterSettle", (event) => {
 		applySkillPrerequisites();
 		filterCatalogue();
 		refreshMemoryAttachAvailability();
+		const requestPath = event.detail?.pathInfo?.requestPath || "";
 		const attachStatus = document.querySelector("#memory-attach-status");
 		if (
+			requestPath.includes("/memory/attach") &&
 			attachStatus?.querySelector?.("[data-waffle-error='true']") &&
 			document.querySelector("#memory-session")
 		) {
-			// A failed attach (e.g. a stale/deleted session selection) resets
-			// the picker to the placeholder and re-fetches eligible sessions
-			// so the invalid choice cannot be resubmitted (#459).
+			// Only the attach response itself resets a stale picker. A later
+			// search or forget must not wipe a valid choice (#459).
 			const picker = document.querySelector("#memory-session");
 			if (picker) picker.value = "";
 			refreshMemorySessionPicker();

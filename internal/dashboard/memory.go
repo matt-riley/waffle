@@ -198,7 +198,7 @@ func (s *MemoryService) ListSessions(ctx context.Context, limit int) ([]MemorySe
 	}
 	lister, ok := s.operations.Sessions.(sessionLister)
 	if !ok {
-		return nil, nil
+		return nil, fmt.Errorf("%w: sessions", ErrMemoryUnavailable)
 	}
 	sessions, err := lister.List(ctx, limit)
 	if err != nil {
