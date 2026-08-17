@@ -119,3 +119,72 @@
 .profile-blocked {
   margin: 0 0 0.4rem;
 }
+
+/* Structured form groups make the trust boundary readable: each fieldset
+   groups related controls and the hints explain inherited/default values (#465). */
+.profile-fieldset {
+  border: 0;
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.profile-fieldset legend {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin: -0.1rem 0 0.4rem;
+}
+
+/* Card actions: Edit is the primary continuation, Copy stays secondary, and
+   Delete is a separated destructive path (#465). */
+.profile-actions [data-action="edit"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.profile-actions [data-action="copy"] {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.profile-actions [data-action="delete"] {
+  border-color: var(--danger);
+  color: var(--danger);
+  margin-left: auto;
+}
+
+/* Review diff: changed rows are flagged by direction so narrowing versus
+   widening is explicit, not buried in two tall columns (#465). */
+.policy-change dt {
+  font-weight: 700;
+}
+
+.policy-change.is-narrowed dt {
+  color: #3d5a26;
+}
+
+.policy-change.is-widened dt {
+  color: var(--danger);
+}
+
+.posture-note.is-widening {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.posture-note.is-narrowing {
+  color: #3d5a26;
+  font-weight: 700;
+}

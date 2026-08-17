@@ -420,7 +420,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		// editor's before/after preview cannot disagree with the read-only view
 		// it is rendered next to (#193, #194).
 		deskPosture := dashboard.NewPostureService(
-			cfg, dashboardClients, dashboard.NewPostureAuditSource(st.DB),
+			&cfg, dashboardClients, dashboard.NewPostureAuditSource(st.DB),
 		)
 		var deskProfiles *dashboard.ProfileEditor
 		if dashboardProviders != nil {

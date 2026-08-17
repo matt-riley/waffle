@@ -147,15 +147,15 @@ if (root) {
       system: elements.system.value,
       model: elements.model.value.trim(),
       sandbox: elements.sandbox.value,
-      allow: splitList(elements.allow.value),
-      deny: splitList(elements.deny.value),
+      allow: splitLines(elements.allow.value),
+      deny: splitLines(elements.deny.value),
       // Bash prefixes contain spaces, so they are one per line rather than
-      // comma-separated.
+      // comma-separated; the structured tool controls follow the same shape.
       deny_prefixes: splitLines(elements.denyPrefixes.value),
       guidance: elements.guidance.value,
       max_tokens: Number(elements.maxTokens.value) || 0,
       max_iterations: Number(elements.maxIterations.value) || 0,
-      allowed_children: splitList(elements.allowedChildren.value),
+      allowed_children: splitLines(elements.allowedChildren.value),
     };
   }
 
@@ -164,8 +164,12 @@ if (root) {
     elements.system.value = profile?.system || "";
     elements.model.value = profile?.model || "";
     elements.sandbox.value = profile?.sandbox || "";
-    elements.allow.value = joinList(profile?.allow);
-    elements.deny.value = joinList(profile?.deny);
+    elements.allow.value = Array.isArray(profile?.allow)
+      ? profile.allow.join("\n")
+      : "";
+    elements.deny.value = Array.isArray(profile?.deny)
+      ? profile.deny.join("\n")
+      : "";
     elements.denyPrefixes.value = Array.isArray(profile?.deny_prefixes)
       ? profile.deny_prefixes.join("\n")
       : "";
@@ -174,7 +178,9 @@ if (root) {
     elements.maxIterations.value = profile?.max_iterations
       ? String(profile.max_iterations)
       : "";
-    elements.allowedChildren.value = joinList(profile?.allowed_children);
+    elements.allowedChildren.value = Array.isArray(profile?.allowed_children)
+      ? profile.allowed_children.join("\n")
+      : "";
     clearFieldInvalid();
     elements.formStatus.textContent = "";
     elements.form.hidden = false;
@@ -260,20 +266,71 @@ if (root) {
     }
   }
 
-  function renderLayerList(parent, label, layer) {
+  function policyValues(name, layer) {
+    switch (name) {
+      case "Sandbox":
+        return layer?.sandbox_mode ? [layer.sandbox_mode] : [];
+      case "Allow":
+        return layer?.allow;
+      case "Deny":
+        return layer?.deny;
+      case "Deny prefixes":
+        return layer?.deny_prefixes;
+      default:
+        return [];
+    }
+  }
+
+  // classifyPolicyChange labels a before/after row as narrowed, widened, or
+  // unchanged so the review makes the direction of the change explicit (#465).
+  function classifyPolicyChange(name, before, after) {
+    const left = Array.isArray(before) ? before.slice().sort() : [];
+    const right = Array.isArray(after) ? after.slice().sort() : [];
+    if (left.length === right.length && left.every((value, index) => value === right[index])) {
+      return "unchanged";
+    }
+    const leftSet = new Set(left);
+    const rightSet = new Set(right);
+    if (name === "Allow") {
+      // Fewer allowed tools narrows; more allowed tools widens.
+      const onlyAfter = right.filter((value) => !leftSet.has(value));
+      const onlyBefore = left.filter((value) => !rightSet.has(value));
+      if (onlyBefore.length === 0 && onlyAfter.length > 0) return "widened";
+      if (onlyAfter.length === 0 && onlyBefore.length > 0) return "narrowed";
+      return "changed";
+    }
+    if (name === "Deny" || name === "Deny prefixes") {
+      // More denied tools narrows; fewer denied tools widens.
+      const onlyAfter = right.filter((value) => !leftSet.has(value));
+      const onlyBefore = left.filter((value) => !rightSet.has(value));
+      if (onlyBefore.length === 0 && onlyAfter.length > 0) return "narrowed";
+      if (onlyAfter.length === 0 && onlyBefore.length > 0) return "widened";
+      return "changed";
+    }
+    // Sandbox: docker is more restricted than host.
+    if (name === "Sandbox") {
+      const rank = { host: 2, docker: 1 };
+      const beforeRank = rank[left[0] || ""] || 0;
+      const afterRank = rank[right[0] || ""] || 0;
+      return afterRank < beforeRank ? "narrowed" : "widened";
+    }
+    return "changed";
+  }
+
+  function renderLayerList(parent, label, layer, changes) {
     const block = document.createElement("div");
     block.className = "profile-diff-side";
     appendText(block, "h4", "", label);
     const facts = document.createElement("dl");
     facts.className = "posture-facts";
-    for (const [name, values] of [
-      ["Sandbox", layer?.sandbox_mode ? [layer.sandbox_mode] : []],
-      ["Allow", layer?.allow],
-      ["Deny", layer?.deny],
-      ["Deny prefixes", layer?.deny_prefixes],
-    ]) {
+    for (const name of ["Sandbox", "Allow", "Deny", "Deny prefixes"]) {
+      const values = policyValues(name, layer);
+      const change = changes?.[name] || "unchanged";
       const row = document.createElement("div");
-      appendText(row, "dt", "", name);
+      if (change !== "unchanged") {
+        row.className = `policy-change is-${change}`;
+      }
+      appendText(row, "dt", "", change === "unchanged" ? name : `${name} (${change})`);
       appendText(
         row,
         "dd",
@@ -312,8 +369,29 @@ if (root) {
 
     const policy = document.createElement("section");
     policy.className = "profile-diff";
-    renderLayerList(policy, "Effective policy before", preview?.before?.effective);
-    renderLayerList(policy, "Effective policy after", preview?.after?.effective);
+    const beforeLayer = preview?.before?.effective || {};
+    const afterLayer = preview?.after?.effective || {};
+    const changes = {};
+    let widened = false;
+    let narrowed = false;
+    for (const name of ["Sandbox", "Allow", "Deny", "Deny prefixes"]) {
+      const change = classifyPolicyChange(name, policyValues(name, beforeLayer), policyValues(name, afterLayer));
+      changes[name] = change;
+      if (change === "widened") widened = true;
+      if (change === "narrowed") narrowed = true;
+    }
+    if (widened || narrowed) {
+      appendText(
+        policy,
+        "p",
+        widened ? "posture-note is-widening" : "posture-note is-narrowing",
+        widened
+          ? "This change widens policy and will be refused by the narrowing guard."
+          : "This change narrows policy — safe to review.",
+      );
+    }
+    renderLayerList(policy, "Effective policy before", beforeLayer, changes);
+    renderLayerList(policy, "Effective policy after", afterLayer, changes);
     elements.reviewBody.append(policy);
   }
 
