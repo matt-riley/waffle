@@ -239,6 +239,26 @@
 		}
 	}
 
+	// The memory attach picker gates every Attach to session action until a
+	// valid persisted session is chosen, and refreshes the picker when an
+	// attach fails so a stale/deleted selection recovers in place (#459).
+	function refreshMemoryAttachAvailability() {
+		const picker = document.querySelector("#memory-session");
+		const valid = Boolean(picker && picker.value && picker.value !== "");
+		for (const button of document.querySelectorAll("[data-waffle-action-id^='memory-attach-']")) {
+			button.disabled = !valid;
+		}
+	}
+
+	function refreshMemorySessionPicker() {
+		const field = document.querySelector("#memory-session-field");
+		if (!field || typeof htmx === "undefined") return;
+		htmx.ajax("GET", "/api/v1/desk/memory/sessions", {
+			target: "#memory-session-field",
+			swap: "outerHTML",
+		});
+	}
+
 	function filterCatalogue() {
 		const search = document.querySelector("#capability-catalogue-search");
 		const results = document.querySelector("#capability-catalogue-results");
@@ -412,9 +432,16 @@
     }
 	});
 
+	document.body.addEventListener("change", (event) => {
+		if (event.target?.id === "memory-session") {
+			refreshMemoryAttachAvailability();
+		}
+	});
+
 	document.body.addEventListener("htmx:afterSwap", (event) => {
 		applySkillPrerequisites();
 		filterCatalogue();
+		refreshMemoryAttachAvailability();
 		const requestPath = event.detail?.pathInfo?.requestPath || "";
 		if (requestPath.endsWith("/close-preview") || requestPath.endsWith("/forget-preview")) {
 			// The fragment arrives closed and is already swapped, so showModal
@@ -444,9 +471,24 @@
 			);
 		}
 	});
-	document.body.addEventListener("htmx:afterSettle", () => {
+	document.body.addEventListener("htmx:afterSettle", (event) => {
 		applySkillPrerequisites();
 		filterCatalogue();
+		refreshMemoryAttachAvailability();
+		const requestPath = event.detail?.pathInfo?.requestPath || "";
+		const attachStatus = document.querySelector("#memory-attach-status");
+		if (
+			requestPath.includes("/memory/attach") &&
+			attachStatus?.querySelector?.("[data-waffle-error='true']") &&
+			document.querySelector("#memory-session")
+		) {
+			// Only the attach response itself resets a stale picker. A later
+			// search or forget must not wipe a valid choice (#459).
+			const picker = document.querySelector("#memory-session");
+			if (picker) picker.value = "";
+			refreshMemorySessionPicker();
+			refreshMemoryAttachAvailability();
+		}
 	});
 
 	document.body.addEventListener("click", (event) => {

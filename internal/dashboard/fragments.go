@@ -165,6 +165,23 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 		fragment.GetURL = "/api/v1/desk/memory?query=" + url.QueryEscape(query)
 		fragment.Trigger = "waffle:refresh from:body"
 		return ui.FragmentList(fragment)
+	case MemorySessionsResponse:
+		options := make([]ui.MemorySessionOption, 0, len(typed.Choices))
+		for _, choice := range typed.Choices {
+			label := strings.TrimSpace(choice.Label)
+			recency := memorySessionRecency(choice.UpdatedAt)
+			if recency != "" {
+				label += " · " + recency
+			}
+			if choice.Pinned {
+				label += " · Pinned"
+			}
+			if id := shortSessionID(choice.ID); id != "" {
+				label += " · " + id
+			}
+			options = append(options, ui.MemorySessionOption{ID: choice.ID, Label: label})
+		}
+		return ui.MemorySessionPicker(ui.MemorySessionPickerView{Choices: options})
 	case MemoryForgetPreview:
 		return ui.MemoryForgetDialog(ui.MemoryForgetDialogView{
 			NoteID:       typed.Note.SourceID,
@@ -617,7 +634,7 @@ func memoryFragment(hits []MemoryHit, query string, sectionErrors []*SectionErro
 			ID: hit.SourceID, Class: "memory-hit", Kind: memorySourceLabel(hit.Source),
 			Excerpt: hit.Excerpt, ExcerptLong: len(hit.Excerpt) > memoryExcerptClampBytes,
 			Fields:  fields,
-			Actions: []ui.FragmentAction{{ID: "memory-attach-" + hit.SourceID, Label: "Attach to session", URL: "/api/v1/desk/memory/attach", Target: "#memory-attach-status", Swap: "innerHTML", Include: "#memory-session-id", Fields: []ui.FragmentField{{Label: "query", Value: query}, {Label: "source", Value: hit.Source}, {Label: "source_id", Value: hit.SourceID}}}},
+			Actions: []ui.FragmentAction{{ID: "memory-attach-" + hit.SourceID, Label: "Attach to session", URL: "/api/v1/desk/memory/attach", Target: "#memory-attach-status", Swap: "innerHTML", Include: "#memory-session", Fields: []ui.FragmentField{{Label: "query", Value: query}, {Label: "source", Value: hit.Source}, {Label: "source_id", Value: hit.SourceID}}}},
 		}
 		if hit.Archived {
 			item.Class += " is-archived"
@@ -644,6 +661,32 @@ func memoryStatusMessage(hits int, sectionErrors []*SectionError) string {
 		return "1 result"
 	default:
 		return fmt.Sprintf("%d results", hits)
+	}
+}
+
+func shortSessionID(id string) string {
+	id = strings.TrimSpace(id)
+	if len(id) <= 8 {
+		return id
+	}
+	return id[len(id)-8:]
+}
+
+func memorySessionRecency(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	age := time.Since(value)
+	if age < 0 {
+		age = 0
+	}
+	switch {
+	case age < time.Hour:
+		return "updated moments ago"
+	case age < 24*time.Hour:
+		return fmt.Sprintf("updated %d hours ago", int(age.Hours()))
+	default:
+		return "updated " + value.Format("2 Jan 2006")
 	}
 }
 
@@ -712,6 +755,12 @@ type MemorySearchResponse struct {
 	Query  string          `json:"query"`
 	Hits   []MemoryHit     `json:"hits"`
 	Errors []*SectionError `json:"errors"`
+}
+
+// MemorySessionsResponse is the bounded, credential-free session list that
+// powers the memory attach picker (#459).
+type MemorySessionsResponse struct {
+	Choices []MemorySessionChoice `json:"choices"`
 }
 
 type MemoryAttachResponse struct {

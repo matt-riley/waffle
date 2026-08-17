@@ -1066,6 +1066,46 @@ test("posture dialog contains keyboard focus and restores the opener", async ({ 
   await expect(trigger).toBeFocused();
 });
 
+test("memory attach uses a session picker with stale-selection recovery", async ({ page }) => {
+  await page.goto(deskURL("memory"));
+  const picker = page.locator("#memory-session");
+  // The picker loads persisted sessions with human-readable labels.
+  await expect(picker).toBeVisible();
+  await expect(picker.locator("option")).toContainText(["Select a conversation", "Release review"]);
+  await expect(picker.locator("option[value='session-primary']")).toContainText(/Release review/);
+
+  // Attach stays disabled until a valid session is selected.
+  const query = page.getByLabel("Search turns, summaries, and notes");
+  await query.fill("release artifact");
+  await page.getByRole("button", { name: "Search memory", exact: true }).click();
+  const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
+  const attach = note.getByRole("button", { name: "Attach to session", exact: true });
+  await expect(attach).toBeDisabled();
+
+  await picker.selectOption("session-primary");
+  await expect(attach).toBeEnabled();
+  await attach.click();
+  await expect(page.locator("#memory-attach-status")).toHaveText(
+    "Memory reference attached to the session.",
+  );
+
+  // A stale/deleted selection recovers: the attach fails and the picker
+  // drops the invalid option instead of leaving it resubmittable.
+  await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?empty=1`);
+  try {
+    await picker.selectOption("session-primary");
+    await attach.click();
+    await expect(page.locator("#memory-attach-status")).toContainText(
+      "target session was not found",
+    );
+    await expect(picker.locator("option[value='session-primary']")).toHaveCount(0);
+    await expect(picker.locator("option")).toContainText("No persisted conversations yet");
+    await expect(page.locator("#memory-session-empty")).toContainText("Start one in Today");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions`);
+  }
+});
+
 test("memory search status settles and never coexists with stale instructions", async ({ page }) => {
   await page.goto(deskURL("memory"));
   const status = page.locator("#memory-status");
@@ -1135,7 +1175,9 @@ test("memory search attaches one source and forgets only after confirmation", as
   const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
   await expect(note).toContainText("Use the verified release artifact.");
 
-  await page.getByLabel("Session ID").fill("session-primary");
+  const picker = page.locator("#memory-session");
+  await expect(picker.locator("option[value='session-primary']")).toContainText(/Release review/);
+  await picker.selectOption("session-primary");
   await note.getByRole("button", { name: "Attach to session", exact: true }).click();
   await expect(page.locator("#memory-attach-status")).toHaveText(
     "Memory reference attached to the session.",
