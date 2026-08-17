@@ -18,9 +18,13 @@ templ FragmentList(view FragmentView) {
 				}
 				if item.Excerpt != "" {
 					if item.ExcerptLong {
-						<details class="waffle-fragment-expand"><summary>Show full text</summary></details>
+						<details class="waffle-fragment-expand">
+							<summary>Show full text</summary>
+							<p class="waffle-fragment-excerpt">{ item.Excerpt }</p>
+						</details>
+					} else {
+						<p class="waffle-fragment-excerpt">{ item.Excerpt }</p>
 					}
-					<p class="waffle-fragment-excerpt">{ item.Excerpt }</p>
 				}
 				if item.Detail != "" {
 					if item.DetailClass != "" {

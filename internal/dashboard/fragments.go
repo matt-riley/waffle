@@ -609,7 +609,7 @@ func memoryFragment(hits []MemoryHit, query string, sectionErrors []*SectionErro
 	})
 	for _, hit := range hits {
 		fields := []ui.FragmentField{
-			{Label: "Session", Value: emptyValue(hit.Provenance, "—")},
+			{Label: "Source", Value: emptyValue(hit.Provenance, "—")},
 			{Label: "Time", Value: emptyValue(memoryTimeLabel(hit.Timestamp), "—")},
 			{Label: "Source ID", Value: hit.SourceID},
 		}
