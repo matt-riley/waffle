@@ -261,3 +261,40 @@ func TestSkillFragmentReportsInstallWithoutAuditRecord(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectionCardLabels(t *testing.T) {
+	probed := ConnectionProbe{Outcome: providerconfig.ProbeOutcomeSuccess, CheckedAt: time.Now()}
+	recent := ConnectionProbe{Outcome: providerconfig.ProbeOutcomeSuccess, CheckedAt: time.Now().Add(-2 * time.Minute)}
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "unchecked health", got: func() string { h, _ := connectionHealth(ConnectionProbe{}, false); return h }(), want: "Unchecked"},
+		{name: "unchecked class", got: func() string { _, c := connectionHealth(ConnectionProbe{}, false); return c }(), want: " is-unchecked"},
+		{name: "healthy health", got: func() string { h, _ := connectionHealth(probed, true); return h }(), want: "Healthy"},
+		{name: "healthy class", got: func() string { _, c := connectionHealth(probed, true); return c }(), want: " is-healthy"},
+		{name: "failed health", got: func() string {
+			h, _ := connectionHealth(ConnectionProbe{Outcome: providerconfig.ProbeOutcomeUnreachable}, true)
+			return h
+		}(), want: "Failed"},
+		{name: "degraded health", got: func() string {
+			h, _ := connectionHealth(ConnectionProbe{Outcome: providerconfig.ProbeOutcomeRequestFailed}, true)
+			return h
+		}(), want: "Degraded"},
+		{name: "protocol openai", got: connectionProtocolLabel("openai"), want: "OpenAI-compatible driver"},
+		{name: "protocol empty", got: connectionProtocolLabel(""), want: "Not reported"},
+		{name: "tokens default", got: connectionMaxTokensLabel(0), want: "Provider default"},
+		{name: "tokens set", got: connectionMaxTokensLabel(4000), want: "4000"},
+		{name: "last check never", got: connectionLastCheckLabel(ConnectionProbe{}, false), want: "Never"},
+		{name: "last check just now", got: connectionLastCheckLabel(probed, true), want: "Just now"},
+		{name: "last check minutes", got: connectionLastCheckLabel(recent, true), want: "2 minutes ago"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Fatalf("got %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+}

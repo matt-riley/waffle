@@ -197,6 +197,14 @@ func main() {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Test-only control route: simulates a failing provider probe so rendered
+	// tests can cover connection failure states (#463).
+	mux.HandleFunc("POST /api/v1/desk/test/provider-probe", func(w http.ResponseWriter, r *http.Request) {
+		providers.mu.Lock()
+		providers.probeFailure = r.URL.Query().Get("failure")
+		providers.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
 		Observability:     obs,
@@ -728,8 +736,9 @@ func (w *fixtureWorkspaces) updateStatus(id, status string) error {
 }
 
 type fixtureProviders struct {
-	mu      sync.Mutex
-	listing providerconfig.Listing
+	mu           sync.Mutex
+	listing      providerconfig.Listing
+	probeFailure string
 }
 
 func (p *fixtureProviders) Snapshot(context.Context) (providerconfig.Listing, error) {
@@ -855,7 +864,19 @@ func (p *fixtureProviders) RemoveWithMode(_ context.Context, name string, _ prov
 	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-provider-remove"}, nil
 }
 
-func (*fixtureProviders) Test(context.Context, string) error { return nil }
+func (p *fixtureProviders) Test(context.Context, string) error {
+	p.mu.Lock()
+	failure := p.probeFailure
+	p.mu.Unlock()
+	switch failure {
+	case "authentication":
+		return errors.New("provider returned 401 unauthorized")
+	case "unreachable":
+		return errors.New("provider is unreachable")
+	default:
+		return nil
+	}
+}
 
 func (*fixtureProviders) TestProspective(context.Context, providerconfig.ProspectiveProbeRequest) error {
 	return nil

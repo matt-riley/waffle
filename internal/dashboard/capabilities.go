@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/config"
@@ -116,12 +117,21 @@ type CapabilitySession struct {
 	ModelAlias string `json:"model_alias,omitempty"`
 }
 
+// ConnectionProbe is the safe browser-facing result of a per-connection
+// check: a classified outcome and the moment it was produced. The upstream
+// probe error never crosses the Desk boundary.
+type ConnectionProbe struct {
+	Outcome   providerconfig.ProbeOutcome `json:"outcome"`
+	CheckedAt time.Time                   `json:"checked_at"`
+}
+
 type CapabilitiesSnapshot struct {
-	Providers       providerconfig.Listing  `json:"providers"`
-	ProviderPresets []providerconfig.Preset `json:"provider_presets"`
-	Session         *CapabilitySession      `json:"session,omitempty"`
-	SkillSources    CapabilitySkillSources  `json:"skill_sources"`
-	Skills          []CapabilitySkill       `json:"skills"`
+	Providers       providerconfig.Listing     `json:"providers"`
+	ProviderPresets []providerconfig.Preset    `json:"provider_presets"`
+	Session         *CapabilitySession         `json:"session,omitempty"`
+	SkillSources    CapabilitySkillSources     `json:"skill_sources"`
+	Skills          []CapabilitySkill          `json:"skills"`
+	Probes          map[string]ConnectionProbe `json:"probes"`
 }
 
 type CapabilityCatalogueView struct {
@@ -147,7 +157,16 @@ type CapabilityCatalogueModel struct {
 // CapabilityProviderTestResult is a fixed, safe probe outcome with no
 // upstream error details.
 type CapabilityProviderTestResult struct {
-	Outcome providerconfig.ProbeOutcome `json:"outcome"`
+	Outcome   providerconfig.ProbeOutcome `json:"outcome"`
+	CheckedAt time.Time                   `json:"checked_at,omitempty"`
+}
+
+// ConnectionTestResult carries the fresh probe outcome plus the full
+// connections snapshot so an htmx check can re-render the cards in place.
+type ConnectionTestResult struct {
+	Outcome   providerconfig.ProbeOutcome `json:"outcome"`
+	CheckedAt time.Time                   `json:"checked_at"`
+	Snapshot  CapabilitiesSnapshot        `json:"snapshot"`
 }
 
 // CapabilityRemovalReference names one sanitized resource that prevents a
@@ -180,6 +199,12 @@ type Capabilities struct {
 	Catalogue    CapabilityCatalogue
 	Previews     *PreviewStore
 	Now          func() time.Time
+
+	// probeMu guards the in-process probe results that back the connection
+	// health surface (#463). Probes are one-shot diagnostics, never a
+	// credential or a config source.
+	probeMu sync.Mutex
+	probes  map[string]ConnectionProbe
 }
 
 func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (CapabilitiesSnapshot, error) {
@@ -195,6 +220,7 @@ func (c *Capabilities) Snapshot(ctx context.Context, sessionID string) (Capabili
 		ProviderPresets: providerconfig.Presets(),
 		SkillSources:    NewCapabilitySkillSources(c.SkillSources.LocalRoots, c.SkillSources.GitHosts),
 		Skills:          make([]CapabilitySkill, 0),
+		Probes:          c.probeSnapshot(),
 	}
 	if sessionID != "" {
 		if c.Sessions == nil {
@@ -493,7 +519,33 @@ func (c *Capabilities) TestProvider(ctx context.Context, name string) (Capabilit
 	if c == nil || c.Providers == nil {
 		return CapabilityProviderTestResult{}, ErrCapabilitiesUnavailable
 	}
-	return CapabilityProviderTestResult{Outcome: providerconfig.ClassifyProbeError(c.Providers.Test(ctx, strings.TrimSpace(name)))}, nil
+	name = strings.TrimSpace(name)
+	outcome := providerconfig.ClassifyProbeError(c.Providers.Test(ctx, name))
+	checkedAt := c.now()
+	c.recordProbe(name, ConnectionProbe{Outcome: outcome, CheckedAt: checkedAt})
+	return CapabilityProviderTestResult{Outcome: outcome, CheckedAt: checkedAt}, nil
+}
+
+func (c *Capabilities) probeSnapshot() map[string]ConnectionProbe {
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	if len(c.probes) == 0 {
+		return nil
+	}
+	out := make(map[string]ConnectionProbe, len(c.probes))
+	for name, probe := range c.probes {
+		out[name] = probe
+	}
+	return out
+}
+
+func (c *Capabilities) recordProbe(name string, probe ConnectionProbe) {
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	if c.probes == nil {
+		c.probes = make(map[string]ConnectionProbe)
+	}
+	c.probes[name] = probe
 }
 
 func (c *Capabilities) TestProspectiveProvider(ctx context.Context, request providerconfig.ProspectiveProbeRequest) (CapabilityProviderTestResult, error) {
@@ -938,7 +990,14 @@ func providerTestHandler(service *Capabilities) http.HandlerFunc {
 			writeCapabilityError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		snapshot, err := service.Snapshot(r.Context(), "")
+		if err != nil {
+			writeCapabilityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ConnectionTestResult{
+			Outcome: result.Outcome, CheckedAt: result.CheckedAt, Snapshot: snapshot,
+		})
 	}
 }
 
