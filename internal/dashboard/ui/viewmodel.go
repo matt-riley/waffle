@@ -66,6 +66,7 @@ type FragmentOption struct {
 type FragmentTextSwap struct {
 	ID        string
 	Text      string
+	Class     string
 	Source    string
 	Available bool
 }
