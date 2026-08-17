@@ -31,10 +31,6 @@ func newChatSessionOwners() *chatSessionOwners {
 	return &chatSessionOwners{owners: make(map[string]*chatRuntime)}
 }
 
-func (o *chatSessionOwners) acquire(owner *chatRuntime, sessionID string) bool {
-	return o.acquireWait(owner, sessionID, 0)
-}
-
 // acquireWait takes the session if it is free. A live owner still fails
 // immediately. An owner already in close/cleanup is waited out up to wait
 // so a same-tab reload does not lose the race against pagehide teardown.
