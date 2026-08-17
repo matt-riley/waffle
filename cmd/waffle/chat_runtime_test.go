@@ -3077,6 +3077,41 @@ func TestChatRuntimeTurnWithNoCitationsEmitsNoSources(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeTurnMediaValidatesBlocks(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err := runtime.TurnMedia(ctx, "see this", []llm.Block{{Type: llm.BlockImage}}, nil)
+	if err == nil {
+		t.Fatal("invalid media must be rejected")
+	}
+	if !strings.Contains(err.Error(), "invalid media") {
+		t.Fatalf("err = %v, want invalid media", err)
+	}
+	if len(runtime.history) != 0 {
+		t.Fatalf("invalid media entered history: %d", len(runtime.history))
+	}
+
+	img, err := llm.NewImageBlock("image/png", []byte("png-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "saw it"}}},
+		}},
+	}}
+	if err := runtime.TurnMedia(ctx, "see this", []llm.Block{img}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.history) == 0 || !runtime.history[0].HasMedia() {
+		t.Fatalf("valid media missing from history: %+v", runtime.history)
+	}
+}
+
 func TestTemporaryConversationNeverPersistsTurns(t *testing.T) {
 	ctx := context.Background()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())

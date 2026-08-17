@@ -657,6 +657,45 @@ test("temporary conversations are offered before the first message and marked li
   await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
 });
 
+test("Today attaches images securely, previews them, and sends them with the turn", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the attachment flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  // A real 1x1 PNG in a temp file.
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "waffle-attach-"));
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const filePath = join(dir, "shot.png");
+  writeFileSync(filePath, png);
+
+  await page.locator("#desk-attach").setInputFiles(filePath);
+  await expect(page.locator(".attachment-chip")).toBeVisible();
+  await expect(page.locator(".attachment-chip")).toContainText("shot.png");
+
+  const turn = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/v1/desk/chat/turn") &&
+      response.request().method() === "POST",
+  );
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Look at this screenshot");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const response = await turn;
+  expect(response.status()).toBe(200);
+  const body = response.request().postDataJSON();
+  expect(body.attachments).toHaveLength(1);
+  expect(body.attachments[0].name).toBe("shot.png");
+  expect(body.attachments[0].media_type).toBe("image/png");
+  await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+  await expect(page.locator(".attachment-chip")).toHaveCount(0);
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

@@ -492,3 +492,15 @@ type StreamFunc func(Event)
 type Provider interface {
 	Complete(ctx context.Context, req Request, onEvent StreamFunc) (*Response, error)
 }
+
+// UserBlocks builds a user message from visible text plus validated media
+// blocks (images/documents). Media blocks are appended after the text so the
+// conversation reads naturally to providers.
+func UserBlocks(text string, media []Block) Message {
+	blocks := make([]Block, 0, 1+len(media))
+	if text != "" {
+		blocks = append(blocks, Block{Type: BlockText, Text: text})
+	}
+	blocks = append(blocks, media...)
+	return Message{Role: RoleUser, Blocks: blocks}
+}

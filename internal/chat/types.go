@@ -257,6 +257,13 @@ type Result struct {
 	ShouldClose bool            `json:"should_close"`
 }
 
+// MediaTurner is the optional media-capable extension of Backend. Backends
+// that do not implement it reject attachment turns with a clear error so the
+// Desk can keep its mutation contract honest (#473).
+type MediaTurner interface {
+	TurnMedia(context.Context, string, []llm.Block, func(Event)) error
+}
+
 // Backend is the shared lifecycle implemented by direct and managed chat
 // connections. Cancel is a synchronous best-effort interruption. Close owns
 // final cancellation and active-work drain, must return when its context ends,

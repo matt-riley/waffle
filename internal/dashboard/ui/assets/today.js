@@ -180,15 +180,20 @@ function readQueue() {
       !queue ||
       typeof queue.sessionID !== "string" ||
       typeof queue.text !== "string" ||
-      queue.text.trim() === "" ||
       typeof queue.idempotencyKey !== "string"
     ) {
+      globalThis.sessionStorage?.removeItem(queueStorageKey);
+      return null;
+    }
+    const attachments = normalizeQueuedAttachments(queue.attachments);
+    if (queue.text.trim() === "" && attachments.length === 0) {
       globalThis.sessionStorage?.removeItem(queueStorageKey);
       return null;
     }
     return {
       sessionID: queue.sessionID,
       text: queue.text,
+      attachments,
       idempotencyKey: queue.idempotencyKey,
       held: queue.held === true,
     };
@@ -248,6 +253,9 @@ const elements = {
   scheduleDraft: document.querySelector("#desk-schedule-draft"),
   dictate: document.querySelector("#desk-dictate"),
   dictateHint: document.querySelector("#desk-dictate-hint"),
+  attachButton: document.querySelector("#desk-attach-button"),
+  attachInput: document.querySelector("#desk-attach"),
+  attachmentPreview: document.querySelector("#desk-attachment-preview"),
   composerStatus: document.querySelector("#desk-composer-status"),
   model: document.querySelector("#desk-model"),
   modelDetail: document.querySelector("#desk-model-detail"),
@@ -308,6 +316,7 @@ const state = {
   generation: 0,
   sessionID: "",
   temporary: false,
+  attachments: [],
   skills: [],
   modelAlias: "",
   models: [],
@@ -443,7 +452,8 @@ function updateControls() {
   elements.message.disabled = state.currentPhase === phase.disconnected;
   const busy = !idle && !recovering && state.currentPhase !== phase.disconnected;
   elements.send.disabled =
-    !state.clientID || elements.message.value.trim() === "";
+    !state.clientID ||
+    (elements.message.value.trim() === "" && state.attachments.length === 0);
   if (busy) {
     elements.send.textContent = "Queue follow-up";
     elements.send.setAttribute("aria-label", "Queue follow-up");
@@ -462,6 +472,9 @@ function updateControls() {
     if (!available) {
       dictation.stop();
     }
+  }
+  if (elements.attachButton) {
+    elements.attachButton.disabled = !idle;
   }
   if (elements.exportButton) {
     elements.exportButton.disabled = !idle;
@@ -1046,7 +1059,8 @@ function renderHistory(history) {
     }
     const text = messageTextWithMarkers(message);
     const role = message.role === "user" ? "user" : "assistant";
-    if (text === "") {
+    const media = renderMediaBlocks(message);
+    if (text === "" && media.length === 0) {
       // Tool-result carriers and tool-use frames have no visible text; they
       // still occupy a history position so branch boundaries stay exact.
       index += 1;
@@ -1056,6 +1070,14 @@ function renderHistory(history) {
     if (!article) {
       index += 1;
       continue;
+    }
+    if (media.length > 0) {
+      const holder = document.createElement("div");
+      holder.className = "message-attachments";
+      for (const node of media) {
+        holder.appendChild(node);
+      }
+      article.insertBefore(holder, article.querySelector(".message-body")?.nextSibling || null);
     }
     if (role === "user") {
       lastUserIndex = index;
@@ -1398,6 +1420,34 @@ async function copyReference(id, button) {
     button.textContent = "Copy reference";
   }, 1500);
 }
+// renderMediaBlocks builds safe attachment cards for a history message's
+// image/document blocks as DOM nodes. Only the persisted, allowlisted payload
+// is shown; every attribute is set via the DOM API so media types can never
+// become markup (#473).
+function renderMediaBlocks(message) {
+  const blocks = Array.isArray(message?.blocks) ? message.blocks : [];
+  const cards = [];
+  for (const block of blocks) {
+    if (!block.source || !block.source.data) {
+      continue;
+    }
+    if (block.type === "image") {
+      const image = document.createElement("img");
+      image.className = "message-media-image";
+      image.alt = "Image attachment";
+      const mediaType = String(block.source.media_type || "image/png");
+      image.setAttribute("src", `data:${mediaType};base64,${block.source.data}`);
+      cards.push(image);
+    } else if (block.type === "document") {
+      const label = document.createElement("span");
+      label.className = "message-media-doc";
+      label.textContent = `Document (${String(block.source.media_type || "document")})`;
+      cards.push(label);
+    }
+  }
+  return cards;
+}
+
 // messageTextWithMarkers renders an assistant message's text with stable
 // inline citation markers ("[1]", "[2]") appended per cited block, matching
 // the response-level source drawer (#479). Markers are plain text, so model
@@ -1578,6 +1628,106 @@ function updateModelDetail() {
     }
   }
   elements.modelDetail.textContent = parts.join(" · ");
+}
+
+// Attachment handling (#473): secure local files only — selection, drag and
+// drop, and pasted clipboard images. Payloads stay in the browser until Send;
+// pre-send previews are removable.
+const attachmentConfig = Object.freeze({
+  maxCount: 4,
+  maxBytes: 5 << 20,
+  imageTypes: new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+  documentTypes: new Set([
+    "application/pdf", "text/plain", "text/markdown", "text/csv",
+    "text/html", "text/xml", "application/epub+zip", "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ]),
+});
+
+function attachmentTypeAllowed(mediaType) {
+  return (
+    attachmentConfig.imageTypes.has(mediaType) ||
+    attachmentConfig.documentTypes.has(mediaType)
+  );
+}
+
+function addAttachments(files) {
+  for (const file of Array.from(files || [])) {
+    if (state.attachments.length >= attachmentConfig.maxCount) {
+      setStatusMessage(
+        elements.composerStatus,
+        `Attachments are capped at ${attachmentConfig.maxCount}.`,
+        true,
+        "composer",
+      );
+      break;
+    }
+    if (file.size > attachmentConfig.maxBytes) {
+      setStatusMessage(
+        elements.composerStatus,
+        `${file.name} is too large (max ${Math.round(attachmentConfig.maxBytes / (1 << 20))}MB).`,
+        true,
+        "composer",
+      );
+      continue;
+    }
+    if (!attachmentTypeAllowed(file.type)) {
+      setStatusMessage(
+        elements.composerStatus,
+        `${file.name} is not an allowed attachment type.`,
+        true,
+        "composer",
+      );
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const data = String(reader.result || "").split(",")[1] || "";
+      state.attachments.push({ name: file.name, mediaType: file.type, data });
+      renderAttachmentPreviews();
+    };
+    reader.readAsDataURL(file);
+  }
+  updateControls();
+}
+
+function renderAttachmentPreviews() {
+  if (!elements.attachmentPreview) {
+    return;
+  }
+  elements.attachmentPreview.replaceChildren();
+  for (let index = 0; index < state.attachments.length; index += 1) {
+    const attachment = state.attachments[index];
+    const card = document.createElement("div");
+    card.className = "attachment-chip";
+    if (attachmentConfig.imageTypes.has(attachment.mediaType)) {
+      const image = document.createElement("img");
+      image.src = `data:${attachment.mediaType};base64,${attachment.data}`;
+      image.alt = "";
+      image.className = "attachment-thumb";
+      card.appendChild(image);
+    }
+    const label = document.createElement("span");
+    label.className = "attachment-name";
+    label.textContent = attachment.name;
+    card.appendChild(label);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-remove";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+    remove.addEventListener("click", () => {
+      state.attachments.splice(index, 1);
+      renderAttachmentPreviews();
+      updateControls();
+    });
+    card.appendChild(remove);
+    elements.attachmentPreview.appendChild(card);
+  }
 }
 
 function selectedSkill() {
@@ -2182,22 +2332,25 @@ async function submitTurn(event, explicitText, idempotencyKey) {
   dictation.stop();
   event.preventDefault();
   const text = String(explicitText ?? elements.message.value).trim();
-  if (!text || state.clientID === "") {
+  const attachments = state.attachments.slice();
+  if ((!text && attachments.length === 0) || state.clientID === "") {
     return;
   }
   if (state.currentPhase !== phase.idle) {
-    queueFollowUp(text);
+    queueFollowUp(text, attachments);
     return;
   }
   await sendTurn(text, turnIdempotencyKey(text, idempotencyKey), {
     clearComposer: explicitText === undefined,
-  });
+  }, attachments);
 }
 
 // queueFollowUp stores the single visible follow-up for the current session
-// while a turn is running. It is dispatched only after the running turn
-// completes successfully in the same session.
-function queueFollowUp(text) {
+// while a turn is running. Attachments stay with the queue so a busy desk
+// cannot drop files. It is dispatched only after the running turn completes
+// successfully in the same session.
+function queueFollowUp(text, attachments) {
+  const queuedAttachments = (attachments || []).slice();
   if (!state.sessionID) {
     return;
   }
@@ -2212,7 +2365,7 @@ function queueFollowUp(text) {
   }
   const existing = state.queue;
   if (existing) {
-    if (existing.text === text) {
+    if (existing.text === text && sameAttachments(existing.attachments, queuedAttachments)) {
       setStatusMessage(
         elements.composerStatus,
         "That message is already queued.",
@@ -2232,6 +2385,7 @@ function queueFollowUp(text) {
   persistQueue({
     sessionID: state.sessionID,
     text,
+    attachments: queuedAttachments,
     idempotencyKey: crypto.randomUUID(),
     held: false,
   });
@@ -2261,7 +2415,8 @@ function renderQueueBanner() {
     : "Follow-up queued";
   const text = document.createElement("p");
   text.className = "queue-text";
-  text.textContent = queue.text;
+  const names = (queue.attachments || []).map((attachment) => attachment.name).filter(Boolean);
+  text.textContent = [queue.text, names.join(", ")].filter(Boolean).join(" · ");
   const actions = document.createElement("div");
   actions.className = "queue-actions";
   const edit = document.createElement("button");
@@ -2275,6 +2430,8 @@ function renderQueueBanner() {
       return;
     }
     elements.message.value = current.text;
+    state.attachments = (current.attachments || []).slice();
+    renderAttachmentPreviews();
     persistQueue(null);
     elements.message.focus();
     setStatusMessage(
@@ -2320,11 +2477,74 @@ function maybeDispatchFollowUp(turn) {
   );
   void sendTurn(followUp.text, followUp.idempotencyKey, {
     clearComposer: false,
-  });
+  }, followUp.attachments || []);
 }
 
-async function sendTurn(text, idempotencyKey, options) {
+function consumeAttachments() {
+  state.attachments = [];
+  renderAttachmentPreviews();
+}
+
+function normalizeQueuedAttachments(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const attachments = [];
+  for (const item of raw) {
+    if (
+      !item ||
+      typeof item.name !== "string" ||
+      typeof item.mediaType !== "string" ||
+      typeof item.data !== "string"
+    ) {
+      continue;
+    }
+    attachments.push({
+      name: item.name,
+      mediaType: item.mediaType,
+      data: item.data,
+    });
+  }
+  return attachments;
+}
+
+function sameAttachments(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((item, index) => (
+    item.name === b[index].name &&
+    item.mediaType === b[index].mediaType &&
+    item.data === b[index].data
+  ));
+}
+
+function attachLiveMedia(article, attachments) {
+  if (!article || !attachments || attachments.length === 0) {
+    return;
+  }
+  const media = renderMediaBlocks({
+    blocks: attachments.map((attachment) => ({
+      type: attachmentConfig.imageTypes.has(attachment.mediaType) ? "image" : "document",
+      source: { data: attachment.data, media_type: attachment.mediaType },
+    })),
+  });
+  if (media.length === 0) {
+    return;
+  }
+  const holder = document.createElement("div");
+  holder.className = "message-attachments";
+  for (const node of media) {
+    holder.appendChild(node);
+  }
+  article.insertBefore(holder, article.querySelector(".message-body")?.nextSibling || null);
+}
+
+async function sendTurn(text, idempotencyKey, options, attachments = []) {
   dictation.stop();
+  consumeAttachments();
   const generation = state.generation;
   const turn = {
     id: ++state.turnSequence,
@@ -2334,14 +2554,21 @@ async function sendTurn(text, idempotencyKey, options) {
     cancelSettled: true,
     cancelled: false,
     text,
+    attachments: (attachments || []).slice(),
     idempotencyKey,
   };
   state.activeTurn = turn;
   state.lastUserText = text;
   setPhase(phase.sending);
   setStatusMessage(elements.composerStatus, "", false, "composer");
-  const promptArticle = appendMessage("user", text, state.streamingMessage);
+  const promptArticle = appendMessage(
+    "user",
+    text,
+    state.streamingMessage,
+    turn.attachments.length > 0,
+  );
   if (promptArticle) {
+    attachLiveMedia(promptArticle, turn.attachments);
     state.promptArticle = promptArticle;
     state.promptIndex = state.historyLength;
     promptArticle.dataset.branchKeep = String(state.historyLength);
@@ -2355,6 +2582,11 @@ async function sendTurn(text, idempotencyKey, options) {
     await postMutation("/api/v1/desk/chat/turn", {
       client_id: state.clientID,
       text,
+      attachments: (attachments || []).map((attachment) => ({
+        name: attachment.name,
+        media_type: attachment.mediaType,
+        data_base64: attachment.data,
+      })),
     }, { idempotencyKey });
     if (state.activeTurn !== turn || generation !== state.generation) {
       return;
@@ -2395,6 +2627,8 @@ async function sendTurn(text, idempotencyKey, options) {
     retry.addEventListener("click", () => {
       setStatusMessage(elements.composerStatus, "", false, "composer");
       elements.message.value = turn.text;
+      state.attachments = (turn.attachments || []).slice();
+      renderAttachmentPreviews();
       elements.message.focus();
       updateControls();
       void submitTurn({ preventDefault() {} });
@@ -3616,7 +3850,7 @@ function handleComposerKeydown(event) {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-    if (elements.message.value.trim() !== "") {
+    if (elements.message.value.trim() !== "" || state.attachments.length > 0) {
       event.preventDefault();
       void submitTurn({ preventDefault() {} });
     }
@@ -3655,6 +3889,37 @@ if (elements.form) {
     handoffSchedule(elements.message.value);
   });
   elements.exportButton?.addEventListener("click", exportConversation);
+  elements.attachButton?.addEventListener("click", () => {
+    elements.attachInput?.click();
+  });
+  elements.attachInput?.addEventListener("change", () => {
+    addAttachments(elements.attachInput.files || []);
+    elements.attachInput.value = "";
+  });
+  elements.message?.addEventListener("paste", (event) => {
+    const images = Array.from(event.clipboardData?.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    if (images.length > 0) {
+      event.preventDefault();
+      addAttachments(images);
+    }
+  });
+  elements.form?.addEventListener("dragover", (event) => {
+    if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+      event.preventDefault();
+    }
+  });
+  elements.form?.addEventListener("drop", (event) => {
+    const files = Array.from(event.dataTransfer?.files || []).filter(
+      (file) => file.size > 0,
+    );
+    if (files.length > 0) {
+      event.preventDefault();
+      addAttachments(files);
+    }
+  });
   elements.dictate?.addEventListener("click", startDictation);
   elements.dictate?.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && dictation.listening()) {

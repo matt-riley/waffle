@@ -148,7 +148,7 @@ func TestSharedDTOsUseStableJSONFieldNames(t *testing.T) {
 		value any
 		keys  []string
 	}{
-		{OpenOptions{Continue: true, SessionID: "s", Profile: "p", Capabilities: []string{"c"}}, []string{"continue", "session_id", "profile", "capabilities"}},
+		{OpenOptions{Continue: true, SessionID: "s", Profile: "p", Capabilities: []string{"c"}, Temporary: true}, []string{"continue", "session_id", "profile", "capabilities", "temporary"}},
 		{Model{Alias: "a", Provider: "p", Upstream: "u", Current: true}, []string{"alias", "provider", "upstream", "current"}},
 		{Session{ID: "s", Title: "t", Summary: "x", ModelAlias: "a", UpdatedAt: stamp, Pinned: true}, []string{"id", "title", "summary", "model_alias", "updated_at", "pinned"}},
 		{UsageRow{SessionID: "s", Period: "day", PeriodStart: "today", Requests: 1, InputTokens: 2, OutputTokens: 3, ReservedTokens: 4, CacheCreationInputTokens: 5, CacheReadInputTokens: 6, TunnelBytes: 7}, []string{"session_id", "period", "period_start", "requests", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "reserved_tokens", "tunnel_bytes"}},

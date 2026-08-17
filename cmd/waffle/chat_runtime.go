@@ -330,16 +330,30 @@ func (r *chatRuntime) providerLabelLocked() string {
 }
 
 func (r *chatRuntime) Turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
+	return r.turnWithMedia(ctx, input, nil, emit)
+}
+
+// TurnMedia runs one turn with media blocks attached to the user message.
+// Media is validated with llm.ValidateBlocks before the turn starts so
+// unsupported or oversized payloads never enter history (#473).
+func (r *chatRuntime) TurnMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
+	return r.turnWithMedia(ctx, input, media, emit)
+}
+
+func (r *chatRuntime) turnWithMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
+	if err := llm.ValidateBlocks(media); err != nil {
+		return fmt.Errorf("invalid media: %w", err)
+	}
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {
 			emit(chatpkg.RedactEvent(event, redact))
 		}
 	}
-	return redactChatError(r.turn(ctx, input, redactedEmit), redact)
+	return redactChatError(r.turn(ctx, input, media, redactedEmit), redact)
 }
 
-func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.Event)) error {
+func (r *chatRuntime) turn(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -380,7 +394,7 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 		}
 	}
 	turnStart := len(r.history)
-	r.history = append(r.history, llm.UserText(input))
+	r.history = append(r.history, llm.UserBlocks(input, media))
 	history := append([]llm.Message(nil), r.history...)
 	// persistedStart marks where this turn's new messages begin once the run
 	// appends them, so artifact collection stays scoped to this exchange.

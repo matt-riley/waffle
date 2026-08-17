@@ -269,6 +269,9 @@ function createHarness({
     "#desk-message",
     "#desk-send",
     "#desk-cancel",
+    "#desk-attach",
+    "#desk-attach-button",
+    "#desk-attachment-preview",
     "#desk-schedule-draft",
     "#desk-dictate",
     "#desk-dictate-hint",
@@ -546,6 +549,18 @@ function createHarness({
     onend: null,
     onerror: null,
   };
+  const fileReadResults = [];
+  class FakeFileReader {
+    readAsDataURL(file) {
+      const payload = fakeFilePayloads[file?.name] || "";
+      this.result = `data:${file?.type || "application/octet-stream"};base64,${payload}`;
+      fileReadResults.push({ name: file?.name, type: file?.type });
+      this.onload?.();
+    }
+  }
+  const fakeFilePayloads = {
+    "shot.png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  };
   const sessionStorage = denyStorage
     ? {
         getItem() {
@@ -581,6 +596,7 @@ function createHarness({
     },
     sessionStorage,
     confirm: () => confirmResult,
+    FileReader: FakeFileReader,
     speechSynthesis,
     SpeechSynthesisUtterance: FakeSpeechSynthesisUtterance,
     SpeechRecognition: noSpeechRecognition ? undefined : FakeSpeechRecognition,
@@ -609,6 +625,7 @@ function createHarness({
   return {
     calls,
     clipboardWrites,
+    fakeFilePayloads,
     speechCalls,
     speechSynthesis,
     speechUtterances,
@@ -1947,6 +1964,7 @@ test("rejected turn clears the composer and retry reuses the Idempotency-Key", a
   assert.equal(turnPosts.length, 2);
   assert.equal(turnPosts[1].options.headers["Idempotency-Key"], firstKey);
   assert.deepEqual(JSON.parse(turnPosts[1].options.body), {
+    attachments: [],
     client_id: "client-1",
     text: "Careful question",
   });
@@ -3501,4 +3519,153 @@ test("temporary conversations send the option and show a live badge", async () =
   assert.equal(JSON.parse(opens[opens.length - 1].options.body).temporary, true);
   assert.equal(harness.elements["#desk-session-title"].textContent, "Temporary conversation");
   assert.equal(harness.elements["#desk-temporary-badge"].hidden, false);
+});
+
+test("attachments preview, reject unsupported types, and send with the turn", async () => {
+  const harness = createHarness();
+  await flush();
+  const pngB64 = harness.fakeFilePayloads["shot.png"];
+  harness.elements["#desk-attach"].files = [
+    { name: "shot.png", type: "image/png", size: 100 },
+  ];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 1);
+  assert.ok(harness.elements["#desk-attachment-preview"].textContent.includes("shot.png"));
+
+  // An unsupported type is rejected with a status message and no preview.
+  harness.elements["#desk-attach"].files = [{ name: "evil.exe", type: "application/x-msdownload", size: 10 }];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  assert.match(harness.elements["#desk-composer-status"].textContent, /not an allowed/);
+
+  // Send includes the attachment and the preview is consumed.
+  harness.elements["#desk-message"].value = "Look at this";
+  await harness.elements["#desk-message"].listener("keydown")({
+    key: "Enter",
+    ctrlKey: true,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+  const turn = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turn.length, 1);
+  const body = JSON.parse(turn[0].options.body);
+  assert.equal(body.attachments.length, 1);
+  assert.equal(body.attachments[0].name, "shot.png");
+  assert.equal(body.attachments[0].data_base64, pngB64);
+  assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 0);
+  const liveImage = harness.elements["#desk-transcript"].querySelector(".message-media-image");
+  assert.ok(liveImage, "live transcript shows the sent image");
+  assert.match(liveImage.getAttribute("src"), new RegExp(`^data:image/png;base64,${pngB64}$`));
+});
+
+test("attachments-only submit sends without text", async () => {
+  const harness = createHarness();
+  await flush();
+  harness.elements["#desk-attach"].files = [
+    { name: "shot.png", type: "image/png", size: 100 },
+  ];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  harness.elements["#desk-message"].value = "";
+  void harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  const turn = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turn.length, 1);
+  const body = JSON.parse(turn[0].options.body);
+  assert.equal(body.text, "");
+  assert.equal(body.attachments.length, 1);
+  assert.equal(body.attachments[0].name, "shot.png");
+  assert.ok(harness.elements["#desk-transcript"].querySelector(".message-media-image"));
+});
+
+test("queued follow-up keeps attachments and sends them after turn_done", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const submit = harness.elements["#desk-composer"].listener("submit");
+  const pngB64 = harness.fakeFilePayloads["shot.png"];
+
+  message.value = "first";
+  const first = submit({ preventDefault() {} });
+  harness.elements["#desk-attach"].files = [
+    { name: "shot.png", type: "image/png", size: 100 },
+  ];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  message.value = "look";
+  void submit({ preventDefault() {} });
+  await flush();
+
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+  assert.match(harness.elements["#desk-queue"].textContent, /shot\.png/);
+  assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 1);
+
+  harness.turnResponse.resolve(jsonResponse({}));
+  await first;
+  await flush();
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  await flush();
+
+  const turns = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turns.length, 2);
+  const followUp = JSON.parse(turns[1].options.body);
+  assert.equal(followUp.text, "look");
+  assert.equal(followUp.attachments.length, 1);
+  assert.equal(followUp.attachments[0].data_base64, pngB64);
+});
+
+test("attachments cap at four and a fifth is refused", async () => {
+  const harness = createHarness();
+  await flush();
+  const files = Array.from({ length: 5 }, (_, index) => ({
+    name: `file-${index}.png`,
+    type: "image/png",
+    size: 10,
+  }));
+  harness.elements["#desk-attach"].files = files;
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 4);
+  assert.match(harness.elements["#desk-composer-status"].textContent, /capped at 4/);
+});
+
+test("restored history renders safe attachment cards for media blocks", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-1",
+          history: [
+            {
+              role: "user",
+              blocks: [
+                { type: "text", text: "See the screenshot" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+                { type: "document", source: { type: "base64", media_type: "application/pdf", data: "cGRm" } },
+              ],
+            },
+            { role: "assistant", blocks: [{ type: "text", text: "Noted." }] },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const userMessage = harness.elements["#desk-transcript"].querySelector(".user-message");
+  const attachments = userMessage.querySelectorAll(".message-attachments");
+  assert.equal(attachments.length, 1, "media cards render as a holder");
+  const image = attachments[0].querySelector(".message-media-image");
+  assert.ok(image, "image card renders");
+  assert.match(image.getAttribute("src"), /^data:image\/png;base64,aGVsbG8=$/);
+  const doc = attachments[0].querySelector(".message-media-doc");
+  assert.ok(doc, "document card renders");
+  assert.equal(doc.textContent, "Document (application/pdf)");
 });

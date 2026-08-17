@@ -4,19 +4,30 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/matt-riley/waffle/internal/chat"
+	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/policy"
 )
 
-const dashboardChatMaxBodyBytes = 64 << 10
+const (
+	// dashboardChatMaxBodyBytes is the JSON mutation cap for open, command,
+	// export, cancel, and close. Turn is the only chat route that carries
+	// inline attachments, so it uses the larger turn limit below.
+	dashboardChatMaxBodyBytes = 64 << 10
+	// dashboardChatTurnMaxBodyBytes allows a 12MiB JSON body on /turn so
+	// a few base64 attachments can fit under llm.MaxMediaBytes each.
+	dashboardChatTurnMaxBodyBytes = 12 << 20
+)
 
 const mutationResponseEnvelopeVersion = "waffle-desk-mutation-v1"
 
@@ -145,6 +156,9 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 	mutation := func(next http.Handler) http.Handler {
 		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatMaxBodyBytes, next)
 	}
+	turnMutation := func(next http.Handler) http.Handler {
+		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatTurnMaxBodyBytes, next)
+	}
 	mux.Handle("GET /api/v1/desk/chat/commands", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, struct {
 			Commands []chat.Command `json:"commands"`
@@ -193,15 +207,29 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			State:         config.ChatClients.safeChatState(state),
 		})
 	})))
-	mux.Handle("POST /api/v1/desk/chat/turn", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/desk/chat/turn", turnMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			ClientID string `json:"client_id"`
-			Text     string `json:"text"`
+			ClientID    string           `json:"client_id"`
+			Text        string           `json:"text"`
+			Attachments []deskAttachment `json:"attachments"`
 		}
 		if !decodeChatRequest(w, r, &request) {
 			return
 		}
-		if err := config.ChatClients.Turn(r.Context(), request.ClientID, request.Text); err != nil {
+		if len(request.Attachments) == 0 {
+			if err := config.ChatClients.Turn(r.Context(), request.ClientID, request.Text); err != nil {
+				writeChatError(w, err, "turn_failed")
+				return
+			}
+			writeJSON(w, http.StatusOK, struct{}{})
+			return
+		}
+		media, err := buildDeskMediaBlocks(request.Attachments)
+		if err != nil {
+			writeChatError(w, err, "attachment_invalid")
+			return
+		}
+		if err := config.ChatClients.TurnMedia(r.Context(), request.ClientID, request.Text, media); err != nil {
 			writeChatError(w, err, "turn_failed")
 			return
 		}
@@ -562,4 +590,45 @@ func (w *responseCapture) AfterResponse(callback func() RestartScheduleOutcome) 
 	if callback != nil {
 		w.afterResponse = append(w.afterResponse, callback)
 	}
+}
+
+// deskAttachment is one browser-supplied attachment: a display name, an
+// exact media type, and the base64 payload (#473).
+type deskAttachment struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	DataB64   string `json:"data_base64"`
+}
+
+// buildDeskMediaBlocks validates browser-supplied attachments against the
+// canonical llm allowlist and size bounds. The agent injects the untrusted
+// media label on the provider request; it is not persisted into history.
+func buildDeskMediaBlocks(attachments []deskAttachment) ([]llm.Block, error) {
+	if len(attachments) > 4 {
+		return nil, errors.New("too many attachments (max 4)")
+	}
+	blocks := make([]llm.Block, 0, len(attachments))
+	total := 0
+	for _, attachment := range attachments {
+		decoded, err := base64.StdEncoding.DecodeString(attachment.DataB64)
+		if err != nil {
+			return nil, errors.New("attachment payload is not valid base64")
+		}
+		total += len(decoded)
+		if total > llm.MaxMediaBytes {
+			return nil, errors.New("attachment payloads are too large")
+		}
+		var block llm.Block
+		switch {
+		case strings.HasPrefix(attachment.MediaType, "image/"):
+			block, err = llm.NewImageBlock(attachment.MediaType, decoded)
+		default:
+			block, err = llm.NewDocumentBlock(attachment.MediaType, decoded)
+		}
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, nil
 }

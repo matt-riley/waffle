@@ -1336,6 +1336,23 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 	return chat.Result{State: &state}, nil
 }
 
+// TurnMedia records an attachment turn exactly like a plain turn, keeping the
+// media blocks in the in-memory history so restored transcripts render cards.
+func (b *fixtureChatBackend) TurnMedia(ctx context.Context, input string, media []llm.Block, emit func(chat.Event)) error {
+	message := llm.UserBlocks(input, media)
+	b.history = append(b.history, message)
+	assistantText := "Fixture reply"
+	b.history = append(b.history,
+		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}},
+	)
+	emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+	if current, err := b.state(); err == nil {
+		emit(chat.Event{Kind: chat.EventState, State: &current})
+	}
+	emit(chat.Event{Kind: chat.EventTurnDone})
+	return nil
+}
+
 func (b *fixtureChatBackend) Cancel() {}
 
 func (b *fixtureChatBackend) Close(context.Context) error { return nil }
