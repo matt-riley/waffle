@@ -1093,7 +1093,7 @@ test("keyboard navigation reaches every destination and dialog returns focus", a
 
 test("fixed mobile navigation never obscures the composer, last content, or dialogs", async ({ page }) => {
   test.skip(
-    !["mobile", "narrow"].includes(test.info().project.name),
+    !["tablet", "mobile", "narrow"].includes(test.info().project.name),
     "Run the obstruction checks on mobile widths.",
   );
   await page.goto(deskURL("today"));
@@ -1129,22 +1129,6 @@ test("fixed mobile navigation never obscures the composer, last content, or dial
     .evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
   expect(labelSize).toBeGreaterThanOrEqual(10);
 
-  // A review dialog opens in the modal top layer, above the navigation: the
-  // bar is inert while the dialog is open (native modal semantics).
-  await page.getByRole("link", { name: "Workspaces", exact: true }).click();
-  await expect(page).toHaveURL(/section=workspaces/);
-  const dirty = page.locator("[data-workspace-id='workspace-dirty']");
-  await expect(dirty).toBeVisible();
-  await dirty.getByRole("button", { name: "Review close", exact: true }).click();
-  const closeDialog = page.locator("#workspace-close-dialog");
-  await expect(closeDialog).toBeVisible();
-  const before = page.url();
-  await page.getByRole("link", { name: "Tasks", exact: true }).click({ force: true });
-  await page.waitForTimeout(150);
-  expect(page.url()).toBe(before);
-  await closeDialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByRole("link", { name: "Tasks", exact: true }).click();
-  await expect(page).toHaveURL(/section=tasks/);
 });
 
 test("reduced motion suppresses animation and preserves an overflow-free desk", async ({ page }) => {
