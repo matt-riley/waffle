@@ -400,7 +400,7 @@ func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) 
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { factoryCalls++; return &fakeChatBackend{}, nil }, bytes.NewReader(bytes.Repeat([]byte{9}, 128)))
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, APIConfig{Security: security, Hub: NewEventHub(4), ChatClients: clients, Idempotency: NewIdempotencyStore(nil, 8, time.Minute)})
-	routes := []string{"open", "turn", "command", "cancel", "close"}
+	routes := []string{"open", "turn", "command", "cancel", "close", "export"}
 	for _, route := range routes {
 		t.Run(route+" missing token", func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewBufferString(`{}`))
@@ -434,7 +434,11 @@ func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) 
 			}
 		})
 		t.Run(route+" oversized", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(bytes.Repeat([]byte("x"), dashboardChatMaxBodyBytes+1)))
+			limit := dashboardChatMaxBodyBytes
+			if route == "turn" {
+				limit = dashboardChatTurnMaxBodyBytes
+			}
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(bytes.Repeat([]byte("x"), int(limit)+1)))
 			req.Host = "127.0.0.1:8422"
 			req.Header.Set("X-Waffle-Desk-Token", security.Token())
 			req.Header.Set("Idempotency-Key", route+"-large")
@@ -447,6 +451,34 @@ func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) 
 	}
 	if factoryCalls != 0 {
 		t.Fatalf("factory calls = %d", factoryCalls)
+	}
+}
+
+func TestChatTurnAllowsBodiesThatOtherChatMutationsReject(t *testing.T) {
+	security := mustSecurity(t, "127.0.0.1:8422")
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return &fakeChatBackend{}, nil }, nil)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, APIConfig{Security: security, Hub: NewEventHub(4), ChatClients: clients, Idempotency: NewIdempotencyStore(nil, 8, time.Minute)})
+	body := bytes.Repeat([]byte("x"), int(dashboardChatMaxBodyBytes)+1)
+	for _, route := range []string{"open", "command", "export", "close"} {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(body))
+		req.Host = "127.0.0.1:8422"
+		req.Header.Set("X-Waffle-Desk-Token", security.Token())
+		req.Header.Set("Idempotency-Key", route+"-mid")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("%s status = %d, want %d", route, rec.Code, http.StatusRequestEntityTooLarge)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/turn", bytes.NewReader(body))
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", "turn-mid")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatal("turn rejected a body that only exceeds the non-turn chat cap")
 	}
 }
 

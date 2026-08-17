@@ -19,7 +19,15 @@ import (
 	"github.com/matt-riley/waffle/internal/policy"
 )
 
-const dashboardChatMaxBodyBytes = 12 << 20
+const (
+	// dashboardChatMaxBodyBytes is the JSON mutation cap for open, command,
+	// export, cancel, and close. Turn is the only chat route that carries
+	// inline attachments, so it uses the larger turn limit below.
+	dashboardChatMaxBodyBytes = 64 << 10
+	// dashboardChatTurnMaxBodyBytes allows a 12MiB JSON body on /turn so
+	// a few base64 attachments can fit under llm.MaxMediaBytes each.
+	dashboardChatTurnMaxBodyBytes = 12 << 20
+)
 
 const mutationResponseEnvelopeVersion = "waffle-desk-mutation-v1"
 
@@ -148,6 +156,9 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 	mutation := func(next http.Handler) http.Handler {
 		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatMaxBodyBytes, next)
 	}
+	turnMutation := func(next http.Handler) http.Handler {
+		return NewMutationHandler(config.Security, config.Idempotency, dashboardChatTurnMaxBodyBytes, next)
+	}
 	mux.Handle("GET /api/v1/desk/chat/commands", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, struct {
 			Commands []chat.Command `json:"commands"`
@@ -196,7 +207,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			State:         config.ChatClients.safeChatState(state),
 		})
 	})))
-	mux.Handle("POST /api/v1/desk/chat/turn", mutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/desk/chat/turn", turnMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ClientID    string           `json:"client_id"`
 			Text        string           `json:"text"`
@@ -590,9 +601,8 @@ type deskAttachment struct {
 }
 
 // buildDeskMediaBlocks validates browser-supplied attachments against the
-// canonical llm allowlist and size bounds. Media is untrusted input, so every
-// block is framed with the standard untrusted-media label before it can reach
-// a model (#473).
+// canonical llm allowlist and size bounds. The agent injects the untrusted
+// media label on the provider request; it is not persisted into history.
 func buildDeskMediaBlocks(attachments []deskAttachment) ([]llm.Block, error) {
 	if len(attachments) > 4 {
 		return nil, errors.New("too many attachments (max 4)")
@@ -620,5 +630,5 @@ func buildDeskMediaBlocks(attachments []deskAttachment) ([]llm.Block, error) {
 		}
 		blocks = append(blocks, block)
 	}
-	return llm.LabelUntrustedMedia(blocks), nil
+	return blocks, nil
 }

@@ -333,14 +333,17 @@ func (r *chatRuntime) Turn(ctx context.Context, input string, emit func(chatpkg.
 	return r.turnWithMedia(ctx, input, nil, emit)
 }
 
-// TurnMedia runs one turn with validated media blocks attached to the user
-// message. Media blocks must already satisfy the canonical llm validation
-// (allowlist, size, base64) before reaching the runtime (#473).
+// TurnMedia runs one turn with media blocks attached to the user message.
+// Media is validated with llm.ValidateBlocks before the turn starts so
+// unsupported or oversized payloads never enter history (#473).
 func (r *chatRuntime) TurnMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
 	return r.turnWithMedia(ctx, input, media, emit)
 }
 
 func (r *chatRuntime) turnWithMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
+	if err := llm.ValidateBlocks(media); err != nil {
+		return fmt.Errorf("invalid media: %w", err)
+	}
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {

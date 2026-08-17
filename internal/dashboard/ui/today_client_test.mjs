@@ -3555,6 +3555,70 @@ test("attachments preview, reject unsupported types, and send with the turn", as
   assert.equal(body.attachments[0].name, "shot.png");
   assert.equal(body.attachments[0].data_base64, pngB64);
   assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 0);
+  const liveImage = harness.elements["#desk-transcript"].querySelector(".message-media-image");
+  assert.ok(liveImage, "live transcript shows the sent image");
+  assert.match(liveImage.getAttribute("src"), new RegExp(`^data:image/png;base64,${pngB64}$`));
+});
+
+test("attachments-only submit sends without text", async () => {
+  const harness = createHarness();
+  await flush();
+  harness.elements["#desk-attach"].files = [
+    { name: "shot.png", type: "image/png", size: 100 },
+  ];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  harness.elements["#desk-message"].value = "";
+  void harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  const turn = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turn.length, 1);
+  const body = JSON.parse(turn[0].options.body);
+  assert.equal(body.text, "");
+  assert.equal(body.attachments.length, 1);
+  assert.equal(body.attachments[0].name, "shot.png");
+  assert.ok(harness.elements["#desk-transcript"].querySelector(".message-media-image"));
+});
+
+test("queued follow-up keeps attachments and sends them after turn_done", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const submit = harness.elements["#desk-composer"].listener("submit");
+  const pngB64 = harness.fakeFilePayloads["shot.png"];
+
+  message.value = "first";
+  const first = submit({ preventDefault() {} });
+  harness.elements["#desk-attach"].files = [
+    { name: "shot.png", type: "image/png", size: 100 },
+  ];
+  await harness.elements["#desk-attach"].listener("change")();
+  await flush();
+  message.value = "look";
+  void submit({ preventDefault() {} });
+  await flush();
+
+  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/turn").length, 1);
+  assert.match(harness.elements["#desk-queue"].textContent, /shot\.png/);
+  assert.equal(harness.elements["#desk-attachment-preview"].childNodes.length, 1);
+
+  harness.turnResponse.resolve(jsonResponse({}));
+  await first;
+  await flush();
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState() },
+  });
+  await flush();
+
+  const turns = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  assert.equal(turns.length, 2);
+  const followUp = JSON.parse(turns[1].options.body);
+  assert.equal(followUp.text, "look");
+  assert.equal(followUp.attachments.length, 1);
+  assert.equal(followUp.attachments[0].data_base64, pngB64);
 });
 
 test("attachments cap at four and a fifth is refused", async () => {

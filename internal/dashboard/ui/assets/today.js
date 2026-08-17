@@ -180,15 +180,20 @@ function readQueue() {
       !queue ||
       typeof queue.sessionID !== "string" ||
       typeof queue.text !== "string" ||
-      queue.text.trim() === "" ||
       typeof queue.idempotencyKey !== "string"
     ) {
+      globalThis.sessionStorage?.removeItem(queueStorageKey);
+      return null;
+    }
+    const attachments = normalizeQueuedAttachments(queue.attachments);
+    if (queue.text.trim() === "" && attachments.length === 0) {
       globalThis.sessionStorage?.removeItem(queueStorageKey);
       return null;
     }
     return {
       sessionID: queue.sessionID,
       text: queue.text,
+      attachments,
       idempotencyKey: queue.idempotencyKey,
       held: queue.held === true,
     };
@@ -2327,11 +2332,12 @@ async function submitTurn(event, explicitText, idempotencyKey) {
   dictation.stop();
   event.preventDefault();
   const text = String(explicitText ?? elements.message.value).trim();
-  if (!text || state.clientID === "") {
+  const attachments = state.attachments.slice();
+  if ((!text && attachments.length === 0) || state.clientID === "") {
     return;
   }
   if (state.currentPhase !== phase.idle) {
-    queueFollowUp(text);
+    queueFollowUp(text, attachments);
     return;
   }
   await sendTurn(text, turnIdempotencyKey(text, idempotencyKey), {
@@ -2340,9 +2346,11 @@ async function submitTurn(event, explicitText, idempotencyKey) {
 }
 
 // queueFollowUp stores the single visible follow-up for the current session
-// while a turn is running. It is dispatched only after the running turn
-// completes successfully in the same session.
-function queueFollowUp(text) {
+// while a turn is running. Attachments stay with the queue so a busy desk
+// cannot drop files. It is dispatched only after the running turn completes
+// successfully in the same session.
+function queueFollowUp(text, attachments) {
+  const queuedAttachments = (attachments || []).slice();
   if (!state.sessionID) {
     return;
   }
@@ -2357,7 +2365,7 @@ function queueFollowUp(text) {
   }
   const existing = state.queue;
   if (existing) {
-    if (existing.text === text) {
+    if (existing.text === text && sameAttachments(existing.attachments, queuedAttachments)) {
       setStatusMessage(
         elements.composerStatus,
         "That message is already queued.",
@@ -2377,6 +2385,7 @@ function queueFollowUp(text) {
   persistQueue({
     sessionID: state.sessionID,
     text,
+    attachments: queuedAttachments,
     idempotencyKey: crypto.randomUUID(),
     held: false,
   });
@@ -2406,7 +2415,8 @@ function renderQueueBanner() {
     : "Follow-up queued";
   const text = document.createElement("p");
   text.className = "queue-text";
-  text.textContent = queue.text;
+  const names = (queue.attachments || []).map((attachment) => attachment.name).filter(Boolean);
+  text.textContent = [queue.text, names.join(", ")].filter(Boolean).join(" · ");
   const actions = document.createElement("div");
   actions.className = "queue-actions";
   const edit = document.createElement("button");
@@ -2420,6 +2430,8 @@ function renderQueueBanner() {
       return;
     }
     elements.message.value = current.text;
+    state.attachments = (current.attachments || []).slice();
+    renderAttachmentPreviews();
     persistQueue(null);
     elements.message.focus();
     setStatusMessage(
@@ -2465,11 +2477,74 @@ function maybeDispatchFollowUp(turn) {
   );
   void sendTurn(followUp.text, followUp.idempotencyKey, {
     clearComposer: false,
+  }, followUp.attachments || []);
+}
+
+function consumeAttachments() {
+  state.attachments = [];
+  renderAttachmentPreviews();
+}
+
+function normalizeQueuedAttachments(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const attachments = [];
+  for (const item of raw) {
+    if (
+      !item ||
+      typeof item.name !== "string" ||
+      typeof item.mediaType !== "string" ||
+      typeof item.data !== "string"
+    ) {
+      continue;
+    }
+    attachments.push({
+      name: item.name,
+      mediaType: item.mediaType,
+      data: item.data,
+    });
+  }
+  return attachments;
+}
+
+function sameAttachments(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((item, index) => (
+    item.name === b[index].name &&
+    item.mediaType === b[index].mediaType &&
+    item.data === b[index].data
+  ));
+}
+
+function attachLiveMedia(article, attachments) {
+  if (!article || !attachments || attachments.length === 0) {
+    return;
+  }
+  const media = renderMediaBlocks({
+    blocks: attachments.map((attachment) => ({
+      type: attachmentConfig.imageTypes.has(attachment.mediaType) ? "image" : "document",
+      source: { data: attachment.data, media_type: attachment.mediaType },
+    })),
   });
+  if (media.length === 0) {
+    return;
+  }
+  const holder = document.createElement("div");
+  holder.className = "message-attachments";
+  for (const node of media) {
+    holder.appendChild(node);
+  }
+  article.insertBefore(holder, article.querySelector(".message-body")?.nextSibling || null);
 }
 
 async function sendTurn(text, idempotencyKey, options, attachments = []) {
   dictation.stop();
+  consumeAttachments();
   const generation = state.generation;
   const turn = {
     id: ++state.turnSequence,
@@ -2479,14 +2554,21 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
     cancelSettled: true,
     cancelled: false,
     text,
+    attachments: (attachments || []).slice(),
     idempotencyKey,
   };
   state.activeTurn = turn;
   state.lastUserText = text;
   setPhase(phase.sending);
   setStatusMessage(elements.composerStatus, "", false, "composer");
-  const promptArticle = appendMessage("user", text, state.streamingMessage);
+  const promptArticle = appendMessage(
+    "user",
+    text,
+    state.streamingMessage,
+    turn.attachments.length > 0,
+  );
   if (promptArticle) {
+    attachLiveMedia(promptArticle, turn.attachments);
     state.promptArticle = promptArticle;
     state.promptIndex = state.historyLength;
     promptArticle.dataset.branchKeep = String(state.historyLength);
@@ -2545,6 +2627,8 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
     retry.addEventListener("click", () => {
       setStatusMessage(elements.composerStatus, "", false, "composer");
       elements.message.value = turn.text;
+      state.attachments = (turn.attachments || []).slice();
+      renderAttachmentPreviews();
       elements.message.focus();
       updateControls();
       void submitTurn({ preventDefault() {} });
@@ -3766,7 +3850,7 @@ function handleComposerKeydown(event) {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-    if (elements.message.value.trim() !== "") {
+    if (elements.message.value.trim() !== "" || state.attachments.length > 0) {
       event.preventDefault();
       void submitTurn({ preventDefault() {} });
     }
