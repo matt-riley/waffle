@@ -354,6 +354,25 @@ func (c *ChatClients) Turn(ctx context.Context, clientID, input string) error {
 	return client.backend.Turn(operationCtx, input, c.emit(clientID))
 }
 
+// TurnMedia forwards one client turn with validated media blocks. Backends
+// without media support reject the turn so the Desk never pretends an
+// attachment was understood (#473).
+func (c *ChatClients) TurnMedia(ctx context.Context, clientID, input string, media []llm.Block) error {
+	if err := c.reap(ctx); err != nil {
+		return err
+	}
+	client, operationCtx, err := c.begin(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	defer c.end(clientID, client)
+	mediaTurner, ok := client.backend.(chat.MediaTurner)
+	if !ok {
+		return errors.New("attachments are not supported by this chat connection")
+	}
+	return mediaTurner.TurnMedia(operationCtx, input, media, c.emit(clientID))
+}
+
 // Command forwards one command while preserving the one-active-operation invariant.
 func (c *ChatClients) Command(ctx context.Context, clientID string, command chat.ParsedCommand) (chat.Result, error) {
 	if err := c.reap(ctx); err != nil {

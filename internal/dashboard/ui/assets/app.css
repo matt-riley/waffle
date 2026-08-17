@@ -2042,3 +2042,66 @@ h3 {
   padding: 0.3rem 0.5rem;
   width: fit-content;
 }
+
+.attachment-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.attachment-chip {
+  align-items: center;
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  display: inline-flex;
+  gap: 0.45rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.attachment-thumb {
+  height: 2.4rem;
+  object-fit: cover;
+  width: 2.4rem;
+}
+
+.attachment-name {
+  font-size: 0.78rem;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.attach-button {
+  background: transparent;
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+  font-size: 0.78rem;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.message-media-image {
+  border: 1px solid var(--rule);
+  max-height: 12rem;
+  max-width: 100%;
+}
+
+.message-media-doc {
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.4rem 0.6rem;
+}
