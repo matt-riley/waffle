@@ -19,7 +19,7 @@ type OpenOptions struct {
 
 	// Temporary opens a conversation that never enters durable history,
 	// summaries, FTS recall, learning, or memory (#475).
-	Temporary bool
+	Temporary bool `json:"temporary,omitempty"`
 }
 
 // Model describes a configured model without exposing provider credentials.
