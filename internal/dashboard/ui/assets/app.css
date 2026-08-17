@@ -2105,3 +2105,139 @@ h3 {
   font-size: 0.78rem;
   padding: 0.4rem 0.6rem;
 }
+
+/* Command palette (#477): a global Ctrl/Cmd+K surface backed by existing
+   Desk actions and canonical command metadata. */
+.command-palette {
+  background: rgb(33 29 25 / 45%);
+  inset: 0;
+  padding: 4rem 1rem 1rem;
+  position: fixed;
+  z-index: 20;
+}
+
+.palette-box {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  margin: 0 auto;
+  max-width: 34rem;
+  padding: 0.8rem;
+}
+
+.palette-search-row {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.palette-search-row input {
+  border: 1px solid var(--ink);
+  flex: 1;
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+}
+
+.palette-search-row kbd,
+.palette-shortcut-hint kbd,
+.palette-help-row kbd {
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.35rem;
+}
+
+.palette-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.palette-actions button {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.palette-results {
+  display: grid;
+  margin-top: 0.6rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.palette-item {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--ink);
+  display: flex;
+  gap: 0.6rem;
+  justify-content: space-between;
+  padding: 0.45rem 0.5rem;
+  text-align: left;
+  width: 100%;
+}
+
+.palette-item:hover,
+.palette-item:focus {
+  background: var(--cream);
+  outline: 1px solid var(--ginger);
+}
+
+.palette-item-label {
+  font-weight: 700;
+}
+
+.palette-item-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.palette-empty,
+.palette-help-heading,
+.palette-help-row {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.3rem 0;
+}
+
+.palette-help-heading {
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.palette-shortcut-hint {
+  color: var(--muted);
+  font-size: 0.74rem;
+  margin: 0.6rem 0 0;
+}
+
+.palette-open {
+  background: transparent;
+  border-color: var(--ginger-dark);
+  color: var(--ginger);
+  font-size: 0.78rem;
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  width: fit-content;
+}
+
+@media (max-width: 768px) {
+  .palette-open {
+    display: none;
+  }
+}
+
+.palette-open kbd {
+  background: transparent;
+  border: 0;
+  color: var(--ginger);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+}

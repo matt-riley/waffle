@@ -51,6 +51,21 @@ templ Shell(view ShellView) {
 					}
 				</main>
 			</div>
+			<div class="command-palette" id="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" hidden>
+				<div class="palette-box">
+					<div class="palette-search-row">
+						<input id="palette-search" type="search" placeholder="Search sections, actions, and commands…" autocomplete="off" aria-label="Search commands"/>
+						<kbd>Esc</kbd>
+					</div>
+					<div class="palette-actions">
+						<button id="palette-new" type="button">New conversation</button>
+						<button id="palette-open-tasks" type="button">Open Tasks</button>
+						<button id="palette-help" type="button">Keyboard shortcuts</button>
+					</div>
+					<div class="palette-results" id="palette-results" role="listbox" aria-label="Command results"></div>
+					<p class="palette-shortcut-hint" id="palette-shortcut-hint">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (or <kbd>Cmd</kbd>+<kbd>K</kbd>) anywhere to open the palette.</p>
+				</div>
+			</div>
 		</body>
 	</html>
 }
