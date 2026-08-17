@@ -27,6 +27,10 @@ func (r *chatRuntime) commandRepo(ctx context.Context, repoArg string, emit func
 		r.mu.Unlock()
 		return chatpkg.Result{}, errors.New("chat runtime is not open")
 	}
+	if !r.persistable() {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("temporary conversations cannot open a durable workspace")
+	}
 	if r.agentCancel != nil {
 		r.mu.Unlock()
 		return chatpkg.Result{Confirm: true, Text: "A turn is active; confirm before opening a repository workspace."}, nil
