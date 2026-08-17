@@ -452,6 +452,44 @@ test("Today sends a streamed reply and confirms cancellation", async ({ page }) 
   await expect(cancel).toBeDisabled();
 });
 
+test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  // Existing session with a completed turn.
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Summarize the fixture");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".user-message .message-body")).toHaveText(
+    "Summarize the fixture",
+  );
+  await expect(page.locator(".waffle-message .message-body")).toHaveText(
+    "Fixture reply",
+  );
+
+  // New conversation atomically replaces the old transcript with the new
+  // session's empty state instead of leaving the prior turns behind (#455).
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  await expect(page.locator("#desk-session-title")).toHaveText("Fresh conversation");
+  await expect(page.locator("#desk-transcript .user-message")).toHaveCount(0);
+  await expect(page.locator("#desk-transcript")).toContainText(
+    "The desk is ready. What are we working on?",
+  );
+
+  // The first turn renders only into the new session's DOM.
+  await message.fill("First message in the fresh session");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#desk-transcript .user-message .message-body")).toHaveText(
+    "First message in the fresh session",
+  );
+  await expect(page.locator("#desk-transcript .waffle-message .message-body")).toHaveText(
+    "Fixture reply",
+  );
+  await expect(page.locator("#desk-transcript .user-message")).toHaveCount(1);
+});
+
 test("Today renders Markdown, keyboard send, and paired tool evidence", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the rich transcript flow once.");
   await page.goto(deskURL("today"));
@@ -689,7 +727,11 @@ test("Today exposes existing commands and resumes a recent session in place", as
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "New conversation", exact: true }).click();
   await expect(page.locator("#desk-session-title")).toHaveText("Fresh conversation");
-  await expect(page.locator("#desk-transcript")).toContainText("Fresh start");
+  // A new session owns an empty transcript: the previous conversation must
+  // be replaced, not left behind (#455).
+  await expect(page.locator("#desk-transcript")).toContainText(
+    "The desk is ready. What are we working on?",
+  );
 
   await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
   await expect(page.getByRole("option", { name: /Release review/ })).toBeVisible();

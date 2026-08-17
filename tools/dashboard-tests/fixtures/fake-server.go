@@ -1047,13 +1047,10 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 		}
 		b.sessions.mu.Unlock()
 		b.session = "session-fresh"
-		b.history = []llm.Message{{
-			Role: llm.RoleAssistant,
-			Blocks: []llm.Block{{
-				Type: llm.BlockText,
-				Text: "Fresh start",
-			}},
-		}}
+		// Match the real backend: a brand-new session has no history, which
+		// serializes as a missing/null history so the browser must treat an
+		// authoritative empty state as an empty transcript (#455).
+		b.history = nil
 	case "sessions":
 		all, err := b.sessions.List(context.Background(), 50)
 		if err != nil {
