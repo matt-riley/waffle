@@ -930,7 +930,9 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 	b.history = append(b.history,
 		llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: input}}},
 	)
-	if strings.Contains(strings.ToLower(input), "markdown") {
+	var assistantText string
+	switch {
+	case strings.Contains(strings.ToLower(input), "markdown"):
 		emit(chat.Event{
 			Kind:       chat.EventToolStarted,
 			ToolName:   "fixture_read",
@@ -943,27 +945,20 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 			ByteCount:  24,
 			DurationMS: 18,
 		})
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n| Name | Cost |\n| :--- |",
-		})
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: " :---: |\n| mise | $0 |\n| figma | $12 |\n\n```go\nfmt.Println(\"fixture\")\n```",
-		})
-		emit(chat.Event{Kind: chat.EventTurnDone})
-		return nil
-	}
-	if strings.Contains(strings.ToLower(input), "wide table") {
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n",
-		})
-	} else {
-		emit(chat.Event{Kind: chat.EventTextDelta, Text: "Fixture reply"})
+		assistantText = "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n| Name | Cost |\n| :--- | :---: |\n| mise | $0 |\n| figma | $12 |\n\n```go\nfmt.Println(\"fixture\")\n```"
+		// Split the markdown across deltas so the client exercises streaming
+		// append (and the table lands on a later frame).
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText[:len(assistantText)/2]})
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText[len(assistantText)/2:]})
+	case strings.Contains(strings.ToLower(input), "wide table"):
+		assistantText = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n"
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+	default:
+		assistantText = "Fixture reply"
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
 	}
 	b.history = append(b.history,
-		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "Fixture reply"}}},
+		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}},
 	)
 	emit(chat.Event{Kind: chat.EventTurnDone})
 	return nil

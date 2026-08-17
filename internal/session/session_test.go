@@ -946,12 +946,16 @@ func TestBranchCopiesCanonicalPrefixAndLineage(t *testing.T) {
 		t.Fatalf("branch turns = %d, want 4", len(turns))
 	}
 	for i, turn := range turns {
-		want := []string{"hello", "hi there", "what is 2+2?", "four"}[i]
-		if turn.Role != llm.RoleAssistant && i%2 == 0 {
-			continue
+		wantRole := llm.RoleUser
+		if i%2 == 1 {
+			wantRole = llm.RoleAssistant
 		}
-		if i%2 == 1 && turn.Text() != want {
-			t.Fatalf("turn %d text = %q, want %q", i, turn.Text(), want)
+		if turn.Role != wantRole {
+			t.Fatalf("turn %d role = %q, want %q", i, turn.Role, wantRole)
+		}
+		wantText := []string{"hello", "hi there", "what is 2+2?", "four"}[i]
+		if turn.Text() != wantText {
+			t.Fatalf("turn %d text = %q, want %q", i, turn.Text(), wantText)
 		}
 	}
 	// Persisted round-trip: a fresh load sees the same lineage.
