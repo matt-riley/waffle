@@ -34,6 +34,13 @@ test("Waffle htmx bridge retains unchanged retry identity and rotates after succ
   assert.match(shim, /textContent = "Enrolled"/);
 });
 
+test("skill-import disclosure is removed while imports are disabled", () => {
+  assert.match(shim, /capability-skill-import-disclosure/);
+  assert.match(shim, /disclosure\.hidden = !showDisclosure/);
+  assert.match(shim, /aria-disabled/);
+  assert.match(shim, /waffleSourceAvailable/);
+});
+
 test("the four migrated sections declare server fragments and Today stays bespoke", () => {
   for (const section of ["capabilities", "tasks", "workspaces", "memory"]) {
     assert.match(templates[section], /hx-(get|post)=/);

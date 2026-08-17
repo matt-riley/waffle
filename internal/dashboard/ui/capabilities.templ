@@ -92,7 +92,7 @@ templ Capabilities() {
 				</header>
 				<div id="capability-skills" class="capability-list" hx-get="/api/v1/desk/capabilities?part=skills" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 				<p id="capability-skill-stage-prerequisite" class="capability-form-status" role="status" aria-live="polite" hidden></p>
-				<details class="capability-disclosure">
+				<details class="capability-disclosure" id="capability-skill-import-disclosure" aria-disabled="true" hidden>
 					<summary>Add a skill for review</summary>
 					<form id="capability-skill-stage-form" aria-describedby="capability-skill-stage-status" hx-post="/api/v1/desk/skills/stage" hx-target="#capability-skill-review" hx-swap="outerHTML" data-waffle-json="true">
 						<h3>Add a skill for review</h3>

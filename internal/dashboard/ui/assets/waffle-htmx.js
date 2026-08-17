@@ -201,10 +201,22 @@
 		const gitHelp = document.querySelector("#capability-skill-git-help");
 		const form = document.querySelector("#capability-skill-stage-form");
 		const prerequisite = document.querySelector("#capability-skill-stage-prerequisite");
+		const disclosure = document.querySelector("#capability-skill-import-disclosure");
 		if (!form || !localHelp || !gitHelp) return;
-		const available = (element) => element.dataset.waffleSourceAvailable === "true" || !element.textContent.includes("none configured");
-		const localAvailable = available(localHelp);
-		const gitAvailable = available(gitHelp);
+		// A source is only proven available once its fragment loads the
+		// explicit data attribute; an untouched help node is still loading and
+		// never counts as an available installer source (#464).
+		const sourceState = (element) => {
+			const state = element.dataset.waffleSourceAvailable;
+			if (state === "true") return true;
+			if (state === "false") return false;
+			return null;
+		};
+		const localState = sourceState(localHelp);
+		const gitState = sourceState(gitHelp);
+		const loaded = localState !== null && gitState !== null;
+		const localAvailable = localState === true;
+		const gitAvailable = gitState === true;
 		const availableSource = localAvailable || gitAvailable;
 		form.hidden = !availableSource;
 		form.querySelector?.("#capability-skill-local-path") && (form.querySelector("#capability-skill-local-path").disabled = restartLocked || !localAvailable);
@@ -212,8 +224,17 @@
 		form.querySelector?.("#capability-skill-commit") && (form.querySelector("#capability-skill-commit").disabled = restartLocked || !gitAvailable);
 		const submit = form.querySelector?.("button[type=submit]");
 		if (submit) submit.disabled = restartLocked || !availableSource;
+		// The add/review disclosure is removed while imports are disabled and
+		// inert while sources are still loading, so it can never open an empty
+		// panel (#464). The prerequisite line carries the safe next action.
+		const showDisclosure = loaded && availableSource;
+		if (disclosure) {
+			disclosure.hidden = !showDisclosure;
+			if (!showDisclosure) disclosure.open = false;
+			disclosure.setAttribute("aria-disabled", showDisclosure ? "false" : "true");
+		}
 		if (prerequisite) {
-			prerequisite.hidden = availableSource;
+			prerequisite.hidden = !loaded || availableSource;
 			prerequisite.textContent = availableSource ? "" : "Skill imports are disabled. Configure an allowed local root or Git host, then restart Waffle.";
 		}
 	}
