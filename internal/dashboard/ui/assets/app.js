@@ -177,6 +177,245 @@ async function hydrateRail() {
   }
 }
 
+// Command palette (#477): a global Ctrl/Cmd+K surface backed by existing
+// Desk actions and canonical chat command metadata. It never invents a
+// shell or an executor — selection clicks real controls or dispatches the
+// same command the composer would.
+const palette = (() => {
+  let isOpen = false;
+  let items = [];
+  let helpVisible = false;
+  let commands = [];
+
+  const elements = {
+    root: document.querySelector("#command-palette"),
+    search: document.querySelector("#palette-search"),
+    results: document.querySelector("#palette-results"),
+    newButton: document.querySelector("#palette-new"),
+    tasksButton: document.querySelector("#palette-open-tasks"),
+    helpButton: document.querySelector("#palette-help"),
+    hint: document.querySelector("#palette-shortcut-hint"),
+    openButton: document.querySelector("#palette-open"),
+  };
+
+  function section() {
+    return document.querySelector(".desk-shell")?.dataset.activeSection || "today";
+  }
+
+  function run(element) {
+    if (element && typeof element.click === "function") {
+      element.click();
+    } else {
+      console.log("PALETTE_RUN none", Boolean(element));
+    }
+  }
+
+  function sectionItems() {
+    const items = [
+      { label: "Go to Today", hint: "navigation", run: () => run(document.querySelector('a[href*="section=today"]')) },
+      { label: "Go to Tasks", hint: "navigation", run: () => run(document.querySelector('a[href*="section=tasks"]')) },
+      { label: "Go to Workspaces", hint: "navigation", run: () => run(document.querySelector('a[href*="section=workspaces"]')) },
+      { label: "Go to Memory", hint: "navigation", run: () => run(document.querySelector('a[href*="section=memory"]')) },
+      { label: "Go to Capabilities", hint: "navigation", run: () => run(document.querySelector('a[href*="section=capabilities"]')) },
+    ];
+    switch (section()) {
+      case "today":
+        items.push(
+          { label: "New conversation", hint: "today", run: () => run(document.querySelector("#desk-new")) },
+          { label: "Recent conversations", hint: "today", run: () => run(document.querySelector("#desk-session-refresh")) },
+          { label: "Export conversation", hint: "today", run: () => run(document.querySelector("#desk-export")) },
+          { label: "Schedule this draft", hint: "today", run: () => run(document.querySelector("#desk-schedule-draft")) },
+          { label: "Start dictation", hint: "today", run: () => run(document.querySelector("#desk-dictate")) },
+        );
+        for (const command of commands) {
+          items.push({
+            label: command.usage || command.name,
+            hint: command.description || "chat command",
+            run: () => {
+              document.dispatchEvent(new CustomEvent("waffle:command", { detail: { name: command.name, args: "" } }));
+            },
+          });
+        }
+        break;
+      case "tasks":
+        items.push({ label: "New schedule", hint: "tasks", run: () => run(document.querySelector("#task-schedule-open")) });
+        break;
+      case "workspaces":
+        items.push({ label: "Open repository", hint: "workspaces", run: () => run(document.querySelector("#workspace-open-button")) });
+        break;
+      case "memory":
+        items.push({
+          label: "Search memory", hint: "memory", run: () => {
+            document.querySelector("#memory-query")?.focus?.();
+          },
+        });
+        break;
+      case "capabilities":
+        for (const link of document.querySelectorAll(".capability-tabs a")) {
+          const label = link.textContent.trim();
+          items.push({ label: `Open ${label}`, hint: "capabilities", run: () => run(link) });
+        }
+        break;
+    }
+    return items;
+  }
+
+  function render(query) {
+    const term = String(query || "").trim().toLowerCase();
+    if (helpVisible) {
+      elements.results.replaceChildren();
+      const heading = document.createElement("p");
+      heading.className = "palette-help-heading";
+      heading.textContent = "Keyboard shortcuts";
+      elements.results.appendChild(heading);
+      const helpItems = [
+        ["Ctrl/Cmd + K", "Open the command palette"],
+        ["Enter", "Send the message (Today composer)"],
+        ["Shift + Enter", "New line (Today composer)"],
+        ["Escape", "Stop dictation or close dialogs"],
+        ["Ctrl/Cmd + Enter", "Send even with no text when attachments are attached"],
+      ];
+      for (const [keys, what] of helpItems) {
+        const row = document.createElement("p");
+        row.className = "palette-help-row";
+        const k = document.createElement("kbd");
+        k.textContent = keys;
+        row.append(k, document.createTextNode(` — ${what}`));
+        elements.results.appendChild(row);
+      }
+      return;
+    }
+    const matches = items.filter(
+      (item) => !term || `${item.label} ${item.hint}`.toLowerCase().includes(term),
+    );
+    elements.results.replaceChildren();
+    for (const item of matches) {
+      const entry = document.createElement("button");
+      entry.type = "button";
+      entry.className = "palette-item";
+      entry.setAttribute("role", "option");
+      const label = document.createElement("span");
+      label.className = "palette-item-label";
+      label.textContent = item.label;
+      entry.appendChild(label);
+      if (item.hint) {
+        const hint = document.createElement("span");
+        hint.className = "palette-item-hint";
+        hint.textContent = item.hint;
+        entry.appendChild(hint);
+      }
+      entry.addEventListener("click", () => {
+        closePalette();
+        item.run();
+      });
+      elements.results.appendChild(entry);
+    }
+    if (matches.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching action.";
+      elements.results.appendChild(empty);
+    }
+  }
+
+  async function loadCommands() {
+    if (section() !== "today") {
+      return;
+    }
+    try {
+      const response = await fetch("/api/v1/desk/chat/commands", {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json();
+      commands = Array.isArray(payload.commands) ? payload.commands : [];
+    } catch {
+      commands = [];
+    }
+  }
+
+  function openPalette() {
+    if (!elements.root) {
+      return;
+    }
+    isOpen = true;
+    elements.root.hidden = false;
+    void loadCommands().then(() => {
+      items = sectionItems();
+      render(elements.search.value);
+    });
+    elements.search.focus();
+  }
+
+  function closePalette() {
+    if (!elements.root) {
+      return;
+    }
+    isOpen = false;
+    helpVisible = false;
+    elements.root.hidden = true;
+    elements.search.blur();
+  }
+
+  function toggle() {
+    if (isOpen) {
+      closePalette();
+    } else {
+      openPalette();
+    }
+  }
+
+  elements.openButton?.addEventListener?.("click", () => {
+    if (isOpen) {
+      closePalette();
+    } else {
+      openPalette();
+    }
+  });
+
+  if (elements.root && typeof document.addEventListener === "function") {
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && isOpen) {
+        event.preventDefault();
+        closePalette();
+        return;
+      }
+      const target = event.target;
+      const editable =
+        target &&
+        (target.matches?.("input, textarea, select") ||
+          target.isContentEditable === true);
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        if (editable && !isOpen) {
+          // Do not hijack a common edit shortcut inside editable controls.
+          return;
+        }
+        event.preventDefault();
+        toggle();
+      }
+    });
+
+    elements.search?.addEventListener("input", (event) => {
+      render(event.target.value);
+    });
+    elements.helpButton?.addEventListener("click", () => {
+      helpVisible = !helpVisible;
+      render(elements.search.value);
+    });
+    elements.newButton?.addEventListener("click", () => {
+      close();
+      run(document.querySelector("#desk-new") || document.querySelector('a[href*="section=today"]'));
+    });
+    elements.tasksButton?.addEventListener("click", () => {
+      close();
+      run(document.querySelector('a[href*="section=tasks"]'));
+    });
+  }
+
+  return { open: openPalette, close: closePalette, toggle };
+})();
+
 // Shared seam for section scripts (Today updates live connection + session model).
 globalThis.waffleDeskRail = Object.freeze({
   connectionStates,

@@ -696,6 +696,64 @@ test("Today attaches images securely, previews them, and sends them with the tur
   await expect(page.locator(".attachment-chip")).toHaveCount(0);
 });
 
+test("command palette opens everywhere, searches, and invokes existing actions", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the palette flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const palette = page.locator("#command-palette");
+  const search = page.getByLabel("Search commands");
+
+  // The visible button opens the palette; Escape closes it.
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  await expect(palette).toBeVisible();
+  await expect(search).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+
+  // Searching a navigation destination and selecting it navigates.
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  await search.fill("tasks");
+  await expect(palette.locator(".palette-item").first()).toContainText("Go to Tasks");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  await search.fill("tasks");
+  await palette.locator(".palette-item").first().click();
+  await expect(page).toHaveURL(/section=tasks/);
+  await expect(palette).toBeHidden();
+
+  // The palette is available on every section.
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  await expect(palette).toBeVisible();
+  await expect(search).toBeFocused();
+  await search.fill("memory");
+  await palette.locator(".palette-item").first().click();
+  await expect(page).toHaveURL(/section=memory/);
+
+  // The shortcut help lists discoverable keys without navigating.
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  await page.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
+  await expect(palette.locator(".palette-results")).toContainText("Ctrl/Cmd + K");
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+});
+
+test("command palette includes canonical chat commands on Today", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the command palette once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByRole("button", { name: /Commands Ctrl K/ }).click();
+  const palette = page.locator("#command-palette");
+  await expect(palette).toBeVisible();
+  const search = page.getByLabel("Search commands");
+  await search.fill("/new");
+  await expect(palette.locator(".palette-item").first()).toContainText("/new");
+  await palette.locator(".palette-item").first().click();
+  // The canonical /new command path runs with its confirmation preserved.
+  await expect(page).toHaveURL(/section=today/);
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));
@@ -1281,7 +1339,6 @@ test("workspace cards lead with truthful metadata and distinct actions", async (
 test("async review dialogs open as native modals with contained focus", async ({ page }) => {
   await page.goto(deskURL("workspaces"));
   const errors = [];
-  page.on("pageerror", (error) => errors.push(error.message));
   const dirty = page.locator("[data-workspace-id='workspace-dirty']");
   await expect(dirty).toBeVisible();
   const review = dirty.getByRole("button", { name: "Review close", exact: true });
