@@ -1148,6 +1148,30 @@ test("skill installation stays inactive until explicit activation", async ({ pag
   ).toHaveCount(0);
 });
 
+test("skill-import disclosure is removed when imports are disabled", async ({ page }) => {
+  await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Skills");
+  const disclosure = page.locator("#capability-skill-import-disclosure");
+  // Imports are enabled in the fixture: the disclosure is interactive.
+  await expect(disclosure).toBeVisible();
+  await expect(disclosure).toHaveAttribute("aria-disabled", "false");
+
+  await page.request.post(`${baseURL}/api/v1/desk/test/skill-imports?on=0`);
+  try {
+    await page.reload();
+    // The disclosure is removed, the prerequisite names the safe next step,
+    // and no interactive blank panel can be opened (#464).
+    await expect(disclosure).toBeHidden();
+    await expect(page.locator("#capability-skill-stage-prerequisite")).toBeVisible();
+    await expect(page.locator("#capability-skill-stage-prerequisite")).toContainText(
+      "Skill imports are disabled",
+    );
+    await expect(page.locator("#capability-skill-stage-form")).toBeHidden();
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/skill-imports`);
+  }
+});
+
 test("provider enrollment clears and never renders its credential", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the credential boundary flow once.");
   const credential = "desk-secret-canary";

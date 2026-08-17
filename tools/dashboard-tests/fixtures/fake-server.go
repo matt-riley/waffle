@@ -187,6 +187,16 @@ func main() {
 		sessionLock.Store(r.URL.Query().Get("on") != "0")
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Test-only control route: toggles whether skill imports are enabled so
+	// rendered tests can exercise the disabled-installer disclosure (#464).
+	mux.HandleFunc("POST /api/v1/desk/test/skill-imports", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("on") == "0" {
+			capabilities.SkillSources = dashboard.CapabilitySkillSources{}
+		} else {
+			capabilities.SkillSources = dashboard.CapabilitySkillSources{LocalRoots: []string{"allowed"}}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
 		Observability:     obs,
