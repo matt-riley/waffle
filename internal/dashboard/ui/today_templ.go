@@ -42,33 +42,46 @@ func Today(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"></script><section class=\"today\" aria-labelledby=\"desk-session-title\"><header class=\"today-header\"><div><p class=\"eyebrow\">Today</p><h1 id=\"desk-session-title\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"></script><script src=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var3 string
-		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(view.Title)
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(AssetURL("dictate.js", view.AssetVersion))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 9, Col: 44}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 5, Col: 56}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</h1></div><p class=\"phase-label\" id=\"desk-phase\" role=\"status\" aria-live=\"polite\">Opening</p><p class=\"connection\" id=\"desk-connection\"><span class=\"connection-light\" aria-hidden=\"true\"></span> <span id=\"desk-connection-text\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script><section class=\"today\" aria-labelledby=\"desk-session-title\"><header class=\"today-header\"><div><p class=\"eyebrow\">Today</p><h1 id=\"desk-session-title\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var4 string
-		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(view.Connection)
+		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(view.Title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 14, Col: 53}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 10, Col: 44}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</span></p></header>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</h1></div><p class=\"phase-label\" id=\"desk-phase\" role=\"status\" aria-live=\"polite\">Opening</p><p class=\"connection\" id=\"desk-connection\"><span class=\"connection-light\" aria-hidden=\"true\"></span> <span id=\"desk-connection-text\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var5 string
+		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(view.Connection)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 15, Col: 53}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</span></p></header>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -76,46 +89,46 @@ func Today(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div class=\"stale-banner\" id=\"desk-stale-status\" role=\"status\" aria-live=\"polite\" hidden><div><strong id=\"desk-stale-label\">This desk is out of date.</strong> <span id=\"desk-stale-message\">The transcript is still here, but sending is paused.</span></div><div class=\"stale-actions\"><button type=\"button\" id=\"desk-recover-new\" hidden>Start a new conversation</button> <button type=\"button\" id=\"desk-refresh\">Refresh Desk</button></div></div><div class=\"today-columns\"><section class=\"conversation\" aria-labelledby=\"desk-session-title\"><div class=\"message-list\" id=\"desk-transcript\" aria-label=\"Conversation transcript\"><p class=\"empty-transcript\" id=\"desk-empty-transcript\">Opening your most recent conversation…</p></div><form class=\"composer\" id=\"desk-composer\" action=\"/desk/\" method=\"post\"><div class=\"slash-menu\" id=\"desk-slash-menu\" role=\"listbox\" aria-label=\"Commands and skills\" hidden></div><div class=\"composer-session\"><div class=\"model-field\"><label for=\"desk-model\">Session model</label> <select id=\"desk-model\" name=\"model\" disabled><option value=\"")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		var templ_7745c5c3_Var5 string
-		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(view.ModelAlias)
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 39, Col: 39}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"stale-banner\" id=\"desk-stale-status\" role=\"status\" aria-live=\"polite\" hidden><div><strong id=\"desk-stale-label\">This desk is out of date.</strong> <span id=\"desk-stale-message\">The transcript is still here, but sending is paused.</span></div><div class=\"stale-actions\"><button type=\"button\" id=\"desk-recover-new\" hidden>Start a new conversation</button> <button type=\"button\" id=\"desk-refresh\">Refresh Desk</button></div></div><div class=\"today-columns\"><section class=\"conversation\" aria-labelledby=\"desk-session-title\"><div class=\"message-list\" id=\"desk-transcript\" aria-label=\"Conversation transcript\"><p class=\"empty-transcript\" id=\"desk-empty-transcript\">Opening your most recent conversation…</p></div><form class=\"composer\" id=\"desk-composer\" action=\"/desk/\" method=\"post\"><div class=\"slash-menu\" id=\"desk-slash-menu\" role=\"listbox\" aria-label=\"Commands and skills\" hidden></div><div class=\"composer-session\"><div class=\"model-field\"><label for=\"desk-model\">Session model</label> <select id=\"desk-model\" name=\"model\" disabled><option value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
-		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(view.ModelAlias)
+		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.ResolveAttributeValue(view.ModelAlias)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 39, Col: 59}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 40, Col: 39}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var6)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</option></select><p id=\"desk-model-status\">Changes this conversation only.</p></div><div class=\"model-field session-skill-field\"><label for=\"desk-skill\">Session skill</label><div class=\"session-skill-row\"><select id=\"desk-skill\" name=\"skill\" disabled></select> <button type=\"button\" id=\"desk-skill-toggle\" disabled>Attach skill</button></div><p id=\"desk-skill-status\">Changes this conversation only.</p></div></div><label for=\"desk-message\">Message Waffle</label> <textarea id=\"desk-message\" name=\"message\" rows=\"3\" placeholder=\"Ask Waffle to help…\"></textarea><p class=\"composer-hint\">Enter sends. Shift+Enter adds a new line.</p><p id=\"desk-composer-status\" class=\"composer-status\" role=\"status\" aria-live=\"polite\" hidden></p><div class=\"queue-banner\" id=\"desk-queue\" aria-label=\"Follow-up queue\" hidden></div><div class=\"composer-actions\"><button id=\"desk-cancel\" type=\"button\" class=\"cancel-button\" disabled>Cancel turn</button> <button id=\"desk-schedule-draft\" type=\"button\" class=\"schedule-button\" disabled>Schedule draft</button> <button id=\"desk-send\" type=\"submit\" class=\"send-button\" disabled>Send message</button></div></form></section><aside class=\"task-context\" aria-labelledby=\"context-title\"><h2 id=\"context-title\" class=\"context-title\">Session</h2><div class=\"conversation-actions\"><button type=\"button\" id=\"desk-new\" disabled>New conversation</button> <button type=\"button\" id=\"desk-session-refresh\" disabled>Recent conversations</button></div><div class=\"session-finder\" id=\"desk-sessions\" hidden><label class=\"visually-hidden\" for=\"desk-session-filter\">Find a conversation</label> <input type=\"search\" id=\"desk-session-filter\" placeholder=\"Find a conversation…\" autocomplete=\"off\"><div class=\"session-list\" id=\"desk-session-options\" role=\"listbox\" aria-label=\"Recent conversations\" aria-live=\"polite\"><p>Load recent conversations to switch sessions.</p></div></div><dl class=\"context-list\"><div class=\"visually-hidden\"><dt>Connection</dt><dd id=\"desk-connection-detail\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var7 string
-		templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(view.Connection)
+		templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(view.ModelAlias)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 80, Col: 55}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 40, Col: 59}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</dd></div><div><dt>Profile</dt><dd id=\"desk-profile\">—</dd></div><div><dt>Posture</dt><dd><button id=\"desk-posture-open\" class=\"posture-trigger\" type=\"button\" data-posture-open>View system prompt and policy</button></dd></div><div><dt>Workspace</dt><dd id=\"desk-workspace\">No workspace</dd></div><div><dt>Provider</dt><dd id=\"desk-provider\">—</dd></div><div><dt>Sandbox</dt><dd id=\"desk-sandbox\">—</dd></div><div id=\"desk-model-error-row\" hidden><dt>Model error</dt><dd id=\"desk-model-error\"></dd></div><div id=\"desk-fork-row\" hidden><dt>Branched from</dt><dd id=\"desk-fork\"></dd></div></dl><div class=\"context-panels\"><details><summary>Usage</summary> <button type=\"button\" id=\"desk-usage-refresh\" disabled>Load usage</button><div id=\"desk-usage\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Permissions</summary> <button type=\"button\" id=\"desk-permissions-refresh\" disabled>Load permissions</button><div id=\"desk-permissions\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Working set</summary> <button type=\"button\" id=\"desk-workset-refresh\" disabled>Load working set</button><div id=\"desk-workset\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Commands</summary> <button type=\"button\" id=\"desk-help-refresh\" disabled>Load commands</button><div id=\"desk-help\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Project context</summary><p class=\"context-panel-hint\">Reusable notes and workspace files for this conversation.</p><button type=\"button\" id=\"desk-project-refresh\" disabled>Load project context</button><div id=\"desk-project\" class=\"context-panel-result\" aria-live=\"polite\"></div><form class=\"project-form\" id=\"desk-project-pin-form\"><label for=\"desk-project-path\">Pin workspace file</label><div class=\"project-form-row\"><input id=\"desk-project-path\" name=\"path\" type=\"text\" placeholder=\"docs/plan.md\" autocomplete=\"off\"> <button type=\"submit\" id=\"desk-project-pin\" disabled>Pin file</button></div></form><form class=\"project-form\" id=\"desk-project-note-form\"><label for=\"desk-project-note-name\">Add owner note</label><div class=\"project-form-row\"><input id=\"desk-project-note-name\" name=\"name\" type=\"text\" placeholder=\"Guidance\" autocomplete=\"off\"></div><textarea id=\"desk-project-note\" name=\"note\" rows=\"2\" placeholder=\"Note body…\"></textarea> <button type=\"submit\" id=\"desk-project-add-note\" disabled>Add note</button></form></details></div></aside></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</option></select><p id=\"desk-model-status\">Changes this conversation only.</p></div><div class=\"model-field session-skill-field\"><label for=\"desk-skill\">Session skill</label><div class=\"session-skill-row\"><select id=\"desk-skill\" name=\"skill\" disabled></select> <button type=\"button\" id=\"desk-skill-toggle\" disabled>Attach skill</button></div><p id=\"desk-skill-status\">Changes this conversation only.</p></div></div><label for=\"desk-message\">Message Waffle</label> <textarea id=\"desk-message\" name=\"message\" rows=\"3\" placeholder=\"Ask Waffle to help…\"></textarea><p class=\"composer-hint\">Enter sends. Shift+Enter adds a new line.</p><p id=\"desk-composer-status\" class=\"composer-status\" role=\"status\" aria-live=\"polite\" hidden></p><div class=\"queue-banner\" id=\"desk-queue\" aria-label=\"Follow-up queue\" hidden></div><div class=\"composer-actions\"><button id=\"desk-cancel\" type=\"button\" class=\"cancel-button\" disabled>Cancel turn</button> <button id=\"desk-schedule-draft\" type=\"button\" class=\"schedule-button\" disabled>Schedule draft</button><div class=\"dictate-control\"><button id=\"desk-dictate\" type=\"button\" class=\"dictate-button\" aria-pressed=\"false\" aria-describedby=\"desk-dictate-hint\" disabled>Dictate</button><p class=\"dictate-hint\" id=\"desk-dictate-hint\">Browser speech may process audio off-device. It is not sent to Waffle.</p></div><button id=\"desk-send\" type=\"submit\" class=\"send-button\" disabled>Send message</button></div></form></section><aside class=\"task-context\" aria-labelledby=\"context-title\"><h2 id=\"context-title\" class=\"context-title\">Session</h2><div class=\"conversation-actions\"><button type=\"button\" id=\"desk-new\" disabled>New conversation</button> <button type=\"button\" id=\"desk-session-refresh\" disabled>Recent conversations</button></div><div class=\"session-finder\" id=\"desk-sessions\" hidden><label class=\"visually-hidden\" for=\"desk-session-filter\">Find a conversation</label> <input type=\"search\" id=\"desk-session-filter\" placeholder=\"Find a conversation…\" autocomplete=\"off\"><div class=\"session-list\" id=\"desk-session-options\" role=\"listbox\" aria-label=\"Recent conversations\" aria-live=\"polite\"><p>Load recent conversations to switch sessions.</p></div></div><dl class=\"context-list\"><div class=\"visually-hidden\"><dt>Connection</dt><dd id=\"desk-connection-detail\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var8 string
+		templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(view.Connection)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `today.templ`, Line: 85, Col: 55}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</dd></div><div><dt>Profile</dt><dd id=\"desk-profile\">—</dd></div><div><dt>Posture</dt><dd><button id=\"desk-posture-open\" class=\"posture-trigger\" type=\"button\" data-posture-open>View system prompt and policy</button></dd></div><div><dt>Workspace</dt><dd id=\"desk-workspace\">No workspace</dd></div><div><dt>Provider</dt><dd id=\"desk-provider\">—</dd></div><div><dt>Sandbox</dt><dd id=\"desk-sandbox\">—</dd></div><div id=\"desk-model-error-row\" hidden><dt>Model error</dt><dd id=\"desk-model-error\"></dd></div><div id=\"desk-fork-row\" hidden><dt>Branched from</dt><dd id=\"desk-fork\"></dd></div></dl><div class=\"context-panels\"><details><summary>Usage</summary> <button type=\"button\" id=\"desk-usage-refresh\" disabled>Load usage</button><div id=\"desk-usage\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Permissions</summary> <button type=\"button\" id=\"desk-permissions-refresh\" disabled>Load permissions</button><div id=\"desk-permissions\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Working set</summary> <button type=\"button\" id=\"desk-workset-refresh\" disabled>Load working set</button><div id=\"desk-workset\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Commands</summary> <button type=\"button\" id=\"desk-help-refresh\" disabled>Load commands</button><div id=\"desk-help\" class=\"context-panel-result\" aria-live=\"polite\"></div></details> <details><summary>Project context</summary><p class=\"context-panel-hint\">Reusable notes and workspace files for this conversation.</p><button type=\"button\" id=\"desk-project-refresh\" disabled>Load project context</button><div id=\"desk-project\" class=\"context-panel-result\" aria-live=\"polite\"></div><form class=\"project-form\" id=\"desk-project-pin-form\"><label for=\"desk-project-path\">Pin workspace file</label><div class=\"project-form-row\"><input id=\"desk-project-path\" name=\"path\" type=\"text\" placeholder=\"docs/plan.md\" autocomplete=\"off\"> <button type=\"submit\" id=\"desk-project-pin\" disabled>Pin file</button></div></form><form class=\"project-form\" id=\"desk-project-note-form\"><label for=\"desk-project-note-name\">Add owner note</label><div class=\"project-form-row\"><input id=\"desk-project-note-name\" name=\"name\" type=\"text\" placeholder=\"Guidance\" autocomplete=\"off\"></div><textarea id=\"desk-project-note\" name=\"note\" rows=\"2\" placeholder=\"Note body…\"></textarea> <button type=\"submit\" id=\"desk-project-add-note\" disabled>Add note</button></form></details></div></aside></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -123,7 +136,7 @@ func Today(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

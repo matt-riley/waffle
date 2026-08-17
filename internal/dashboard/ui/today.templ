@@ -2,6 +2,7 @@ package ui
 
 templ Today(view ShellView) {
 	<script type="module" src={ AssetURL("read-aloud.js", view.AssetVersion) }></script>
+	<script src={ AssetURL("dictate.js", view.AssetVersion) }></script>
 	<section class="today" aria-labelledby="desk-session-title">
 		<header class="today-header">
 			<div>
@@ -57,7 +58,10 @@ templ Today(view ShellView) {
 					<div class="composer-actions">
 						<button id="desk-cancel" type="button" class="cancel-button" disabled>Cancel turn</button>
 						<button id="desk-schedule-draft" type="button" class="schedule-button" disabled>Schedule draft</button>
-						<button id="desk-dictate" type="button" class="dictate-button" aria-pressed="false" aria-description="Dictation uses your browser's speech recognition; audio is never sent to Waffle." disabled>Dictate</button>
+						<div class="dictate-control">
+							<button id="desk-dictate" type="button" class="dictate-button" aria-pressed="false" aria-describedby="desk-dictate-hint" disabled>Dictate</button>
+							<p class="dictate-hint" id="desk-dictate-hint">Browser speech may process audio off-device. It is not sent to Waffle.</p>
+						</div>
 						<button id="desk-send" type="submit" class="send-button" disabled>Send message</button>
 					</div>
 				</form>

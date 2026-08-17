@@ -7,6 +7,10 @@ const readAloudSource = await readFile(
   new URL("./assets/read-aloud.js", import.meta.url),
   "utf8",
 );
+const dictateSource = await readFile(
+  new URL("./assets/dictate.js", import.meta.url),
+  "utf8",
+);
 const source = await readFile(new URL("./assets/today.js", import.meta.url), "utf8");
 
 class FakeElement {
@@ -266,6 +270,7 @@ function createHarness({
     "#desk-cancel",
     "#desk-schedule-draft",
     "#desk-dictate",
+    "#desk-dictate-hint",
     "#desk-composer-status",
     "#desk-model",
     "#desk-model-status",
@@ -585,6 +590,7 @@ function createHarness({
     },
   });
   new vm.Script(readAloudSource, { filename: "read-aloud.js" }).runInContext(context);
+  new vm.Script(dictateSource, { filename: "dictate.js" }).runInContext(context);
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
   return {
@@ -3388,8 +3394,12 @@ test("dictation inserts at the caret without destroying the draft and stops on E
   assert.equal(harness.elements["#desk-message"].focused, true);
 });
 
-test("dictation is hidden entirely when recognition is unsupported", async () => {
+test("dictation stays disabled and explains when recognition is unsupported", async () => {
   const harness = createHarness({ noSpeechRecognition: true });
   await flush();
   assert.equal(harness.elements["#desk-dictate"].disabled, true);
+  assert.match(
+    harness.elements["#desk-dictate-hint"].textContent,
+    /not available in this browser/i,
+  );
 });

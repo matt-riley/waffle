@@ -224,6 +224,7 @@ const elements = {
   cancel: document.querySelector("#desk-cancel"),
   scheduleDraft: document.querySelector("#desk-schedule-draft"),
   dictate: document.querySelector("#desk-dictate"),
+  dictateHint: document.querySelector("#desk-dictate-hint"),
   composerStatus: document.querySelector("#desk-composer-status"),
   model: document.querySelector("#desk-model"),
   modelStatus: document.querySelector("#desk-model-status"),
@@ -425,7 +426,11 @@ function updateControls() {
       elements.message.value.trim() === "" || state.currentPhase !== phase.idle;
   }
   if (elements.dictate) {
-    elements.dictate.disabled = !dictation.supported() || state.currentPhase !== phase.idle;
+    const available = dictation.supported() && state.currentPhase === phase.idle;
+    elements.dictate.disabled = !available;
+    if (!available) {
+      dictation.stop();
+    }
   }
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
@@ -822,6 +827,21 @@ function renderMarkdown(node, text) {
     appendInlineMarkdown(paragraph, paragraphLines.join("\n"));
     node.appendChild(paragraph);
   }
+}
+
+const dictation = globalThis.waffleDeskDictate || {
+  supported: () => false,
+  listening: () => false,
+  start() {},
+  stop() {},
+};
+
+function announceDictation(message, isError) {
+  setStatusMessage(elements.composerStatus, message, isError, "composer");
+}
+
+function startDictation() {
+  dictation.start(elements.message, elements.dictate, announceDictation);
 }
 
 function attachReadAloudButton(article) {
@@ -1691,6 +1711,7 @@ function noteEventCursor(envelope) {
 }
 
 function disconnect(message) {
+  dictation.stop();
   clearReconnectTimer();
   state.streamGeneration += 1;
   if (state.eventSource) {
@@ -1884,6 +1905,7 @@ async function openDesk({ forceNewSession = false } = {}) {
   clearControlErrors();
   resetOwnershipConflict();
   globalThis.waffleReadAloud?.stop();
+  dictation.stop();
   try {
     const bootstrap = validateBootstrap(await getBootstrap());
     if (generation !== state.generation) {
@@ -2066,6 +2088,7 @@ function turnIdempotencyKey(text, provided) {
 }
 
 async function submitTurn(event, explicitText, idempotencyKey) {
+  dictation.stop();
   event.preventDefault();
   const text = String(explicitText ?? elements.message.value).trim();
   if (!text || state.clientID === "") {
@@ -2210,6 +2233,7 @@ function maybeDispatchFollowUp(turn) {
 }
 
 async function sendTurn(text, idempotencyKey, options) {
+  dictation.stop();
   const generation = state.generation;
   const turn = {
     id: ++state.turnSequence,
@@ -2383,6 +2407,7 @@ function commandMutation(name, args = "") {
 
 async function newConversation() {
   globalThis.waffleReadAloud?.stop();
+  dictation.stop();
   await runCommandOperation("Starting conversation", async () => {
     const preview = await commandMutation("new");
     if (preview.confirm) {
@@ -2418,6 +2443,7 @@ function formatSessionUpdated(value) {
 
 async function resumeSession(sessionID) {
   globalThis.waffleReadAloud?.stop();
+  dictation.stop();
   await runCommandOperation("Resuming conversation", async () => {
     const result = await commandMutation("resume", sessionID);
     if (result.state) {
@@ -3416,9 +3442,8 @@ function handleComposerKeydown(event) {
     closeSlashMenu();
     return;
   }
-  if (event.key === "Escape") {
-    // Escape stops dictation and returns focus to the composer predictably.
-    dictation.stop({ returnFocus: true });
+  if (event.key === "Escape" && dictation.listening()) {
+    dictation.stop();
     return;
   }
   if (
@@ -3449,6 +3474,7 @@ function handleComposerKeydown(event) {
 
 function closeOwnerOnPageHide() {
   globalThis.waffleReadAloud?.stop();
+  dictation.stop();
   if (!state.clientID || !state.reattachToken || !state.requestToken) {
     return;
   }
@@ -3472,8 +3498,12 @@ if (elements.form) {
   elements.scheduleDraft?.addEventListener("click", () => {
     handoffSchedule(elements.message.value);
   });
-  elements.dictate?.addEventListener("click", () => {
-    dictation.start(elements.message, elements.dictate);
+  elements.dictate?.addEventListener("click", startDictation);
+  elements.dictate?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && dictation.listening()) {
+      event.preventDefault();
+      dictation.stop({ returnFocus: true, textarea: elements.message });
+    }
   });
   elements.model.addEventListener("change", selectModel);
   elements.skill.addEventListener("change", updateSkillControl);
@@ -3510,13 +3540,9 @@ if (elements.form) {
   );
   elements.projectPinForm?.addEventListener("submit", pinProjectFile);
   elements.projectNoteForm?.addEventListener("submit", addProjectNote);
-  // Escape anywhere stops listening and hands focus back to the composer,
-  // even when the dictation button itself holds focus.
-  globalThis.addEventListener?.("keydown", (event) => {
-    if (event.key === "Escape") {
-      dictation.stop({ returnFocus: true });
-    }
-  });
+  if (elements.dictateHint && !dictation.supported()) {
+    elements.dictateHint.textContent = "Dictation is not available in this browser.";
+  }
   globalThis.addEventListener?.("pagehide", closeOwnerOnPageHide);
   void openDesk();
   void fetchCommands();
