@@ -242,6 +242,7 @@ function createHarness({
   storedLease = null,
   sharedStorage = null,
   denyStorage = false,
+  noSpeechRecognition = false,
 } = {}) {
   const selectors = [
     ".desk-shell",
@@ -264,6 +265,7 @@ function createHarness({
     "#desk-send",
     "#desk-cancel",
     "#desk-schedule-draft",
+    "#desk-dictate",
     "#desk-composer-status",
     "#desk-model",
     "#desk-model-status",
@@ -493,6 +495,25 @@ function createHarness({
       speechUtterances.push(this);
     }
   }
+  const recognitionInstances = [];
+  class FakeSpeechRecognition {
+    constructor() {
+      this.continuous = false;
+      this.interimResults = false;
+      this.lang = "";
+      this.onresult = null;
+      this.onerror = null;
+      this.onend = null;
+      this.started = false;
+      recognitionInstances.push(this);
+    }
+    start() {
+      this.started = true;
+    }
+    stop() {
+      this.started = false;
+    }
+  }
   const speechCalls = [];
   const speechSynthesis = {
     speak(utterance) {
@@ -544,6 +565,7 @@ function createHarness({
     confirm: () => confirmResult,
     speechSynthesis,
     SpeechSynthesisUtterance: FakeSpeechSynthesisUtterance,
+    SpeechRecognition: noSpeechRecognition ? undefined : FakeSpeechRecognition,
     addEventListener: (type, listener) => {
       const listeners = lifecycleListeners.get(type) || [];
       listeners.push(listener);
@@ -571,6 +593,7 @@ function createHarness({
     speechCalls,
     speechSynthesis,
     speechUtterances,
+    recognitionInstances,
     cancelResponse,
     elements,
     EventSource: FakeEventSource,
@@ -3326,4 +3349,47 @@ test("read aloud stops on a new conversation and resume, and never speaks user d
   await flush();
   const cancelsAfterResume = harness.speechCalls.filter((call) => call.kind === "cancel").length;
   assert.ok(cancelsAfterResume > cancelsAfterResumePlay, "resume stops speech");
+});
+
+test("dictation inserts at the caret without destroying the draft and stops on Escape", async () => {
+  const harness = createHarness();
+  await flush();
+  const textarea = harness.elements["#desk-message"];
+  const dictate = harness.elements["#desk-dictate"];
+  assert.equal(dictate.disabled, false, "dictate is enabled when supported");
+
+  // Start listening; the button flips to a Stop state.
+  await dictate.listener("click")();
+  const recognition = harness.recognitionInstances[0];
+  assert.ok(recognition.started, "recognition starts on activation");
+  assert.equal(dictate.textContent, "Stop dictation");
+  assert.equal(dictate.getAttribute("aria-pressed"), "true");
+
+  // A transcript lands at the caret without destroying the draft.
+  textarea.value = "Please ";
+  textarea.selectionStart = 7;
+  textarea.selectionEnd = 7;
+  recognition.onresult({ results: [[{ transcript: "summarise the queue" }]] });
+  assert.equal(textarea.value, "Please summarise the queue");
+  assert.equal(dictate.textContent, "Dictate");
+  assert.equal(dictate.getAttribute("aria-pressed"), "false");
+
+  // Denied mic state is announced and the control returns to idle.
+  await dictate.listener("click")();
+  const second = harness.recognitionInstances[1];
+  second.onerror({ error: "not-allowed" });
+  assert.match(harness.elements["#desk-composer-status"].textContent, /denied/i);
+  assert.equal(dictate.textContent, "Dictate");
+
+  // Escape stops listening and returns focus to the composer.
+  await dictate.listener("click")();
+  await harness.elements["#desk-message"].listener("keydown")({ key: "Escape" });
+  assert.equal(dictate.textContent, "Dictate");
+  assert.equal(harness.elements["#desk-message"].focused, true);
+});
+
+test("dictation is hidden entirely when recognition is unsupported", async () => {
+  const harness = createHarness({ noSpeechRecognition: true });
+  await flush();
+  assert.equal(harness.elements["#desk-dictate"].disabled, true);
 });

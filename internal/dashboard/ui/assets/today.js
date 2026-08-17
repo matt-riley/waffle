@@ -223,6 +223,7 @@ const elements = {
   send: document.querySelector("#desk-send"),
   cancel: document.querySelector("#desk-cancel"),
   scheduleDraft: document.querySelector("#desk-schedule-draft"),
+  dictate: document.querySelector("#desk-dictate"),
   composerStatus: document.querySelector("#desk-composer-status"),
   model: document.querySelector("#desk-model"),
   modelStatus: document.querySelector("#desk-model-status"),
@@ -422,6 +423,9 @@ function updateControls() {
   if (elements.scheduleDraft) {
     elements.scheduleDraft.disabled =
       elements.message.value.trim() === "" || state.currentPhase !== phase.idle;
+  }
+  if (elements.dictate) {
+    elements.dictate.disabled = !dictation.supported() || state.currentPhase !== phase.idle;
   }
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
@@ -3412,6 +3416,11 @@ function handleComposerKeydown(event) {
     closeSlashMenu();
     return;
   }
+  if (event.key === "Escape") {
+    // Escape stops dictation and returns focus to the composer predictably.
+    dictation.stop({ returnFocus: true });
+    return;
+  }
   if (
     state.slash.open &&
     (event.key === "ArrowDown" || event.key === "ArrowUp")
@@ -3463,6 +3472,9 @@ if (elements.form) {
   elements.scheduleDraft?.addEventListener("click", () => {
     handoffSchedule(elements.message.value);
   });
+  elements.dictate?.addEventListener("click", () => {
+    dictation.start(elements.message, elements.dictate);
+  });
   elements.model.addEventListener("change", selectModel);
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
@@ -3498,6 +3510,13 @@ if (elements.form) {
   );
   elements.projectPinForm?.addEventListener("submit", pinProjectFile);
   elements.projectNoteForm?.addEventListener("submit", addProjectNote);
+  // Escape anywhere stops listening and hands focus back to the composer,
+  // even when the dictation button itself holds focus.
+  globalThis.addEventListener?.("keydown", (event) => {
+    if (event.key === "Escape") {
+      dictation.stop({ returnFocus: true });
+    }
+  });
   globalThis.addEventListener?.("pagehide", closeOwnerOnPageHide);
   void openDesk();
   void fetchCommands();

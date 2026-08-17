@@ -574,6 +574,35 @@ test("completed responses expose a keyboard-friendly read-aloud control", async 
   await expect(readButton).toHaveAttribute("aria-pressed", "false");
 });
 
+test("composer exposes a privacy-first dictation control with clear states", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the dictation flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const dictate = page.locator("#desk-dictate");
+  const supported = await page.evaluate(
+    () => Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
+  );
+  await expect(dictate).toBeVisible();
+  // The control discloses that speech is handled by the browser service, not
+  // Waffle, and its accessible name never relies on color alone.
+  await expect(dictate).toHaveAttribute(
+    "aria-description",
+    /never sent to Waffle/,
+  );
+  if (supported) {
+    await expect(dictate).toBeEnabled();
+    await dictate.click();
+    await expect(dictate).toHaveText("Stop dictation");
+    await expect(dictate).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+    await expect(dictate).toHaveText("Dictate");
+    await expect(dictate).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByLabel("Message Waffle")).toBeFocused();
+  } else {
+    await expect(dictate).toBeDisabled();
+  }
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));
