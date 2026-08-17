@@ -72,6 +72,12 @@ templ Today(view ShellView) {
 				<div class="conversation-actions">
 					<button type="button" id="desk-new" disabled>New conversation</button>
 					<button type="button" id="desk-session-refresh" disabled>Recent conversations</button>
+					<label class="visually-hidden" for="desk-export-format">Export format</label>
+					<select id="desk-export-format" disabled>
+						<option value="markdown">Markdown</option>
+						<option value="json">Versioned JSON</option>
+					</select>
+					<button type="button" id="desk-export" disabled>Export</button>
 				</div>
 				<div class="session-finder" id="desk-sessions" hidden>
 					<label class="visually-hidden" for="desk-session-filter">Find a conversation</label>

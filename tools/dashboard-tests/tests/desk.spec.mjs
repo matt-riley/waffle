@@ -618,6 +618,26 @@ test("Today model choices explain roles and operator descriptions", async ({ pag
   await expect(detail).toContainText("Fast local drafts");
 });
 
+test("owner can export the visible transcript with their live lease", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the export flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Summarize the release queue");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  const download = await downloadPromise;
+  const path = await download.path();
+  const content = await (await import("node:fs/promises")).readFile(path, "utf8");
+  expect(content).toContain("Summarize the release queue");
+  expect(content).toContain("Fixture reply");
+  expect(content).not.toContain("secret");
+  expect(download.suggestedFilename()).toMatch(/\.md$/);
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

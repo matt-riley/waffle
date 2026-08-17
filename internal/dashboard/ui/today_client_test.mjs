@@ -235,6 +235,7 @@ function createHarness({
   },
   commandHandler,
   openHandler,
+  exportHandler,
   closeHandler,
   turnHandler,
   cancelHandler,
@@ -288,6 +289,8 @@ function createHarness({
     "#desk-fork",
     "#desk-new",
     "#desk-session-refresh",
+    "#desk-export-format",
+    "#desk-export",
     "#desk-sessions",
     "#desk-session-filter",
     "#desk-session-options",
@@ -390,6 +393,12 @@ function createHarness({
         reattach_token: "lease-1",
         state: defaultChatState(),
       });
+    }
+    if (path === "/api/v1/desk/chat/export") {
+      if (exportHandler) {
+        return exportHandler({ path, options });
+      }
+      return { ok: true, async text() { return "# Conversation"; }, async json() { return {}; } };
     }
     if (path === "/api/v1/desk/chat/command") {
       if (commandHandler) {
@@ -3434,4 +3443,21 @@ test("model choices explain roles, upstream, and operator description", async ()
   await harness.elements["#desk-model"].listener("change")({ preventDefault() {} });
   assert.match(detail.textContent, /No operator description configured/);
   assert.match(detail.textContent, /fixture → local-model/);
+});
+
+test("export sends the live owner lease and chosen format", async () => {
+  let exportBody = null;
+  const harness = createHarness({
+    exportHandler: async ({ options }) => {
+      exportBody = JSON.parse(options.body);
+      return { ok: true, async text() { return "# Conversation"; }, async json() { return {}; } };
+    },
+  });
+  await flush();
+  assert.equal(harness.elements["#desk-export"].disabled, false);
+  await harness.elements["#desk-export"].listener("click")();
+  await flush();
+  assert.equal(exportBody.format, "markdown");
+  assert.ok(exportBody.client_id, "export sends the client id");
+  assert.ok(exportBody.reattach_token, "export sends the live reattach proof");
 });

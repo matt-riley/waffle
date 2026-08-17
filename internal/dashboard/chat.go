@@ -1024,3 +1024,30 @@ func (c *ChatClients) projectChatArtifacts(artifacts []chat.Artifact) []chat.Art
 	}
 	return projected
 }
+
+// ExportLease authorises an owner-only transcript export. A client ID without
+// its current proof is only an identifier and never authorises export (#476).
+type ExportLease struct {
+	ClientID      string
+	ReattachToken string
+}
+
+// Export returns the redacted transcript for the proven browser owner without
+// rotating the reattach proof, so the export never invalidates the page's
+// live lease. Only the current proof is accepted: expired or different-client
+// proofs are rejected.
+func (c *ChatClients) Export(lease ExportLease) (chat.State, error) {
+	if c == nil || lease.ClientID == "" || lease.ReattachToken == "" {
+		return chat.State{}, errChatClientNotFound
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	client, ok := c.clients[lease.ClientID]
+	if !ok || client.isRetiring() {
+		return chat.State{}, errChatClientNotFound
+	}
+	if !sameReattachToken(client.reattachToken, lease.ReattachToken) {
+		return chat.State{}, errChatClientNotFound
+	}
+	return cloneChatState(client.state), nil
+}

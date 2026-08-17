@@ -1169,6 +1169,11 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 	b.history = append(b.history,
 		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}},
 	)
+	// Keep the shared chat cache current so owner-only reads (export, #476)
+	// see the same transcript the page rendered.
+	if current, err := b.state(); err == nil {
+		emit(chat.Event{Kind: chat.EventState, State: &current})
+	}
 	emit(chat.Event{Kind: chat.EventTurnDone})
 	return nil
 }
