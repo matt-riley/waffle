@@ -583,11 +583,10 @@ test("composer exposes a privacy-first dictation control with clear states", asy
     () => Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
   );
   await expect(dictate).toBeVisible();
-  // The control discloses that speech is handled by the browser service, not
-  // Waffle, and its accessible name never relies on color alone.
-  await expect(dictate).toHaveAttribute(
-    "aria-description",
-    /never sent to Waffle/,
+  // Disclosure lives in visible hint text, wired with aria-describedby.
+  await expect(dictate).toHaveAttribute("aria-describedby", "desk-dictate-hint");
+  await expect(page.locator("#desk-dictate-hint")).toContainText(
+    "Browser speech may process audio off-device. It is not sent to Waffle.",
   );
   if (supported) {
     await expect(dictate).toBeEnabled();
