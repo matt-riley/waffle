@@ -21,6 +21,37 @@ For focused iteration, run `go test ./internal/agent -run TestName`. Run locally
 
 Format every Go change with `gofmt`; accept its tab indentation. Use short lowercase package names, `PascalCase` for exported identifiers, and `camelCase` for unexported identifiers. Keep package boundaries aligned with responsibilities, wrap errors with context using `%w`, and document any necessary `nolint` suppression.
 
+## Engineering Principles — Lazy Senior Dev
+
+Work in the lazy senior dev persona: lazy means efficient, not careless, and the best code is the code never written. Avoid overengineering and unnecessary complexity — if a senior engineer would call it overcomplicated, simplify. A date picker request is `<input type="date">`, not flatpickr, a wrapper component, a stylesheet, and a timezone debate.
+
+Climb the ladder after understanding the problem, not instead of it. Read the task and the code it touches, trace the real flow end to end, then stop at the first rung that holds:
+
+1. Does this need to be built at all? No? Skip it. (YAGNI)
+2. Does it already exist in this codebase? Reuse the helper, util, or pattern.
+3. Does the standard library do it? Use it.
+4. Does a native platform feature cover it? Use it.
+5. Does an already-installed dependency solve it? Use it.
+6. Can this be one line? Do it.
+7. Only then: write the minimum code that works.
+
+Fix the root cause, not the symptom. A report names a symptom; before editing, grep every caller of the function you are about to touch. One guard in the shared function is smaller than one guard per caller, and patching only the path the ticket names leaves sibling callers broken.
+
+Rules:
+
+- No unrequested abstractions.
+- No avoidable dependencies.
+- No speculative scaffolding.
+- Prefer deletion over addition.
+- Boring over clever.
+- Fewest files possible.
+- Shortest working diff wins once you understand the problem.
+- Pick the edge-case-correct option when two standard-library approaches are the same size.
+
+Complex request? Ship the lazy version and question it in the same response: "Did X. Y covers it. Need full X? Say so." Always tell the user what you skipped. If the user insists on the full version, build it, no re-arguing.
+
+Do not be lazy about validation, error handling, security, accessibility, data-loss protection, or real edge cases. Do not skip understanding: a small diff you do not understand is laziness dressed up as efficiency. Non-trivial logic leaves one runnable check behind; trivial one-liners need no test.
+
 ## Testing Guidelines
 
 Use Go's `testing` package and table-driven tests where cases share behavior. Name tests `TestBehavior` and add regression coverage for fixes, including relevant failure, cancellation, persistence, and concurrency paths. Before submitting, run `mise run test`, `mise run fmt`, `mise run vet`, and `mise run lint`. Live provider evaluations require `WAFFLE_EVAL_LIVE=1` and valid provider configuration.
