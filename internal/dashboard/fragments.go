@@ -171,6 +171,7 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 			Excludes:     typed.Excludes,
 			PreviewURL:   "/api/v1/desk/memory/" + url.PathEscape(typed.Note.SourceID) + "/forget",
 			PreviewToken: typed.PreviewToken,
+			FocusID:      "memory-forget-" + typed.Note.SourceID,
 		})
 	case MemoryAttachResponse:
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: "Memory reference attached to the session."})

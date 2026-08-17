@@ -188,6 +188,47 @@ globalThis.waffleDeskRail = Object.freeze({
   getState: () => ({ ...railState }),
 });
 
+// Modal dialogs must contain Tab even when they expose a single focusable
+// control; the native trap alone is not reliable across shapes, and this page
+// is the one script every Desk section loads (#457).
+const dialogFocusableSelector =
+  'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+// Guard for unit harnesses that only stub a subset of document APIs.
+if (
+  typeof document.addEventListener === "function" &&
+  typeof document.querySelector === "function"
+) {
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") {
+      return;
+    }
+    const dialog = document.querySelector("dialog:modal");
+    if (!dialog) {
+      return;
+    }
+    const focusables = Array.from(
+      dialog.querySelectorAll(dialogFocusableSelector),
+    ).filter(
+      (element) => element.offsetParent !== null || element === document.activeElement,
+    );
+    if (focusables.length === 0) {
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey) {
+      if (active === first || !dialog.contains(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !dialog.contains(active)) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+}
+
 // Hash navigation alone does not reliably move focus; make the skip link do so.
 // Guard for unit harnesses that only stub a subset of document APIs.
 if (typeof document.querySelectorAll === "function") {
