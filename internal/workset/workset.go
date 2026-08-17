@@ -111,6 +111,18 @@ func (s *Store) list(ctx context.Context, q querier, sessionID string) ([]Entry,
 // Cap check and insert run in one short SQLite transaction so concurrent Adds
 // cannot both pass the check then both insert (#104).
 func (s *Store) Add(ctx context.Context, sessionID string, kind, body, source string, pinned bool) (*Entry, error) {
+	eid, err := newEntryID()
+	if err != nil {
+		return nil, err
+	}
+	return s.AddWithID(ctx, sessionID, eid, kind, body, source, pinned)
+}
+
+// AddWithID inserts a working-set entry with an explicit ID, sharing Add's
+// cap checks and transaction. Callers that need a stable entry ID (project
+// attachments, #478) use this so detach can address exactly the entry it
+// created instead of a random one.
+func (s *Store) AddWithID(ctx context.Context, sessionID, eid, kind, body, source string, pinned bool) (*Entry, error) {
 	if err := validateKind(kind); err != nil {
 		return nil, err
 	}
@@ -123,10 +135,6 @@ func (s *Store) Add(ctx context.Context, sessionID string, kind, body, source st
 	}
 	if len(body) > MaxEntryBytes {
 		return nil, fmt.Errorf("entry exceeds %d byte cap", MaxEntryBytes)
-	}
-	eid, err := newEntryID()
-	if err != nil {
-		return nil, err
 	}
 
 	tx, err := s.DB.BeginTx(ctx, nil)

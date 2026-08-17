@@ -8,6 +8,7 @@ package workspace
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1289,11 +1290,25 @@ func (m *Manager) ReadFile(ctx context.Context, id, repoPath string) ([]byte, er
 		return nil, fmt.Errorf("project file exceeds the %d-byte cap", projectMaxFileBytes)
 	}
 
-	content, err := m.bashOutput(ctx, client, `cat -- `+shellQuote(resolved))
+	// Read the payload as base64 so the returned bytes are exact: the
+	// inspection channel is string-based, so a raw cat would have leading
+	// and trailing whitespace trimmed and silently change digests/sizes
+	// (#478 review). base64's trailing newline is trimmed deterministically
+	// and decoding restores the exact payload.
+	b64, err := m.bashOutput(ctx, client, `base64 --wrap=0 < `+shellQuote(resolved))
 	if err != nil {
 		return nil, fmt.Errorf("read project file: %w", err)
 	}
-	return []byte(content), nil
+	content, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return nil, fmt.Errorf("decode project file: %w", err)
+	}
+	// The size check guards against a file growing between wc and base64;
+	// the digest is computed over exactly these bytes by the project store.
+	if int64(len(content)) != size {
+		return nil, fmt.Errorf("project file changed while reading")
+	}
+	return content, nil
 }
 
 // ErrProjectFileMissing is returned when a workspace file cannot be read
@@ -1302,17 +1317,19 @@ func (m *Manager) ReadFile(ctx context.Context, id, repoPath string) ([]byte, er
 var ErrProjectFileMissing = errors.New("workspace file is missing or unreadable")
 
 // safeRepoPath mirrors project.ValidPath for the workspace layer: a safe
-// repo-relative path has no absolute prefix, no traversal, and no shell-
-// dangerous characters.
+// repo-relative path is trimmed, has no absolute prefix, no traversal
+// segments, no backslashes, and no shell-dangerous characters.
 func safeRepoPath(p string) bool {
+	p = strings.TrimSpace(p)
 	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "\\") {
 		return false
 	}
-	clean := path.Clean(p)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
-		return false
+	for _, segment := range strings.Split(p, "/") {
+		if segment == ".." {
+			return false
+		}
 	}
-	if path.IsAbs(clean) {
+	if path.IsAbs(path.Clean(p)) {
 		return false
 	}
 	for _, r := range p {

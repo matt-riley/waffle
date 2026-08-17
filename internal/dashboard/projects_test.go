@@ -34,13 +34,17 @@ func (f *fakeProjectReader) ReadFile(_ context.Context, _ string, path string) (
 // fakeProjectWorkspaces is a minimal WorkspaceManager + ProjectFileReader.
 type fakeProjectWorkspaces struct {
 	reader ProjectFileReader
+	list   []workspace.Workspace
+}
+
+func (f *fakeProjectWorkspaces) List(context.Context) ([]workspace.Workspace, error) {
+	return append([]workspace.Workspace(nil), f.list...), nil
 }
 
 func (f *fakeProjectWorkspaces) ReadFile(ctx context.Context, id, path string) ([]byte, error) {
 	return f.reader.ReadFile(ctx, id, path)
 }
 
-func (f *fakeProjectWorkspaces) List(context.Context) ([]workspace.Workspace, error) { return nil, nil }
 func (f *fakeProjectWorkspaces) Get(context.Context, string) (*workspace.Workspace, error) {
 	return nil, nil
 }
@@ -72,7 +76,13 @@ func newProjectFixture(t *testing.T, files map[string]string) (*ProjectsService,
 		t.Fatal(err)
 	}
 	projects := project.New(st.DB)
-	service := NewProjectsService(projects, &fakeProjectReader{files: files})
+	ops := &Operations{Workspaces: &fakeProjectWorkspaces{
+		reader: &fakeProjectReader{files: files},
+		list: []workspace.Workspace{{
+			ID: "ws-p", Repo: "a/b", SessionID: "session-p", Status: "open",
+		}},
+	}}
+	service := NewProjectsService(projects, ops.Workspaces.(ProjectFileReader), ops)
 	return service, projects
 }
 
@@ -144,8 +154,11 @@ func TestProjectsEndpointsAreGuardedAndSanitized(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	RegisterProjectRoutes(mux, ProjectRouteConfig{
-		Projects:    projects,
-		Operations:  &Operations{Workspaces: &fakeProjectWorkspaces{reader: &fakeProjectReader{files: map[string]string{"README.md": "# Readme"}}}},
+		Projects: projects,
+		Operations: &Operations{Workspaces: &fakeProjectWorkspaces{
+			reader: &fakeProjectReader{files: map[string]string{"README.md": "# Readme"}},
+			list:   []workspace.Workspace{{ID: "ws-p", SessionID: "session-p", Status: "open"}},
+		}},
 		Security:    security,
 		Idempotency: NewIdempotencyStore(time.Now, 64, time.Minute),
 	})
@@ -202,4 +215,29 @@ func TestProjectsEndpointsAreGuardedAndSanitized(t *testing.T) {
 		t.Fatalf("list = %s", rec.Body.String())
 	}
 	_ = ctx
+}
+
+// TestProjectsAttachRejectsCrossWorkspaceResource pins that a resource can
+// never be attached to a session whose workspace does not own it (#478).
+func TestProjectsAttachRejectsCrossWorkspaceResource(t *testing.T) {
+	ctx := context.Background()
+	_, projects := newProjectFixture(t, nil)
+	if _, err := projects.DB.Exec(`INSERT INTO sessions (id, created_at, updated_at) VALUES ('session-other', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.DB.Exec(`INSERT INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at) VALUES ('ws-other', 'x/y', 'https://example.com/x/y', 'img', 'c', 'v', 'session-other', 'open', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	// The foreign resource belongs to ws-other, not the session's ws-p.
+	resource, err := projects.AddNote(ctx, "ws-other", "Other note", "foreign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &Operations{Workspaces: &fakeProjectWorkspaces{
+		list: []workspace.Workspace{{ID: "ws-p", SessionID: "session-p", Status: "open"}},
+	}}
+	service := NewProjectsService(projects, nil, ops)
+	if err := service.Attach(ctx, resource.ID, "session-p"); err == nil {
+		t.Fatal("cross-workspace attach must fail closed")
+	}
 }

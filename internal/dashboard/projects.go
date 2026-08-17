@@ -47,12 +47,15 @@ type ProjectAttachmentView struct {
 type ProjectsService struct {
 	projects *project.Store
 	readFile ProjectFileReader
+	// operations supplies the workspace list so attachments can be verified
+	// to stay within the session's own workspace (#478 review).
+	operations *Operations
 }
 
 // NewProjectsService wires the project surface. readFile must be non-nil for
 // file resources; notes still work without it.
-func NewProjectsService(projects *project.Store, readFile ProjectFileReader) *ProjectsService {
-	service := &ProjectsService{projects: projects, readFile: readFile}
+func NewProjectsService(projects *project.Store, readFile ProjectFileReader, operations *Operations) *ProjectsService {
+	service := &ProjectsService{projects: projects, readFile: readFile, operations: operations}
 	if service.projects != nil && readFile != nil {
 		service.projects.ReadFile = func(ctx context.Context, workspaceID, path string) ([]byte, error) {
 			return readFile.ReadFile(ctx, workspaceID, path)
@@ -146,10 +149,15 @@ func (s *ProjectsService) Remove(ctx context.Context, workspaceID, id string) er
 	return s.projects.Remove(ctx, workspaceID, id)
 }
 
-// Attach binds a resource to a session's bounded working set.
+// Attach binds a resource to a session's bounded working set. The resource
+// must belong to the session's own open workspace: attachments never cross
+// workspace boundaries (#478).
 func (s *ProjectsService) Attach(ctx context.Context, resourceID, sessionID string) error {
 	if s == nil || s.projects == nil {
 		return ErrOperationsDependencyUnavailable
+	}
+	if err := s.verifySessionWorkspace(ctx, resourceID, sessionID); err != nil {
+		return err
 	}
 	_, err := s.projects.Attach(ctx, sessionID, resourceID)
 	return err
@@ -160,7 +168,44 @@ func (s *ProjectsService) Detach(ctx context.Context, resourceID, sessionID stri
 	if s == nil || s.projects == nil {
 		return ErrOperationsDependencyUnavailable
 	}
+	if err := s.verifySessionWorkspace(ctx, resourceID, sessionID); err != nil {
+		return err
+	}
 	return s.projects.Detach(ctx, sessionID, resourceID)
+}
+
+// verifySessionWorkspace fails closed unless the resource belongs to the
+// workspace bound to the session (or the session has no workspace at all),
+// so a crafted request can never attach another workspace's resource.
+func (s *ProjectsService) verifySessionWorkspace(ctx context.Context, resourceID, sessionID string) error {
+	if sessionID == "" {
+		return project.ErrNotFound
+	}
+	if s.operations == nil || s.operations.Workspaces == nil {
+		return ErrOperationsDependencyUnavailable
+	}
+	workspaces, err := s.operations.Workspaces.List(ctx)
+	if err != nil {
+		return err
+	}
+	var sessionWorkspace string
+	for _, ws := range workspaces {
+		if ws.SessionID == sessionID && ws.Status != "closed" {
+			sessionWorkspace = ws.ID
+			break
+		}
+	}
+	if sessionWorkspace == "" {
+		return project.ErrNotFound
+	}
+	resource, err := s.projects.Get(ctx, sessionWorkspace, resourceID)
+	if err != nil {
+		return err
+	}
+	if resource.WorkspaceID != sessionWorkspace {
+		return project.ErrNotOwned
+	}
+	return nil
 }
 
 func (s *ProjectsService) view(r project.Resource, attached bool) ProjectResourceView {
@@ -198,7 +243,7 @@ func RegisterProjectRoutes(mux *http.ServeMux, routeConfig ProjectRouteConfig) {
 	if reader, ok := routeConfig.Operations.Workspaces.(ProjectFileReader); ok {
 		readFile = reader
 	}
-	service := NewProjectsService(routeConfig.Projects, readFile)
+	service := NewProjectsService(routeConfig.Projects, readFile, routeConfig.Operations)
 	if routeConfig.Security == nil || routeConfig.Idempotency == nil {
 		// Read-only attached list still mounts; guarded mutations drop out.
 		mux.Handle("GET /api/v1/desk/projects/attached", newProjectAttachedHandler(service))

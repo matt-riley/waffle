@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2791,7 +2792,7 @@ func TestReadFileReadsRepoRelativeFile(t *testing.T) {
 		"test -f":  "/work/repo/README.md",
 		"readlink": "/work/repo/README.md",
 		"wc -c":    "8",
-		"cat --":   "# Readme",
+		"base64":   base64.StdEncoding.EncodeToString([]byte("# Readme")),
 	}}
 	mgr, _ := newTestManager(t, tools)
 	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
@@ -2808,7 +2809,7 @@ func TestReadFileReadsRepoRelativeFile(t *testing.T) {
 	if string(content) != "# Readme" {
 		t.Fatalf("content = %q", content)
 	}
-	if !tools.ran("readlink -f") || !tools.ran("cat --") {
+	if !tools.ran("readlink -f") || !tools.ran("base64 --wrap=0") {
 		t.Fatalf("commands = %+v", tools.commands)
 	}
 }

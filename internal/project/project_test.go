@@ -162,13 +162,27 @@ func TestAttachEntersWorkingSetWithProvenance(t *testing.T) {
 	if err != nil || len(attached) != 1 || attached[0].Resource.ID != r.ID {
 		t.Fatalf("attached = %+v, %v", attached, err)
 	}
-	// Detach removes both the binding and the working-set entry.
+	// Detach removes both the binding and the working-set entry it created
+	// (the deterministic attachment entry ID must match, #478 review).
+	var workingSetEntries int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM working_set_entries WHERE session_id = 'session-1'`).Scan(&workingSetEntries); err != nil {
+		t.Fatal(err)
+	}
+	if workingSetEntries != 1 {
+		t.Fatalf("working set entries after attach = %d, want 1", workingSetEntries)
+	}
 	if err := s.Detach(ctx, "session-1", r.ID); err != nil {
 		t.Fatalf("Detach: %v", err)
 	}
 	attached, _ = s.ListAttached(ctx, "session-1")
 	if len(attached) != 0 {
 		t.Fatalf("attached after detach = %+v", attached)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM working_set_entries WHERE session_id = 'session-1'`).Scan(&workingSetEntries); err != nil {
+		t.Fatal(err)
+	}
+	if workingSetEntries != 0 {
+		t.Fatalf("working set entries after detach = %d, want 0", workingSetEntries)
 	}
 }
 
@@ -211,4 +225,63 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// TestRefreshStalenessIsNotTransient pins that a changed file stays stale:
+// Refresh must not adopt the new digest, or a later refresh would flip the
+// resource back to available and allow attaching changed content (#478).
+func TestRefreshStalenessIsNotTransient(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t, map[string]string{"a.md": "one"})
+	r, err := s.PinFile(ctx, "ws-1", "a.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// File changes; the first refresh marks it stale.
+	s.ReadFile = func(_ context.Context, _, _ string) ([]byte, error) { return []byte("two"), nil }
+	if err := s.Refresh(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	// A second refresh with the same changed content must NOT flip back.
+	if err := s.Refresh(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx, "ws-1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	if list[0].State != StateStale {
+		t.Fatalf("state after second refresh = %q, want stale", list[0].State)
+	}
+	// The pinned baseline digest is preserved.
+	got, err := s.Get(ctx, "ws-1", r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Digest != r.Digest || got.Size != r.Size {
+		t.Fatalf("pinned digest/size changed: %+v", got)
+	}
+	// Restoring the original content re-adopts available.
+	s.ReadFile = func(_ context.Context, _, _ string) ([]byte, error) { return []byte("one"), nil }
+	if err := s.Refresh(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = s.List(ctx, "ws-1")
+	if list[0].State != StateAvailable {
+		t.Fatalf("state after restore = %q, want available", list[0].State)
+	}
+}
+
+func TestPinFileEnforcesWorkspaceCap(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t, nil)
+	s.MaxPerWorkspace = 2
+	for i := 0; i < 2; i++ {
+		if _, err := s.AddNote(ctx, "ws-1", "N", "body"); err != nil {
+			t.Fatalf("note %d: %v", i, err)
+		}
+	}
+	if _, err := s.AddNote(ctx, "ws-1", "Too many", "body"); err == nil {
+		t.Fatal("third resource should exceed the workspace cap")
+	}
 }

@@ -39,14 +39,17 @@ const (
 	// MaxFileBytes caps how much file content is read and digested.
 	MaxFileBytes = 1 << 20
 	// MaxAttachBytes bounds the content placed into the working set per
-	// resource (workset.MaxEntryBytes governs each entry).
-	MaxAttachBytes = 4096
+	// resource. It must fit the working-set entry cap (workset.MaxEntryBytes) so
+	// every attachment lands in the bounded path with a visible truncation
+	// reason instead of failing.
+	MaxAttachBytes = workset.MaxEntryBytes
 	// MaxNameBytes bounds note names.
 	MaxNameBytes = 200
 	// MaxNoteBytes bounds an owner note body.
 	MaxNoteBytes = 8 << 10
-	// MaxPerWorkspace caps pinned resources per workspace.
-	MaxPerWorkspace = 64
+	// MaxPerWorkspaceDefault is the per-workspace pin cap used when a store
+	// does not override it.
+	MaxPerWorkspaceDefault = 64
 )
 
 // ErrNotFound is returned when a resource row is missing.
@@ -96,6 +99,9 @@ type Store struct {
 	ReadFile FileReader
 	// Now, when set, freezes the clock (tests).
 	Now func() time.Time
+	// MaxPerWorkspace caps pinned resources per workspace; zero uses the
+	// default.
+	MaxPerWorkspace int
 }
 
 // New wraps an opened waffle store.
@@ -190,6 +196,9 @@ func EligibleFile(name string) bool {
 func (s *Store) PinFile(ctx context.Context, workspaceID, filePath string) (*Resource, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	filePath = strings.TrimSpace(filePath)
+	if err := s.checkWorkspaceCapacity(ctx, workspaceID); err != nil {
+		return nil, err
+	}
 	if !ValidPath(filePath) {
 		return nil, fmt.Errorf("%w: path %q is not a safe workspace-relative path", ErrUnsupportedFile, filePath)
 	}
@@ -234,6 +243,9 @@ func (s *Store) AddNote(ctx context.Context, workspaceID, name, note string) (*R
 	workspaceID = strings.TrimSpace(workspaceID)
 	name = strings.TrimSpace(name)
 	note = strings.TrimSpace(note)
+	if err := s.checkWorkspaceCapacity(ctx, workspaceID); err != nil {
+		return nil, err
+	}
 	if !validName(name) {
 		return nil, errors.New("note name is not a safe display name")
 	}
@@ -269,6 +281,26 @@ func (s *Store) Remove(ctx context.Context, workspaceID, id string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) maxPerWorkspace() int {
+	if s.MaxPerWorkspace > 0 {
+		return s.MaxPerWorkspace
+	}
+	return MaxPerWorkspaceDefault
+}
+
+// checkWorkspaceCapacity enforces the per-workspace pin cap so refresh and
+// list costs and storage growth stay bounded (#478 review).
+func (s *Store) checkWorkspaceCapacity(ctx context.Context, workspaceID string) error {
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_resources WHERE workspace_id = ?`, workspaceID).Scan(&count); err != nil {
+		return fmt.Errorf("count workspace resources: %w", err)
+	}
+	if count >= s.maxPerWorkspace() {
+		return fmt.Errorf("workspace project context is full (%d resources); remove one before pinning more", s.maxPerWorkspace())
 	}
 	return nil
 }
@@ -366,13 +398,20 @@ func (s *Store) Refresh(ctx context.Context, workspaceID string) error {
 		}
 		sum := sha256.Sum256(content)
 		digest := hex.EncodeToString(sum[:])
-		state := StateAvailable
-		if digest != r.Digest || int64(len(content)) != r.Size {
-			state = StateStale
+		// Only re-adopt the available state when the content is unchanged;
+		// a changed file is marked stale WITHOUT adopting its new digest, so
+		// a later refresh can never flip it back to available. The stored
+		// digest stays the pinned baseline until the operator re-pins.
+		if digest == r.Digest && int64(len(content)) == r.Size {
+			if _, err := s.DB.ExecContext(ctx, `UPDATE project_resources SET state = ?, updated_at = ? WHERE id = ?`, StateAvailable, s.nowStr(), r.ID); err != nil {
+				return err
+			}
+			continue
 		}
-		if _, err := s.DB.ExecContext(ctx, `UPDATE project_resources SET state = ?, size_bytes = ?, digest = ?, updated_at = ? WHERE id = ?`,
-			state, len(content), digest, s.nowStr(), r.ID); err != nil {
-			return err
+		if r.State == StateAvailable {
+			if _, err := s.DB.ExecContext(ctx, `UPDATE project_resources SET state = ?, updated_at = ? WHERE id = ?`, StateStale, s.nowStr(), r.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -411,7 +450,7 @@ func (s *Store) Attach(ctx context.Context, sessionID, resourceID string) (*work
 		body = boundedAttachBody(r.Name, content)
 	}
 	ws := &workset.Store{DB: s.DB}
-	entry, err := ws.Add(ctx, sessionID, workset.KindProject, body, workset.SourceUser, true)
+	entry, err := ws.AddWithID(ctx, sessionID, attachEntryID(resourceID), workset.KindProject, body, workset.SourceUser, true)
 	if err != nil {
 		return nil, err
 	}
