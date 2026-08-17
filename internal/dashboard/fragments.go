@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -395,11 +396,47 @@ func catalogueModelDetail(model CapabilityCatalogueModel) string {
 	return ""
 }
 
+// tasksAttentionLabel renders the settled attention chip truthfully: the
+// initial page state only ever claims to be checking, and a settled fragment
+// reports the real count or a distinct error state (#456).
+func attentionEvidenceFailed(errors []*SectionError) bool {
+	for _, err := range errors {
+		if err != nil && (err.Section == OperationsSectionJobs || err.Section == OperationsSectionRuns) {
+			return true
+		}
+	}
+	return false
+}
+
+func tasksAttentionLabel(count int, hasErrors bool) string {
+	if hasErrors {
+		return "Attention unavailable"
+	}
+	switch count {
+	case 0:
+		return "No tasks need attention"
+	case 1:
+		return "1 task needs attention"
+	default:
+		return fmt.Sprintf("%d tasks need attention", count)
+	}
+}
+
 func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 	fragment := ui.FragmentView{ID: "tasks-list", Class: "task-list", Empty: "No tasks match this view.", Filters: taskFilterFragments(snapshot.Filter)}
+	attentionClass := "tasks-attention"
+	attentionFailed := attentionEvidenceFailed(snapshot.Errors)
 	if len(snapshot.Errors) > 0 {
 		fragment.Status = "Some task evidence is temporarily unavailable."
 	}
+	if attentionFailed {
+		attentionClass += " is-error"
+	}
+	fragment.TextSwaps = append(fragment.TextSwaps, ui.FragmentTextSwap{
+		ID:    "tasks-attention-count",
+		Class: attentionClass,
+		Text:  tasksAttentionLabel(snapshot.AttentionCount, attentionFailed),
+	})
 	for _, task := range snapshot.Tasks {
 		kind := task.Kind + " / " + task.Source
 		title := task.Name

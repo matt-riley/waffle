@@ -374,6 +374,22 @@ test("Tasks htmx schedule form creates, edits, and reports filter state", async 
   await expect(page.locator("#task-filter-all")).toHaveAttribute("aria-pressed", "false");
 });
 
+test("Tasks attention chip settles to a truthful count instead of Checking forever", async ({ page }) => {
+  await page.goto(deskURL("tasks"));
+  // The list fragment replaces the loading label with the settled count.
+  await expect(page.locator("#tasks-attention-count")).toHaveText("1 task needs attention", {
+    timeout: 10_000,
+  });
+  await expect(page.locator("#tasks-attention-count")).not.toHaveText("Checking attention");
+  // The settled chip keeps its live styling (not the error treatment).
+  await expect(page.locator("#tasks-attention-count")).not.toHaveClass(/is-error/);
+
+  // Filtering reloads the fragment and keeps the count truthful.
+  await page.getByRole("button", { name: "Attention", exact: true }).click();
+  await expect(page.locator("#task-filter-attention")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#tasks-attention-count")).toHaveText("1 task needs attention");
+});
+
 test("Capabilities htmx catalogue add, search, and prospective test use fragments", async ({ page }) => {
   await page.goto(deskURL("capabilities"));
   await openCapabilityTab(page, "Tools & connections");

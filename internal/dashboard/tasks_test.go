@@ -392,3 +392,40 @@ func (taskSessionReader) Search(context.Context, string, int) ([]session.Hit, er
 func (taskSessionReader) SearchSummaries(context.Context, string, int) ([]session.Hit, error) {
 	return nil, nil
 }
+
+func TestAttentionEvidenceFailedIgnoresUsageAndSessions(t *testing.T) {
+	if attentionEvidenceFailed([]*SectionError{
+		{Section: OperationsSectionUsage},
+		{Section: OperationsSectionSessions},
+	}) {
+		t.Fatal("usage/session errors are not attention evidence")
+	}
+	if !attentionEvidenceFailed([]*SectionError{{Section: OperationsSectionJobs}}) {
+		t.Fatal("jobs errors are attention evidence")
+	}
+	if !attentionEvidenceFailed([]*SectionError{{Section: OperationsSectionRuns}}) {
+		t.Fatal("runs errors are attention evidence")
+	}
+}
+
+func TestTasksAttentionLabel(t *testing.T) {
+	cases := []struct {
+		name      string
+		count     int
+		hasErrors bool
+		want      string
+	}{
+		{name: "zero", count: 0, want: "No tasks need attention"},
+		{name: "one", count: 1, want: "1 task needs attention"},
+		{name: "many", count: 4, want: "4 tasks need attention"},
+		{name: "partial failure", count: 2, hasErrors: true, want: "Attention unavailable"},
+		{name: "total failure", count: 0, hasErrors: true, want: "Attention unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tasksAttentionLabel(tc.count, tc.hasErrors); got != tc.want {
+				t.Fatalf("tasksAttentionLabel(%d, %v) = %q, want %q", tc.count, tc.hasErrors, got, tc.want)
+			}
+		})
+	}
+}

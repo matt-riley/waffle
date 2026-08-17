@@ -1386,6 +1386,12 @@ h3 {
   padding: 0.55rem 0.7rem;
 }
 
+.tasks-attention.is-error {
+  background: #f3d8cf;
+  border-color: var(--danger);
+  color: #6f302c;
+}
+
 .task-filters {
   display: flex;
   flex-wrap: wrap;
