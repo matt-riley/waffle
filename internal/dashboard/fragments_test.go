@@ -298,3 +298,25 @@ func TestConnectionCardLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceSummaryLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]int
+		want string
+	}{
+		{name: "empty", in: map[string]int{}, want: "No guarded workspaces are open."},
+		{name: "single open", in: map[string]int{"open": 1}, want: "1 open"},
+		{name: "plural idle", in: map[string]int{"idle": 2}, want: "2 idle"},
+		{name: "mixed", in: map[string]int{"open": 1, "idle": 2, "closed": 1}, want: "1 open · 2 idle · 1 closed"},
+		{name: "failed", in: map[string]int{"failed": 1, "open": 1}, want: "1 open · 1 failed"},
+		{name: "attention ignored", in: map[string]int{"attention": 1, "open": 1}, want: "1 open"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workspaceSummaryLabel(tc.in); got != tc.want {
+				t.Fatalf("workspaceSummaryLabel(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

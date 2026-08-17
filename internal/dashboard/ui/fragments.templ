@@ -45,6 +45,8 @@ templ FragmentList(view FragmentView) {
 						for _, action := range item.Actions {
 							if action.Method == "get" {
 								<a class={ action.Class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
+							} else if action.Method == "copy" {
+								<button class={ action.Class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value }>{ action.Label }</button>
 							} else if action.Method == "edit" {
 								<button class={ action.Class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button">{ action.Label }</button>
 							} else if len(action.Fields) > 0 || len(action.Inputs) > 0 {

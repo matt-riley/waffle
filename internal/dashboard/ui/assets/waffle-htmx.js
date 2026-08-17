@@ -492,6 +492,25 @@
 	});
 
 	document.body.addEventListener("click", (event) => {
+		const copyButton = event.target?.closest?.("[data-waffle-copy]");
+		if (copyButton) {
+			const value = copyButton.getAttribute("data-waffle-copy");
+			if (value && navigator.clipboard?.writeText) {
+				void navigator.clipboard
+					.writeText(value)
+					.then(() => {
+						const label = copyButton.textContent;
+						copyButton.textContent = "Copied";
+						setTimeout(() => {
+							copyButton.textContent = label;
+						}, 2000);
+					})
+					.catch(() => {
+						// Clipboard denied: the label simply stays stable.
+					});
+			}
+			return;
+		}
 		const taskEdit = event.target?.closest?.("[data-waffle-task-edit]");
 		if (taskEdit) {
 			event.preventDefault();

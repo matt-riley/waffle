@@ -580,27 +580,60 @@ func taskFilterFragments(active TaskFilter) []ui.FragmentFilter {
 
 func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitView) ui.FragmentView {
 	fragment := ui.FragmentView{ID: "workspaces-list", Class: "workspaces-grid", Empty: "No guarded workspaces are open."}
+	summary := map[string]int{}
 	for _, workspace := range snapshot.Workspaces {
-		item := ui.FragmentItem{ID: workspace.ID, DataWorkspaceID: workspace.ID, Class: "workspace-card", Kind: workspace.Status, Title: workspace.Repository, Fields: []ui.FragmentField{{Label: "Session", Value: workspace.SessionID}, {Label: "Profile", Value: workspace.Profile}, {Label: "Network", Value: workspace.Egress}}}
+		summary[workspace.Status]++
+	}
+	fragment.TextSwaps = append(fragment.TextSwaps, ui.FragmentTextSwap{
+		ID:    "workspaces-summary",
+		Class: "workspaces-summary",
+		Text:  workspaceSummaryLabel(summary),
+	})
+	for _, workspace := range snapshot.Workspaces {
+		// Truthful human empty states: never a blank definition row (#462).
+		fields := []ui.FragmentField{
+			{Label: "Profile", Value: emptyValue(workspace.Profile, "No profile")},
+			{Label: "Network", Value: emptyValue(workspace.Egress, "No network")},
+		}
+		item := ui.FragmentItem{ID: workspace.ID, DataWorkspaceID: workspace.ID, Class: "workspace-card", Kind: workspace.Status, Title: workspace.Repository, Fields: fields}
 		if status, ok := git[workspace.ID]; ok && workspace.Status != "closed" {
 			item.DetailClass = "workspace-git"
 			item.Detail = workspaceGitDetail(status)
 		}
-		if workspace.Status == "open" || workspace.Status == "idle" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
-		}
 		if workspace.Status == "open" {
+			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
 			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Idle", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/idle", Target: "#workspaces-list", Swap: "innerHTML"})
 		}
 		if workspace.Status == "idle" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Resume", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/resume", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Resume", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/resume", Target: "#workspaces-list", Swap: "innerHTML"})
+		}
+		if workspace.SessionID != "" {
+			item.Actions = append(item.Actions, ui.FragmentAction{Method: "copy", Value: workspace.SessionID, Label: "Copy session ID"})
 		}
 		if workspace.Status != "closed" {
-			item.Actions = append(item.Actions, ui.FragmentAction{ID: "workspace-close-" + workspace.ID, Label: "Review close", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/close-preview", Target: "#workspace-close-dialog", Swap: "outerHTML"})
+			item.Actions = append(item.Actions, ui.FragmentAction{ID: "workspace-close-" + workspace.ID, Class: "workspace-danger-action", Label: "Review close", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/close-preview", Target: "#workspace-close-dialog", Swap: "outerHTML"})
 		}
 		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
+}
+
+func workspaceSummaryLabel(summary map[string]int) string {
+	order := []string{"open", "idle", "failed", "closed"}
+	parts := make([]string, 0, len(order))
+	for _, status := range order {
+		count := summary[status]
+		if count == 0 {
+			continue
+		}
+		// Statuses are adjectives here ("2 open", "1 idle"), never pluralised.
+		parts = append(parts, fmt.Sprintf("%d %s", count, status))
+	}
+	if len(parts) == 0 {
+		return "No guarded workspaces are open."
+	}
+	return strings.Join(parts, " · ")
 }
 
 func workspaceGitFragment(view WorkspaceGitView) ui.FragmentView {

@@ -246,3 +246,43 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+
+.workspaces-summary {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0 0 0.6rem;
+}
+
+.workspaces-summary:empty {
+  display: none;
+}
+
+.workspace-card .waffle-fragment-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 520px) {
+  .workspace-card .waffle-fragment-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workspace-card .waffle-fragment-actions .workspace-primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.workspace-card .waffle-fragment-actions .workspace-danger-action {
+  border-color: var(--danger);
+  color: var(--danger);
+  margin-left: auto;
+}
+
+.workspace-card .waffle-fragment-actions [data-waffle-copy] {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
