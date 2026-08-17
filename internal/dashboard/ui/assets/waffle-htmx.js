@@ -96,6 +96,11 @@
 			const fieldInput = input(form, `task-schedule-${field}`);
 			if (clear?.checked) {
 				intentsForFields[field] = { action: "clear" };
+			} else if (field === "deliver") {
+				const value = scheduleDeliverValue(form);
+				intentsForFields[field] = value
+					? { action: "replace", value }
+					: { action: "preserve" };
 			} else if (fieldInput?.value) {
 				intentsForFields[field] = { action: "replace", value: fieldInput.value };
 			} else {
@@ -218,9 +223,22 @@
 		}
 	}
 
+	function syncGuidedVisibility(form) {
+		const cadence = input(form, "task-schedule-cadence")?.value || "weekdays";
+		const dow = input(form, "task-schedule-dow");
+		const dom = input(form, "task-schedule-dom");
+		const dowRow = input(form, "task-schedule-dow-row");
+		const domRow = input(form, "task-schedule-dom-row");
+		if (dowRow) dowRow.hidden = cadence !== "weekly";
+		if (domRow) domRow.hidden = cadence !== "monthly";
+		if (dow) dow.hidden = cadence !== "weekly";
+		if (dom) dom.hidden = cadence !== "monthly";
+	}
+
 	function updateScheduleGuide(form) {
 		const cron = input(form, "task-schedule-cron");
 		if (!cron) return;
+		syncGuidedVisibility(form);
 		cron.value = scheduleGuidedCron(form);
 		void schedulePreview(form);
 	}
@@ -689,7 +707,8 @@
 			const form = document.querySelector("#task-schedule-form");
 			if (form) {
 				if (id === "task-schedule-cron") syncGuidedFromCron(form);
-				void schedulePreview(form);
+				if (id === "task-schedule-time") updateScheduleGuide(form);
+				else void schedulePreview(form);
 			}
 		}
 	});
