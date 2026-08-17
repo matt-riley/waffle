@@ -927,7 +927,12 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		emit(chat.Event{Kind: chat.EventTurnDone})
 		return nil
 	}
-	if strings.Contains(strings.ToLower(input), "markdown") {
+	b.history = append(b.history,
+		llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: input}}},
+	)
+	var assistantText string
+	switch {
+	case strings.Contains(strings.ToLower(input), "markdown"):
 		emit(chat.Event{
 			Kind:       chat.EventToolStarted,
 			ToolName:   "fixture_read",
@@ -940,26 +945,21 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 			ByteCount:  24,
 			DurationMS: 18,
 		})
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n| Name | Cost |\n| :--- |",
-		})
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: " :---: |\n| mise | $0 |\n| figma | $12 |\n\n```go\nfmt.Println(\"fixture\")\n```",
-		})
-		emit(chat.Event{Kind: chat.EventTurnDone})
-		return nil
+		assistantText = "## Fixture markdown\n\n- one\n- two\n\nUse `mise`.\n\n| Name | Cost |\n| :--- | :---: |\n| mise | $0 |\n| figma | $12 |\n\n```go\nfmt.Println(\"fixture\")\n```"
+		// Split the markdown across deltas so the client exercises streaming
+		// append (and the table lands on a later frame).
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText[:len(assistantText)/2]})
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText[len(assistantText)/2:]})
+	case strings.Contains(strings.ToLower(input), "wide table"):
+		assistantText = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n"
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+	default:
+		assistantText = "Fixture reply"
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
 	}
-	if strings.Contains(strings.ToLower(input), "wide table") {
-		emit(chat.Event{
-			Kind: chat.EventTextDelta,
-			Text: "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n",
-		})
-		emit(chat.Event{Kind: chat.EventTurnDone})
-		return nil
-	}
-	emit(chat.Event{Kind: chat.EventTextDelta, Text: "Fixture reply"})
+	b.history = append(b.history,
+		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}},
+	)
 	emit(chat.Event{Kind: chat.EventTurnDone})
 	return nil
 }
@@ -1027,31 +1027,48 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 		}
 		return chat.Result{}, nil
 	case "branch":
-		id, keepStr, ok := strings.Cut(command.Args, " ")
-		keep, err := strconv.Atoi(strings.TrimSpace(keepStr))
-		if !ok || id == "" || err != nil {
-			return chat.Result{}, errors.New("usage: /branch <session> <keep>")
-		}
-		branchID := fmt.Sprintf("session-branch-%d", keep)
-		b.sessions.mu.Lock()
-		if _, exists := b.sessions.sessions[branchID]; !exists {
-			b.sessions.sessions[branchID] = &session.Session{
-				ID:         branchID,
-				Title:      "Branch",
-				Summary:    "A fixture branch.",
-				ModelAlias: "primary",
-				CreatedAt:  fixtureNow,
-				UpdatedAt:  fixtureNow,
+		if strings.Contains(strings.TrimSpace(command.Args), " ") {
+			id, keepStr, ok := strings.Cut(command.Args, " ")
+			keep, err := strconv.Atoi(strings.TrimSpace(keepStr))
+			if !ok || id == "" || err != nil {
+				return chat.Result{}, errors.New("usage: /branch <session> <keep>")
 			}
+			branchID := fmt.Sprintf("session-branch-%d", keep)
+			b.sessions.mu.Lock()
+			if _, exists := b.sessions.sessions[branchID]; !exists {
+				b.sessions.sessions[branchID] = &session.Session{
+					ID:         branchID,
+					Title:      "Branch",
+					Summary:    "A fixture branch.",
+					ModelAlias: "primary",
+					CreatedAt:  fixtureNow,
+					UpdatedAt:  fixtureNow,
+				}
+			}
+			b.sessions.mu.Unlock()
+			b.session = branchID
+			b.history = nil
+			st, err := b.state()
+			if err != nil {
+				return chat.Result{}, err
+			}
+			return chat.Result{State: &st}, nil
+		}
+		b.sessions.mu.Lock()
+		b.sessions.sessions["session-branch"] = &session.Session{
+			ID:         "session-branch",
+			Title:      "Branched conversation",
+			Summary:    "Forked from the fixture exchange.",
+			ModelAlias: "primary",
+			CreatedAt:  fixtureNow,
+			UpdatedAt:  fixtureNow,
 		}
 		b.sessions.mu.Unlock()
-		b.session = branchID
-		b.history = nil
-		st, err := b.state()
-		if err != nil {
-			return chat.Result{}, err
+		b.session = "session-branch"
+		b.history = append([]llm.Message(nil), b.history...)
+		for i := range b.history {
+			b.history[i].Seq = int64(i + 1)
 		}
-		return chat.Result{State: &st}, nil
 	case "resume":
 		b.session = strings.TrimSpace(command.Args)
 		b.history = nil
@@ -1106,6 +1123,20 @@ func (b *fixtureChatBackend) Cancel() {}
 
 func (b *fixtureChatBackend) Close(context.Context) error { return nil }
 
+func (b *fixtureChatBackend) sessionLineage() string {
+	if b.session == "session-branch" {
+		return "session-primary"
+	}
+	return ""
+}
+
+func (b *fixtureChatBackend) sessionLineageSeq() int64 {
+	if b.session == "session-branch" {
+		return int64(len(b.history))
+	}
+	return 0
+}
+
 func (b *fixtureChatBackend) state() (chat.State, error) {
 	current, err := b.sessions.Get(context.Background(), b.session)
 	if err != nil {
@@ -1121,6 +1152,10 @@ func (b *fixtureChatBackend) state() (chat.State, error) {
 		SandboxMode:    "workspace-write",
 		Workspace:      "matt-riley/waffle",
 		History:        append([]llm.Message(nil), b.history...),
+		Lineage: chat.BranchLineage{
+			ForkedFrom:  b.sessionLineage(),
+			ForkedAtSeq: b.sessionLineageSeq(),
+		},
 		Models: []chat.Model{
 			{Alias: "primary", Provider: "fixture", Upstream: "primary-model", Current: current.ModelAlias == "primary"},
 			{Alias: "local", Provider: "fixture", Upstream: "local-model", Current: current.ModelAlias == "local"},

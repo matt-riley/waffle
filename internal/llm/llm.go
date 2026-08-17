@@ -305,10 +305,15 @@ func (m Message) HasMedia() bool {
 	return false
 }
 
-// Message is one turn of conversation.
+// Message is one turn of conversation. Seq is a presentation hint set by
+// session.Turns to the turn's persisted sequence number; it is not stored in
+// the turn's blocks JSON (the storage form is Blocks alone), so it never
+// round-trips into persisted fixtures and is only present on the wire when a
+// caller annotates history with it (branching provenance, #471).
 type Message struct {
 	Role   Role    `json:"role"`
 	Blocks []Block `json:"blocks"`
+	Seq    int64   `json:"seq,omitempty"`
 }
 
 // UserText builds a plain-text user message.

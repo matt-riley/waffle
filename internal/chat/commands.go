@@ -65,7 +65,7 @@ var commandRegistry = [...]Command{
 	{Name: CommandPin, Usage: "/pin <session>", Description: "pin a conversation"},
 	{Name: CommandUnpin, Usage: "/unpin <session>", Description: "unpin a conversation"},
 	{Name: CommandDelete, Usage: "/delete <session>", Description: "delete a conversation"},
-	{Name: CommandBranch, Usage: "/branch <session> <keep>", Description: "branch a conversation at a completed boundary"},
+	{Name: CommandBranch, Usage: "/branch [<turn>|<session> <keep>]", Description: "fork a conversation at a completed exchange"},
 }
 
 // Commands returns a deep copy of the canonical command registry in stable

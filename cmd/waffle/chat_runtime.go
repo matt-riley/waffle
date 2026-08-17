@@ -275,6 +275,7 @@ func (r *chatRuntime) stateLocked(capabilities []string) chatpkg.State {
 		state.SessionID = r.current.ID
 		state.Title = r.current.Title
 		state.ModelAlias = r.current.ModelAlias
+		state.Lineage = chatpkg.BranchLineage{ForkedFrom: r.current.ForkedFrom, ForkedAtSeq: r.current.ForkedAtSeq}
 	}
 	if r.agent != nil {
 		if state.ModelAlias == "" {

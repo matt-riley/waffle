@@ -36,6 +36,15 @@ type Session struct {
 	Pinned     bool      `json:"pinned"`
 }
 
+// BranchLineage is the durable fork provenance of a conversation (#471): the
+// source session it was branched from and the completed-exchange sequence the
+// prefix was cut at. Zero/empty values mean the conversation was started
+// fresh.
+type BranchLineage struct {
+	ForkedFrom  string `json:"forked_from,omitempty"`
+	ForkedAtSeq int64  `json:"forked_at_seq,omitempty"`
+}
+
 // UsageRow is one persisted usage-accounting row.
 type UsageRow struct {
 	SessionID                string `json:"session_id"`
@@ -90,6 +99,7 @@ type State struct {
 	Models         []Model       `json:"models"`
 	Skills         []SkillRef    `json:"skills"`
 	Capabilities   []string      `json:"capabilities"`
+	Lineage        BranchLineage `json:"lineage,omitempty"`
 }
 
 // EventKind identifies a streamed chat lifecycle event.
