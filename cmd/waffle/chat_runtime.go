@@ -353,6 +353,9 @@ var taskModeGuidance = map[string]string{
 // Modes only add trusted guidance or narrow limits; they never widen posture
 // (#481). The mode metadata is persisted with the turn.
 func (r *chatRuntime) TurnWithModes(ctx context.Context, input string, options chatpkg.TurnModeOptions, emit func(chatpkg.Event)) error {
+	if err := llm.ValidateBlocks(options.Media); err != nil {
+		return fmt.Errorf("invalid media: %w", err)
+	}
 	redact := r.runtimeRedactor()
 	redactedEmit := func(event chatpkg.Event) {
 		if emit != nil {
