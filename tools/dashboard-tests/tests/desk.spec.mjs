@@ -528,6 +528,52 @@ test("a Today prompt hands off into the reviewed schedule editor", async ({ page
   await expect(form.getByLabel("Prompt")).toHaveValue("");
 });
 
+test("completed responses expose a keyboard-friendly read-aloud control", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the read-aloud flow once.");
+  await page.addInitScript(() => {
+    class FakeUtterance {
+      constructor(text) {
+        this.text = text;
+        this.onend = null;
+        this.onerror = null;
+        this.voice = null;
+      }
+    }
+    const synth = {
+      speaking: false,
+      getVoices() {
+        return [{ default: true, name: "Test", lang: "en-US" }];
+      },
+      addEventListener() {},
+      speak() {
+        this.speaking = true;
+      },
+      cancel() {
+        this.speaking = false;
+      },
+    };
+    Object.defineProperty(window, "speechSynthesis", { configurable: true, value: synth });
+    window.SpeechSynthesisUtterance = FakeUtterance;
+  });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Speak to me");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const reply = page.locator(".waffle-message").last();
+  const readButton = reply.locator(".message-read");
+  await expect(readButton).toBeVisible();
+  await expect(readButton).toHaveAttribute("aria-label", "Read this response aloud");
+  // Activation changes to a clear Stop state; Copy remains available.
+  await readButton.focus();
+  await page.keyboard.press("Enter");
+  await expect(readButton).toHaveText("Stop");
+  await expect(reply.getByRole("button", { name: "Copy message" })).toBeVisible();
+  await readButton.click();
+  await expect(readButton).toHaveText("Read aloud");
+  await expect(readButton).toHaveAttribute("aria-pressed", "false");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

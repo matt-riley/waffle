@@ -3,6 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+const readAloudSource = await readFile(
+  new URL("./assets/read-aloud.js", import.meta.url),
+  "utf8",
+);
 const source = await readFile(new URL("./assets/today.js", import.meta.url), "utf8");
 
 class FakeElement {
@@ -479,6 +483,30 @@ function createHarness({
   if (storedLease) {
     storage.set("waffle.desk.today.owner.v1", JSON.stringify(storedLease));
   }
+  const speechUtterances = [];
+  class FakeSpeechSynthesisUtterance {
+    constructor(text) {
+      this.text = text;
+      this.voice = null;
+      this.onend = null;
+      this.onerror = null;
+      speechUtterances.push(this);
+    }
+  }
+  const speechCalls = [];
+  const speechSynthesis = {
+    speak(utterance) {
+      speechCalls.push({ kind: "speak", text: utterance.text });
+    },
+    cancel() {
+      speechCalls.push({ kind: "cancel" });
+    },
+    getVoices() {
+      return [{ default: true, name: "Fixture" }];
+    },
+    onend: null,
+    onerror: null,
+  };
   const sessionStorage = denyStorage
     ? {
         getItem() {
@@ -514,6 +542,8 @@ function createHarness({
     },
     sessionStorage,
     confirm: () => confirmResult,
+    speechSynthesis,
+    SpeechSynthesisUtterance: FakeSpeechSynthesisUtterance,
     addEventListener: (type, listener) => {
       const listeners = lifecycleListeners.get(type) || [];
       listeners.push(listener);
@@ -532,11 +562,15 @@ function createHarness({
       }
     },
   });
+  new vm.Script(readAloudSource, { filename: "read-aloud.js" }).runInContext(context);
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
   return {
     calls,
     clipboardWrites,
+    speechCalls,
+    speechSynthesis,
+    speechUtterances,
     cancelResponse,
     elements,
     EventSource: FakeEventSource,
@@ -3136,4 +3170,160 @@ test("a completed user prompt and the composer draft expose Create schedule hand
     JSON.parse(harness.sessionStorage.getItem("waffle.desk.schedule.draft.v1")).text,
     "Draft a report every morning",
   );
+});
+
+test("read aloud speaks sanitized chunked content, replaces, and stops on teardown", async () => {
+  const longMarkdown =
+    "# Findings\n\n- **alpha** is fine\n- beta is not\n\n```go\nfmt.Println(\"x\")\n```\n\n| A | B |\n| --- | --- |\n| one | two |\n\nSee [the docs](https://example.com). " +
+    "This sentence is repeated enough times to exceed the chunk boundary. " .repeat(6);
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-1",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Question" }] },
+            { role: "assistant", blocks: [{ type: "text", text: longMarkdown }] },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const readButton = article.querySelector(".message-read");
+  assert.ok(readButton, "assistant message exposes Read aloud");
+  await readButton.listener("click")();
+
+  // Sanitized, chunked utterances: no markdown punctuation, links read as
+  // visible text, code and tables handled intelligibly.
+  const spoken = harness.speechCalls.filter((call) => call.kind === "speak").map((call) => call.text);
+  assert.ok(spoken.length >= 2, "long response is chunked");
+  const joined = spoken.join(" ");
+  assert.ok(joined.includes("Findings"), joined);
+  assert.ok(joined.includes("alpha is fine"), joined);
+  assert.ok(joined.includes("the docs"), joined);
+  assert.ok(joined.includes("Code: fmt.Println"), joined);
+  assert.ok(joined.includes("one, two"), joined);
+  assert.doesNotMatch(joined, /\*\*|```|\[|\]|\(https/);
+
+  const lastUtterance = harness.speechUtterances.at(-1);
+  assert.equal(typeof lastUtterance.onend, "function");
+  assert.equal(typeof lastUtterance.onerror, "function");
+  assert.equal(harness.speechSynthesis.onend, null);
+  assert.equal(harness.speechSynthesis.onerror, null);
+  assert.equal(readButton.textContent, "Stop");
+  lastUtterance.onend();
+  assert.equal(readButton.textContent, "Read aloud");
+  assert.equal(readButton.getAttribute("aria-pressed"), "false");
+  assert.equal(readButton.classList.contains("is-speaking"), false);
+
+  // Toggle stops the first and starts nothing; toggling a second message
+  // replaces the first. Snapshot cancels after start — start() already
+  // cancels any previous utterance, so a raw "some cancel happened" check
+  // would be false-green.
+  await readButton.listener("click")();
+  const cancelsAfterReplay = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await readButton.listener("click")();
+  const cancelsAfterStop = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterStop > cancelsAfterReplay, "stop cancels synthesis");
+  const secondHarness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-1",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Q1" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "First reply" }] },
+            { role: "user", blocks: [{ type: "text", text: "Q2" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Second reply" }] },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const messages = secondHarness.elements["#desk-transcript"].querySelectorAll(".waffle-message");
+  const first = messages[0].querySelector(".message-read");
+  const second = messages[1].querySelector(".message-read");
+  await first.listener("click")();
+  const cancelsAfterFirst = secondHarness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await second.listener("click")();
+  const cancelsAfterSecond = secondHarness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterSecond > cancelsAfterFirst, "starting a second playback stops the first");
+  assert.equal(secondHarness.speechCalls.filter((call) => call.kind === "speak").length, 2);
+});
+
+test("read aloud stops on a new conversation and resume, and never speaks user drafts", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-1",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Question" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Reply" }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "new" && command.args === "") {
+        return jsonResponse({ confirm: true, text: "Start over?" });
+      }
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-3",
+              title: "Other session",
+              updated_at: "2026-07-25T12:00:00Z",
+            },
+          ],
+        });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "session-3",
+            title: "Other session",
+            history: [{ role: "assistant", blocks: [{ type: "text", text: "Resumed reply" }] }],
+          }),
+        });
+      }
+      return jsonResponse({
+        state: defaultChatState({ session_id: "session-2", title: "Fresh", history: null }),
+      });
+    },
+  });
+  await flush();
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const readButton = article.querySelector(".message-read");
+  await readButton.listener("click")();
+  assert.ok(harness.speechCalls.some((call) => call.kind === "speak"));
+  const userMessage = harness.elements["#desk-transcript"].querySelector(".user-message");
+  assert.equal(userMessage.querySelector(".message-read"), null, "user messages never read aloud");
+  const cancelsAfterStart = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await harness.elements["#desk-new"].listener("click")();
+  await flush();
+  const cancelsAfterNew = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterNew > cancelsAfterStart, "new conversation stops speech");
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const sessionButton = harness.elements["#desk-session-options"].querySelector("button");
+  await sessionButton.listener("click")();
+  await flush();
+  const resumed = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const resumeRead = resumed.querySelector(".message-read");
+  await resumeRead.listener("click")();
+  const cancelsAfterResumePlay = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await sessionButton.listener("click")();
+  await flush();
+  const cancelsAfterResume = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterResume > cancelsAfterResumePlay, "resume stops speech");
 });

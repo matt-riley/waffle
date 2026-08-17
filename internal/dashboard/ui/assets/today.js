@@ -820,6 +820,28 @@ function renderMarkdown(node, text) {
   }
 }
 
+function attachReadAloudButton(article) {
+  const engine = globalThis.waffleReadAloud;
+  if (!article || article.querySelector(".message-read") || !engine?.supported?.()) {
+    return;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-read";
+  button.textContent = "Read aloud";
+  button.dataset.readAloudLabel = "Read aloud";
+  button.setAttribute("aria-label", "Read this response aloud");
+  button.setAttribute("aria-pressed", "false");
+  button.addEventListener("click", () => {
+    if (button.classList.contains("is-speaking")) {
+      engine.stop();
+      return;
+    }
+    engine.start(article, button);
+  });
+  article.appendChild(button);
+}
+
 function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   if (!text && !allowEmpty) {
     return null;
@@ -844,6 +866,9 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   article.append(label, body);
   if (!allowEmpty) {
     attachCopyButton(article);
+    if (role !== "user") {
+      attachReadAloudButton(article);
+    }
   }
   if (beforeNode) {
     elements.transcript.insertBefore(article, beforeNode);
@@ -1482,6 +1507,9 @@ function renderCanonicalState(chatState, includeHistory) {
   if (!chatState) {
     return;
   }
+  if (includeHistory) {
+    globalThis.waffleReadAloud?.stop();
+  }
   state.sessionID = chatState.session_id || state.sessionID;
   syncComposerDraft();
   markSessionSelection();
@@ -1851,6 +1879,7 @@ async function openDesk({ forceNewSession = false } = {}) {
   setPhase(phase.opening);
   clearControlErrors();
   resetOwnershipConflict();
+  globalThis.waffleReadAloud?.stop();
   try {
     const bootstrap = validateBootstrap(await getBootstrap());
     if (generation !== state.generation) {
@@ -2349,6 +2378,7 @@ function commandMutation(name, args = "") {
 }
 
 async function newConversation() {
+  globalThis.waffleReadAloud?.stop();
   await runCommandOperation("Starting conversation", async () => {
     const preview = await commandMutation("new");
     if (preview.confirm) {
@@ -2383,6 +2413,7 @@ function formatSessionUpdated(value) {
 }
 
 async function resumeSession(sessionID) {
+  globalThis.waffleReadAloud?.stop();
   await runCommandOperation("Resuming conversation", async () => {
     const result = await commandMutation("resume", sessionID);
     if (result.state) {
@@ -3117,6 +3148,7 @@ function finalizeStreamingMessage() {
     state.historyLength = state.promptIndex + 2;
   }
   attachCopyButton(state.streamingMessage);
+  attachReadAloudButton(state.streamingMessage);
   // The finished exchange is the final completed boundary: branch at the end.
   attachBranchButton(state.streamingMessage, "");
   state.streamingMessage = null;
@@ -3407,6 +3439,7 @@ function handleComposerKeydown(event) {
 }
 
 function closeOwnerOnPageHide() {
+  globalThis.waffleReadAloud?.stop();
   if (!state.clientID || !state.reattachToken || !state.requestToken) {
     return;
   }
