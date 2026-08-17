@@ -20,7 +20,7 @@ import (
 	"strings"
 
 	"filippo.io/age"
-	tomltree "github.com/pelletier/go-toml"
+	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/matt-riley/waffle/internal/config"
 	redactpkg "github.com/matt-riley/waffle/internal/redact"
@@ -149,7 +149,8 @@ func (m *Manager) Preflight(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if _, err := tomltree.LoadBytes(raw); err != nil {
+	var parsed any
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
 		return fmt.Errorf("parse config syntax tree: %w", err)
 	}
 	cfg, err := config.Load(m.ConfigPath)
