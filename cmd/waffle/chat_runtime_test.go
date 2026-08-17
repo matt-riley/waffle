@@ -2471,11 +2471,13 @@ type runtimeProviderStep struct {
 type runtimeScriptedProvider struct {
 	mu        sync.Mutex
 	responses []runtimeProviderStep
+	calls     int
 }
 
 func (p *runtimeScriptedProvider) Complete(_ context.Context, _ llm.Request, onEvent llm.StreamFunc) (*llm.Response, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls++
 	if len(p.responses) == 0 {
 		return nil, errors.New("no scripted response")
 	}
@@ -3072,5 +3074,127 @@ func TestChatRuntimeTurnWithNoCitationsEmitsNoSources(t *testing.T) {
 	}
 	if sourcesSeen != 0 {
 		t.Fatalf("sources events = %d, want 0", sourcesSeen)
+	}
+}
+
+func TestTemporaryConversationNeverPersistsTurns(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{Temporary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Temporary {
+		t.Fatal("temporary open must be flagged in the state")
+	}
+	if state.Title != "Temporary conversation" {
+		t.Fatalf("title = %q, want Temporary conversation", state.Title)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "temp reply"}}},
+			Usage:      llm.Usage{InputTokens: 2, OutputTokens: 4},
+		}},
+	}}
+	if err := runtime.Turn(ctx, "a temporary question", nil); err != nil {
+		t.Fatal(err)
+	}
+	// The temp session ID must not exist in the durable store.
+	if _, err := sessions.Get(ctx, state.SessionID); err == nil {
+		t.Fatalf("temporary session %q was persisted", state.SessionID)
+	}
+	// Listing must not include it either.
+	list, err := sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range list {
+		if value.ID == state.SessionID {
+			t.Fatalf("temporary session %q appears in the durable list", state.SessionID)
+		}
+	}
+	// The transcript is still visible in memory for the live page.
+	status, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State == nil || len(status.State.History) == 0 {
+		t.Fatal("temporary history should be visible in memory")
+	}
+}
+
+func TestTemporaryConversationNeverReflectsOrWritesMemory(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{Temporary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "first"}}},
+		}},
+		{response: llm.Response{
+			StopReason: llm.StopToolUse,
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+				Type: llm.BlockToolUse,
+				ToolUse: &llm.ToolUse{
+					ID:    "remember-1",
+					Name:  "remember",
+					Input: json.RawMessage(`{"note":"secret temp fact"}`),
+				},
+			}}},
+		}},
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "second"}}},
+		}},
+	}}
+	runtime.agent.Provider = provider
+	if err := runtime.Turn(ctx, "hello", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Turn(ctx, "remember this", nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.persisted != 0 {
+		t.Fatalf("persisted = %d, want 0 so reflection cannot treat this as durable work", runtime.persisted)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("provider calls after turns = %d, want 3", provider.calls)
+	}
+	remembered := false
+	for _, msg := range runtime.history {
+		for _, block := range msg.Blocks {
+			if block.Type == llm.BlockToolResult && block.ToolResult != nil &&
+				strings.Contains(block.ToolResult.Content, "unavailable in a temporary conversation") {
+				remembered = true
+			}
+		}
+	}
+	if !remembered {
+		t.Fatalf("remember tool must fail closed; history = %+v", runtime.history)
+	}
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("provider calls after close = %d, want 3 (reflect must not run)", provider.calls)
+	}
+	if _, err := sessions.Get(ctx, state.SessionID); err == nil {
+		t.Fatalf("temporary session %q was persisted", state.SessionID)
+	}
+	list, err := sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("durable sessions = %+v, want none", list)
+	}
+	memoryPath := filepath.Join(os.Getenv("WAFFLE_HOME"), "workspace", "main", "MEMORY.md")
+	if data, err := os.ReadFile(memoryPath); err == nil && strings.Contains(string(data), "secret temp fact") {
+		t.Fatalf("MEMORY.md recorded temporary content:\n%s", data)
 	}
 }

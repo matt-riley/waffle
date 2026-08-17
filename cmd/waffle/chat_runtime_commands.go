@@ -270,10 +270,12 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	r.history = nil
 	r.persisted = 0
 	r.modelError = ""
+	r.temporary = false
 	if r.agent != nil {
 		r.agent.Model = model
 		r.agent.System = nextSystem
 	}
+	r.applyPersistPolicyLocked()
 	r.attachedSkills = nextSkills
 	return dropped, nil
 }
@@ -458,6 +460,9 @@ func (r *chatRuntime) commandRename(ctx context.Context, args string) (chatpkg.R
 	if len([]rune(title)) > 200 {
 		return chatpkg.Result{}, errors.New("title is too long (maximum 200 characters)")
 	}
+	if r.blocksCurrentSessionWrite(id) {
+		return chatpkg.Result{}, errors.New("temporary conversations cannot be renamed into durable history")
+	}
 	if err := r.sessions.SetTitle(ctx, id, title); err != nil {
 		return chatpkg.Result{}, err
 	}
@@ -473,6 +478,9 @@ func (r *chatRuntime) commandPin(ctx context.Context, args string, pinned bool) 
 			verb = "unpin"
 		}
 		return chatpkg.Result{}, fmt.Errorf("usage: /%s <session>", verb)
+	}
+	if r.blocksCurrentSessionWrite(id) {
+		return chatpkg.Result{}, errors.New("temporary conversations cannot be pinned into durable history")
 	}
 	if err := r.sessions.SetPinned(ctx, id, pinned); err != nil {
 		return chatpkg.Result{}, err
@@ -781,17 +789,30 @@ func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name strin
 	}
 	r.blockTurns = true
 	sessionID := r.current.ID
+	persistable := r.persistable()
 	activeAgent := r.agent
 	baseSystem := r.baseSystem
 	activeSkills := append([]skill.Skill(nil), r.skills...)
 	skillWorkspace := r.skillWorkspace
+	var liveAttached []string
+	for _, ref := range r.attachedSkills {
+		if ref.Attached {
+			liveAttached = append(liveAttached, ref.Name)
+		}
+	}
 	r.mu.Unlock()
 	defer r.endExclusiveChange()
 
 	attachments := &skill.Attachments{DB: r.st.DB, Workspace: skillWorkspace, Lifecycle: r.st.SkillLifecycleGuard()}
-	currentNames, err := attachments.List(ctx, sessionID)
-	if err != nil {
-		return chatpkg.Result{}, err
+	var currentNames []string
+	if persistable {
+		var err error
+		currentNames, err = attachments.List(ctx, sessionID)
+		if err != nil {
+			return chatpkg.Result{}, err
+		}
+	} else {
+		currentNames = liveAttached
 	}
 	wasAttached := containsString(currentNames, name)
 	nextNames := append([]string(nil), currentNames...)
@@ -810,13 +831,15 @@ func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name strin
 	if err != nil {
 		return chatpkg.Result{}, err
 	}
-	if action == "attach" {
-		err = attachments.Attach(ctx, sessionID, name)
-	} else {
-		err = attachments.Detach(ctx, sessionID, name)
-	}
-	if err != nil {
-		return chatpkg.Result{}, err
+	if persistable {
+		if action == "attach" {
+			err = attachments.Attach(ctx, sessionID, name)
+		} else {
+			err = attachments.Detach(ctx, sessionID, name)
+		}
+		if err != nil {
+			return chatpkg.Result{}, err
+		}
 	}
 
 	r.mu.Lock()
@@ -834,10 +857,12 @@ func (r *chatRuntime) changeSessionSkill(ctx context.Context, action, name strin
 	r.mu.Unlock()
 
 	var rollbackErr error
-	if wasAttached {
-		rollbackErr = attachments.Attach(ctx, sessionID, name)
-	} else {
-		rollbackErr = attachments.Detach(ctx, sessionID, name)
+	if persistable {
+		if wasAttached {
+			rollbackErr = attachments.Attach(ctx, sessionID, name)
+		} else {
+			rollbackErr = attachments.Detach(ctx, sessionID, name)
+		}
 	}
 	return chatpkg.Result{}, errors.Join(errors.New("chat session changed while updating skills"), rollbackErr)
 }
@@ -938,6 +963,7 @@ func (r *chatRuntime) commandWorkset(ctx context.Context, args string) (chatpkg.
 		return chatpkg.Result{}, errors.New("no active session working set")
 	}
 	sessionID := r.current.ID
+	persistable := r.persistable()
 	r.mu.Unlock()
 	ws := &workset.Store{DB: r.st.DB}
 	fields := strings.Fields(args)
@@ -958,6 +984,9 @@ func (r *chatRuntime) commandWorkset(ctx context.Context, args string) (chatpkg.
 			text = strings.TrimSpace(workset.Render(entries))
 		}
 		return chatpkg.Result{Title: "Working set", Text: text, Workset: items}, nil
+	}
+	if !persistable {
+		return chatpkg.Result{}, errors.New("workspace_update is unavailable in a temporary conversation")
 	}
 	switch fields[0] {
 	case "replace":
@@ -1013,6 +1042,10 @@ func (r *chatRuntime) commandBranch(ctx context.Context, args string, emit func(
 	if r.current == nil {
 		r.mu.Unlock()
 		return chatpkg.Result{}, errors.New("chat runtime is not open")
+	}
+	if !r.persistable() {
+		r.mu.Unlock()
+		return chatpkg.Result{}, errors.New("temporary conversations cannot be branched into durable history")
 	}
 	if r.agentCancel != nil {
 		r.mu.Unlock()
@@ -1152,11 +1185,13 @@ func (r *chatRuntime) commandModel(ctx context.Context, alias string) (chatpkg.R
 	if _, err := r.cfg.ResolveModel(alias); err != nil {
 		return chatpkg.Result{}, err
 	}
-	if err := r.sessions.SetModelAliasIfVersion(ctx, r.current.ID, alias, r.current.ModelAliasVersion); err != nil {
-		return chatpkg.Result{}, err
+	if r.persistable() {
+		if err := r.sessions.SetModelAliasIfVersion(ctx, r.current.ID, alias, r.current.ModelAliasVersion); err != nil {
+			return chatpkg.Result{}, err
+		}
+		r.current.ModelAliasVersion++
 	}
 	r.current.ModelAlias = alias
-	r.current.ModelAliasVersion++
 	r.agent.Model = alias
 	r.modelError = ""
 	state := r.stateLocked(r.capabilities)

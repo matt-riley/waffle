@@ -158,6 +158,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 			SessionID        string   `json:"session_id"`
 			Profile          string   `json:"profile"`
 			Capabilities     []string `json:"capabilities"`
+			Temporary        bool     `json:"temporary"`
 			ReattachClientID string   `json:"reattach_client_id"`
 			ReattachToken    string   `json:"reattach_token"`
 		}
@@ -171,6 +172,7 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 				SessionID:    request.SessionID,
 				Profile:      request.Profile,
 				Capabilities: request.Capabilities,
+				Temporary:    request.Temporary,
 			},
 			ChatClientLease{
 				ClientID:      request.ReattachClientID,

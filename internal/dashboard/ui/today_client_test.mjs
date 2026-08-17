@@ -289,6 +289,9 @@ function createHarness({
     "#desk-fork",
     "#desk-new",
     "#desk-session-refresh",
+    "#desk-temporary-row",
+    "#desk-temporary",
+    "#desk-temporary-badge",
     "#desk-export-format",
     "#desk-export",
     "#desk-sessions",
@@ -687,6 +690,7 @@ test("open at desk selects exactly one requested persisted session", async () =>
     continue: false,
     profile: "",
     session_id: "session-live",
+    temporary: false,
   });
 });
 
@@ -3460,4 +3464,41 @@ test("export sends the live owner lease and chosen format", async () => {
   assert.equal(exportBody.format, "markdown");
   assert.ok(exportBody.client_id, "export sends the client id");
   assert.ok(exportBody.reattach_token, "export sends the live reattach proof");
+});
+
+test("temporary conversations send the option and show a live badge", async () => {
+  const harness = createHarness({
+    openHandler: async ({ options }) => {
+      const body = JSON.parse(options.body);
+      if (body.temporary) {
+        return jsonResponse({
+          client_id: "client-1",
+          reattach_token: "lease-1",
+          state: defaultChatState({
+            session_id: "session-temp",
+            title: "Temporary conversation",
+            temporary: true,
+            history: [],
+          }),
+        });
+      }
+      return jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState(),
+      });
+    },
+  });
+  await flush();
+  // The option is available before the first message.
+  assert.equal(harness.elements["#desk-temporary-row"].hidden, false);
+  assert.equal(harness.elements["#desk-temporary-badge"].hidden, true);
+
+  harness.elements["#desk-temporary"].checked = true;
+  await harness.elements["#desk-refresh"].listener("click")();
+  await flush();
+  const opens = mutationCalls(harness, "/api/v1/desk/chat/open");
+  assert.equal(JSON.parse(opens[opens.length - 1].options.body).temporary, true);
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Temporary conversation");
+  assert.equal(harness.elements["#desk-temporary-badge"].hidden, false);
 });

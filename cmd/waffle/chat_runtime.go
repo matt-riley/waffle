@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,12 +15,14 @@ import (
 	"github.com/matt-riley/waffle/internal/broker"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	redactpkg "github.com/matt-riley/waffle/internal/redact"
 	"github.com/matt-riley/waffle/internal/repopolicy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/skill"
+	"github.com/matt-riley/waffle/internal/spill"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/tool"
 	"github.com/matt-riley/waffle/internal/workspace"
@@ -35,16 +38,22 @@ const (
 // connection. Renderers are responsible only for displaying its state,
 // events, and command results.
 type chatRuntime struct {
-	mu                  sync.Mutex
-	commandMu           sync.Mutex
-	agent               *agent.Agent
-	agentCancel         context.CancelFunc
-	commandCancel       context.CancelFunc
-	commandDone         chan struct{}
-	sessions            *session.Store
-	current             *session.Session
-	history             []llm.Message
-	persisted           int
+	mu            sync.Mutex
+	commandMu     sync.Mutex
+	agent         *agent.Agent
+	agentCancel   context.CancelFunc
+	commandCancel context.CancelFunc
+	commandDone   chan struct{}
+	sessions      *session.Store
+	current       *session.Session
+	history       []llm.Message
+	persisted     int
+	// temporary marks a conversation whose content must never enter durable
+	// session storage, reflection, learning, or memory (#475).
+	temporary bool
+	// durableSpill is the agent's spill store, kept aside while a temporary
+	// conversation disables durable recall so /new can restore it.
+	durableSpill        *spill.Store
 	cfg                 config.Config
 	st                  *store.Store
 	skills              []skill.Skill
@@ -151,27 +160,39 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	}()
 
 	var current *session.Session
-	switch {
-	case strings.TrimSpace(options.SessionID) != "":
-		current, err = r.sessions.Get(ctx, strings.TrimSpace(options.SessionID))
-	case options.Continue:
-		current, err = r.sessions.Latest(ctx)
-		if errors.Is(err, session.ErrNotFound) {
-			err = nil
+	if options.Temporary {
+		// A temporary conversation gets an in-memory scoped identity only:
+		// no row is ever written, so listing, FTS, summaries, reflection, and
+		// memory can never find it (#475).
+		id, idErr := id.New("temp-session-")
+		if idErr != nil {
+			return chatpkg.State{}, fmt.Errorf("temporary session id: %w", idErr)
 		}
-	}
-	if err != nil {
-		return chatpkg.State{}, err
-	}
-	if current == nil {
-		current, err = r.sessions.Create(ctx, "")
+		now := time.Now()
+		current = &session.Session{ID: id, Title: "Temporary conversation", CreatedAt: now, UpdatedAt: now}
+	} else {
+		switch {
+		case strings.TrimSpace(options.SessionID) != "":
+			current, err = r.sessions.Get(ctx, strings.TrimSpace(options.SessionID))
+		case options.Continue:
+			current, err = r.sessions.Latest(ctx)
+			if errors.Is(err, session.ErrNotFound) {
+				err = nil
+			}
+		}
 		if err != nil {
 			return chatpkg.State{}, err
+		}
+		if current == nil {
+			current, err = r.sessions.Create(ctx, "")
+			if err != nil {
+				return chatpkg.State{}, err
+			}
 		}
 	}
 
 	var history []llm.Message
-	if options.Continue || strings.TrimSpace(options.SessionID) != "" {
+	if !options.Temporary && (options.Continue || strings.TrimSpace(options.SessionID) != "") {
 		history, err = r.sessions.Turns(ctx, current.ID)
 		if err != nil {
 			return chatpkg.State{}, err
@@ -230,6 +251,8 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = modelError
+	r.temporary = options.Temporary
+	r.applyPersistPolicyLocked()
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
 	adopted = true
@@ -280,6 +303,7 @@ func (r *chatRuntime) stateLocked(capabilities []string) chatpkg.State {
 		state.ModelAlias = r.current.ModelAlias
 		state.Lineage = chatpkg.BranchLineage{ForkedFrom: r.current.ForkedFrom, ForkedAtSeq: r.current.ForkedAtSeq}
 	}
+	state.Temporary = r.temporary
 	if r.agent != nil {
 		if state.ModelAlias == "" {
 			state.ModelAlias = r.agent.Model
@@ -349,17 +373,23 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	r.turnDone = turnDone
 	current := r.current
 	runner := r.agent
-	if len(r.history) == 0 && current.Title == "" {
+	if len(r.history) == 0 && current.Title == "" && r.persistable() {
 		title := truncateChatTitle(input)
 		if err := r.sessions.SetTitle(turnCtx, current.ID, title); err == nil {
 			current.Title = title
 		}
 	}
+	turnStart := len(r.history)
 	r.history = append(r.history, llm.UserText(input))
 	history := append([]llm.Message(nil), r.history...)
 	// persistedStart marks where this turn's new messages begin once the run
 	// appends them, so artifact collection stays scoped to this exchange.
 	persistedStart := r.persisted
+	if !r.persistable() {
+		// Temporary conversations never advance persisted; keep artifact
+		// collection scoped to this exchange via the in-memory turn start.
+		persistedStart = turnStart
+	}
 	r.mu.Unlock()
 
 	defer func() {
@@ -443,12 +473,14 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	r.mu.Lock()
 	r.history = newHistory
 	var persistErr error
-	for r.persisted < len(r.history) {
-		if err := r.sessions.AppendTurn(persistCtx, current.ID, r.history[r.persisted]); err != nil {
-			persistErr = err
-			break
+	if r.persistable() {
+		for r.persisted < len(r.history) {
+			if err := r.sessions.AppendTurn(persistCtx, current.ID, r.history[r.persisted]); err != nil {
+				persistErr = err
+				break
+			}
+			r.persisted++
 		}
-		r.persisted++
 	}
 	state := r.stateLocked(r.capabilities)
 	// Collect artifacts declared only by this exchange's appended turns so a
@@ -578,9 +610,38 @@ func newChat(ctx context.Context, cfg config.Config, st *store.Store, continueLa
 	return runtime, cleanup, nil
 }
 
+// persistable reports whether this conversation may write durable session,
+// reflection, learning, or memory state. The caller must hold r.mu.
+func (r *chatRuntime) persistable() bool { return !r.temporary }
+
+func (r *chatRuntime) blocksCurrentSessionWrite(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.current != nil && r.current.ID == id && !r.persistable()
+}
+
+func (r *chatRuntime) applyPersistPolicyLocked() {
+	if r.agent == nil {
+		return
+	}
+	if r.persistable() {
+		if r.agent.Spill == nil && r.durableSpill != nil {
+			r.agent.Spill = r.durableSpill
+		}
+		return
+	}
+	if r.agent.Spill != nil {
+		r.durableSpill = r.agent.Spill
+		r.agent.Spill = nil
+	}
+	if _, ok := r.agent.Tools.(persistableToolbox); !ok {
+		r.agent.Tools = persistableToolbox{runtime: r, inner: r.agent.Tools}
+	}
+}
+
 func (r *chatRuntime) reflectSession(ctx context.Context) error {
 	r.mu.Lock()
-	if r.persisted < 2 || r.agent == nil || r.current == nil {
+	if !r.persistable() || r.persisted < 2 || r.agent == nil || r.current == nil {
 		r.mu.Unlock()
 		return nil
 	}
@@ -706,4 +767,78 @@ func (r *chatRuntime) runtimeRedactor() func(string) string {
 
 func redactChatError(err error, redact func(string) string) error {
 	return redactpkg.RedactError(err, redact)
+}
+
+// persistableToolbox refuses durable memory, learning, and working-set writes
+// while the conversation is temporary. The caller must apply it from
+// chatRuntime so persistable() stays the single gate (#475).
+type persistableToolbox struct {
+	runtime *chatRuntime
+	inner   tool.Toolbox
+}
+
+func durableWriteTool(name string) bool {
+	switch name {
+	case "remember", "memory_update", "distill_skill", "workspace_update":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p persistableToolbox) denyDurable(name string) error {
+	if !durableWriteTool(name) {
+		return nil
+	}
+	p.runtime.mu.Lock()
+	ok := p.runtime.persistable()
+	p.runtime.mu.Unlock()
+	if ok {
+		return nil
+	}
+	return fmt.Errorf("%s is unavailable in a temporary conversation", name)
+}
+
+func (p persistableToolbox) Defs() []llm.Tool {
+	if p.inner == nil {
+		return nil
+	}
+	return p.inner.Defs()
+}
+
+func (p persistableToolbox) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	if err := p.denyDurable(name); err != nil {
+		return "", err
+	}
+	if p.inner == nil {
+		return "", fmt.Errorf("unknown tool %q", name)
+	}
+	return p.inner.Run(ctx, name, input)
+}
+
+func (p persistableToolbox) RunWithID(ctx context.Context, id, name string, input json.RawMessage) (string, error) {
+	if err := p.denyDurable(name); err != nil {
+		return "", err
+	}
+	if p.inner == nil {
+		return "", fmt.Errorf("unknown tool %q", name)
+	}
+	if caller, ok := p.inner.(tool.CallerToolbox); ok {
+		return caller.RunWithID(ctx, id, name, input)
+	}
+	return p.inner.Run(ctx, name, input)
+}
+
+func (p persistableToolbox) RunWithBlocks(ctx context.Context, name string, input json.RawMessage) (string, []llm.Block, error) {
+	if err := p.denyDurable(name); err != nil {
+		return "", nil, err
+	}
+	if p.inner == nil {
+		return "", nil, fmt.Errorf("unknown tool %q", name)
+	}
+	if blocks, ok := p.inner.(tool.BlockToolbox); ok {
+		return blocks.RunWithBlocks(ctx, name, input)
+	}
+	out, err := p.inner.Run(ctx, name, input)
+	return out, nil, err
 }

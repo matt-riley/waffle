@@ -72,6 +72,11 @@ templ Today(view ShellView) {
 				<div class="conversation-actions">
 					<button type="button" id="desk-new" disabled>New conversation</button>
 					<button type="button" id="desk-session-refresh" disabled>Recent conversations</button>
+					<label id="desk-temporary-row" class="temporary-row" for="desk-temporary" hidden>
+						<input id="desk-temporary" type="checkbox"/>
+						<span>Temporary conversation</span>
+					</label>
+					<p id="desk-temporary-badge" class="temporary-badge" hidden>Temporary — nothing is saved</p>
 					<label class="visually-hidden" for="desk-export-format">Export format</label>
 					<select id="desk-export-format" disabled>
 						<option value="markdown">Markdown</option>

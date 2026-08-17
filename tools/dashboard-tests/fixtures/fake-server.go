@@ -1067,6 +1067,7 @@ type fixtureChatBackend struct {
 	artifacts   *artifact.Store
 	session     string
 	history     []llm.Message
+	temporary   bool
 	sessionLock *atomic.Bool
 }
 
@@ -1085,6 +1086,11 @@ func (fixtureSessionActiveError) SafeMessage() string {
 func (b *fixtureChatBackend) Open(_ context.Context, options chat.OpenOptions) (chat.State, error) {
 	if options.Continue && b.sessionLock != nil && b.sessionLock.Load() {
 		return chat.State{}, fixtureSessionActiveError{}
+	}
+	if options.Temporary {
+		b.session = "session-temporary"
+		b.temporary = true
+		return b.state()
 	}
 	b.session = strings.TrimSpace(options.SessionID)
 	if b.session == "" {
@@ -1349,13 +1355,22 @@ func (b *fixtureChatBackend) sessionLineageSeq() int64 {
 }
 
 func (b *fixtureChatBackend) state() (chat.State, error) {
+	if b.temporary {
+		current := &session.Session{ID: "session-temporary", Title: "Temporary conversation"}
+		return b.stateFor(current), nil
+	}
 	current, err := b.sessions.Get(context.Background(), b.session)
 	if err != nil {
 		return chat.State{}, err
 	}
+	return b.stateFor(current), nil
+}
+
+func (b *fixtureChatBackend) stateFor(current *session.Session) chat.State {
 	return chat.State{
 		SessionID:      current.ID,
 		Title:          current.Title,
+		Temporary:      b.temporary,
 		ModelAlias:     current.ModelAlias,
 		ProviderLabel:  "Fixture provider",
 		Profile:        "reviewer",
@@ -1375,7 +1390,7 @@ func (b *fixtureChatBackend) state() (chat.State, error) {
 			{Name: "review", Description: "Review changes"},
 		},
 		Capabilities: []string{},
-	}, nil
+	}
 }
 
 var (
