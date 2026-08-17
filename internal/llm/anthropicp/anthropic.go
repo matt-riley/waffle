@@ -375,7 +375,13 @@ func fromMessage(msg anthropic.Message) (*llm.Response, error) {
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
-			resp.Message.Blocks = append(resp.Message.Blocks, llm.Block{Type: llm.BlockText, Text: b.Text})
+			out := llm.Block{Type: llm.BlockText, Text: b.Text}
+			for i, citation := range b.Citations {
+				if translated := translateCitation(citation, i+1); translated != nil {
+					out.Citations = append(out.Citations, *translated)
+				}
+			}
+			resp.Message.Blocks = append(resp.Message.Blocks, out)
 		case anthropic.ToolUseBlock:
 			resp.Message.Blocks = append(resp.Message.Blocks, llm.Block{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{
 				ID:    b.ID,
@@ -402,4 +408,65 @@ func fromMessage(msg anthropic.Message) (*llm.Response, error) {
 		resp.StopReason = llm.StopOther
 	}
 	return resp, nil
+}
+
+// translateCitation maps one provider citation to waffle's provider-neutral
+// form (#479). Web-search citations become safe web sources (their URL is
+// restricted to http/https by the projection layer); document citations
+// (char/page/content-block locations) become opaque workspace-local
+// resources using the provider's file id — never an absolute path. Every
+// translated citation gets a deterministic, provider-neutral ID so persisted
+// turns and streamed source events share stable source identifiers. Unknown
+// citation shapes are dropped so the contract stays additive.
+func translateCitation(citation anthropic.TextCitationUnion, sequence int) *llm.Citation {
+	switch v := citation.AsAny().(type) {
+	case anthropic.CitationsWebSearchResultLocation:
+		label := strings.TrimSpace(v.Title)
+		if label == "" {
+			label = strings.TrimSpace(v.URL)
+		}
+		if label == "" {
+			label = "Web source"
+		}
+		return &llm.Citation{
+			ID: citationID(sequence), Kind: llm.CitationWeb, Label: label, URL: strings.TrimSpace(v.URL),
+			Snippet: boundedCitationSnippet(v.CitedText), Provenance: "provider citation",
+		}
+	case anthropic.CitationCharLocation:
+		return documentCitation(sequence, v.DocumentTitle, v.FileID, v.CitedText)
+	case anthropic.CitationPageLocation:
+		return documentCitation(sequence, v.DocumentTitle, v.FileID, v.CitedText)
+	case anthropic.CitationContentBlockLocation:
+		return documentCitation(sequence, v.DocumentTitle, v.FileID, v.CitedText)
+	default:
+		return nil
+	}
+}
+
+func documentCitation(sequence int, title, fileID, citedText string) *llm.Citation {
+	label := strings.TrimSpace(title)
+	if label == "" {
+		label = "Workspace document"
+	}
+	return &llm.Citation{
+		ID: citationID(sequence), Kind: llm.CitationWorkspace, Label: label, Resource: strings.TrimSpace(fileID),
+		Snippet: boundedCitationSnippet(citedText), Provenance: "provider citation",
+	}
+}
+
+// citationID builds a deterministic, provider-neutral source ID from the
+// citation's position within the response (c1, c2, …). IDs are opaque
+// display identifiers; provider file ids and URLs never leak into them.
+func citationID(sequence int) string {
+	return fmt.Sprintf("c%d", sequence)
+}
+
+// boundedCitationSnippet caps a cited-text excerpt so hostile or oversized
+// provider snippets cannot bloat persisted turns or the Desk drawer.
+func boundedCitationSnippet(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) > 280 {
+		return text[:280] + "…"
+	}
+	return text
 }

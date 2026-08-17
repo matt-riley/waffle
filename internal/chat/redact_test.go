@@ -69,3 +69,37 @@ func TestRedactArtifactsScrubsDisplayMetadata(t *testing.T) {
 		t.Fatalf("artifact metadata = %+v", out[0])
 	}
 }
+
+// TestRedactMessageScrubsCitationMetadata pins the source boundary (#479):
+// citation labels, URLs, resources, snippets, and provenance all pass
+// through the exact-value redactor before projection, and the original
+// message is unchanged.
+func TestRedactMessageScrubsCitationMetadata(t *testing.T) {
+	msg := llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+		Type: llm.BlockText,
+		Text: "answer with sk-cite-secret",
+		Citations: []llm.Citation{
+			{
+				ID: "s1", Kind: llm.CitationWeb, Label: "sk-cite-secret docs",
+				URL: "https://example.com/sk-cite-secret", Snippet: "sk-cite-secret line",
+				Provenance: "provider citation",
+			},
+			{ID: "s2", Kind: llm.CitationWorkspace, Label: "Plan", Resource: "/var/lib/waffle/private/plan.md"},
+		},
+	}}}
+	redact := func(s string) string { return strings.ReplaceAll(s, "sk-cite-secret", "[redacted]") }
+	out := RedactMessage(msg, redact)
+	citations := out.Blocks[0].Citations
+	if citations[0].Label != "[redacted] docs" {
+		t.Errorf("label = %q", citations[0].Label)
+	}
+	if citations[0].URL != "https://example.com/[redacted]" {
+		t.Errorf("url = %q", citations[0].URL)
+	}
+	if citations[0].Snippet != "[redacted] line" {
+		t.Errorf("snippet = %q", citations[0].Snippet)
+	}
+	if msg.Blocks[0].Citations[0].Label != "sk-cite-secret docs" {
+		t.Errorf("original citation mutated: %q", msg.Blocks[0].Citations[0].Label)
+	}
+}

@@ -718,6 +718,7 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 				OutputTokens: event.Usage.OutputTokens,
 			},
 			Artifacts: c.projectChatArtifacts(event.Artifacts),
+			Sources:   c.projectChatSources(event.Sources),
 		})
 		if err != nil {
 			return
@@ -810,6 +811,58 @@ func projectChatWorkspaceLabel(value string) string {
 	return value
 }
 
+// projectChatSources applies the Desk source boundary (#479): labels,
+// snippets, and provenance pass through the exact-value redactor; web
+// destinations admit only http/https (anything else renders as a plain
+// label); workspace resources stay opaque identifiers; hostile labels are
+// clamped to safe text so they can never become markup or links.
+func (c *ChatClients) projectChatSources(sources []chat.Source) []chat.Source {
+	if len(sources) == 0 {
+		return nil
+	}
+	projected := make([]chat.Source, 0, len(sources))
+	for _, source := range sources {
+		source.ID = projectChatIdentifier(c.redactExact(source.ID))
+		label := c.redactExact(source.Label)
+		if label == "" {
+			label = "Unnamed source"
+		}
+		snippet := c.redactExact(source.Snippet)
+		source.Label = label
+		source.Snippet = snippet
+		source.Provenance = c.redactExact(source.Provenance)
+		source.Resource = projectChatIdentifier(c.redactExact(source.Resource))
+		switch source.Kind {
+		case string(llm.CitationWeb):
+			if !safeCitationURL(source.URL) {
+				source.URL = ""
+			}
+			source.URL = c.redactExact(source.URL)
+		default:
+			// Workspace and unknown kinds never carry a clickable destination.
+			source.URL = ""
+			source.Kind = string(llm.CitationWorkspace)
+		}
+		projected = append(projected, source)
+	}
+	return projected
+}
+
+// safeCitationURL admits only http/https destinations, so hostile schemes
+// (javascript:, file:, data:) can never become anchor hrefs in the drawer.
+func safeCitationURL(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	schemeEnd := strings.Index(value, ":")
+	if schemeEnd <= 0 {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(value[:schemeEnd]))
+	return scheme == "http" || scheme == "https"
+}
+
 type dashboardChatEvent struct {
 	Kind       chat.EventKind      `json:"kind"`
 	Text       string              `json:"text,omitempty"`
@@ -821,6 +874,7 @@ type dashboardChatEvent struct {
 	Usage      dashboardUsage      `json:"usage,omitempty"`
 	State      *dashboardChatState `json:"state,omitempty"`
 	Artifacts  []chat.Artifact     `json:"artifacts,omitempty"`
+	Sources    []chat.Source       `json:"sources,omitempty"`
 }
 
 type dashboardChatState struct {
@@ -850,7 +904,7 @@ type dashboardUsage struct {
 
 func dashboardEventKind(kind chat.EventKind) bool {
 	switch kind {
-	case chat.EventTextDelta, chat.EventToolStarted, chat.EventToolFinished, chat.EventNotice, chat.EventState, chat.EventTurnDone, chat.EventArtifact:
+	case chat.EventTextDelta, chat.EventToolStarted, chat.EventToolFinished, chat.EventNotice, chat.EventState, chat.EventTurnDone, chat.EventArtifact, chat.EventSources:
 		return true
 	default:
 		return false

@@ -648,6 +648,39 @@ test("Today previews, downloads, and references a declared session artifact", as
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+
+
+test("Today renders a source drawer with safe destinations after a cited reply", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the source drawer flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Show sources");
+  await message.press("Control+Enter");
+
+  const reply = page.locator(".waffle-message").last();
+  await expect(reply.locator(".message-body")).toContainText(
+    "The release queue is summarized in the fixture sources.",
+  );
+  const drawer = reply.locator(".sources-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator("summary")).toHaveText("Sources (2)");
+  await drawer.locator("summary").click();
+  const items = drawer.locator(".source-item");
+  await expect(items).toHaveCount(2);
+  const web = items.filter({ hasText: "Waffle fixture docs" });
+  await expect(web.locator(".source-open")).toHaveAttribute(
+    "href",
+    "https://example.com/docs",
+  );
+  await expect(web.locator(".source-open")).toHaveAttribute("rel", "noopener noreferrer");
+  const workspace = items.filter({ hasText: "Fixture plan" });
+  await expect(workspace.locator(".source-open")).toHaveCount(0);
+  await expect(workspace.locator(".source-kind")).toHaveText("Workspace source");
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+});
+
 test("Today exposes existing commands and resumes a recent session in place", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the command surface once.");
   await page.goto(deskURL("today"));

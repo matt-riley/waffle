@@ -961,3 +961,75 @@ func TestSystemExtraAloneWhenSystemEmpty(t *testing.T) {
 		t.Fatalf("changing extra text requested a cache write: %v", block["cache_control"])
 	}
 }
+
+// TestFromMessageTranslatesProviderCitations pins the provider-neutral source
+// contract (#479): web-search citations become safe web sources and document
+// citations become opaque workspace resources; snippets are bounded.
+func TestFromMessageTranslatesProviderCitations(t *testing.T) {
+	srv := messagesServer(t, nil, []string{
+		`{"type":"message_start","message":{"id":"msg_c","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"An answer."}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","title":"Waffle docs","url":"https://example.com/docs","cited_text":"the cited line","document_index":0,"file_id":"file_web_1"}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","document_title":"Project plan","document_index":0,"file_id":"file_42","cited_text":"a plan line","start_char_index":0,"end_char_index":8}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	resp, err := p.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{llm.UserText("hi")},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(resp.Message.Blocks) != 1 || resp.Message.Blocks[0].Type != llm.BlockText {
+		t.Fatalf("blocks = %+v", resp.Message.Blocks)
+	}
+	citations := resp.Message.Blocks[0].Citations
+	if len(citations) != 2 {
+		t.Fatalf("citations = %+v, want 2", citations)
+	}
+	web := citations[0]
+	if web.ID != "c1" || web.Kind != llm.CitationWeb || web.Label != "Waffle docs" || web.URL != "https://example.com/docs" {
+		t.Fatalf("web citation = %+v", web)
+	}
+	if web.Snippet != "the cited line" {
+		t.Fatalf("web snippet = %q", web.Snippet)
+	}
+	doc := citations[1]
+	if doc.ID != "c2" || doc.Kind != llm.CitationWorkspace || doc.Label != "Project plan" || doc.Resource != "file_42" {
+		t.Fatalf("document citation = %+v", doc)
+	}
+	if doc.URL != "" {
+		t.Fatalf("document citation must never carry a URL: %+v", doc)
+	}
+}
+
+// TestFromMessageBoundedSnippets caps provider cited-text so hostile or
+// oversized snippets cannot bloat persisted turns or the Desk drawer.
+func TestFromMessageBoundedSnippets(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	srv := messagesServer(t, nil, []string{
+		`{"type":"message_start","message":{"id":"msg_l","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","title":"T","url":"https://example.com/x","cited_text":"` + long + `","document_index":0,"file_id":"f"}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	})
+	defer srv.Close()
+	p := New("k", srv.URL)
+	resp, err := p.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{llm.UserText("hi")},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	snippet := resp.Message.Blocks[0].Citations[0].Snippet
+	if len(snippet) > 283 {
+		t.Fatalf("snippet length = %d, want bounded (280 chars + ellipsis)", len(snippet))
+	}
+}

@@ -2991,3 +2991,86 @@ func TestChatRuntimeArtifactsNotReemittedOnLaterTurns(t *testing.T) {
 		t.Fatalf("artifact events re-emitted on a later turn = %d, want 0", artifactEvents)
 	}
 }
+
+// TestChatRuntimeTurnEmitsSourcesForCompletedExchange pins the streamed
+// source contract (#479): when the final assistant message carries
+// provider-neutral citations, the turn emits one sources event whose safe
+// projection matches the drawer, and citations persist into the stored turn.
+func TestChatRuntimeTurnEmitsSourcesForCompletedExchange(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{
+		response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message: llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{
+				Type: llm.BlockText,
+				Text: "answer",
+				Citations: []llm.Citation{
+					{ID: "c1", Kind: llm.CitationWeb, Label: "Waffle docs", URL: "https://example.com/docs", Snippet: "line"},
+					{ID: "c2", Kind: llm.CitationWorkspace, Label: "Plan", Resource: "file-42"},
+				},
+			}}},
+			Usage: llm.Usage{InputTokens: 1, OutputTokens: 1},
+		},
+	}}}
+	var events []chatpkg.Event
+	if err := runtime.Turn(ctx, "research", func(event chatpkg.Event) { events = append(events, event) }); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	var sources []chatpkg.Source
+	for _, event := range events {
+		if event.Kind == chatpkg.EventSources {
+			sources = event.Sources
+		}
+	}
+	if len(sources) != 2 {
+		t.Fatalf("sources event = %+v, want 2 sources", sources)
+	}
+	if sources[0].ID != "c1" || sources[0].Label != "Waffle docs" || sources[0].URL != "https://example.com/docs" || sources[0].Kind != "web" {
+		t.Fatalf("web source = %+v", sources[0])
+	}
+	if sources[1].Kind != "workspace" || sources[1].Resource != "file-42" || sources[1].URL != "" {
+		t.Fatalf("workspace source = %+v", sources[1])
+	}
+	// Citations persist into the stored turn and survive reload.
+	stored, err := sessions.Turns(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := stored[len(stored)-1]
+	if len(last.Blocks) != 1 || len(last.Blocks[0].Citations) != 2 {
+		t.Fatalf("stored blocks = %+v, want one text block with 2 citations", last.Blocks)
+	}
+}
+
+// TestChatRuntimeTurnWithNoCitationsEmitsNoSources pins that a provider
+// without attested sources emits no sources event and the drawer stays absent.
+func TestChatRuntimeTurnWithNoCitationsEmitsNoSources(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{
+		response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "plain"}}},
+			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+		},
+	}}}
+	var sourcesSeen int
+	if err := runtime.Turn(ctx, "hello", func(event chatpkg.Event) {
+		if event.Kind == chatpkg.EventSources {
+			sourcesSeen++
+		}
+	}); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if sourcesSeen != 0 {
+		t.Fatalf("sources events = %d, want 0", sourcesSeen)
+	}
+}

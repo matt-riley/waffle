@@ -1511,3 +1511,55 @@ func (f *fakeChatBackend) closeCount() int {
 
 func (f *fakeChatBackend) cancelCount() int  { f.mu.Lock(); defer f.mu.Unlock(); return f.cancels }
 func (f *fakeChatBackend) commandCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.commandCalls }
+
+// TestChatClientProjectsSafeSources pins the Desk source boundary (#479):
+// labels and snippets are exact-value redacted, web destinations admit only
+// http/https, workspace kinds never carry a URL, and hostile schemes are
+// dropped before the browser ever sees them.
+func TestChatClientProjectsSafeSources(t *testing.T) {
+	canary := "sk-source-secret"
+	backend := &fakeChatBackend{turnEvent: chat.Event{
+		Kind: chat.EventSources,
+		Sources: []chat.Source{
+			{ID: "../secret", Label: "docs " + canary, Kind: "web", URL: "https://example.com/" + canary, Snippet: "line " + canary},
+			{ID: "s2", Label: "javascript", Kind: "web", URL: "javascript:alert(1)"},
+			{ID: "s3", Label: "plan", Kind: "workspace", URL: "/var/lib/waffle/private/plan.md", Resource: "file-42"},
+		},
+	}}
+	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{4}, 32)))
+	clients.SetRedactor(func(s string) string { return strings.ReplaceAll(s, canary, "[redacted]") })
+	hub := NewEventHub(4)
+	clients.events = hub
+	client, _, err := clients.Open(context.Background(), chat.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clients.Turn(context.Background(), client, "not an event payload"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := hub.Subscribe(0)
+	defer hub.Unsubscribe(events)
+	event := <-events
+	data := string(event.Data)
+	if !strings.Contains(data, `"label":"docs [redacted]"`) {
+		t.Fatalf("web label not redacted: %s", data)
+	}
+	if !strings.Contains(data, `"id":"[redacted]"`) || strings.Contains(data, "../secret") {
+		t.Fatalf("source id not projected safely: %s", data)
+	}
+	if !strings.Contains(data, `"url":"https://example.com/[redacted]"`) {
+		t.Fatalf("web url not redacted: %s", data)
+	}
+	if !strings.Contains(data, `"snippet":"line [redacted]"`) {
+		t.Fatalf("snippet not redacted: %s", data)
+	}
+	if strings.Contains(data, "javascript:") || strings.Contains(data, "alert(1)") {
+		t.Fatalf("hostile scheme leaked: %s", data)
+	}
+	if strings.Contains(data, "/var/lib/waffle/private") {
+		t.Fatalf("workspace path leaked: %s", data)
+	}
+	if strings.Contains(data, canary) {
+		t.Fatalf("canary leaked: %s", data)
+	}
+}
