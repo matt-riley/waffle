@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.30.0](https://github.com/matt-riley/waffle/compare/v0.29.0...v0.30.0) (2026-08-17)
+
+
+### Features
+
+* **desk:** add a global command palette and shortcut reference ([#516](https://github.com/matt-riley/waffle/issues/516)) ([1bf77db](https://github.com/matt-riley/waffle/commit/1bf77db414a0d8f0ae7727ee614ba2105130d2d8))
+* **desk:** add owner-only conversation export ([#513](https://github.com/matt-riley/waffle/issues/513)) ([4ea9a86](https://github.com/matt-riley/waffle/commit/4ea9a865a67b8ffe79a3a4f24c9c3d1ad4e61e48))
+* **desk:** add per-turn task and reasoning modes without widening posture ([#517](https://github.com/matt-riley/waffle/issues/517)) ([3a99767](https://github.com/matt-riley/waffle/commit/3a997677979925be275eff293adc06d16b5be3fd))
+* **desk:** add privacy-first voice dictation to the Today composer ([#510](https://github.com/matt-riley/waffle/issues/510)) ([6a1398e](https://github.com/matt-riley/waffle/commit/6a1398e9773b277d7dfbaefb36b65c52e7bb547d))
+* **desk:** add read-aloud controls for assistant responses ([#509](https://github.com/matt-riley/waffle/issues/509)) ([879db4d](https://github.com/matt-riley/waffle/commit/879db4d3be1a905a5ff0636c38c18217c2d55b92))
+* **desk:** attach images and documents to Today messages ([#515](https://github.com/matt-riley/waffle/issues/515)) ([c352b78](https://github.com/matt-riley/waffle/commit/c352b785ae51f8b8d38e916ae3b1f4d2b57483a4))
+* **desk:** support temporary conversations that do not enter recall ([#514](https://github.com/matt-riley/waffle/issues/514)) ([1f474f3](https://github.com/matt-riley/waffle/commit/1f474f332bbf41586a76bcb4586b4212f184aa74))
+* **desk:** turn a chat prompt into a reviewed schedule ([#508](https://github.com/matt-riley/waffle/issues/508)) ([7047b69](https://github.com/matt-riley/waffle/commit/7047b69f8cf567efc476558f884edff91ea651ad))
+
+
+### Bug Fixes
+
+* **desk:** clear the previous transcript when starting a new conversation ([#500](https://github.com/matt-riley/waffle/issues/500)) ([deaf64a](https://github.com/matt-riley/waffle/commit/deaf64acc51855fbfe582668541ed961a3874c85))
+* **desk:** keep fixed mobile navigation from obscuring active content ([#501](https://github.com/matt-riley/waffle/issues/501)) ([42aa38f](https://github.com/matt-riley/waffle/commit/42aa38f823e937e472930a119bf55bfe7f67cc67))
+* **desk:** keep Memory search status and results consistent ([#507](https://github.com/matt-riley/waffle/issues/507)) ([1c7f008](https://github.com/matt-riley/waffle/commit/1c7f008620588dc79e512f1eaad8241ddb12ce31))
+* **desk:** repair async dialog modality, focus trapping, and mobile layering ([#503](https://github.com/matt-riley/waffle/issues/503)) ([19b9c6c](https://github.com/matt-riley/waffle/commit/19b9c6ce1fe7f3888c927a52b7d3af48fe5d7fda))
+* **desk:** replace the permanent Tasks attention placeholder with truthful state ([#498](https://github.com/matt-riley/waffle/issues/498)) ([f29805f](https://github.com/matt-riley/waffle/commit/f29805f0e022928153a9e7b62bba4ed5632064e0))
+* **desk:** restore Today after reloading an active chat session ([#497](https://github.com/matt-riley/waffle/issues/497)) ([a1d0804](https://github.com/matt-riley/waffle/commit/a1d0804f9e93e9c64b7982e78d79c1b9ac619d92))
+* **desk:** show real provider health and human-readable connection values ([#496](https://github.com/matt-riley/waffle/issues/496)) ([ffa18cf](https://github.com/matt-riley/waffle/commit/ffa18cfa58efc0085211ff2b8b89000ba35f894d))
+
 ## [0.29.0](https://github.com/matt-riley/waffle/compare/v0.28.0...v0.29.0) (2026-08-17)
 
 
