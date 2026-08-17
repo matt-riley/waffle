@@ -68,6 +68,7 @@ func (b *plainBackend) Close(ctx context.Context) error {
 }
 
 func TestPlainChatMakesNewConfirmationActionable(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01CONFIRM"}}
 	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
 		switch {
@@ -112,6 +113,7 @@ func TestPlainChatMakesNewConfirmationActionable(t *testing.T) {
 }
 
 func TestPlainChatClearsNewConfirmationAfterInvalidatingCommand(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01INVALIDATE"}}
 	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
 		switch command.Name {
@@ -146,6 +148,7 @@ func TestPlainChatClearsNewConfirmationAfterInvalidatingCommand(t *testing.T) {
 }
 
 func TestPlainChatClearsNewConfirmationAfterFailedConfirmAttempt(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01STALE"}}
 	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
 		switch {
@@ -178,6 +181,7 @@ func TestPlainChatClearsNewConfirmationAfterFailedConfirmAttempt(t *testing.T) {
 }
 
 func TestPlainChatClearsGenericConfirmationAfterSuccessfulRetry(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01GENERIC"}}
 	resumeCalls := 0
 	backend.commandFunc = func(command chatpkg.ParsedCommand, _ func(chatpkg.Event)) (chatpkg.Result, error) {
@@ -213,6 +217,7 @@ func TestPlainChatClearsGenericConfirmationAfterSuccessfulRetry(t *testing.T) {
 }
 
 func TestPlainChatRendersCompleteResultInExactStableOrder(t *testing.T) {
+	t.Parallel()
 	updated := time.Date(2026, time.July, 20, 12, 34, 56, 0, time.UTC)
 	allFields := chatpkg.Result{
 		Title: "All fields", Text: "body", Confirm: true,
@@ -259,6 +264,7 @@ func TestPlainChatRendersCompleteResultInExactStableOrder(t *testing.T) {
 }
 
 func TestPlainChatClosesOnceWhenOpenFailsAndPreservesOpenError(t *testing.T) {
+	t.Parallel()
 	openErr := errors.New("open failed")
 	backend := &plainBackend{openErr: openErr, closeErr: errors.New("close failed")}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -278,6 +284,7 @@ func TestPlainChatClosesOnceWhenOpenFailsAndPreservesOpenError(t *testing.T) {
 }
 
 func TestPlainChatReportsEOFCloseErrorOnceAndReturnsSuccess(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{
 		state:    chatpkg.State{SessionID: "01EOF"},
 		closeErr: errors.New("summary\x1b[31m\r\nfailed"),
@@ -298,6 +305,7 @@ func TestPlainChatReportsEOFCloseErrorOnceAndReturnsSuccess(t *testing.T) {
 }
 
 func TestPlainChatExitWarningIsSanitizedAndRenderedExactlyOnce(t *testing.T) {
+	t.Parallel()
 	warning := "warning: summary\x1b[31m\r\nfailed"
 	backend := &plainBackend{
 		state:    chatpkg.State{SessionID: "01EXIT"},
@@ -326,6 +334,7 @@ func TestPlainChatExitWarningIsSanitizedAndRenderedExactlyOnce(t *testing.T) {
 }
 
 func TestPlainChatDeduplicatesMixedResultWarningButKeepsSuccessText(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{
 		state:    chatpkg.State{SessionID: "01MIXED"},
 		closeErr: errors.New("summary failed"),
@@ -354,6 +363,7 @@ func TestPlainChatDeduplicatesMixedResultWarningButKeepsSuccessText(t *testing.T
 }
 
 func TestPlainChatRendersOrdinaryTextEqualToPriorWarning(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01COLLISION"}}
 	backend.commandFunc = func(command chatpkg.ParsedCommand, emit func(chatpkg.Event)) (chatpkg.Result, error) {
 		switch command.Name {
@@ -380,6 +390,7 @@ func TestPlainChatRendersOrdinaryTextEqualToPriorWarning(t *testing.T) {
 }
 
 func TestPlainChatPreservesPrimaryScanAndTurnErrorsOverCloseError(t *testing.T) {
+	t.Parallel()
 	t.Run("scan error is returned", func(t *testing.T) {
 		scanErr := errors.New("scan failed")
 		backend := &plainBackend{
@@ -430,6 +441,7 @@ func assertBoundedCloseContext(t *testing.T, backend *plainBackend) {
 }
 
 func TestPlainChatOpensScansExactCommandsAndClosesOnShouldClose(t *testing.T) {
+	t.Parallel()
 	updated := time.Date(2026, time.July, 20, 12, 34, 56, 0, time.UTC)
 	backend := &plainBackend{
 		state: chatpkg.State{
@@ -532,6 +544,7 @@ func TestPlainChatOpensScansExactCommandsAndClosesOnShouldClose(t *testing.T) {
 }
 
 func TestPlainChatReportsParseAndTurnErrorsAndClosesOnEOF(t *testing.T) {
+	t.Parallel()
 	backend := &plainBackend{
 		state:   chatpkg.State{SessionID: "01EOF", ModelAlias: "gpt", ProviderLabel: "test"},
 		turnErr: errors.New("provider\x1b[31m\r\nfailed"),
@@ -555,6 +568,7 @@ func TestPlainChatReportsParseAndTurnErrorsAndClosesOnEOF(t *testing.T) {
 }
 
 func TestPlainChatWritesTextDeltasVerbatim(t *testing.T) {
+	t.Parallel()
 	delta := "first\r\n\tsecond"
 	backend := &plainBackend{
 		state:   chatpkg.State{SessionID: "01TEXT"},
@@ -571,6 +585,7 @@ func TestPlainChatWritesTextDeltasVerbatim(t *testing.T) {
 }
 
 func TestPlainChatScannerHasInclusiveOneMiBBound(t *testing.T) {
+	t.Parallel()
 	content := strings.Repeat("x", 1<<20)
 	tests := []struct {
 		name      string

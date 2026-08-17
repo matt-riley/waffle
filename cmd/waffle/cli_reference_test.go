@@ -77,6 +77,7 @@ func headingsFromReference(t *testing.T) []string {
 // command reference: a new subcommand that ships without documentation fails
 // here, and so does a reference entry for a command that does not exist.
 func TestCLIReferenceCoversEveryCommand(t *testing.T) {
+	t.Parallel()
 	commands := commandsFromUsage(t)
 	headings := headingsFromReference(t)
 

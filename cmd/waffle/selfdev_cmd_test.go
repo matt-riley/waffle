@@ -13,6 +13,7 @@ import (
 )
 
 func TestUpgradeNoVerifyIsOptInUnsafeAndDocumented(t *testing.T) {
+	t.Parallel()
 	ref, noVerify, help, err := parseUpgradeArgs(nil)
 	if err != nil || ref != "" || noVerify || help {
 		t.Fatalf("default parse ref=%q noVerify=%v help=%v err=%v", ref, noVerify, help, err)
@@ -37,6 +38,7 @@ func TestUpgradeNoVerifyIsOptInUnsafeAndDocumented(t *testing.T) {
 }
 
 func TestParseUpgradeArgsHelp(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{
 		{"--help"},
 		{"-h"},
@@ -56,6 +58,7 @@ func TestParseUpgradeArgsHelp(t *testing.T) {
 }
 
 func TestUpgradeCmdHelp(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	if err := upgradeCmd(context.Background(), []string{"--help"}, &stdout, &stderr); err != nil {
 		t.Fatalf("upgradeCmd --help: %v", err)
