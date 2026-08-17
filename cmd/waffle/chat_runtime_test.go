@@ -3233,3 +3233,43 @@ func TestTemporaryConversationNeverReflectsOrWritesMemory(t *testing.T) {
 		t.Fatalf("MEMORY.md recorded temporary content:\n%s", data)
 	}
 }
+
+func TestTurnWithModesPersistsSafeMetadataAndStripsGuidanceFromTranscript(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "ok"}}},
+			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+		}},
+	}}
+	if err := runtime.TurnWithModes(ctx, "concise please", chatpkg.TurnModeOptions{TaskMode: "quick", ReasoningEffort: "low"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State == nil || len(status.State.History) < 1 {
+		t.Fatal("no history after mode turn")
+	}
+	user := status.State.History[0]
+	if user.Metadata["task_mode"] != "quick" || user.Metadata["reasoning_effort"] != "low" {
+		t.Fatalf("metadata = %v", user.Metadata)
+	}
+	// The trusted guidance block is present for the model but must not be
+	// visible transcript text (the Desk strips it by exact match).
+	containsGuidance := false
+	for _, block := range user.Blocks {
+		if block.Type == llm.BlockText && block.Text == taskModeGuidance["quick"] {
+			containsGuidance = true
+		}
+	}
+	if !containsGuidance {
+		t.Fatal("trusted task guidance block missing from the turn")
+	}
+}

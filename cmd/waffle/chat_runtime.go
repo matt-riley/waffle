@@ -337,7 +337,44 @@ func (r *chatRuntime) Turn(ctx context.Context, input string, emit func(chatpkg.
 // Media is validated with llm.ValidateBlocks before the turn starts so
 // unsupported or oversized payloads never enter history (#473).
 func (r *chatRuntime) TurnMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
-	return r.turnWithMedia(ctx, input, media, emit)
+	return r.TurnWithModes(ctx, input, chatpkg.TurnModeOptions{Media: media}, emit)
+}
+
+// taskModeGuidance is the trusted, server-owned guidance a validated task
+// mode adds to the user message. It is fixed text — never operator-supplied —
+// so it can be stripped safely from transcript rendering by exact match.
+var taskModeGuidance = map[string]string{
+	"quick": "Answer concisely and directly. Avoid unnecessary detail.",
+	"deep":  "Work through the problem carefully before giving a final answer.",
+	"draft": "Draft prose suitable for editing before use.",
+}
+
+// TurnWithModes runs one turn with validated per-turn task/reasoning modes.
+// Modes only add trusted guidance or narrow limits; they never widen posture
+// (#481). The mode metadata is persisted with the turn.
+func (r *chatRuntime) TurnWithModes(ctx context.Context, input string, options chatpkg.TurnModeOptions, emit func(chatpkg.Event)) error {
+	if err := llm.ValidateBlocks(options.Media); err != nil {
+		return fmt.Errorf("invalid media: %w", err)
+	}
+	redact := r.runtimeRedactor()
+	redactedEmit := func(event chatpkg.Event) {
+		if emit != nil {
+			emit(chatpkg.RedactEvent(event, redact))
+		}
+	}
+	metadata := map[string]string{}
+	guidance := []llm.Block(nil)
+	if options.TaskMode != "" {
+		metadata["task_mode"] = options.TaskMode
+		if text := taskModeGuidance[options.TaskMode]; text != "" {
+			guidance = append(guidance, llm.Block{Type: llm.BlockText, Text: text})
+		}
+	}
+	if options.ReasoningEffort != "" {
+		metadata["reasoning_effort"] = options.ReasoningEffort
+	}
+	media := append(guidance, options.Media...)
+	return redactChatError(r.turn(ctx, input, media, metadata, redactedEmit), redact)
 }
 
 func (r *chatRuntime) turnWithMedia(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
@@ -350,10 +387,10 @@ func (r *chatRuntime) turnWithMedia(ctx context.Context, input string, media []l
 			emit(chatpkg.RedactEvent(event, redact))
 		}
 	}
-	return redactChatError(r.turn(ctx, input, media, redactedEmit), redact)
+	return redactChatError(r.turn(ctx, input, media, nil, redactedEmit), redact)
 }
 
-func (r *chatRuntime) turn(ctx context.Context, input string, media []llm.Block, emit func(chatpkg.Event)) error {
+func (r *chatRuntime) turn(ctx context.Context, input string, media []llm.Block, metadata map[string]string, emit func(chatpkg.Event)) error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -394,7 +431,9 @@ func (r *chatRuntime) turn(ctx context.Context, input string, media []llm.Block,
 		}
 	}
 	turnStart := len(r.history)
-	r.history = append(r.history, llm.UserBlocks(input, media))
+	message := llm.UserBlocks(input, media)
+	message.Metadata = metadata
+	r.history = append(r.history, message)
 	history := append([]llm.Message(nil), r.history...)
 	// persistedStart marks where this turn's new messages begin once the run
 	// appends them, so artifact collection stays scoped to this exchange.

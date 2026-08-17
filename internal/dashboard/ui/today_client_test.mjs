@@ -281,6 +281,8 @@ function createHarness({
     "#desk-model-status",
     "#desk-skill",
     "#desk-skill-toggle",
+    "#desk-task-mode",
+    "#desk-reasoning",
     "#desk-skill-status",
     "#desk-profile",
     "#desk-workspace",
@@ -1966,6 +1968,8 @@ test("rejected turn clears the composer and retry reuses the Idempotency-Key", a
   assert.deepEqual(JSON.parse(turnPosts[1].options.body), {
     attachments: [],
     client_id: "client-1",
+    reasoning_effort: "",
+    task_mode: "",
     text: "Careful question",
   });
 });
@@ -3668,4 +3672,30 @@ test("restored history renders safe attachment cards for media blocks", async ()
   const doc = attachments[0].querySelector(".message-media-doc");
   assert.ok(doc, "document card renders");
   assert.equal(doc.textContent, "Document (application/pdf)");
+});
+
+test("per-turn task and reasoning modes are sent with the turn and rendered as a chip", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({}),
+      }),
+  });
+  await flush();
+  harness.elements["#desk-task-mode"].value = "deep";
+  harness.elements["#desk-reasoning"].value = "high";
+  harness.elements["#desk-message"].value = "Think hard about this";
+  await harness.elements["#desk-message"].listener("keydown")({
+    key: "Enter",
+    ctrlKey: true,
+    metaKey: false,
+    preventDefault() {},
+  });
+  await flush();
+  const turn = mutationCalls(harness, "/api/v1/desk/chat/turn");
+  const body = JSON.parse(turn[0].options.body);
+  assert.equal(body.task_mode, "deep");
+  assert.equal(body.reasoning_effort, "high");
 });

@@ -209,27 +209,39 @@ func registerChatRoutes(mux *http.ServeMux, config APIConfig) {
 	})))
 	mux.Handle("POST /api/v1/desk/chat/turn", turnMutation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			ClientID    string           `json:"client_id"`
-			Text        string           `json:"text"`
-			Attachments []deskAttachment `json:"attachments"`
+			ClientID        string           `json:"client_id"`
+			Text            string           `json:"text"`
+			Attachments     []deskAttachment `json:"attachments"`
+			TaskMode        string           `json:"task_mode"`
+			ReasoningEffort string           `json:"reasoning_effort"`
 		}
 		if !decodeChatRequest(w, r, &request) {
 			return
 		}
-		if len(request.Attachments) == 0 {
-			if err := config.ChatClients.Turn(r.Context(), request.ClientID, request.Text); err != nil {
-				writeChatError(w, err, "turn_failed")
+		options := chat.TurnModeOptions{}
+		switch request.TaskMode {
+		case "", "quick", "deep", "draft":
+			options.TaskMode = request.TaskMode
+		default:
+			writeChatError(w, errors.New("invalid task mode"), "turn_failed")
+			return
+		}
+		switch request.ReasoningEffort {
+		case "", "low", "medium", "high":
+			options.ReasoningEffort = request.ReasoningEffort
+		default:
+			writeChatError(w, errors.New("invalid reasoning effort"), "turn_failed")
+			return
+		}
+		if len(request.Attachments) > 0 {
+			media, err := buildDeskMediaBlocks(request.Attachments)
+			if err != nil {
+				writeChatError(w, err, "attachment_invalid")
 				return
 			}
-			writeJSON(w, http.StatusOK, struct{}{})
-			return
+			options.Media = media
 		}
-		media, err := buildDeskMediaBlocks(request.Attachments)
-		if err != nil {
-			writeChatError(w, err, "attachment_invalid")
-			return
-		}
-		if err := config.ChatClients.TurnMedia(r.Context(), request.ClientID, request.Text, media); err != nil {
+		if err := config.ChatClients.TurnModes(r.Context(), request.ClientID, request.Text, options); err != nil {
 			writeChatError(w, err, "turn_failed")
 			return
 		}
