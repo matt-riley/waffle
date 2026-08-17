@@ -438,7 +438,7 @@ func TestChatRoutesRejectMissingMutationHeadersAndOversizedBodies(t *testing.T) 
 			if route == "turn" {
 				limit = dashboardChatTurnMaxBodyBytes
 			}
-			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(bytes.Repeat([]byte("x"), int(limit)+1)))
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(bytes.Repeat([]byte("x"), limit+1)))
 			req.Host = "127.0.0.1:8422"
 			req.Header.Set("X-Waffle-Desk-Token", security.Token())
 			req.Header.Set("Idempotency-Key", route+"-large")
@@ -459,7 +459,7 @@ func TestChatTurnAllowsBodiesThatOtherChatMutationsReject(t *testing.T) {
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return &fakeChatBackend{}, nil }, nil)
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, APIConfig{Security: security, Hub: NewEventHub(4), ChatClients: clients, Idempotency: NewIdempotencyStore(nil, 8, time.Minute)})
-	body := bytes.Repeat([]byte("x"), int(dashboardChatMaxBodyBytes)+1)
+	body := bytes.Repeat([]byte("x"), dashboardChatMaxBodyBytes+1)
 	for _, route := range []string{"open", "command", "export", "close"} {
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8422/api/v1/desk/chat/"+route, bytes.NewReader(body))
 		req.Host = "127.0.0.1:8422"
