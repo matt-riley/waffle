@@ -8,9 +8,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 	"github.com/matt-riley/waffle/internal/dashboard/ui"
+	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/skillinstall"
 	"github.com/matt-riley/waffle/internal/workset"
 )
@@ -192,6 +194,10 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 	case CapabilityProviderTestResult:
 		message, failed := capabilityProbeMessage(string(typed.Outcome))
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: message, Error: failed})
+	case ConnectionTestResult:
+		// A per-connection check re-renders the connections list so the card
+		// health and last-check time update in place (#463).
+		return ui.FragmentList(capabilityFragment(typed.Snapshot, "connections"))
 	case skillinstall.Manifest:
 		files := make([]ui.SkillReviewFileView, 0, len(typed.Files))
 		for _, file := range typed.Files {
@@ -310,7 +316,23 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 		sort.Strings(connections)
 		for _, name := range connections {
 			provider := snapshot.Providers.Providers[name]
-			view.Items = append(view.Items, ui.FragmentItem{ID: name, Class: "connection-card", Kind: provider.Type, Title: name, Fields: []ui.FragmentField{{Label: "Base URL", Value: provider.BaseURL}, {Label: "Maximum tokens", Value: formatInt(provider.MaxTokens)}}})
+			probe, probed := snapshot.Probes[name]
+			health, healthClass := connectionHealth(probe, probed)
+			// Endpoint values stay private per the surface copy (#463); the
+			// card leads with health and translates stored configuration.
+			item := ui.FragmentItem{
+				ID: name, Class: "connection-card" + healthClass, Kind: health, Title: name,
+				Fields: []ui.FragmentField{
+					{Label: "Compatibility protocol", Value: connectionProtocolLabel(provider.Type)},
+					{Label: "Maximum tokens", Value: connectionMaxTokensLabel(provider.MaxTokens)},
+					{Label: "Last check", Value: connectionLastCheckLabel(probe, probed)},
+				},
+			}
+			if probed && probe.Outcome != providerconfig.ProbeOutcomeSuccess {
+				item.Detail, _ = capabilityProbeMessage(string(probe.Outcome))
+			}
+			item.Actions = append(item.Actions, ui.FragmentAction{ID: "connection-check-" + name, Label: "Check connection", URL: "/api/v1/desk/providers/" + url.PathEscape(name) + "/test", Target: "#capability-connections", Swap: "outerHTML"})
+			view.Items = append(view.Items, item)
 		}
 	default:
 		view.ID = "capability-models"
@@ -395,6 +417,64 @@ func catalogueModelDetail(model CapabilityCatalogueModel) string {
 		return "Enrolled as " + model.EnrolledAlias + "."
 	}
 	return ""
+}
+
+// connectionHealth renders the trustworthy health summary for a connection
+// card: unchecked until the first probe, then the classified outcome (#463).
+func connectionHealth(probe ConnectionProbe, probed bool) (string, string) {
+	if !probed {
+		return "Unchecked", " is-unchecked"
+	}
+	switch probe.Outcome {
+	case providerconfig.ProbeOutcomeSuccess:
+		return "Healthy", " is-healthy"
+	case providerconfig.ProbeOutcomeAuthentication, providerconfig.ProbeOutcomeUnreachable:
+		return "Failed", " is-failed"
+	default:
+		return "Degraded", " is-degraded"
+	}
+}
+
+// connectionProtocolLabel explains that a provider type is the compatibility
+// protocol/driver rather than naming the remote service (#463).
+func connectionProtocolLabel(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "openai":
+		return "OpenAI-compatible driver"
+	case "anthropic":
+		return "Anthropic-compatible driver"
+	case "":
+		return "Not reported"
+	default:
+		return strings.TrimSpace(protocol) + "-compatible driver"
+	}
+}
+
+// connectionMaxTokensLabel renders an unset limit as a provider default
+// instead of a misleading zero-token cap (#463).
+func connectionMaxTokensLabel(tokens int) string {
+	if tokens <= 0 {
+		return "Provider default"
+	}
+	return formatInt(tokens)
+}
+
+func connectionLastCheckLabel(probe ConnectionProbe, probed bool) string {
+	if !probed {
+		return "Never"
+	}
+	age := time.Since(probe.CheckedAt)
+	if age < 0 {
+		age = 0
+	}
+	switch {
+	case age < time.Minute:
+		return "Just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%d minutes ago", int(age.Minutes()))
+	default:
+		return probe.CheckedAt.Format("2006-01-02 15:04")
+	}
 }
 
 // tasksAttentionLabel renders the settled attention chip truthfully: the

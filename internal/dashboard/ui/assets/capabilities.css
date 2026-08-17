@@ -333,3 +333,39 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Connection health chips lead the card and translate the classified probe
+   into operator language without claiming provider internals (#463). */
+.connection-card .waffle-fragment-kind {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.4rem;
+  padding: 0.15rem 0.45rem;
+  text-transform: none;
+  width: fit-content;
+}
+
+.connection-card.is-healthy .waffle-fragment-kind {
+  background: #e2efd8;
+  border: 1px solid #5f7f46;
+  color: #3d5a26;
+}
+
+.connection-card.is-degraded .waffle-fragment-kind {
+  background: #f7ddbf;
+  border: 1px solid var(--ginger-dark);
+  color: #7a4b0e;
+}
+
+.connection-card.is-failed .waffle-fragment-kind {
+  background: #f3d8cf;
+  border: 1px solid var(--danger);
+  color: #6f302c;
+}
+
+.connection-card.is-unchecked .waffle-fragment-kind {
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  color: var(--muted);
+}

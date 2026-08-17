@@ -1236,6 +1236,37 @@ test("skill installation stays inactive until explicit activation", async ({ pag
   ).toHaveCount(0);
 });
 
+test("connection cards lead with real health and operator language", async ({ page }) => {
+  await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Tools & connections");
+  const card = page.locator(".connection-card").filter({ hasText: "fixture" });
+  await expect(card).toBeVisible();
+  // Unchecked state: never probed, provider default limit, no endpoint leak.
+  await expect(card.locator(".waffle-fragment-kind")).toHaveText("Unchecked");
+  await expect(card).toContainText("Provider default");
+  await expect(card).toContainText("Last checkNever");
+  await expect(card).toContainText("OpenAI-compatible driver");
+  await expect(card).not.toContainText("11434");
+
+  // A healthy probe updates the card in place.
+  const checkButton = card.getByRole("button", { name: "Check connection", exact: true });
+  await checkButton.click();
+  await expect(card.locator(".waffle-fragment-kind")).toHaveText("Healthy");
+  await expect(card).toContainText("Just now");
+  await expect(card).not.toContainText("Never");
+
+  // A failed probe renders a distinct failure state with the safe next step.
+  await page.request.post(`${baseURL}/api/v1/desk/test/provider-probe?failure=unreachable`);
+  try {
+    await card.getByRole("button", { name: "Check connection", exact: true }).click();
+    await expect(card.locator(".waffle-fragment-kind")).toHaveText("Failed");
+    await expect(card).toContainText("Connection test could not reach the endpoint.");
+    await expect(card).not.toContainText("11434");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/provider-probe`);
+  }
+});
+
 test("skill-import disclosure is removed when imports are disabled", async ({ page }) => {
   await page.goto(deskURL("capabilities"));
   await openCapabilityTab(page, "Skills");
