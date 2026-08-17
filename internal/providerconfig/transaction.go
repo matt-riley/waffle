@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	tomltree "github.com/pelletier/go-toml"
+	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/instance"
@@ -80,8 +80,8 @@ func (m *Manager) stageConfig(original []byte, mutate func(*tomlDocument, config
 	// Parse into a TOML syntax tree before mutation. The document editor below
 	// changes only managed table/key spans so comments, ordering, and unrelated
 	// settings retain their original bytes.
-	_, err := tomltree.LoadBytes(original)
-	if err != nil {
+	var parsed any
+	if err := toml.Unmarshal(original, &parsed); err != nil {
 		return "", config.Config{}, fmt.Errorf("parse config syntax tree: %w", err)
 	}
 	base, err := config.Load(m.ConfigPath)
