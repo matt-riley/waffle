@@ -1978,3 +1978,16 @@ h3 {
   color: var(--ginger-dark);
   font-size: 0.78rem;
 }
+
+.message-read {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.message-read.is-speaking {
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+  font-weight: 700;
+}
