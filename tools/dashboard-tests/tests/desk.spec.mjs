@@ -1260,7 +1260,7 @@ test("connection cards lead with real health and operator language", async ({ pa
   try {
     await card.getByRole("button", { name: "Check connection", exact: true }).click();
     await expect(card.locator(".waffle-fragment-kind")).toHaveText("Failed");
-    await expect(card).toContainText("Re-check the connection or re-enroll the provider.");
+    await expect(card).toContainText("Connection test could not reach the endpoint.");
     await expect(card).not.toContainText("11434");
   } finally {
     await page.request.post(`${baseURL}/api/v1/desk/test/provider-probe`);
