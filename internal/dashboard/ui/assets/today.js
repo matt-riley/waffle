@@ -820,194 +820,9 @@ function renderMarkdown(node, text) {
   }
 }
 
-// Read aloud (#483): a browser-local speechSynthesis helper. No audio ever
-// leaves the browser and no speech object is created until the first explicit
-// activation. Utterances are chunked lazily and cancelled on stop/session
-// change so long responses never freeze or leak across conversations.
-const readAloud = (() => {
-  const chunkChars = 180;
-  let speakingArticle = null;
-  let currentButton = null;
-  let voices = [];
-
-  function supported() {
-    return Boolean(
-      globalThis.speechSynthesis &&
-      typeof globalThis.SpeechSynthesisUtterance !== "undefined",
-    );
-  }
-
-  function refreshVoices() {
-    try {
-      voices = globalThis.speechSynthesis?.getVoices?.() || [];
-    } catch {
-      voices = [];
-    }
-  }
-  if (supported()) {
-    refreshVoices();
-    globalThis.speechSynthesis?.addEventListener?.("voiceschanged", refreshVoices);
-  }
-
-  // sanitizeForSpeech strips Markdown punctuation and renders code, links, and
-  // tables as sensible spoken text from the visible message content only.
-  function sanitizeForSpeech(text) {
-    const lines = String(text || "").split(/\r?\n/);
-    const spoken = [];
-    let inCode = false;
-    let codeLines = [];
-    const flushCode = () => {
-      if (inCode) {
-        spoken.push(`Code: ${codeLines.join(", ")}`);
-        codeLines = [];
-        inCode = false;
-      }
-    };
-    for (const rawLine of lines) {
-      let line = rawLine;
-      if (/^```/.test(line.trim())) {
-        if (inCode) {
-          flushCode();
-        } else {
-          inCode = true;
-          codeLines = [];
-        }
-        continue;
-      }
-      if (inCode) {
-        codeLines.push(line.trim());
-        continue;
-      }
-      const heading = /^#{1,6}\s+(.+)$/.exec(line);
-      if (heading) {
-        spoken.push(heading[1].replace(/[*_`]/g, ""));
-        continue;
-      }
-      const list = /^\s*(?:[-*+]|\d+\.)\s+(.+)$/.exec(line);
-      if (list) {
-        spoken.push(list[1].replace(/[*_`]/g, ""));
-        continue;
-      }
-      // Table delimiter rows (| --- | --- |) carry no content and are skipped.
-      if (/^\|.*\|$/.test(line.trim()) && /^[\s|:+-]+$/.test(line.trim())) {
-        continue;
-      }
-      const table = /^\|.*\|$/.test(line.trim());
-      if (table) {
-        const cells = line
-          .replace(/^\||\|$/g, "")
-          .split("|")
-          .map((cell) => cell.trim().replace(/[*_`]/g, ""))
-          .filter(Boolean);
-        if (cells.length > 0) {
-          spoken.push(cells.join(", "));
-        }
-        continue;
-      }
-      // Links read as their visible text; emphasis and code ticks drop.
-      line = line.replace(/\[(.+?)\]\([^)]*\)/g, "$1");
-      line = line.replace(/[*_`]/g, "");
-      if (line.trim() !== "") {
-        spoken.push(line.trim());
-      }
-    }
-    flushCode();
-    return spoken.filter(Boolean).join(". ") || "No readable content.";
-  }
-
-  // chunkText splits the sanitized text at sentence-ish boundaries so every
-  // utterance stays within the synthesis engine's comfortable length.
-  function chunkText(text) {
-    const units = text.split(/(?<=\.)\s+/).map((part) => part.trim()).filter(Boolean);
-    const chunks = [];
-    let current = "";
-    for (const unit of units) {
-      if (current && current.length + unit.length > chunkChars) {
-        chunks.push(current);
-        current = unit;
-      } else {
-        current = current ? `${current} ${unit}` : unit;
-      }
-    }
-    if (current) {
-      chunks.push(current);
-    }
-    return chunks.length > 0 ? chunks : [text];
-  }
-
-  function stop() {
-    if (!supported()) {
-      return;
-    }
-    try {
-      globalThis.speechSynthesis.cancel();
-    } catch {
-      // Synthesis teardown is best-effort.
-    }
-    if (currentButton) {
-      const label = currentButton.dataset.readAloudLabel || "Read aloud";
-      currentButton.textContent = label;
-      currentButton.setAttribute("aria-label", "Read this response aloud");
-      currentButton.classList.remove("is-speaking");
-      currentButton.setAttribute("aria-pressed", "false");
-    }
-    speakingArticle = null;
-    currentButton = null;
-  }
-
-  function speak(article, button) {
-    if (!supported()) {
-      return;
-    }
-    stop();
-    const body = article.querySelector(".message-body");
-    if (!body) {
-      return;
-    }
-    const plain = (article.dataset.rawText ?? body.textContent) || "";
-    const chunks = chunkText(sanitizeForSpeech(plain));
-    speakingArticle = article;
-    currentButton = button;
-    button.textContent = "Stop";
-    button.setAttribute("aria-label", "Stop reading");
-    button.classList.add("is-speaking");
-    button.setAttribute("aria-pressed", "true");
-    try {
-      const first = new SpeechSynthesisUtterance(chunks[0]);
-      first.voice = voices.find((voice) => voice?.default) || null;
-      for (const chunk of chunks) {
-        const utterance = new SpeechSynthesisUtterance(chunk);
-        utterance.voice = first.voice;
-        globalThis.speechSynthesis.speak(utterance);
-      }
-      globalThis.speechSynthesis.onend = () => {
-        if (speakingArticle === article) {
-          stop();
-        }
-      };
-      globalThis.speechSynthesis.onerror = () => {
-        if (speakingArticle === article) {
-          stop();
-        }
-      };
-    } catch {
-      stop();
-    }
-  }
-
-  function toggle(article, button) {
-    if (speakingArticle === article) {
-      stop();
-      return;
-    }
-    speak(article, button);
-  }
-
-  return { supported, toggle, stop };
-})();
-
 function attachReadAloudButton(article) {
-  if (!article || article.querySelector(".message-read") || !readAloud.supported()) {
+  const engine = globalThis.waffleReadAloud;
+  if (!article || article.querySelector(".message-read") || !engine?.supported?.()) {
     return;
   }
   const button = document.createElement("button");
@@ -1018,7 +833,11 @@ function attachReadAloudButton(article) {
   button.setAttribute("aria-label", "Read this response aloud");
   button.setAttribute("aria-pressed", "false");
   button.addEventListener("click", () => {
-    readAloud.toggle(article, button);
+    if (button.classList.contains("is-speaking")) {
+      engine.stop();
+      return;
+    }
+    engine.start(article, button);
   });
   article.appendChild(button);
 }
@@ -1688,6 +1507,9 @@ function renderCanonicalState(chatState, includeHistory) {
   if (!chatState) {
     return;
   }
+  if (includeHistory) {
+    globalThis.waffleReadAloud?.stop();
+  }
   state.sessionID = chatState.session_id || state.sessionID;
   syncComposerDraft();
   markSessionSelection();
@@ -2057,7 +1879,7 @@ async function openDesk({ forceNewSession = false } = {}) {
   setPhase(phase.opening);
   clearControlErrors();
   resetOwnershipConflict();
-  readAloud.stop();
+  globalThis.waffleReadAloud?.stop();
   try {
     const bootstrap = validateBootstrap(await getBootstrap());
     if (generation !== state.generation) {
@@ -2556,6 +2378,7 @@ function commandMutation(name, args = "") {
 }
 
 async function newConversation() {
+  globalThis.waffleReadAloud?.stop();
   await runCommandOperation("Starting conversation", async () => {
     const preview = await commandMutation("new");
     if (preview.confirm) {
@@ -2590,6 +2413,7 @@ function formatSessionUpdated(value) {
 }
 
 async function resumeSession(sessionID) {
+  globalThis.waffleReadAloud?.stop();
   await runCommandOperation("Resuming conversation", async () => {
     const result = await commandMutation("resume", sessionID);
     if (result.state) {
@@ -3615,7 +3439,7 @@ function handleComposerKeydown(event) {
 }
 
 function closeOwnerOnPageHide() {
-  readAloud.stop();
+  globalThis.waffleReadAloud?.stop();
   if (!state.clientID || !state.reattachToken || !state.requestToken) {
     return;
   }

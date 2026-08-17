@@ -3,6 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+const readAloudSource = await readFile(
+  new URL("./assets/read-aloud.js", import.meta.url),
+  "utf8",
+);
 const source = await readFile(new URL("./assets/today.js", import.meta.url), "utf8");
 
 class FakeElement {
@@ -484,6 +488,8 @@ function createHarness({
     constructor(text) {
       this.text = text;
       this.voice = null;
+      this.onend = null;
+      this.onerror = null;
       speechUtterances.push(this);
     }
   }
@@ -556,12 +562,14 @@ function createHarness({
       }
     },
   });
+  new vm.Script(readAloudSource, { filename: "read-aloud.js" }).runInContext(context);
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
   return {
     calls,
     clipboardWrites,
     speechCalls,
+    speechSynthesis,
     speechUtterances,
     cancelResponse,
     elements,
@@ -3200,10 +3208,26 @@ test("read aloud speaks sanitized chunked content, replaces, and stops on teardo
   assert.ok(joined.includes("one, two"), joined);
   assert.doesNotMatch(joined, /\*\*|```|\[|\]|\(https/);
 
+  const lastUtterance = harness.speechUtterances.at(-1);
+  assert.equal(typeof lastUtterance.onend, "function");
+  assert.equal(typeof lastUtterance.onerror, "function");
+  assert.equal(harness.speechSynthesis.onend, null);
+  assert.equal(harness.speechSynthesis.onerror, null);
+  assert.equal(readButton.textContent, "Stop");
+  lastUtterance.onend();
+  assert.equal(readButton.textContent, "Read aloud");
+  assert.equal(readButton.getAttribute("aria-pressed"), "false");
+  assert.equal(readButton.classList.contains("is-speaking"), false);
+
   // Toggle stops the first and starts nothing; toggling a second message
-  // replaces the first.
+  // replaces the first. Snapshot cancels after start — start() already
+  // cancels any previous utterance, so a raw "some cancel happened" check
+  // would be false-green.
   await readButton.listener("click")();
-  assert.ok(harness.speechCalls.some((call) => call.kind === "cancel"), "stop cancels synthesis");
+  const cancelsAfterReplay = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await readButton.listener("click")();
+  const cancelsAfterStop = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterStop > cancelsAfterReplay, "stop cancels synthesis");
   const secondHarness = createHarness({
     openHandler: async () =>
       jsonResponse({
@@ -3225,13 +3249,14 @@ test("read aloud speaks sanitized chunked content, replaces, and stops on teardo
   const first = messages[0].querySelector(".message-read");
   const second = messages[1].querySelector(".message-read");
   await first.listener("click")();
+  const cancelsAfterFirst = secondHarness.speechCalls.filter((call) => call.kind === "cancel").length;
   await second.listener("click")();
-  const cancels = secondHarness.speechCalls.filter((call) => call.kind === "cancel").length;
-  assert.ok(cancels >= 1, "starting a second playback stops the first");
+  const cancelsAfterSecond = secondHarness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterSecond > cancelsAfterFirst, "starting a second playback stops the first");
   assert.equal(secondHarness.speechCalls.filter((call) => call.kind === "speak").length, 2);
 });
 
-test("read aloud stops on a new conversation and never speaks user drafts", async () => {
+test("read aloud stops on a new conversation and resume, and never speaks user drafts", async () => {
   const harness = createHarness({
     openHandler: async () =>
       jsonResponse({
@@ -3250,6 +3275,26 @@ test("read aloud stops on a new conversation and never speaks user drafts", asyn
       if (command.name === "new" && command.args === "") {
         return jsonResponse({ confirm: true, text: "Start over?" });
       }
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-3",
+              title: "Other session",
+              updated_at: "2026-07-25T12:00:00Z",
+            },
+          ],
+        });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "session-3",
+            title: "Other session",
+            history: [{ role: "assistant", blocks: [{ type: "text", text: "Resumed reply" }] }],
+          }),
+        });
+      }
       return jsonResponse({
         state: defaultChatState({ session_id: "session-2", title: "Fresh", history: null }),
       });
@@ -3262,7 +3307,23 @@ test("read aloud stops on a new conversation and never speaks user drafts", asyn
   assert.ok(harness.speechCalls.some((call) => call.kind === "speak"));
   const userMessage = harness.elements["#desk-transcript"].querySelector(".user-message");
   assert.equal(userMessage.querySelector(".message-read"), null, "user messages never read aloud");
+  const cancelsAfterStart = harness.speechCalls.filter((call) => call.kind === "cancel").length;
   await harness.elements["#desk-new"].listener("click")();
   await flush();
-  assert.ok(harness.speechCalls.some((call) => call.kind === "cancel"), "new conversation stops speech");
+  const cancelsAfterNew = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterNew > cancelsAfterStart, "new conversation stops speech");
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const sessionButton = harness.elements["#desk-session-options"].querySelector("button");
+  await sessionButton.listener("click")();
+  await flush();
+  const resumed = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const resumeRead = resumed.querySelector(".message-read");
+  await resumeRead.listener("click")();
+  const cancelsAfterResumePlay = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  await sessionButton.listener("click")();
+  await flush();
+  const cancelsAfterResume = harness.speechCalls.filter((call) => call.kind === "cancel").length;
+  assert.ok(cancelsAfterResume > cancelsAfterResumePlay, "resume stops speech");
 });
