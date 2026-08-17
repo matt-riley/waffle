@@ -3074,3 +3074,50 @@ func TestChatRuntimeTurnWithNoCitationsEmitsNoSources(t *testing.T) {
 		t.Fatalf("sources events = %d, want 0", sourcesSeen)
 	}
 }
+
+func TestTemporaryConversationNeverPersistsTurns(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{Temporary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Temporary {
+		t.Fatal("temporary open must be flagged in the state")
+	}
+	if state.Title != "Temporary conversation" {
+		t.Fatalf("title = %q, want Temporary conversation", state.Title)
+	}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "temp reply"}}},
+			Usage:      llm.Usage{InputTokens: 2, OutputTokens: 4},
+		}},
+	}}
+	if err := runtime.Turn(ctx, "a temporary question", nil); err != nil {
+		t.Fatal(err)
+	}
+	// The temp session ID must not exist in the durable store.
+	if _, err := sessions.Get(ctx, state.SessionID); err == nil {
+		t.Fatalf("temporary session %q was persisted", state.SessionID)
+	}
+	// Listing must not include it either.
+	list, err := sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range list {
+		if value.ID == state.SessionID {
+			t.Fatalf("temporary session %q appears in the durable list", state.SessionID)
+		}
+	}
+	// The transcript is still visible in memory for the live page.
+	status, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandStatus}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State == nil || len(status.State.History) == 0 {
+		t.Fatal("temporary history should be visible in memory")
+	}
+}

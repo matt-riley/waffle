@@ -120,6 +120,29 @@ function setDraft(sessionID, text) {
 // through same-origin session storage (never the URL/history/referrer), and
 // the Tasks editor opens prefilled with exactly that text.
 const scheduleHandoffKey = "waffle.desk.schedule.draft.v1";
+// The temporary-conversation choice survives a reload before the first
+// message; once history exists the option is gone (#475).
+const temporaryStorageKey = "waffle.desk.today.temporary.v1";
+
+function readTemporaryPreference() {
+  try {
+    return globalThis.sessionStorage?.getItem(temporaryStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeTemporaryPreference(enabled) {
+  try {
+    if (enabled) {
+      globalThis.sessionStorage?.setItem(temporaryStorageKey, "1");
+    } else {
+      globalThis.sessionStorage?.removeItem(temporaryStorageKey);
+    }
+  } catch {
+    // Best-effort: the choice simply applies to the current page.
+  }
+}
 
 function handoffSchedule(text) {
   const trimmed = String(text || "").trim();
@@ -243,6 +266,9 @@ const elements = {
   fork: document.querySelector("#desk-fork"),
   newConversation: document.querySelector("#desk-new"),
   sessionRefresh: document.querySelector("#desk-session-refresh"),
+  temporaryRow: document.querySelector("#desk-temporary-row"),
+  temporary: document.querySelector("#desk-temporary"),
+  temporaryBadge: document.querySelector("#desk-temporary-badge"),
   exportFormat: document.querySelector("#desk-export-format"),
   exportButton: document.querySelector("#desk-export"),
   sessions: document.querySelector("#desk-sessions"),
@@ -281,6 +307,7 @@ const state = {
   turnSequence: 0,
   generation: 0,
   sessionID: "",
+  temporary: false,
   skills: [],
   modelAlias: "",
   models: [],
@@ -448,6 +475,15 @@ function updateControls() {
     state.currentPhase !== phase.recovering;
   if (elements.recoverNew) {
     elements.recoverNew.disabled = !recovering;
+  }
+  if (elements.temporaryRow) {
+    elements.temporaryRow.hidden = state.historyLength > 0;
+  }
+  if (elements.temporary) {
+    elements.temporary.disabled = !idle || state.historyLength > 0;
+  }
+  if (elements.temporaryBadge) {
+    elements.temporaryBadge.hidden = !state.temporary;
   }
   for (const control of [
     elements.newConversation,
@@ -1584,6 +1620,10 @@ function renderCanonicalState(chatState, includeHistory) {
     globalThis.waffleReadAloud?.stop();
   }
   state.sessionID = chatState.session_id || state.sessionID;
+  state.temporary = Boolean(chatState.temporary);
+  if (state.temporary && Array.isArray(chatState.history) && chatState.history.length > 0) {
+    writeTemporaryPreference(false);
+  }
   syncComposerDraft();
   markSessionSelection();
   state.modelAlias = chatState.model_alias || state.modelAlias;
@@ -2001,6 +2041,7 @@ async function openDesk({ forceNewSession = false } = {}) {
       session_id: forceNewSession ? "" : requested,
       profile: "",
       capabilities: [],
+      temporary: Boolean(elements.temporary?.checked),
     };
     if (owner && !forceNewSession) {
       openBody.reattach_client_id = owner.client_id;
@@ -2071,6 +2112,7 @@ async function openChatWithRecovery(openBody, owner, generation) {
         session_id: openBody.session_id,
         profile: "",
         capabilities: [],
+        temporary: openBody.temporary === true,
       };
     }
   }
@@ -3620,6 +3662,21 @@ if (elements.form) {
       dictation.stop({ returnFocus: true, textarea: elements.message });
     }
   });
+  if (elements.temporary) {
+    elements.temporary.checked = readTemporaryPreference();
+    elements.temporary.addEventListener("change", () => {
+      writeTemporaryPreference(elements.temporary.checked);
+      if (elements.temporary.checked && state.historyLength === 0) {
+        // The empty conversation is reopened as temporary before any message:
+        // nothing has been persisted yet, so the switch is lossless (#475).
+        state.clientID = "";
+        state.reattachToken = "";
+        state.storedOwner = null;
+        forgetStoredOwner();
+        void openDesk();
+      }
+    });
+  }
   elements.model.addEventListener("change", () => {
     updateModelDetail();
     selectModel();

@@ -16,6 +16,10 @@ type OpenOptions struct {
 	SessionID    string   `json:"session_id"`
 	Profile      string   `json:"profile"`
 	Capabilities []string `json:"capabilities"`
+
+	// Temporary opens a conversation that never enters durable history,
+	// summaries, FTS recall, learning, or memory (#475).
+	Temporary bool
 }
 
 // Model describes a configured model without exposing provider credentials.
@@ -92,6 +96,7 @@ type SkillRef struct {
 // State is the complete presentation-neutral chat state.
 type State struct {
 	SessionID      string        `json:"session_id"`
+	Temporary      bool          `json:"temporary,omitempty"`
 	Title          string        `json:"title"`
 	ModelAlias     string        `json:"model_alias"`
 	ModelError     string        `json:"model_error"`

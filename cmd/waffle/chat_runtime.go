@@ -14,6 +14,7 @@ import (
 	"github.com/matt-riley/waffle/internal/broker"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
+	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	redactpkg "github.com/matt-riley/waffle/internal/redact"
@@ -35,16 +36,19 @@ const (
 // connection. Renderers are responsible only for displaying its state,
 // events, and command results.
 type chatRuntime struct {
-	mu                  sync.Mutex
-	commandMu           sync.Mutex
-	agent               *agent.Agent
-	agentCancel         context.CancelFunc
-	commandCancel       context.CancelFunc
-	commandDone         chan struct{}
-	sessions            *session.Store
-	current             *session.Session
-	history             []llm.Message
-	persisted           int
+	mu            sync.Mutex
+	commandMu     sync.Mutex
+	agent         *agent.Agent
+	agentCancel   context.CancelFunc
+	commandCancel context.CancelFunc
+	commandDone   chan struct{}
+	sessions      *session.Store
+	current       *session.Session
+	history       []llm.Message
+	persisted     int
+	// temporary marks a conversation whose content must never enter durable
+	// session storage, reflection, learning, or memory (#475).
+	temporary           bool
 	cfg                 config.Config
 	st                  *store.Store
 	skills              []skill.Skill
@@ -151,27 +155,39 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	}()
 
 	var current *session.Session
-	switch {
-	case strings.TrimSpace(options.SessionID) != "":
-		current, err = r.sessions.Get(ctx, strings.TrimSpace(options.SessionID))
-	case options.Continue:
-		current, err = r.sessions.Latest(ctx)
-		if errors.Is(err, session.ErrNotFound) {
-			err = nil
+	if options.Temporary {
+		// A temporary conversation gets an in-memory scoped identity only:
+		// no row is ever written, so listing, FTS, summaries, reflection, and
+		// memory can never find it (#475).
+		id, idErr := id.New("temp-session-")
+		if idErr != nil {
+			return chatpkg.State{}, fmt.Errorf("temporary session id: %w", idErr)
 		}
-	}
-	if err != nil {
-		return chatpkg.State{}, err
-	}
-	if current == nil {
-		current, err = r.sessions.Create(ctx, "")
+		now := time.Now()
+		current = &session.Session{ID: id, Title: "Temporary conversation", CreatedAt: now, UpdatedAt: now}
+	} else {
+		switch {
+		case strings.TrimSpace(options.SessionID) != "":
+			current, err = r.sessions.Get(ctx, strings.TrimSpace(options.SessionID))
+		case options.Continue:
+			current, err = r.sessions.Latest(ctx)
+			if errors.Is(err, session.ErrNotFound) {
+				err = nil
+			}
+		}
 		if err != nil {
 			return chatpkg.State{}, err
+		}
+		if current == nil {
+			current, err = r.sessions.Create(ctx, "")
+			if err != nil {
+				return chatpkg.State{}, err
+			}
 		}
 	}
 
 	var history []llm.Message
-	if options.Continue || strings.TrimSpace(options.SessionID) != "" {
+	if !options.Temporary && (options.Continue || strings.TrimSpace(options.SessionID) != "") {
 		history, err = r.sessions.Turns(ctx, current.ID)
 		if err != nil {
 			return chatpkg.State{}, err
@@ -230,6 +246,7 @@ func (r *chatRuntime) open(ctx context.Context, options chatpkg.OpenOptions) (ch
 	r.history = history
 	r.persisted = len(history)
 	r.modelError = modelError
+	r.temporary = options.Temporary
 	state := r.stateLocked(r.capabilities)
 	r.mu.Unlock()
 	adopted = true
@@ -280,6 +297,7 @@ func (r *chatRuntime) stateLocked(capabilities []string) chatpkg.State {
 		state.ModelAlias = r.current.ModelAlias
 		state.Lineage = chatpkg.BranchLineage{ForkedFrom: r.current.ForkedFrom, ForkedAtSeq: r.current.ForkedAtSeq}
 	}
+	state.Temporary = r.temporary
 	if r.agent != nil {
 		if state.ModelAlias == "" {
 			state.ModelAlias = r.agent.Model
@@ -443,12 +461,18 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	r.mu.Lock()
 	r.history = newHistory
 	var persistErr error
-	for r.persisted < len(r.history) {
-		if err := r.sessions.AppendTurn(persistCtx, current.ID, r.history[r.persisted]); err != nil {
-			persistErr = err
-			break
+	if !r.temporary {
+		for r.persisted < len(r.history) {
+			if err := r.sessions.AppendTurn(persistCtx, current.ID, r.history[r.persisted]); err != nil {
+				persistErr = err
+				break
+			}
+			r.persisted++
 		}
-		r.persisted++
+	} else {
+		// Nothing durable is written for a temporary conversation; the
+		// in-memory history still drives streaming, ownership, and usage.
+		r.persisted = len(r.history)
 	}
 	state := r.stateLocked(r.capabilities)
 	// Collect artifacts declared only by this exchange's appended turns so a

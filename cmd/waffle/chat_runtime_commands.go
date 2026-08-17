@@ -270,6 +270,7 @@ func (r *chatRuntime) resetSession(ctx context.Context) (int, error) {
 	r.history = nil
 	r.persisted = 0
 	r.modelError = ""
+	r.temporary = false
 	if r.agent != nil {
 		r.agent.Model = model
 		r.agent.System = nextSystem

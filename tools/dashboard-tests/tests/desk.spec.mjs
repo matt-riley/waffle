@@ -638,6 +638,25 @@ test("owner can export the visible transcript with their live lease", async ({ p
   expect(download.suggestedFilename()).toMatch(/\.md$/);
 });
 
+test("temporary conversations are offered before the first message and marked live", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the temporary flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const toggle = page.locator("#desk-temporary");
+  await expect(toggle).toBeVisible();
+  // Switching the option before the first message reopens the empty session
+  // as temporary and marks it live.
+  await toggle.check();
+  await expect(page.locator("#desk-session-title")).toHaveText("Temporary conversation");
+  await expect(page.locator("#desk-temporary-badge")).toBeVisible();
+  await expect(page.locator("#desk-temporary-badge")).toHaveText("Temporary — nothing is saved");
+  // A message still works end-to-end in the temporary conversation.
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Transient question");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));
