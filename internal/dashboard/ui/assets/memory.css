@@ -266,3 +266,25 @@
 .memory-hit .memory-status + .memory-results {
   margin-top: 0.8rem;
 }
+
+.memory-session-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.memory-session-picker {
+  font: inherit;
+  min-height: 2.5rem;
+  width: 100%;
+}
+
+.memory-session-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.memory-session-hint a {
+  color: var(--ginger-dark);
+}

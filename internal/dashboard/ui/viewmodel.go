@@ -76,6 +76,18 @@ type FragmentTextSwap struct {
 	Available bool
 }
 
+// MemorySessionOption is one eligible persisted session choice for the
+// memory attach picker (#459). The label is human-readable; the opaque
+// identifier is only the form value.
+type MemorySessionOption struct {
+	ID    string
+	Label string
+}
+
+type MemorySessionPickerView struct {
+	Choices []MemorySessionOption
+}
+
 type FragmentFilter struct {
 	ID      string
 	Name    string

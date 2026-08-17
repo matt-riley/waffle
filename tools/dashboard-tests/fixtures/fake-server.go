@@ -205,6 +205,18 @@ func main() {
 		providers.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Test-only control route: empties the persisted session list so the
+	// memory attach picker can cover empty and stale-selection states (#459).
+	mux.HandleFunc("POST /api/v1/desk/test/memory-sessions", func(w http.ResponseWriter, r *http.Request) {
+		sessions.mu.Lock()
+		if r.URL.Query().Get("empty") == "1" {
+			sessions.sessions = map[string]*session.Session{}
+		} else {
+			sessions.sessions = newFixtureSessions().sessions
+		}
+		sessions.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
 	// Test-only control route: drives memory search hit/error states so
 	// rendered tests cover results, no-results, partial, and total failure
 	// (#458).

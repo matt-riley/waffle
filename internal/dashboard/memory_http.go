@@ -39,6 +39,7 @@ func RegisterMemoryRoutes(mux *http.ServeMux, config MemoryRouteConfig) {
 		)
 		return preserveResponseType(protected)
 	}
+	mux.Handle("GET /api/v1/desk/memory/sessions", negotiateFragments(newMemorySessionsHandler(service)))
 	mux.Handle("POST /api/v1/desk/memory/attach", mutation(newMemoryAttachHandler(service)))
 	mux.Handle("POST /api/v1/desk/memory/{noteID}/forget-preview", mutation(newMemoryForgetPreviewHandler(service)))
 	mux.Handle("POST /api/v1/desk/memory/{noteID}/forget", mutation(newMemoryForgetHandler(service)))
@@ -58,6 +59,17 @@ func newMemorySearchHandler(service *MemoryService) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, MemorySearchResponse{Query: query[0], Hits: hits, Errors: sectionErrors})
+	})
+}
+
+func newMemorySessionsHandler(service *MemoryService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		choices, err := service.ListSessions(r.Context(), MemorySessionPickerLimit)
+		if err != nil {
+			writeMemoryError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, MemorySessionsResponse{Choices: choices})
 	})
 }
 

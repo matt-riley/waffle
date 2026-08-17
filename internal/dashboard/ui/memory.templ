@@ -30,8 +30,13 @@ templ Memory(view ShellView) {
 				<p class="eyebrow">Working set</p>
 				<h2 id="memory-attach-title">Attach to a session</h2>
 				<p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p>
-				<label for="memory-session-id">Session ID</label>
-				<input id="memory-session-id" name="session_id" autocomplete="off" placeholder="session-…"/>
+				<label for="memory-session">Attach to session</label>
+				<div class="memory-session-field" id="memory-session-field">
+					<select id="memory-session" name="session_id" class="memory-session-picker" autocomplete="off" aria-describedby="memory-session-empty" hx-get="/api/v1/desk/memory/sessions" hx-trigger="load" hx-target="#memory-session-field" hx-swap="outerHTML">
+						<option value="">Loading conversations…</option>
+					</select>
+					<p class="memory-session-hint" id="memory-session-empty" hidden></p>
+				</div>
 				<div id="memory-attach-status" class="memory-status" aria-live="polite"></div>
 			</aside>
 		</div>
@@ -47,4 +52,24 @@ templ Memory(view ShellView) {
 			</div>
 		</dialog>
 	</section>
+}
+
+templ MemorySessionPicker(view MemorySessionPickerView) {
+	<div class="memory-session-field" id="memory-session-field">
+		<select id="memory-session" name="session_id" class="memory-session-picker" autocomplete="off" aria-describedby="memory-session-empty">
+			if len(view.Choices) == 0 {
+				<option value="">No persisted conversations yet</option>
+			} else {
+				<option value="">Select a conversation…</option>
+				for _, choice := range view.Choices {
+					<option value={ choice.ID }>{ choice.Label }</option>
+				}
+			}
+		</select>
+		if len(view.Choices) == 0 {
+			<p class="memory-session-hint" id="memory-session-empty">No persisted conversations yet. <a href="/desk/?section=today">Start one in Today</a> to attach memory to it.</p>
+		} else {
+			<p class="memory-session-hint" id="memory-session-empty" hidden></p>
+		}
+	</div>
 }

@@ -20,7 +20,7 @@ func TestMemoryRendersSearchAttachConversationAndCancelFirstDialog(t *testing.T)
 		`aria-labelledby="memory-title"`,
 		`id="memory-search-form"`,
 		`id="memory-query"`,
-		`id="memory-session-id"`,
+		`id="memory-session"`,
 		`id="memory-results"`,
 		`id="memory-status"`,
 		`id="memory-forget-dialog"`,

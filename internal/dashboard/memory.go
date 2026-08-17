@@ -21,15 +21,16 @@ const (
 	MemorySourceSummary = "summary"
 	MemorySourceTurn    = "turn"
 
-	MemorySearchLimit       = 20
-	MemoryQueryMaxBytes     = 1024
-	MemoryExcerptMaxBytes   = 512
-	MemoryForgetPreviewTTL  = 60 * time.Second
-	MemoryForgetOperation   = "memory-forget"
-	MemoryAttachedEvent     = "memory.attached"
-	MemoryForgottenEvent    = "memory.forgotten"
-	MemoryForgetScope       = "Affects Waffle-owned memory only."
-	memorySourceLabelMaxLen = 256
+	MemorySearchLimit        = 20
+	MemorySessionPickerLimit = 50
+	MemoryQueryMaxBytes      = 1024
+	MemoryExcerptMaxBytes    = 512
+	MemoryForgetPreviewTTL   = 60 * time.Second
+	MemoryForgetOperation    = "memory-forget"
+	MemoryAttachedEvent      = "memory.attached"
+	MemoryForgottenEvent     = "memory.forgotten"
+	MemoryForgetScope        = "Affects Waffle-owned memory only."
+	memorySourceLabelMaxLen  = 256
 )
 
 var (
@@ -60,6 +61,21 @@ type MemoryAttachRequest struct {
 	Query     string `json:"query"`
 	Source    string `json:"source"`
 	SourceID  string `json:"source_id"`
+}
+
+// MemorySessionChoice is one eligible persisted session for the memory attach
+// picker: a human-readable label plus the opaque identifier as the value.
+type MemorySessionChoice struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Pinned    bool      `json:"pinned,omitempty"`
+}
+
+// sessionLister is the optional SessionStore capability that powers the
+// attach-session picker. Stores without it simply yield an empty picker.
+type sessionLister interface {
+	List(context.Context, int) ([]session.Session, error)
 }
 
 type MemoryForgetPreview struct {
@@ -171,6 +187,37 @@ func (s *MemoryService) Search(ctx context.Context, query string, limit int) ([]
 		hits = make([]MemoryHit, 0)
 	}
 	return hits, sectionErrors, nil
+}
+
+// ListSessions returns eligible persisted sessions for the attach picker,
+// newest activity first, with human-readable labels. An unavailable lister
+// yields an empty picker rather than failing the whole surface.
+func (s *MemoryService) ListSessions(ctx context.Context, limit int) ([]MemorySessionChoice, error) {
+	if s == nil || s.operations == nil || s.operations.Sessions == nil {
+		return nil, nil
+	}
+	lister, ok := s.operations.Sessions.(sessionLister)
+	if !ok {
+		return nil, nil
+	}
+	sessions, err := lister.List(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sessions", ErrMemoryUnavailable)
+	}
+	choices := make([]MemorySessionChoice, 0, len(sessions))
+	for _, value := range sessions {
+		title := strings.TrimSpace(value.Title)
+		if title == "" {
+			title = "Untitled conversation"
+		}
+		choices = append(choices, MemorySessionChoice{
+			ID:        value.ID,
+			Label:     title,
+			UpdatedAt: value.UpdatedAt,
+			Pinned:    value.Pinned,
+		})
+	}
+	return choices, nil
 }
 
 // Attach resolves the source again, verifies the explicit persisted session,
