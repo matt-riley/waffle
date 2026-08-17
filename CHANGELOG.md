@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.0](https://github.com/matt-riley/waffle/compare/v0.26.0...v0.27.0) (2026-08-17)
+
+
+### Features
+
+* **desk:** branch a conversation from a completed exchange ([#471](https://github.com/matt-riley/waffle/issues/471)) ([#489](https://github.com/matt-riley/waffle/issues/489)) ([04b718e](https://github.com/matt-riley/waffle/commit/04b718ea586eef730443a06d9b95bda2a12246a5))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/pelletier/go-toml to v2 ([#488](https://github.com/matt-riley/waffle/issues/488)) ([bb5608a](https://github.com/matt-riley/waffle/commit/bb5608ae93f7990fd98504af5a4b3b9e4bb12674))
+
 ## [0.26.0](https://github.com/matt-riley/waffle/compare/v0.25.0...v0.26.0) (2026-08-16)
 
 
