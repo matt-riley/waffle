@@ -550,6 +550,12 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 			item.DataTaskProfile = task.Profile
 			item.DataTaskEnabled = task.Enabled
 			item.DataTaskRedactedFields = strings.Join(task.RedactedFields, ",")
+			// The human schedule leads; the raw cron stays inspectable in the
+			// advanced editor (#460).
+			item.Fields = append(item.Fields,
+				ui.FragmentField{Label: "Schedule", Value: emptyValue(task.HumanCron, task.Cron)},
+				ui.FragmentField{Label: "Next run", Value: emptyValue(taskTimeLabel(task.NextRun), "—")},
+			)
 			item.Actions = append(item.Actions, ui.FragmentAction{ID: "task-edit-" + task.ID, Label: "Edit schedule", Method: "edit"})
 		}
 		if task.OpenAtDesk && task.SessionID != "" {
@@ -807,4 +813,11 @@ type TaskMutationResponse struct {
 type WorkspaceFragmentSnapshot struct {
 	Snapshot WorkspaceSnapshot           `json:"snapshot"`
 	Git      map[string]WorkspaceGitView `json:"git"`
+}
+
+func taskTimeLabel(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return ""
+	}
+	return value.Format("2 Jan 2006 15:04")
 }

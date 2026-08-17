@@ -1884,3 +1884,83 @@ h3 {
   border-color: var(--ginger-dark);
   color: var(--ginger-dark);
 }
+
+/* Guided schedule editor (#460): common cadences in plain language, a live
+   summary with next run, and raw cron tucked into an explicit advanced mode. */
+.schedule-guide {
+  border: 1px solid var(--rule);
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0 0;
+  padding: 0.7rem;
+}
+
+.schedule-guide legend {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.schedule-guide select,
+.schedule-guide input {
+  border: 1px solid var(--ink);
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+}
+
+.schedule-summary {
+  background: var(--cream);
+  border: 1px solid var(--rule-dark);
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0;
+  min-height: 1.4em;
+  padding: 0.45rem 0.6rem;
+}
+
+.schedule-advanced {
+  margin: 0.6rem 0 0;
+}
+
+.schedule-advanced summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.schedule-help {
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin: 0.25rem 0 0;
+}
+
+.schedule-delivery-row {
+  display: grid;
+  gap: 0.4rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.schedule-delivery-row select,
+.schedule-delivery-row input,
+.schedule-editor form > select {
+  border: 1px solid var(--ink);
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  width: 100%;
+}
+
+.schedule-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin: 0.2rem 0 0;
+}
+
+.schedule-field-errors {
+  border: 1px solid var(--danger);
+  color: #6f302c;
+  font-size: 0.8rem;
+  margin: 0.6rem 0 0;
+  padding: 0.45rem 0.6rem;
+}

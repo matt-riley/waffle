@@ -50,6 +50,7 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 		RegisterTaskRoutes(mux, TaskRouteConfig{
 			Operations:  config.Operations,
 			Schedules:   config.Schedules,
+			Options:     config.ScheduleOptions,
 			Security:    config.Security,
 			Idempotency: config.Idempotency,
 			Events:      config.Hub,

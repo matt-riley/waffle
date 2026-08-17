@@ -445,8 +445,18 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			Artifacts:     artifact.New(st.DB),
 			Previews:      operations.Previews,
 
-			Operations:      operations,
-			Schedules:       scheduleStore,
+			Operations: operations,
+			Schedules:  scheduleStore,
+			ScheduleOptions: dashboard.OperationsScheduleOptions(
+				func() []string { return deskPosture.Profiles() },
+				func() []string {
+					names := make([]string, 0, len(adapters))
+					for _, adapter := range adapters {
+						names = append(names, adapter.Name())
+					}
+					return names
+				},
+			),
 			Memory:          ws,
 			WorkspaceEgress: cfg.Workspace.Egress,
 			Capabilities:    capabilities,

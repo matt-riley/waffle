@@ -72,6 +72,13 @@
 		const idControl = input(form, "task-schedule-id");
 		const id = idControl?.value?.trim?.() || "";
 		delete body.id;
+		// Guided-only controls never reach the schedule contract; the cron
+		// input is the single source of truth and delivery is reassembled
+		// from the configured channel + chat id (#460).
+		for (const key of ["cadence", "time", "dow", "dom", "chat_id"]) {
+			delete body[key];
+		}
+		body.deliver = scheduleDeliverValue(form);
 		if (!id) {
 			delete body.enabled;
 			delete body.field_intents;
@@ -105,6 +112,190 @@
 		if (detail.requestConfig) detail.requestConfig.path = path;
 	}
 
+	// Guided schedule editor (#460): common cadences in plain language with a
+	// live human summary + next run from the server, raw cron in an explicit
+	// advanced mode, and configured profile/delivery choices.
+	function scheduleGuidedCron(form) {
+		const cadence = input(form, "task-schedule-cadence")?.value || "weekdays";
+		const time = (input(form, "task-schedule-time")?.value || "09:00").trim() || "09:00";
+		const [hour = "9", minute = "0"] = time.split(":");
+		const padded = (value) => String(Number(value) || 0).padStart(2, "0");
+		const hm = `${padded(minute)} ${padded(hour)}`;
+		switch (cadence) {
+			case "daily":
+				return `${hm} * * * *`;
+			case "weekly":
+				return `${hm} * * ${input(form, "task-schedule-dow")?.value || "1"}`;
+			case "monthly":
+				return `${hm} ${input(form, "task-schedule-dom")?.value || "1"} * *`;
+			case "weekdays":
+			default:
+				return `${hm} * * 1-5`;
+		}
+	}
+
+	function scheduleCronFromSpec(spec) {
+		const fields = String(spec || "").trim().split(/\s+/);
+		if (fields.length !== 5) return null;
+		const [minute, hour, dom, month, dow] = fields;
+		const time = `${String(hour || "0").padStart(2, "0")}:${String(minute || "0").padStart(2, "0")}`;
+		if (dom === "*" && month === "*" && dow === "*") {
+			return { cadence: "daily", time };
+		}
+		if (dom === "*" && month === "*" && dow === "1-5") {
+			return { cadence: "weekdays", time };
+		}
+		if (dom === "*" && month === "*" && /^[0-7]$/.test(dow)) {
+			return { cadence: "weekly", time, dow };
+		}
+		if (month === "*" && dow === "*" && /^\d+$/.test(dom) && Number(dom) >= 1 && Number(dom) <= 28) {
+			return { cadence: "monthly", time, dom };
+		}
+		return null;
+	}
+
+	function scheduleDeliverValue(form) {
+		const channel = input(form, "task-schedule-deliver")?.value || "";
+		if (!channel) return "";
+		const chatID = (input(form, "task-schedule-chat-id")?.value || "").trim();
+		return chatID ? `${channel}:${chatID}` : "";
+	}
+
+	async function schedulePreview(form) {
+		const name = input(form, "task-schedule-name")?.value || "";
+		const prompt = input(form, "task-schedule-prompt")?.value || "";
+		const cron = input(form, "task-schedule-cron")?.value || "";
+		const body = {
+			name, cron, prompt,
+			deliver: scheduleDeliverValue(form),
+			profile: input(form, "task-schedule-profile")?.value || "",
+		};
+		let response;
+		try {
+			response = await fetch("/api/v1/desk/tasks/schedules/preview", {
+				method: "POST",
+				credentials: "same-origin",
+				cache: "no-store",
+				headers: {
+					Accept: "application/json",
+					"Content-Type": "application/json",
+					"X-Waffle-Desk-Token": document.body.dataset.requestToken || "",
+					"Idempotency-Key":
+						globalThis.crypto?.randomUUID?.() ||
+						`${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`,
+				},
+				body: JSON.stringify(body),
+			});
+		} catch {
+			return;
+		}
+		const preview = await response.json().catch(() => ({}));
+		const summary = input(form, "task-schedule-summary");
+		if (summary) {
+			if (preview.human && preview.next_run) {
+				const when = new Date(preview.next_run);
+				const next = Number.isNaN(when.getTime())
+					? ""
+					: ` · next ${when.toLocaleString()}`;
+				summary.textContent = `${preview.human}${next}`;
+			} else if (preview.human) {
+				summary.textContent = preview.human;
+			} else {
+				summary.textContent = "";
+			}
+		}
+		const errors = preview.errors || {};
+		const errorBox = input(form, "task-schedule-field-errors");
+		if (errorBox) {
+			const messages = Object.entries(errors).map(([key, message]) => `${key}: ${message}`);
+			if (messages.length > 0) {
+				errorBox.hidden = false;
+				errorBox.replaceChildren(document.createTextNode(messages.join(" · ")));
+			} else {
+				errorBox.hidden = true;
+				errorBox.replaceChildren();
+			}
+		}
+	}
+
+	function updateScheduleGuide(form) {
+		const cron = input(form, "task-schedule-cron");
+		if (!cron) return;
+		cron.value = scheduleGuidedCron(form);
+		void schedulePreview(form);
+	}
+
+	function syncGuidedFromCron(form) {
+		const cron = input(form, "task-schedule-cron");
+		if (!cron) return;
+		const guided = scheduleCronFromSpec(cron.value);
+		if (!guided) return;
+		const cadence = input(form, "task-schedule-cadence");
+		const time = input(form, "task-schedule-time");
+		const dow = input(form, "task-schedule-dow");
+		const dom = input(form, "task-schedule-dom");
+		if (cadence) cadence.value = guided.cadence;
+		if (time) time.value = guided.time;
+		if (dow) dow.value = guided.dow || "1";
+		if (dom) dom.value = guided.dom || "1";
+		const dowRow = input(form, "task-schedule-dow-row");
+		const domRow = input(form, "task-schedule-dom-row");
+		if (dowRow) dowRow.hidden = guided.cadence !== "weekly";
+		if (domRow) domRow.hidden = guided.cadence !== "monthly";
+		if (dow) dow.hidden = guided.cadence !== "weekly";
+		if (dom) dom.hidden = guided.cadence !== "monthly";
+	}
+
+	async function loadScheduleOptions(form) {
+		let options;
+		try {
+			const response = await fetch("/api/v1/desk/tasks/schedules/options", {
+				credentials: "same-origin",
+				cache: "no-store",
+				headers: { Accept: "application/json" },
+			});
+			options = await response.json();
+		} catch {
+			options = {};
+		}
+		const profiles = Array.isArray(options.profiles) ? options.profiles : [];
+		const deliveries = Array.isArray(options.deliveries) ? options.deliveries : [];
+		const profileSelect = input(form, "task-schedule-profile");
+		if (profileSelect) {
+			profileSelect.replaceChildren(new Option("Group default", ""));
+			for (const name of profiles) {
+				profileSelect.add(new Option(name, name));
+			}
+		}
+		const profileHint = input(form, "task-schedule-profile-hint");
+		if (profileHint) {
+			profileHint.hidden = profiles.length > 0;
+			profileHint.textContent = profiles.length === 0
+				? "No agent profiles are configured. Create one in Capabilities → Profiles."
+				: "";
+		}
+		const deliverSelect = input(form, "task-schedule-deliver");
+		if (deliverSelect) {
+			deliverSelect.replaceChildren(new Option("Log only (no delivery)", ""));
+			for (const channel of deliveries) {
+				deliverSelect.add(new Option(channel, channel));
+			}
+		}
+		const deliverHint = input(form, "task-schedule-deliver-hint");
+		if (deliverHint) {
+			deliverHint.hidden = deliveries.length > 0;
+			deliverHint.textContent = deliveries.length === 0
+				? "No delivery channels are connected. Enroll one in Capabilities → Tools & connections."
+				: "";
+		}
+	}
+
+	function syncScheduleDeliverUI(form) {
+		const channel = input(form, "task-schedule-deliver")?.value || "";
+		const chatID = input(form, "task-schedule-chat-id");
+		if (chatID) chatID.hidden = !channel;
+	}
+
 	function resetTaskSchedule(form) {
 		const id = input(form, "task-schedule-id");
 		const enabled = input(form, "task-schedule-enabled");
@@ -123,6 +314,21 @@
 				control.required = field === "name" || field === "cron" || field === "prompt";
 			}
 		}
+		const cadence = input(form, "task-schedule-cadence");
+		const time = input(form, "task-schedule-time");
+		const chatID = input(form, "task-schedule-chat-id");
+		const summary = input(form, "task-schedule-summary");
+		const errors = input(form, "task-schedule-field-errors");
+		if (cadence) cadence.value = "weekdays";
+		if (time) time.value = "09:00";
+		if (chatID) chatID.value = "";
+		if (summary) summary.textContent = "";
+		if (errors) {
+			errors.hidden = true;
+			errors.replaceChildren();
+		}
+		syncGuidedFromCron(form);
+		syncScheduleDeliverUI(form);
 		for (const field of ["deliver", "profile"]) {
 			const clear = input(form, `task-schedule-${field}-clear`);
 			const row = input(form, `task-schedule-${field}-clear-row`);
@@ -179,6 +385,26 @@
 			control.value = isRedacted ? "" : value;
 			control.required = !isRedacted && (field === "name" || field === "cron" || field === "prompt");
 		}
+		// Guided controls derive from the stored cron; complex expressions stay
+		// in the explicit advanced input without being mangled (#460).
+		syncGuidedFromCron(form);
+		const deliver = values.deliver;
+		const [channel = "", chatID = ""] = String(deliver).split(":");
+		const deliverSelect = input(form, "task-schedule-deliver");
+		const chatIDInput = input(form, "task-schedule-chat-id");
+		if (deliverSelect && channel) {
+			if (![...deliverSelect.options].some((option) => option.value === channel)) {
+				deliverSelect.add(new Option(channel, channel));
+			}
+			deliverSelect.value = channel;
+		}
+		if (chatIDInput) chatIDInput.value = redacted.includes("deliver") ? "" : chatID;
+		syncScheduleDeliverUI(form);
+		void loadScheduleOptions(form).then(() => {
+			if (deliverSelect && channel) deliverSelect.value = channel;
+			syncScheduleDeliverUI(form);
+		});
+		void schedulePreview(form);
 		for (const field of ["deliver", "profile"]) {
 			const row = input(form, `task-schedule-${field}-clear-row`);
 			if (row) row.hidden = !redacted.includes(field);
@@ -436,6 +662,28 @@
 		if (event.target?.id === "memory-session") {
 			refreshMemoryAttachAvailability();
 		}
+		const id = event.target?.id || "";
+		if (id === "task-schedule-cadence" || id === "task-schedule-dow" || id === "task-schedule-dom") {
+			const form = document.querySelector("#task-schedule-form");
+			if (form) updateScheduleGuide(form);
+		}
+		if (id === "task-schedule-deliver") {
+			const form = document.querySelector("#task-schedule-form");
+			if (form) {
+				syncScheduleDeliverUI(form);
+				void schedulePreview(form);
+			}
+		}
+	});
+	document.body.addEventListener("input", (event) => {
+		const id = event.target?.id || "";
+		if (id === "task-schedule-time" || id === "task-schedule-cron" || id === "task-schedule-name" || id === "task-schedule-prompt" || id === "task-schedule-chat-id") {
+			const form = document.querySelector("#task-schedule-form");
+			if (form) {
+				if (id === "task-schedule-cron") syncGuidedFromCron(form);
+				void schedulePreview(form);
+			}
+		}
 	});
 
 	document.body.addEventListener("htmx:afterSwap", (event) => {
@@ -521,7 +769,11 @@
 		if (scheduleOpen) {
 			event.preventDefault();
 			const form = document.querySelector("#task-schedule-form");
-			if (form) resetTaskSchedule(form);
+			if (form) {
+				resetTaskSchedule(form);
+				void loadScheduleOptions(form);
+				updateScheduleGuide(form);
+			}
 			openTaskScheduleDialog();
 			document.querySelector("#task-schedule-name")?.focus?.();
 			return;

@@ -323,41 +323,46 @@ test("form-and-list sections swap real embedded htmx fragments", async ({ page }
   await expect(page.locator("#memory-results")).toHaveAttribute("data-waffle-fragment", "true");
 });
 
-test("Tasks htmx schedule form creates, edits, and reports filter state", async ({ page }) => {
+test("Tasks guided schedule form creates, edits, and reports filter state", async ({ page }) => {
   await page.goto(deskURL("tasks"));
   await page.getByRole("button", { name: "New schedule", exact: true }).click();
   const form = page.locator("#task-schedule-form");
   await expect(form.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
-  await form.getByLabel("Name").fill("Invalid fixture schedule");
-  await form.getByLabel("Cron schedule").fill("not-a-cron");
-  await form.getByLabel("Prompt").fill("This must not be saved");
-  const invalid = page.waitForResponse(
-    (response) =>
-      response.url().endsWith("/api/v1/desk/tasks/schedules") &&
-      response.request().method() === "POST" &&
-      response.status() === 422,
-  );
-  await form.getByRole("button", { name: "Create schedule", exact: true }).click();
-  await invalid;
-  await expect(form.locator("[data-waffle-error='true']")).toContainText("schedule definition is invalid");
 
+  // Guided controls describe the cadence in plain language and show a live
+  // human summary with the next run.
   await form.getByLabel("Name").fill("Fixture schedule");
-  await form.getByLabel("Cron schedule").fill("0 10 * * 1-5");
   await form.getByLabel("Prompt").fill("Review the fixture queue");
+  await expect(form.locator("#task-schedule-summary")).toContainText("Every weekday at 09:00", {
+    timeout: 10_000,
+  });
+  await expect(form.locator("#task-schedule-summary")).toContainText("next");
+  // Configured choices: the reviewer profile is offered.
+  await expect(form.locator("#task-schedule-profile")).toContainText("reviewer", {
+    timeout: 10_000,
+  });
+  await form.locator("#task-schedule-profile").selectOption("reviewer");
+
   const created = page.waitForResponse(
     (response) =>
       response.url().endsWith("/api/v1/desk/tasks/schedules") &&
-      response.request().method() === "POST" &&
-      response.status() === 201,
+      response.request().method() === "POST",
   );
   await form.getByRole("button", { name: "Create schedule", exact: true }).click();
   await created;
 
   const card = page.locator("[data-task-id='job-added']");
   await expect(card).toContainText("Fixture schedule");
+  // The card repeats the human schedule rather than raw cron.
+  await expect(card).toContainText("Every weekday at 09:00");
+  await expect(card).toContainText("Next run");
+
   await card.getByRole("button", { name: "Edit schedule", exact: true }).click();
   await expect(form.getByLabel("Name")).toHaveValue("Fixture schedule");
-  await expect(form.getByLabel("Cron schedule")).toHaveValue("0 10 * * 1-5");
+  // Guided controls re-derive from the stored cron.
+  await expect(form.getByLabel("Cadence")).toHaveValue("weekdays");
+  await expect(form.getByLabel("Time")).toHaveValue("09:00");
+  await expect(form.locator("#task-schedule-profile")).toHaveValue("reviewer");
   await form.getByLabel("Prompt").fill("Edited fixture queue");
   const updated = page.waitForResponse(
     (response) =>
@@ -372,6 +377,31 @@ test("Tasks htmx schedule form creates, edits, and reports filter state", async 
   await page.getByRole("button", { name: "Scheduled", exact: true }).click();
   await expect(page.locator("#task-filter-scheduled")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#task-filter-all")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("Tasks schedule advanced cron validates inline and rejects bad expressions", async ({ page }) => {
+  await page.goto(deskURL("tasks"));
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
+  const form = page.locator("#task-schedule-form");
+  await form.getByLabel("Name").fill("Invalid fixture schedule");
+  await form.getByLabel("Prompt").fill("This must not be saved");
+  // Advanced mode: raw cron with help.
+  await form.locator("#task-schedule-advanced summary").click();
+  await expect(form.locator("#task-schedule-advanced")).toContainText("Five fields");
+  await form.getByLabel("Cron schedule").fill("not-a-cron");
+  await expect(form.locator("#task-schedule-field-errors")).toContainText("cron", {
+    timeout: 10_000,
+  });
+  await expect(form.locator("#task-schedule-field-errors")).toContainText("not valid");
+  const invalid = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/v1/desk/tasks/schedules") &&
+      response.request().method() === "POST" &&
+      response.status() === 422,
+  );
+  await form.getByRole("button", { name: "Create schedule", exact: true }).click();
+  await invalid;
+  await expect(form.locator("[data-waffle-error='true']")).toContainText("schedule definition is invalid");
 });
 
 test("Tasks attention chip settles to a truthful count instead of Checking forever", async ({ page }) => {

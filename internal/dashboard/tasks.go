@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,6 +87,8 @@ type TaskView struct {
 	Deliver        string     `json:"deliver,omitempty"`
 	Enabled        bool       `json:"enabled,omitempty"`
 	LastRun        *time.Time `json:"last_run,omitempty"`
+	HumanCron      string     `json:"human_cron,omitempty"`
+	NextRun        *time.Time `json:"next_run,omitempty"`
 	RedactedFields []string   `json:"redacted_fields,omitempty"`
 }
 
@@ -96,16 +99,136 @@ type TasksSnapshot struct {
 	Errors         []*SectionError `json:"errors"`
 }
 
+// ScheduleOptionsView is the credential-free choice set for the guided
+// schedule editor: configured profiles and delivery destinations (#460).
+type ScheduleOptionsView struct {
+	Profiles     []string `json:"profiles"`
+	Deliveries   []string `json:"deliveries"`
+	DefaultModel string   `json:"default_model,omitempty"`
+}
+
+// SchedulePreviewRequest is one draft of a schedule the editor asks the
+// server to validate and describe before it is committed (#460).
+type SchedulePreviewRequest struct {
+	Name    string `json:"name"`
+	Cron    string `json:"cron"`
+	Prompt  string `json:"prompt"`
+	Deliver string `json:"deliver"`
+	Profile string `json:"profile"`
+}
+
+// SchedulePreviewResponse is the validated human summary of a draft. Field
+// errors carry the exact key so the editor can highlight the control.
+type SchedulePreviewResponse struct {
+	Human    string            `json:"human,omitempty"`
+	NextRun  string            `json:"next_run,omitempty"`
+	Timezone string            `json:"timezone"`
+	Errors   map[string]string `json:"errors,omitempty"`
+}
+
+// ScheduleOptions exposes the choice lists behind the guided editor.
+type ScheduleOptions interface {
+	Profiles() []string
+	Deliveries() []string
+}
+
+// OperationsScheduleOptions adapts the shared operations/config dependencies.
+func OperationsScheduleOptions(profiles func() []string, deliveries func() []string) ScheduleOptions {
+	return scheduleOptionsFuncs{profiles: profiles, deliveries: deliveries}
+}
+
+type scheduleOptionsFuncs struct {
+	profiles   func() []string
+	deliveries func() []string
+}
+
+func (s scheduleOptionsFuncs) Profiles() []string {
+	if s.profiles == nil {
+		return nil
+	}
+	return s.profiles()
+}
+
+func (s scheduleOptionsFuncs) Deliveries() []string {
+	if s.deliveries == nil {
+		return nil
+	}
+	return s.deliveries()
+}
+
 type TasksService struct {
 	operations *Operations
+	options    ScheduleOptions
 }
 
 func NewTasksService(operations *Operations) *TasksService {
 	return &TasksService{operations: operations}
 }
 
+// SetOptions wires the configured choice lists for the guided schedule
+// editor. Additive: Tasks still works without them.
+func (s *TasksService) SetOptions(options ScheduleOptions) {
+	s.options = options
+}
+
 // Read shapes schedules and cron runs independently. One failed dependency
 // contributes a sanitized section error without discarding healthy cards.
+// Options returns the configured choices for the guided schedule editor.
+func (s *TasksService) Options() ScheduleOptionsView {
+	view := ScheduleOptionsView{Profiles: make([]string, 0), Deliveries: make([]string, 0)}
+	if s.options != nil {
+		view.Profiles = s.options.Profiles()
+		view.Deliveries = s.options.Deliveries()
+	}
+	sort.Strings(view.Profiles)
+	sort.Strings(view.Deliveries)
+	return view
+}
+
+// Preview validates one schedule draft and returns the human summary plus the
+// next run in the host timezone, with exact field errors for inline feedback.
+func (s *TasksService) Preview(ctx context.Context, request SchedulePreviewRequest) SchedulePreviewResponse {
+	response := SchedulePreviewResponse{
+		Timezone: time.Now().Format("MST (UTC-07:00)"),
+		Errors:   make(map[string]string),
+	}
+	input, err := schedule.ValidateUpdate(schedule.Update{
+		Name: request.Name, Cron: request.Cron, Prompt: request.Prompt,
+		Deliver: request.Deliver, Profile: request.Profile, Enabled: true,
+	})
+	if err != nil {
+		for key, message := range scheduleValidationFieldErrors(err, request) {
+			response.Errors[key] = message
+		}
+		return response
+	}
+	response.Human = schedule.DescribeCron(input.Cron)
+	response.NextRun = schedule.NextRun(input.Cron, time.Now()).Format(time.RFC3339)
+	return response
+}
+
+// scheduleValidationFieldErrors maps a schedule validation failure to the
+// exact field the operator must fix, preserving the draft (#460).
+func scheduleValidationFieldErrors(err error, request SchedulePreviewRequest) map[string]string {
+	message := err.Error()
+	errors := map[string]string{}
+	switch {
+	case strings.Contains(message, "name is required"):
+		errors["name"] = "Give the schedule a name."
+	case strings.Contains(message, "prompt is required"):
+		errors["prompt"] = "Describe what the schedule should run."
+	case strings.Contains(message, "invalid cron"):
+		errors["cron"] = "That cron expression is not valid. Use the guided controls or the examples below."
+	case strings.Contains(message, "delivery"):
+		errors["deliver"] = "That delivery target is not valid. Choose a configured destination."
+	case strings.Contains(message, "profile"):
+		errors["profile"] = "That profile is not configured. Choose one from the list."
+	default:
+		errors["cron"] = message
+	}
+	return errors
+}
+
 func (s *TasksService) Read(ctx context.Context, filter TaskFilter) (TasksSnapshot, error) {
 	if _, err := ParseTaskFilter([]string{string(filter)}); err != nil {
 		return TasksSnapshot{}, err
@@ -272,6 +395,10 @@ func scheduleTaskView(job schedule.Job) TaskView {
 		Deliver: sanitizeDashboardString(job.Deliver),
 		Enabled: job.Enabled,
 		LastRun: taskTimePointer(job.LastRun),
+		// Operator-language summary for the card (#460); the raw cron stays
+		// available for the advanced editor.
+		HumanCron: schedule.DescribeCron(job.Cron),
+		NextRun:   taskTimePointer(schedule.NextRun(job.Cron, time.Now())),
 	}
 	view.RedactedFields = redactedTaskScheduleFields(job)
 	view.Attention = TaskNeedsAttention(job, nil)
