@@ -162,9 +162,13 @@ func main() {
 		Catalogue: fixtureCatalogue{},
 	}
 
+	// Test-only control route: makes the latest-session open report a
+	// recoverable ownership conflict so rendered tests can exercise the
+	// Desk recovery flow (#454).
+	sessionLock := &atomic.Bool{}
 	chatClients := dashboard.NewChatClients(
 		func(context.Context) (chat.Backend, error) {
-			return &fixtureChatBackend{sessions: sessions, skills: skills, artifacts: artifact.New(stateStore.DB)}, nil
+			return &fixtureChatBackend{sessions: sessions, skills: skills, artifacts: artifact.New(stateStore.DB), sessionLock: sessionLock}, nil
 		},
 		entropy,
 	)
@@ -179,6 +183,10 @@ func main() {
 	obs.MarkSchedulerTick()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/desk/test/lock-latest", func(w http.ResponseWriter, r *http.Request) {
+		sessionLock.Store(r.URL.Query().Get("on") != "0")
+		w.WriteHeader(http.StatusNoContent)
+	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
 		Observability:     obs,
@@ -935,14 +943,30 @@ type fixtureRestart struct{}
 func (fixtureRestart) Schedule(context.Context, string) error { return nil }
 
 type fixtureChatBackend struct {
-	sessions  *fixtureSessions
-	skills    *fixtureSkills
-	artifacts *artifact.Store
-	session   string
-	history   []llm.Message
+	sessions    *fixtureSessions
+	skills      *fixtureSkills
+	artifacts   *artifact.Store
+	session     string
+	history     []llm.Message
+	sessionLock *atomic.Bool
+}
+
+// fixtureSessionActiveError mirrors the real runtime's recoverable ownership
+// conflict so the Desk open path projects it as session_active (#454).
+type fixtureSessionActiveError struct{}
+
+func (fixtureSessionActiveError) Error() string { return "session is already active" }
+func (fixtureSessionActiveError) ErrorCode() string {
+	return "session_active"
+}
+func (fixtureSessionActiveError) SafeMessage() string {
+	return "chat session is already active"
 }
 
 func (b *fixtureChatBackend) Open(_ context.Context, options chat.OpenOptions) (chat.State, error) {
+	if options.Continue && b.sessionLock != nil && b.sessionLock.Load() {
+		return chat.State{}, fixtureSessionActiveError{}
+	}
 	b.session = strings.TrimSpace(options.SessionID)
 	if b.session == "" {
 		b.session = "session-primary"

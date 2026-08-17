@@ -361,6 +361,11 @@ h3 {
   font-size: 0.85rem;
 }
 
+.stale-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .today-columns {
   display: grid;
   flex: 1;

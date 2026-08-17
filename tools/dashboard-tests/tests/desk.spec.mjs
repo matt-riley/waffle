@@ -827,6 +827,52 @@ test("Today reload and navigate-away recovery returns to a usable single desk", 
   await expect(page.locator(".waffle-message .message-body")).toContainText("Fixture reply");
 });
 
+test("an active-session ownership conflict recovers inline instead of the fatal stale screen", async ({ page, browser }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the ownership recovery once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  // Lock the latest session as if another surface holds it, then open the
+  // Desk from a second browser surface with no stored owner (#454).
+  await page.request.post(`${baseURL}/api/v1/desk/test/lock-latest`);
+  try {
+    const context = await browser.newContext();
+    try {
+      const second = await context.newPage();
+      await second.goto(deskURL("today"));
+
+      // Bounded retries fail, then inline recovery appears; the fatal
+      // out-of-date treatment is reserved for genuinely incompatible state.
+      await expect(second.locator("#desk-phase")).toHaveText("Conversation in use", {
+        timeout: 15_000,
+      });
+      await expect(second.locator("#desk-stale-label")).toHaveText(
+        "This conversation is in use.",
+      );
+      await expect(second.locator("#desk-stale-message")).toContainText(
+        "Another surface",
+      );
+      await expect(second.getByRole("button", { name: "Start a new conversation" })).toBeVisible();
+
+      // Inline recovery opens a fresh session and returns the composer to a
+      // usable state.
+      await second.getByRole("button", { name: "Start a new conversation" }).click();
+      await expect(second.locator("#desk-phase")).toHaveText("Ready");
+      const message = second.getByLabel("Message Waffle");
+      await expect(message).toBeEnabled();
+      await message.fill("Usable after recovery");
+      await second.getByRole("button", { name: "Send message", exact: true }).click();
+      await expect(second.locator(".waffle-message .message-body")).toHaveText(
+        "Fixture reply",
+      );
+    } finally {
+      await context.close();
+    }
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/lock-latest?on=0`);
+  }
+});
+
 test("Today reconnects after SSE drop without tearing down the desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the recovery flow once.");
 
