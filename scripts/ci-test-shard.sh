@@ -14,8 +14,8 @@
 #                          measured per-test weights from
 #                          scripts/ci-test-workspace-weights.tsv. The workspace
 #                          package is ~half of all CI test time under -race on
-#                          4-vCPU runners, so it is split across runners with
-#                          -run instead of serializing on one runner.
+#                          4-vCPU runners, so it is split across three runners
+#                          with -run instead of serializing on one runner.
 #
 # Items without a weight entry default to 1s, so newly added packages/tests
 # attach to the currently-lightest shard without manual bookkeeping.

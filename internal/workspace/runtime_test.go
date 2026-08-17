@@ -16,6 +16,7 @@ import (
 )
 
 func TestWorkspaceRunArgsUseAbsoluteBinaryPath(t *testing.T) {
+	t.Parallel()
 	args := workspaceRunArgs(ContainerOpts{
 		Name:      "waffle-ws-ab12",
 		Image:     "buildpack-deps:bookworm-scm",
@@ -53,6 +54,7 @@ func TestWorkspaceRunArgsUseAbsoluteBinaryPath(t *testing.T) {
 }
 
 func TestContainerOptsCarriesRunnerBinary(t *testing.T) {
+	t.Parallel()
 	m := &Manager{RunnerBinary: "/opt/waffle-linux"}
 	ws := &Workspace{ID: "ws-1", Container: "waffle-ws-1", Volume: "waffle-ws-1", Image: "img"}
 	opts := m.containerOpts(ws, "wk_tok", m.Egress)
@@ -64,6 +66,7 @@ func TestContainerOptsCarriesRunnerBinary(t *testing.T) {
 // TestEgressNetworkArgs asserts none/allowlist use the waffle-ws bridge (not
 // Docker "none") so waffle-host:host-gateway works; full stays on bridge (#95).
 func TestEgressNetworkArgs(t *testing.T) {
+	t.Parallel()
 	ws := &Workspace{ID: "ws-1", Container: "waffle-ws-1", Volume: "waffle-ws-1", Image: "img"}
 	cases := []struct {
 		name      string
@@ -157,6 +160,7 @@ func TestEgressNetworkArgs(t *testing.T) {
 }
 
 func TestEgressNetworkHelper(t *testing.T) {
+	t.Parallel()
 	if got := egressNetwork("none"); got != WorkspaceBrokerNetwork {
 		t.Fatalf("none -> %q, want %q", got, WorkspaceBrokerNetwork)
 	}
@@ -412,6 +416,7 @@ func buildLinuxNetlockProbe(t *testing.T) string {
 }
 
 func TestContainerOptsNetLockdown(t *testing.T) {
+	t.Parallel()
 	ws := &Workspace{ID: "ws-1", Container: "c", Volume: "v", Image: "img"}
 	m := &Manager{Egress: "none", BrokerURL: "http://waffle-host:1"}
 	opts := m.containerOpts(ws, "tok", m.Egress)
@@ -434,6 +439,7 @@ func TestContainerOptsNetLockdown(t *testing.T) {
 }
 
 func TestGitHostFromURL(t *testing.T) {
+	t.Parallel()
 	if got := gitHostFromURL("https://github.com/o/r.git"); got != "github.com" {
 		t.Fatalf("got %q", got)
 	}
@@ -448,6 +454,7 @@ func TestGitHostFromURL(t *testing.T) {
 // host. The clone then dies with "could not read Password for
 // http://wk_...@waffle-host:8423". An explicit empty password stops git asking.
 func TestWorkspaceProxyURLCarriesAnExplicitEmptyPassword(t *testing.T) {
+	t.Parallel()
 	m := &Manager{
 		Egress:    "none",
 		Network:   "waffle-ws",

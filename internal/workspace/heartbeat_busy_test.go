@@ -59,6 +59,7 @@ func realBusyError(t *testing.T) error {
 }
 
 func TestWaitForInspectionHeartbeatRetriesTransientContention(t *testing.T) {
+	t.Parallel()
 	busy := realBusyError(t)
 	startedAt := time.Date(2026, time.July, 25, 13, 0, 0, 0, time.UTC)
 	ticks := make(chan time.Time, 4)
@@ -86,6 +87,7 @@ func TestWaitForInspectionHeartbeatRetriesTransientContention(t *testing.T) {
 }
 
 func TestWaitForInspectionHeartbeatFailsFastOnRealErrors(t *testing.T) {
+	t.Parallel()
 	startedAt := time.Date(2026, time.July, 25, 13, 0, 0, 0, time.UTC)
 	fatal := errors.New("no such table: results")
 	ticks := make(chan time.Time, 1)
@@ -107,6 +109,7 @@ func TestWaitForInspectionHeartbeatFailsFastOnRealErrors(t *testing.T) {
 }
 
 func TestWaitForInspectionHeartbeatStillBoundsPersistentContention(t *testing.T) {
+	t.Parallel()
 	busy := realBusyError(t)
 	startedAt := time.Date(2026, time.July, 25, 13, 0, 0, 0, time.UTC)
 	ticks := make(chan time.Time)
