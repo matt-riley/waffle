@@ -46,9 +46,8 @@
 # utility_model, or secret.
 #
 # Optional operator-authored "use for" note on a favourite alias. Desk shows
-# this under the Today model picker. It is never invented:
-#   [models.claude]
-#   description = "Long-form review and careful edits"
+# this under the Today model picker. It is never invented. On that alias's
+# models table, set description = "Long-form review and careful edits".
 
 # Optional standalone local chat service. Managed deployments normally receive
 # /run/waffle/chat.sock from systemd socket activation instead. This server
