@@ -16,7 +16,7 @@ func TestStaticAssetsCachedAtInit(t *testing.T) {
 		"app.css",
 		"app.js",
 		"today.js",
-		"read-aloud.js",
+		"dictate.js",
 		"workspaces.css",
 		"memory.css",
 		"capabilities.css",

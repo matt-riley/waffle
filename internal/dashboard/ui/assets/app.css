@@ -1991,3 +1991,31 @@ h3 {
   color: var(--ginger-dark);
   font-weight: 700;
 }
+
+.dictate-control {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+}
+
+.dictate-button {
+  background: transparent;
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+  font-size: 0.78rem;
+}
+
+.dictate-button.is-listening {
+  background: #f3d8cf;
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.dictate-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin: 0;
+  max-width: 16rem;
+}
