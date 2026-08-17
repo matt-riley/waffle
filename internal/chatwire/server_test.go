@@ -357,9 +357,9 @@ func TestServerRejectsSecondTurnAndCancelRemainsResponsive(t *testing.T) {
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first Turn: %v", err)
 	}
-	if got := backend.cancelCount(); got != 1 {
-		t.Fatalf("cancel calls = %d", got)
-	}
+	// stop() cancels the turn context before backend.Cancel, so Turn can
+	// return a beat before the cancel count increments.
+	waitCancelCount(t, backend, 1)
 	if err := client.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1681,6 +1681,20 @@ func (b *wireFakeBackend) cancelCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.cancels
+}
+
+func waitCancelCount(t *testing.T, backend *wireFakeBackend, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := backend.cancelCount(); got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancel calls = %d, want %d", backend.cancelCount(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (b *wireFakeBackend) closeCount() int {

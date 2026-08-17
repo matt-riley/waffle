@@ -1647,7 +1647,9 @@ h3 {
     display: block;
     height: auto;
     min-height: 100dvh;
-    padding-bottom: 4.75rem;
+    /* Reserve the fixed navigation's full height plus the device safe-area
+       inset so every section's last row can scroll clear of the bar (#467). */
+    padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
   }
 
   .desk-shell[data-active-section="today"] main,
@@ -1665,6 +1667,13 @@ h3 {
     position: fixed;
     right: 0;
     z-index: 3;
+  }
+
+  /* A freshly swapped review dialog is visible inline for one tick before
+     showModal lifts it to the top layer; keep it above the navigation then,
+     so it can never render beneath the bar (#467). */
+  dialog[open] {
+    z-index: 4;
   }
 
   .brand {
@@ -1688,12 +1697,12 @@ h3 {
   .section-links a {
     align-items: center;
     display: flex;
-    font-size: 0.62rem;
+    font-size: 0.68rem;
     justify-content: center;
     line-height: 1.15;
     min-height: 2.75rem;
     overflow-wrap: anywhere;
-    padding: 0.45rem 0.15rem;
+    padding: 0.4rem 0.15rem;
     text-align: center;
   }
 
@@ -1702,7 +1711,17 @@ h3 {
   }
 
   .conversation {
-    min-height: calc(100dvh - 8.75rem);
+    /* Leave the composer (and its slash menu) fully visible above the fixed
+       navigation plus the device safe-area inset (#467). */
+    min-height: calc(100dvh - 8.75rem - 4.75rem - env(safe-area-inset-bottom, 0px));
+  }
+
+  .composer,
+  #desk-message {
+    /* scrollIntoView and keyboard focus stop the composer (and the focused
+       textarea inside it) clear of the fixed bar instead of docking it
+       underneath (#467). */
+    scroll-margin-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
   }
 
   .message-list {
