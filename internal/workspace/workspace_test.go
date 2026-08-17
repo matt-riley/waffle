@@ -134,6 +134,8 @@ type fakeRuntime struct {
 	// absent tracks containers removed since their last start, so
 	// StartContainer can simulate Docker's "No such container" error.
 	absent map[string]bool
+	// done is closed when the named runner's Serve goroutine returns.
+	done map[string]chan struct{}
 }
 
 type revocationTracker struct {
@@ -159,7 +161,7 @@ func (r *revocationTracker) seen(sessionID string) bool {
 }
 
 func newFakeRuntime(tools *scriptedBash) *fakeRuntime {
-	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}, absent: map[string]bool{}}
+	return &fakeRuntime{tools: tools, cancels: map[string]context.CancelFunc{}, absent: map[string]bool{}, done: map[string]chan struct{}{}}
 }
 
 func (f *fakeRuntime) log(e string) {
@@ -195,11 +197,19 @@ func (f *fakeRuntime) StartWorkspace(ctx context.Context, opts ContainerOpts) er
 
 func (f *fakeRuntime) launch(name, queueDir string) {
 	rctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
 	f.mu.Lock()
+	// StartContainer relaunches without halt. Cancel the previous Serve so
+	// it cannot keep the queue DBs open after this name is reused.
+	if prev := f.cancels[name]; prev != nil {
+		prev()
+	}
 	f.cancels[name] = cancel
+	f.done[name] = finished
 	delay := f.restartDelay
 	f.mu.Unlock()
 	go func() {
+		defer close(finished)
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
@@ -293,15 +303,52 @@ func (f *fakeRuntime) RemoveVolume(ctx context.Context, name string) error {
 
 func (f *fakeRuntime) halt(name string) {
 	f.mu.Lock()
-	if cancel := f.cancels[name]; cancel != nil {
+	cancel := f.cancels[name]
+	done := f.done[name]
+	delete(f.cancels, name)
+	delete(f.done, name)
+	f.mu.Unlock()
+	if cancel != nil {
 		cancel()
-		delete(f.cancels, name)
+	}
+	if done == nil {
+		return
+	}
+	// Wait for Serve to close its queue DBs. A fixed sleep was both slow
+	// (150ms per container remove) and still racy when Serve outlasted it.
+	// Bound the wait: modernc sqlite can ignore a canceled QueryContext.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+func (f *fakeRuntime) haltAll() {
+	f.mu.Lock()
+	names := make([]string, 0, len(f.cancels))
+	for name := range f.cancels {
+		names = append(names, name)
 	}
 	f.mu.Unlock()
-	time.Sleep(150 * time.Millisecond) // let the runner release the queue
+	for _, name := range names {
+		f.halt(name)
+	}
 }
 
 func newTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) {
+	t.Helper()
+	t.Parallel()
+	return newManagerFixture(t, tools)
+}
+
+// newSerialTestManager is for tests that inspect the process-wide
+// workspaceLifecycleLocks registry and cannot run beside other lifecycle tests.
+func newSerialTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) {
+	t.Helper()
+	return newManagerFixture(t, tools)
+}
+
+func newManagerFixture(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "waffle.db"))
 	if err != nil {
@@ -313,6 +360,7 @@ func newTestManager(t *testing.T, tools *scriptedBash) (*Manager, *fakeRuntime) 
 		}
 	})
 	rt := newFakeRuntime(tools)
+	t.Cleanup(rt.haltAll)
 	mgr := NewManager(st, session.New(st), rt, t.TempDir())
 	mgr.InspectionProbeInterval = testInspectionProbeInterval
 	mgr.ExecTimeout = 10 * time.Second
@@ -1051,6 +1099,7 @@ func TestInspectCloseWaitsForFreshIdleRunnerHeartbeat(t *testing.T) {
 }
 
 func TestWaitForInspectionHeartbeatAllowsSupportedColdStart(t *testing.T) {
+	t.Parallel()
 	if inspectionRunnerReadyTimeout != time.Minute {
 		t.Fatalf("inspection runner readiness timeout = %s, want sandbox cold-start allowance %s", inspectionRunnerReadyTimeout, time.Minute)
 	}
@@ -1254,6 +1303,7 @@ func TestInspectCloseClosedWorkspaceIsExplicit(t *testing.T) {
 }
 
 func TestLifecycleLockRegistryRetiresQuiescentKeys(t *testing.T) {
+	t.Parallel()
 	var registry lifecycleLockRegistry
 	for i := range 256 {
 		lock := registry.lock(fmt.Sprintf("quiescent-%d", i))
@@ -1268,7 +1318,7 @@ func TestLifecycleLockRegistryRetiresQuiescentKeys(t *testing.T) {
 
 func TestLifecycleLockRegistryRetiresFailedWorkspaceCalls(t *testing.T) {
 	ctx := context.Background()
-	mgr, _ := newTestManager(t, &scriptedBash{})
+	mgr, _ := newSerialTestManager(t, &scriptedBash{})
 
 	for i := range 64 {
 		id := fmt.Sprintf("missing-%d", i)
@@ -1291,6 +1341,7 @@ func TestLifecycleLockRegistryRetiresFailedWorkspaceCalls(t *testing.T) {
 }
 
 func TestLifecycleLockRegistryKeepsOneEntryThroughContendedHandoff(t *testing.T) {
+	t.Parallel()
 	var registry lifecycleLockRegistry
 	const key = "contended"
 
@@ -1329,6 +1380,7 @@ func TestLifecycleLockRegistryKeepsOneEntryThroughContendedHandoff(t *testing.T)
 }
 
 func TestLifecycleLockRegistryConcurrentStressRetiresAllKeys(t *testing.T) {
+	t.Parallel()
 	var registry lifecycleLockRegistry
 	const (
 		workers = 24
@@ -1374,7 +1426,7 @@ func TestLifecycleLockRegistryConcurrentStressRetiresAllKeys(t *testing.T) {
 
 func TestInspectCloseGuardedSerializesPreviewAcceptanceAgainstClose(t *testing.T) {
 	ctx := context.Background()
-	mgr, rt := newTestManager(t, &scriptedBash{})
+	mgr, rt := newSerialTestManager(t, &scriptedBash{})
 	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
 	if err != nil {
 		t.Fatal(err)
@@ -1800,6 +1852,7 @@ func TestIsUniqueConstraintErrorRealDriver(t *testing.T) {
 }
 
 func TestIsUniqueConstraintErrorFallback(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		err  error
 		want bool
@@ -1820,6 +1873,7 @@ func TestIsUniqueConstraintErrorFallback(t *testing.T) {
 }
 
 func TestNormalizeRepo(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, repo, url string
 		wantErr       bool
@@ -2332,6 +2386,7 @@ func TestNoteActivityClearsFallbackAfterASuccessfulWrite(t *testing.T) {
 // order they started, so a slower older successful write must not erase the
 // record of newer activity whose write failed.
 func TestActivityFallbackKeepsNewestOverlappingWrite(t *testing.T) {
+	t.Parallel()
 	mgr := &Manager{}
 	older := time.Now().UTC().Add(-time.Second)
 	newer := older.Add(500 * time.Millisecond)
@@ -2705,6 +2760,7 @@ func TestResumeDoesNotPersistUnenforcedEgress(t *testing.T) {
 }
 
 func TestClassifyCloneErrorMapsSafeStableCodes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		msg  string
@@ -2831,7 +2887,7 @@ func TestReadFileRejectsTraversalAndMissing(t *testing.T) {
 	}
 	// A missing file maps to ErrProjectFileMissing.
 	tools2 := &scriptedBash{failing: map[string]string{"test -f": "cat: no such file or directory"}}
-	mgr2, _ := newTestManager(t, tools2)
+	mgr2, _ := newManagerFixture(t, tools2)
 	ws2, client2, err := mgr2.Open(ctx, "matt-riley/waffle")
 	if err != nil {
 		t.Fatal(err)
