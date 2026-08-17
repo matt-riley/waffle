@@ -75,7 +75,8 @@ func postureTestConfig() config.Config {
 }
 
 func TestPostureProjectsSystemPromptAndLayers(t *testing.T) {
-	service := NewPostureService(postureTestConfig(), nil, nil)
+	cfgForTest := postureTestConfig()
+	service := NewPostureService(&cfgForTest, nil, nil)
 	view := service.Read("reviewer")
 
 	if !view.Known {
@@ -149,7 +150,7 @@ func TestPostureResolvesFilePromptWithRelativeSourceOnly(t *testing.T) {
 		"cron": {System: "@prompts/cron.md"},
 	}}}
 
-	view := NewPostureService(cfg, nil, nil).Read("cron")
+	view := NewPostureService(&cfg, nil, nil).Read("cron")
 	if view.System.Source != config.SystemPromptFile {
 		t.Fatalf("source = %q, want file", view.System.Source)
 	}
@@ -177,7 +178,7 @@ func TestPostureReportsUnreadablePromptWithoutLeakingIt(t *testing.T) {
 		"broken": {System: "@prompts/does-not-exist.md"},
 	}}}
 
-	view := NewPostureService(cfg, nil, nil).Read("broken")
+	view := NewPostureService(&cfg, nil, nil).Read("broken")
 	if view.System.Error == "" {
 		t.Fatal("unreadable prompt reported no error")
 	}
@@ -208,7 +209,7 @@ func TestPostureRedactsSecretsAndPathShapedIdentifiers(t *testing.T) {
 			},
 		},
 	}
-	service := NewPostureService(cfg, postureRedactorStub{secret: "sk-super-private"}, nil)
+	service := NewPostureService(&cfg, postureRedactorStub{secret: "sk-super-private"}, nil)
 	view := service.Read("main")
 
 	payload, err := json.Marshal(view)
@@ -235,7 +236,8 @@ func TestPostureRedactsSecretsAndPathShapedIdentifiers(t *testing.T) {
 }
 
 func TestPostureUnknownProfileReportsInheritedPosture(t *testing.T) {
-	view := NewPostureService(postureTestConfig(), nil, nil).Read("not-configured")
+	cfgForTest := postureTestConfig()
+	view := NewPostureService(&cfgForTest, nil, nil).Read("not-configured")
 	if view.Known {
 		t.Fatal("unknown profile reported as configured")
 	}
@@ -256,7 +258,8 @@ func TestPostureTracesDenialsToTheirRule(t *testing.T) {
 			Detail: "Force pushes are refused on shared branches.",
 		},
 	}}
-	service := NewPostureService(postureTestConfig(), nil, audit)
+	cfgForTest := postureTestConfig()
+	service := NewPostureService(&cfgForTest, nil, audit)
 
 	snapshot, err := service.Denials(t.Context(), " session-primary ")
 	if err != nil {
@@ -286,7 +289,8 @@ func TestPostureTracesDenialsToTheirRule(t *testing.T) {
 
 func TestPostureDenialsAreOptionalAndFailClosed(t *testing.T) {
 	// No audit source is not an error: the trace is additive.
-	snapshot, err := NewPostureService(postureTestConfig(), nil, nil).Denials(t.Context(), "s")
+	cfgForTest := postureTestConfig()
+	snapshot, err := NewPostureService(&cfgForTest, nil, nil).Denials(t.Context(), "s")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +299,8 @@ func TestPostureDenialsAreOptionalAndFailClosed(t *testing.T) {
 	}
 
 	audit := &postureAuditStub{err: errors.New("secret://policy/private")}
-	service := NewPostureService(postureTestConfig(), nil, audit)
+	denialCfg := postureTestConfig()
+	service := NewPostureService(&denialCfg, nil, audit)
 	mux := http.NewServeMux()
 	RegisterPostureRoutes(mux, PostureRouteConfig{Service: service})
 	response := httptest.NewRecorder()
@@ -312,7 +317,10 @@ func TestPostureRoutesAreReadOnly(t *testing.T) {
 	audit := &postureAuditStub{returnEmpty: true}
 	mux := http.NewServeMux()
 	RegisterPostureRoutes(mux, PostureRouteConfig{
-		Service: NewPostureService(postureTestConfig(), nil, audit),
+		Service: func() *PostureService {
+			cfgForTest := postureTestConfig()
+			return NewPostureService(&cfgForTest, nil, audit)
+		}(),
 	})
 
 	ok := httptest.NewRecorder()

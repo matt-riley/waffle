@@ -92,12 +92,15 @@ type PostureAuditSource interface {
 // PostureService projects agent posture. It holds a config snapshot and never
 // a runtime client.
 type PostureService struct {
-	cfg      config.Config
+	cfg      *config.Config
 	redactor PostureRedactor
 	audit    PostureAuditSource
 }
 
-func NewPostureService(cfg config.Config, redactor PostureRedactor, audit PostureAuditSource) *PostureService {
+// NewPostureService keeps a pointer so the profile editor and posture view
+// share one config snapshot; the Desk surfaces stay consistent as profile
+// edits are previewed and committed (#465).
+func NewPostureService(cfg *config.Config, redactor PostureRedactor, audit PostureAuditSource) *PostureService {
 	return &PostureService{cfg: cfg, redactor: redactor, audit: audit}
 }
 
@@ -143,9 +146,9 @@ func (s *PostureService) ReadCandidate(profileName string, profile config.AgentP
 // Config exposes the snapshot the posture view resolves against, so callers
 // that must validate a candidate against the same tiers do not load a second,
 // possibly newer, config.
-func (s *PostureService) Config() config.Config {
+func (s *PostureService) Config() *config.Config {
 	if s == nil {
-		return config.Config{}
+		return nil
 	}
 	return s.cfg
 }

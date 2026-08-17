@@ -262,7 +262,7 @@ func (e *ProfileEditor) Preview(request providerconfig.ProfileRequest) (ProfileP
 	candidate := request.AgentProfile()
 
 	cfg := e.posture.Config()
-	group := providerconfig.ProfileGroup(cfg, name)
+	group := providerconfig.ProfileGroup(*cfg, name)
 	// The refusal happens here, before a token exists, so a widening edit can
 	// never be confirmed (#194 AC2).
 	if err := config.ValidateProfileNarrows(cfg.AgentPolicy(group), candidate); err != nil {
@@ -299,7 +299,7 @@ func (e *ProfileEditor) Save(ctx context.Context, request providerconfig.Profile
 	// fast refusal before taking the lock.
 	cfg := e.posture.Config()
 	if err := config.ValidateProfileNarrows(
-		cfg.AgentPolicy(providerconfig.ProfileGroup(cfg, name)), candidate); err != nil {
+		cfg.AgentPolicy(providerconfig.ProfileGroup(*cfg, name)), candidate); err != nil {
 		return ProfileMutationResponse{}, err
 	}
 
@@ -377,8 +377,8 @@ func (e *ProfileEditor) Delete(ctx context.Context, name, token string) (Profile
 
 // allReferences merges config-level references with runtime ones. Both are
 // projected as stable labels, never as raw rows.
-func (e *ProfileEditor) allReferences(ctx context.Context, cfg config.Config, name string) ([]string, error) {
-	refs := providerconfig.ProfileReferences(cfg, name)
+func (e *ProfileEditor) allReferences(ctx context.Context, cfg *config.Config, name string) ([]string, error) {
+	refs := providerconfig.ProfileReferences(*cfg, name)
 	if e.references != nil {
 		runtime, err := e.references.ProfileReferences(ctx, name)
 		if err != nil {

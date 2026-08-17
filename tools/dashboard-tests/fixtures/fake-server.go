@@ -152,6 +152,20 @@ func main() {
 	skills := &fixtureSkills{items: []dashboard.CapabilitySkill{
 		{Name: "review", Description: "Review changes", Active: true},
 	}}
+	// The profile editor shares one mutable config snapshot with the posture
+	// service, so create/edit/delete flows preview and persist consistently in
+	// the fixture (#465).
+	profileCfg := postureFixtureConfig()
+	profileStore := &fixtureProfileStore{cfg: &profileCfg}
+	posture := dashboard.NewPostureService(&profileCfg, nil, fixturePostureAudit{})
+	profilesEditor := dashboard.NewProfileEditor(
+		profileStore,
+		posture,
+		operations.Previews,
+		dashboard.NewOperationsProfileReferences(operations),
+		hub,
+	)
+
 	capabilities := &dashboard.Capabilities{
 		Providers: providers,
 		Sessions:  sessions,
@@ -258,7 +272,8 @@ func main() {
 		WorkspaceEgress:   "allowlist",
 		Capabilities:      capabilities,
 		Restart:           fixtureRestart{},
-		Posture:           dashboard.NewPostureService(postureFixtureConfig(), nil, fixturePostureAudit{}),
+		Posture:           posture,
+		Profiles:          profilesEditor,
 		Setup:             dashboard.NewSetupService(setupFixtureConfig(), setupIdentity, setupIdentity),
 		Version:           "dashboard-fixture",
 		ProcessGeneration: "dashboard-fixture-generation",
@@ -1352,6 +1367,7 @@ var (
 	_ io.Reader                         = (*counterReader)(nil)
 	_ dashboard.RunReader               = fixtureRuns{}
 	_ dashboard.TaskScheduleStore       = (*fixtureJobs)(nil)
+	_ dashboard.ProfileConfigStore      = (*fixtureProfileStore)(nil)
 	_ dashboard.SessionStore            = (*fixtureSessions)(nil)
 	_ dashboard.CapabilitySessions      = (*fixtureSessions)(nil)
 	_ dashboard.NotesSearcher           = (*fixtureNotes)(nil)
@@ -1420,6 +1436,30 @@ func (f fixtureSetupIdentity) IdentityConfigured() (bool, error) { return f.crea
 func (f fixtureSetupIdentity) CreateIdentity() error {
 	f.created.Store(true)
 	return nil
+}
+
+// fixtureProfileStore persists agent profiles into one shared config value,
+// mirroring the production manager without a transaction journal (#465).
+type fixtureProfileStore struct {
+	mu  sync.Mutex
+	cfg *config.Config
+}
+
+func (s *fixtureProfileStore) PutProfile(_ context.Context, request providerconfig.ProfileRequest, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Agent.Profiles == nil {
+		s.cfg.Agent.Profiles = map[string]config.AgentProfile{}
+	}
+	s.cfg.Agent.Profiles[request.Name] = request.AgentProfile()
+	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-profile-put"}, nil
+}
+
+func (s *fixtureProfileStore) RemoveProfile(_ context.Context, name string, _ []string, _ providerconfig.CommitMode) (providerconfig.MutationResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cfg.Agent.Profiles, name)
+	return providerconfig.MutationResult{RestartRequired: true, TransactionID: "fixture-profile-remove"}, nil
 }
 
 type fixturePostureAudit struct{}

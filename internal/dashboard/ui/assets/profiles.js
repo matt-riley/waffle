@@ -123,22 +123,11 @@ if (root) {
     }));
   }
 
-  function splitList(value) {
-    return String(value || "")
-      .split(/[\s,]+/)
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-
   function splitLines(value) {
     return String(value || "")
       .split("\n")
       .map((entry) => entry.trim())
       .filter(Boolean);
-  }
-
-  function joinList(values) {
-    return Array.isArray(values) ? values.join(", ") : "";
   }
 
   function readForm() {
@@ -147,15 +136,15 @@ if (root) {
       system: elements.system.value,
       model: elements.model.value.trim(),
       sandbox: elements.sandbox.value,
-      allow: splitList(elements.allow.value),
-      deny: splitList(elements.deny.value),
+      allow: splitLines(elements.allow.value),
+      deny: splitLines(elements.deny.value),
       // Bash prefixes contain spaces, so they are one per line rather than
-      // comma-separated.
+      // comma-separated; the structured tool controls follow the same shape.
       deny_prefixes: splitLines(elements.denyPrefixes.value),
       guidance: elements.guidance.value,
       max_tokens: Number(elements.maxTokens.value) || 0,
       max_iterations: Number(elements.maxIterations.value) || 0,
-      allowed_children: splitList(elements.allowedChildren.value),
+      allowed_children: splitLines(elements.allowedChildren.value),
     };
   }
 
@@ -164,8 +153,12 @@ if (root) {
     elements.system.value = profile?.system || "";
     elements.model.value = profile?.model || "";
     elements.sandbox.value = profile?.sandbox || "";
-    elements.allow.value = joinList(profile?.allow);
-    elements.deny.value = joinList(profile?.deny);
+    elements.allow.value = Array.isArray(profile?.allow)
+      ? profile.allow.join("\n")
+      : "";
+    elements.deny.value = Array.isArray(profile?.deny)
+      ? profile.deny.join("\n")
+      : "";
     elements.denyPrefixes.value = Array.isArray(profile?.deny_prefixes)
       ? profile.deny_prefixes.join("\n")
       : "";
@@ -174,7 +167,9 @@ if (root) {
     elements.maxIterations.value = profile?.max_iterations
       ? String(profile.max_iterations)
       : "";
-    elements.allowedChildren.value = joinList(profile?.allowed_children);
+    elements.allowedChildren.value = Array.isArray(profile?.allowed_children)
+      ? profile.allowed_children.join("\n")
+      : "";
     clearFieldInvalid();
     elements.formStatus.textContent = "";
     elements.form.hidden = false;
@@ -260,18 +255,29 @@ if (root) {
     }
   }
 
+  function policyValues(name, layer) {
+    switch (name) {
+      case "Sandbox":
+        return layer?.sandbox_mode ? [layer.sandbox_mode] : [];
+      case "Allow":
+        return layer?.allow;
+      case "Deny":
+        return layer?.deny;
+      case "Deny prefixes":
+        return layer?.deny_prefixes;
+      default:
+        return [];
+    }
+  }
+
   function renderLayerList(parent, label, layer) {
     const block = document.createElement("div");
     block.className = "profile-diff-side";
     appendText(block, "h4", "", label);
     const facts = document.createElement("dl");
     facts.className = "posture-facts";
-    for (const [name, values] of [
-      ["Sandbox", layer?.sandbox_mode ? [layer.sandbox_mode] : []],
-      ["Allow", layer?.allow],
-      ["Deny", layer?.deny],
-      ["Deny prefixes", layer?.deny_prefixes],
-    ]) {
+    for (const name of ["Sandbox", "Allow", "Deny", "Deny prefixes"]) {
+      const values = policyValues(name, layer);
       const row = document.createElement("div");
       appendText(row, "dt", "", name);
       appendText(
@@ -312,8 +318,14 @@ if (root) {
 
     const policy = document.createElement("section");
     policy.className = "profile-diff";
-    renderLayerList(policy, "Effective policy before", preview?.before?.effective);
-    renderLayerList(policy, "Effective policy after", preview?.after?.effective);
+    appendText(
+      policy,
+      "p",
+      "posture-note",
+      "The server decides whether this change narrows or widens the group. Review the resolved policy below.",
+    );
+    renderLayerList(policy, "Effective policy before", preview?.before?.effective || {});
+    renderLayerList(policy, "Effective policy after", preview?.after?.effective || {});
     elements.reviewBody.append(policy);
   }
 

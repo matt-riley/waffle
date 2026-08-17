@@ -234,7 +234,7 @@ test("saving requires a review first and sends the issued token", async () => {
   harness.elements["#profile-name"].value = "auditor";
   harness.elements["#profile-system"].value = "You audit.";
   harness.elements["#profile-sandbox"].value = "docker";
-  harness.elements["#profile-allow"].value = "read_file, search";
+  harness.elements["#profile-allow"].value = "read_file\nsearch";
   harness.elements["#profile-deny"].value = "bash";
   harness.elements["#profile-deny-prefixes"].value = "git push\nrm -rf";
   harness.elements["#profile-max-tokens"].value = "2048";
@@ -358,4 +358,72 @@ test("copy prefills the form without a name and writes nothing", async () => {
     harness.requests.some((entry) => entry.options.method === "POST"),
     false,
   );
+});
+
+test("review flags narrowing and widening directions explicitly", async () => {
+  const harness = createHarness({
+    "/api/v1/desk/profiles/preview": () =>
+      response({
+        profile: "reviewer",
+        exists: true,
+        preview_token: "token-review",
+        before: {
+          system: { text: "Before." },
+          effective: {
+            sandbox_mode: "host",
+            allow: ["read_file", "search"],
+            deny: ["bash"],
+            deny_prefixes: ["git push"],
+          },
+        },
+        after: {
+          system: { text: "After." },
+          effective: {
+            sandbox_mode: "docker",
+            allow: ["read_file"],
+            deny: ["bash", "curl"],
+            deny_prefixes: ["git push"],
+          },
+        },
+      }),
+    "/api/v1/desk/profiles": () => response({ profiles: [reviewerProfile], groups: ["main"] }),
+  });
+  await settle();
+  harness.elements["#profile-name"].value = "reviewer";
+  await harness.elements["#profile-form"].dispatch("submit");
+  await settle();
+
+  const review = flatten(harness.elements["#profile-review-body"]);
+  assert.match(review, /server decides/i);
+  assert.match(review, /docker/);
+  assert.match(review, /read_file/);
+  assert.match(review, /git push/);
+  assert.doesNotMatch(review, /will be refused by the narrowing guard/);
+});
+
+test("tool fields read one structured entry per line", async () => {
+  let body = null;
+  const harness = createHarness({
+    "/api/v1/desk/profiles/preview": (_path, options) => {
+      body = JSON.parse(options.body);
+      return response({
+        profile: "auditor",
+        exists: false,
+        preview_token: "token-1",
+        before: { system: { text: "" }, effective: {} },
+        after: { system: { text: "You audit." }, effective: {} },
+      });
+    },
+    "/api/v1/desk/profiles": () => response({ profiles: [], groups: ["main"] }),
+  });
+  await settle();
+  harness.elements["#profile-name"].value = "auditor";
+  harness.elements["#profile-allow"].value = "read_file\nsearch";
+  harness.elements["#profile-deny"].value = "bash\ncurl";
+  harness.elements["#profile-allowed-children"].value = "reviewer";
+  await harness.elements["#profile-form"].dispatch("submit");
+  await settle();
+  assert.deepEqual(body.allow, ["read_file", "search"]);
+  assert.deepEqual(body.deny, ["bash", "curl"]);
+  assert.deepEqual(body.allowed_children, ["reviewer"]);
 });

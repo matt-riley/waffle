@@ -1425,6 +1425,53 @@ test("skill-import disclosure is removed when imports are disabled", async ({ pa
   }
 });
 
+test("profile editing is structured, distinct, and reviewable", async ({ page }) => {
+  await page.goto(deskURL("capabilities"));
+  await openCapabilityTab(page, "Profiles");
+  const card = page.locator(".profile-card").filter({ hasText: "reviewer" });
+  await expect(card).toBeVisible();
+  // Actions are visually distinct: Edit is primary, Copy secondary, Delete
+  // destructive and separated.
+  const edit = card.getByRole("button", { name: "Edit", exact: true });
+  await expect(edit).toHaveAttribute("data-action", "edit");
+  await expect(edit).toBeVisible();
+  await expect(card.getByRole("button", { name: "Copy", exact: true })).toHaveAttribute("data-action", "copy");
+  await expect(card.getByRole("button", { name: "Delete", exact: true })).toHaveAttribute("data-action", "delete");
+  await expect(card.getByRole("button", { name: "Copy", exact: true })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+
+  // The editor groups fields into understandable sections.
+  await edit.click();
+  const form = page.locator("#profile-form");
+  await expect(form).toBeVisible();
+  await expect(form.locator("fieldset legend")).toContainText([
+    "Identity & model",
+    "Prompt",
+    "Tools & policy",
+    "Resource limits",
+  ]);
+  // Structured one-per-line tool controls replace comma-separated fields.
+  await expect(form.getByLabel("Allowed tools (one per line)")).toHaveValue("read");
+  await expect(form.getByLabel("Denied tools (one per line)")).toHaveValue("bash");
+  await expect(form.getByLabel("Denied command prefixes (one per line)")).toHaveValue("git push");
+
+  // Review identifies the direction of policy changes.
+  await form.getByRole("button", { name: "Review change", exact: true }).click();
+  const review = page.locator("#profile-review-dialog");
+  await expect(review).toBeVisible();
+  await expect(review).toContainText("Effective policy before");
+  await expect(review).toContainText("Effective policy after");
+  await review.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(review).toBeHidden();
+
+  // Delete is an explicit, confirmable destructive path.
+  await card.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(review).toBeVisible();
+  await expect(review.getByRole("button", { name: "Delete profile", exact: true })).toBeDisabled();
+  await review.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(review).toBeHidden();
+});
+
 test("provider enrollment clears and never renders its credential", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the credential boundary flow once.");
   const credential = "desk-secret-canary";

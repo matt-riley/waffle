@@ -83,9 +83,10 @@ func newProfileEditorHarness(t *testing.T, refs ProfileReferenceSource) (*Profil
 	store := &profileStoreStub{}
 	now := time.Unix(20_000, 0).UTC()
 	previews := NewPreviewStore(func() time.Time { return now }, previewEntropy(64))
+	editorCfg := profileEditorConfig()
 	editor := NewProfileEditor(
 		store,
-		NewPostureService(profileEditorConfig(), nil, nil),
+		NewPostureService(&editorCfg, nil, nil),
 		previews,
 		refs,
 		nil,
@@ -174,7 +175,7 @@ func TestProfileEditorRefusesWideningWithNamedField(t *testing.T) {
 	now := time.Unix(20_000, 0).UTC()
 	editor := NewProfileEditor(
 		store,
-		NewPostureService(cfg, nil, nil),
+		NewPostureService(&cfg, nil, nil),
 		NewPreviewStore(func() time.Time { return now }, previewEntropy(64)),
 		nil, nil,
 	)
