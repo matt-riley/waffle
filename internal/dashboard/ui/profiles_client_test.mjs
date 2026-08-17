@@ -394,13 +394,11 @@ test("review flags narrowing and widening directions explicitly", async () => {
   await settle();
 
   const review = flatten(harness.elements["#profile-review-body"]);
-  // Narrowing rows are flagged in both directions of the diff.
-  assert.match(review, /narrows/);
-  assert.ok(review.includes("Sandbox (narrowed)"), review);
-  assert.ok(review.includes("Allow (narrowed)"), review);
-  assert.ok(review.includes("Deny (narrowed)"), review);
-  assert.ok(review.includes("Deny prefixes git push"), review);
-  assert.doesNotMatch(review, /widened/);
+  assert.match(review, /server decides/i);
+  assert.match(review, /docker/);
+  assert.match(review, /read_file/);
+  assert.match(review, /git push/);
+  assert.doesNotMatch(review, /will be refused by the narrowing guard/);
 });
 
 test("tool fields read one structured entry per line", async () => {
