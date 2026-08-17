@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/matt-riley/waffle/compare/v0.28.0...v0.29.0) (2026-08-17)
+
+
+### Features
+
+* **desk:** preserve citations and expose a safe source drawer ([#479](https://github.com/matt-riley/waffle/issues/479)) ([#490](https://github.com/matt-riley/waffle/issues/490)) ([e7e322b](https://github.com/matt-riley/waffle/commit/e7e322b800713391a9ad469d079a7d4bb17917cc))
+
 ## [0.28.0](https://github.com/matt-riley/waffle/compare/v0.27.0...v0.28.0) (2026-08-17)
 
 
