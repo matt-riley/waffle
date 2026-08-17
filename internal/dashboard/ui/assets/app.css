@@ -1655,3 +1655,84 @@ h3 {
     transition-duration: 0.01ms !important;
   }
 }
+
+.context-panel-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin: 0 0 0.5rem;
+}
+
+.project-form {
+  border-top: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+}
+
+.project-form label {
+  font-size: 0.72rem;
+}
+
+.project-form-row {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.project-form input[type="text"],
+.project-form textarea {
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.2));
+  border-radius: 4px;
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  width: 100%;
+}
+
+.project-form button {
+  background: var(--paper);
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  white-space: nowrap;
+}
+
+.project-form button:hover,
+.project-form button:focus-visible {
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+}
+
+.project-resource {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin-top: 0.4rem;
+}
+
+.project-resource-label {
+  font-size: 0.76rem;
+}
+
+.project-resource-state {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.project-resource button {
+  background: var(--paper);
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.project-resource button:hover,
+.project-resource button:focus-visible {
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+}

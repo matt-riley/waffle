@@ -59,6 +59,12 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 			Idempotency: config.Idempotency,
 			Events:      config.Hub,
 		})
+		RegisterProjectRoutes(mux, ProjectRouteConfig{
+			Projects:    config.Projects,
+			Operations:  config.Operations,
+			Security:    config.Security,
+			Idempotency: config.Idempotency,
+		})
 	}
 	if config.Posture != nil {
 		RegisterPostureRoutes(mux, PostureRouteConfig{Service: config.Posture})

@@ -10,6 +10,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/project"
 )
 
 const eventHeartbeatInterval = 15 * time.Second
@@ -18,11 +19,14 @@ const eventHeartbeatInterval = 15 * time.Second
 // The serve command owns these dependencies so the routes never create a
 // second security token, mux, listener, or event hub.
 type APIConfig struct {
-	Observability   *observability.Service
-	Security        *Security
-	Hub             *EventHub
-	ChatClients     *ChatClients
-	Idempotency     *IdempotencyStore
+	Observability *observability.Service
+	Security      *Security
+	Hub           *EventHub
+	ChatClients   *ChatClients
+	Idempotency   *IdempotencyStore
+	// Projects is the workspace-scoped project context store (#478); nil
+	// disables the project surface.
+	Projects        *project.Store
 	Operations      *Operations
 	Schedules       TaskScheduleStore
 	Memory          memory.Workspace

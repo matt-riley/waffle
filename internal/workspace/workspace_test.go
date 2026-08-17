@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2778,5 +2779,65 @@ func TestClassifyCloneErrorMapsSafeStableCodes(t *testing.T) {
 				t.Fatalf("host Error() lost the raw cause: %q", err.Error())
 			}
 		})
+	}
+}
+
+// TestReadFileReadsRepoRelativeFile pins the project-context file surface
+// (#478): the file is read from the running workspace via the inspection
+// queue, symlinks resolve beneath the repo root, and traversal or missing
+// files fail closed.
+func TestReadFileReadsRepoRelativeFile(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{
+		"test -f":  "/work/repo/README.md",
+		"readlink": "/work/repo/README.md",
+		"wc -c":    "8",
+		"base64":   base64.StdEncoding.EncodeToString([]byte("# Readme")),
+	}}
+	mgr, _ := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	_ = ws
+
+	content, err := mgr.ReadFile(ctx, ws.ID, "README.md")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != "# Readme" {
+		t.Fatalf("content = %q", content)
+	}
+	if !tools.ran("readlink -f") || !tools.ran("base64 --wrap=0") {
+		t.Fatalf("commands = %+v", tools.commands)
+	}
+}
+
+func TestReadFileRejectsTraversalAndMissing(t *testing.T) {
+	ctx := context.Background()
+	tools := &scriptedBash{outputs: map[string]string{}}
+	mgr, _ := newTestManager(t, tools)
+	ws, client, err := mgr.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	for _, bad := range []string{"../etc/passwd", "/etc/passwd", "a\\b.md", "a;rm -rf /"} {
+		if _, err := mgr.ReadFile(ctx, ws.ID, bad); err == nil {
+			t.Errorf("ReadFile(%q) should fail closed", bad)
+		}
+	}
+	// A missing file maps to ErrProjectFileMissing.
+	tools2 := &scriptedBash{failing: map[string]string{"test -f": "cat: no such file or directory"}}
+	mgr2, _ := newTestManager(t, tools2)
+	ws2, client2, err := mgr2.Open(ctx, "matt-riley/waffle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	if _, err := mgr2.ReadFile(ctx, ws2.ID, "missing.md"); err == nil {
+		t.Fatal("ReadFile of a missing file should fail")
 	}
 }

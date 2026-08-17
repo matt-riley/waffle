@@ -36,6 +36,7 @@ import (
 	"github.com/matt-riley/waffle/internal/mcp"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
+	"github.com/matt-riley/waffle/internal/project"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/secret"
@@ -439,6 +440,7 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 			Hub:             dashboardHub,
 			ChatClients:     dashboardClients,
 			Idempotency:     dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
+			Projects:        project.New(st.DB),
 			Operations:      operations,
 			Schedules:       scheduleStore,
 			Memory:          ws,

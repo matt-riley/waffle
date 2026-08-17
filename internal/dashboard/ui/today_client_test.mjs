@@ -230,6 +230,8 @@ function createHarness({
   closeHandler,
   turnHandler,
   cancelHandler,
+  workspacesHandler,
+  projectHandler,
   confirmResult = true,
   storedLease = null,
   sharedStorage = null,
@@ -274,6 +276,15 @@ function createHarness({
     "#desk-session-options",
     "#desk-usage-refresh",
     "#desk-usage",
+    "#desk-project-refresh",
+    "#desk-project",
+    "#desk-project-pin-form",
+    "#desk-project-path",
+    "#desk-project-pin",
+    "#desk-project-note-form",
+    "#desk-project-note-name",
+    "#desk-project-note",
+    "#desk-project-add-note",
     "#desk-permissions-refresh",
     "#desk-permissions",
     "#desk-workset-refresh",
@@ -384,6 +395,18 @@ function createHarness({
         return cancelHandler({ path, options });
       }
       return cancelResponse.promise;
+    }
+    if (path === "/api/v1/desk/workspaces") {
+      if (workspacesHandler) {
+        return workspacesHandler({ path, options });
+      }
+      return jsonResponse({ workspaces: [] });
+    }
+    if (path.startsWith("/api/v1/desk/projects/")) {
+      if (projectHandler) {
+        return projectHandler({ path, options });
+      }
+      return jsonResponse({});
     }
     if (path === "/api/v1/desk/chat/close") {
       if (closeHandler) {
@@ -2512,3 +2535,118 @@ test("branch action on a streamed exchange branches at the end of the transcript
   await flush();
   assert.equal(harness.elements["#desk-session-title"].textContent, "Untitled conversation");
 });
+
+test("project context panel lists workspace resources and attaches in place", async () => {
+  let attached = false;
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-p",
+          workspace: "matt-riley/waffle",
+        }),
+      }),
+    workspacesHandler: async () =>
+      jsonResponse({
+        workspaces: [
+          {
+            id: "ws-p",
+            repository: "matt-riley/waffle",
+            session: "session-p",
+            status: "open",
+          },
+        ],
+      }),
+    projectHandler: async ({ path, options }) => {
+      const cleanPath = path.split("?")[0];
+      if (cleanPath.endsWith("/resources")) {
+        return jsonResponse({
+          workspace: "ws-p",
+          resources: [
+            {
+              id: "pr-1",
+              workspace: "ws-p",
+              kind: "note",
+              name: "Guidance",
+              size: 0,
+              state: "available",
+              attached,
+            },
+            {
+              id: "pr-2",
+              workspace: "ws-p",
+              kind: "file",
+              name: "README.md",
+              path: "README.md",
+              size: 1024,
+              state: "stale",
+            },
+          ],
+        });
+      }
+      if (cleanPath.endsWith("/attach")) {
+        attached = true;
+        return jsonResponse({});
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const refresh = harness.elements["#desk-project-refresh"];
+  assert.equal(refresh.disabled, false, "project refresh enabled once idle");
+  await refresh.listener("click")();
+  await flush();
+  const project = harness.elements["#desk-project"];
+  assert.match(project.textContent, /Guidance/);
+  assert.match(project.textContent, /README\.md/);
+  assert.match(project.textContent, /changed since pinning/);
+  const rows = project.querySelectorAll(".project-resource");
+  assert.ok(rows.length >= 2, "one row per resource");
+  const attachButtons = rows.flatMap((row) =>
+    row.childNodes.filter((node) => node.tagName === "BUTTON"),
+  );
+  assert.ok(attachButtons.length >= 2, "attach/detach controls per resource");
+  // Attach the note in place.
+  await attachButtons[0].listener("click")();
+  await flush();
+  assert.equal(attached, true, "attach mutation fired with the session");
+});
+
+test("project panel pins a workspace file through the guarded mutation", async () => {
+  let pinned = null;
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({ session_id: "session-p" }),
+      }),
+    workspacesHandler: async () =>
+      jsonResponse({
+        workspaces: [{ id: "ws-p", session: "session-p", status: "open" }],
+      }),
+    projectHandler: async ({ path, options }) => {
+      if (path.endsWith("/resources/pin")) {
+        pinned = JSON.parse(options.body).path;
+        return jsonResponse({ id: "pr-9", name: "plan.md", kind: "file" });
+      }
+      if (path.endsWith("/resources")) {
+        return jsonResponse({ resources: [] });
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  const refresh = harness.elements["#desk-project-refresh"];
+  await refresh.listener("click")();
+  await flush();
+  harness.elements["#desk-project-path"].value = "docs/plan.md";
+  const form = harness.elements["#desk-project-pin-form"];
+  await form.listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.equal(pinned, "docs/plan.md");
+  assert.equal(harness.elements["#desk-project-path"].value, "", "path cleared after pin");
+});
+

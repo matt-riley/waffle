@@ -84,6 +84,14 @@ type WorkspaceCloseLifecycle interface {
 	CloseTransition(context.Context, string, bool) (*workspace.CloseReport, bool, error)
 }
 
+// ProjectFileReader reads one repo-relative file from an already-running
+// workspace for project context (#478). Implementations must not start
+// containers; unreadable files return an error the project surface maps to
+// visibly-stale resources.
+type ProjectFileReader interface {
+	ReadFile(context.Context, string, string) ([]byte, error)
+}
+
 var (
 	_ RunReader    = (*observability.Service)(nil)
 	_ JobStore     = (*schedule.Store)(nil)
@@ -96,6 +104,7 @@ var (
 	_ WorkspaceManager        = (*workspace.Manager)(nil)
 	_ WorkspaceCloseLifecycle = (*workspace.Manager)(nil)
 	_ WorkspaceGitReader      = (*workspace.Manager)(nil)
+	_ ProjectFileReader       = (*workspace.Manager)(nil)
 )
 
 // SectionError is a sanitized public error for one independently readable

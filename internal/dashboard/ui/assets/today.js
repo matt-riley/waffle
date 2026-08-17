@@ -220,6 +220,15 @@ const elements = {
   sessionOptions: document.querySelector("#desk-session-options"),
   usageRefresh: document.querySelector("#desk-usage-refresh"),
   usage: document.querySelector("#desk-usage"),
+  projectRefresh: document.querySelector("#desk-project-refresh"),
+  project: document.querySelector("#desk-project"),
+  projectPinForm: document.querySelector("#desk-project-pin-form"),
+  projectPath: document.querySelector("#desk-project-path"),
+  projectPin: document.querySelector("#desk-project-pin"),
+  projectNoteForm: document.querySelector("#desk-project-note-form"),
+  projectNoteName: document.querySelector("#desk-project-note-name"),
+  projectNote: document.querySelector("#desk-project-note"),
+  projectAddNote: document.querySelector("#desk-project-add-note"),
   permissionsRefresh: document.querySelector("#desk-permissions-refresh"),
   permissions: document.querySelector("#desk-permissions"),
   worksetRefresh: document.querySelector("#desk-workset-refresh"),
@@ -258,6 +267,7 @@ const state = {
   turnToolContainer: null,
   typingMessage: null,
   lastUserText: "",
+  projectWorkspaceID: "",
   draftSessionID: "",
   historyLength: 0,
   promptArticle: null,
@@ -383,6 +393,9 @@ function updateControls() {
     elements.permissionsRefresh,
     elements.worksetRefresh,
     elements.helpRefresh,
+    elements.projectRefresh,
+    elements.projectPin,
+    elements.projectAddNote,
   ]) {
     if (control) {
       control.disabled = !idle;
@@ -2391,6 +2404,153 @@ async function refreshResultPanel(name, label, render) {
   }
 }
 
+// findProjectWorkspace resolves the open workspace bound to the current
+// session so project context never crosses workspace boundaries (#478). An
+// empty result means the conversation has no workspace.
+async function findProjectWorkspace() {
+  try {
+    const response = await fetch("/api/v1/desk/workspaces", {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const snapshot = await response.json();
+    const workspaces = Array.isArray(snapshot.workspaces)
+      ? snapshot.workspaces
+      : [];
+    return (
+      workspaces.find(
+        (ws) => ws.session === state.sessionID && ws.status !== "closed",
+      ) || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function projectMutation(resourceID, action) {
+  return postMutation(`/api/v1/desk/projects/resources/${resourceID}/${action}`, {
+    session_id: state.sessionID,
+  });
+}
+
+async function refreshProjectContext() {
+  const workspace = await findProjectWorkspace();
+  clearNode(elements.project);
+  if (!workspace) {
+    elements.project.textContent =
+      "This conversation has no open workspace, so project context is unavailable.";
+    return;
+  }
+  state.projectWorkspaceID = workspace.id || "";
+  const response = await fetch(
+    `/api/v1/desk/projects/${encodeURIComponent(state.projectWorkspaceID)}/resources?session_id=${encodeURIComponent(state.sessionID)}`,
+    { credentials: "same-origin", cache: "no-store" },
+  );
+  if (!response.ok) {
+    elements.project.textContent = "Project context could not be loaded.";
+    return;
+  }
+  const snapshot = await response.json();
+  renderProjectResources(snapshot.resources || []);
+}
+
+function renderProjectResources(resources) {
+  clearNode(elements.project);
+  if (resources.length === 0) {
+    elements.project.textContent =
+      "No pinned resources. Pin a workspace file or add an owner note.";
+    return;
+  }
+  const list = document.createElement("ul");
+  for (const resource of resources) {
+    const row = document.createElement("li");
+    row.className = "project-resource";
+    const label = document.createElement("span");
+    label.className = "project-resource-label";
+    label.textContent = `${resource.name || resource.id || "resource"} · ${resource.kind || ""} · ${formatProjectBytes(resource.size)}`;
+    if (resource.state && resource.state !== "available") {
+      const state = document.createElement("span");
+      state.className = "project-resource-state";
+      state.textContent =
+        resource.state === "missing"
+          ? "file missing"
+          : "changed since pinning";
+      row.appendChild(state);
+    }
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = resource.attached ? "Detach" : "Attach";
+    toggle.disabled = state.currentPhase !== phase.idle;
+    toggle.addEventListener("click", async () => {
+      if (state.currentPhase !== phase.idle) {
+        return;
+      }
+      const action = resource.attached ? "detach" : "attach";
+      const result = await projectMutation(resource.id, action).catch(() => null);
+      if (result === null) {
+        return;
+      }
+      await refreshProjectContext();
+    });
+    row.append(label, toggle);
+    list.appendChild(row);
+  }
+  elements.project.appendChild(list);
+}
+
+function formatProjectBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
+async function pinProjectFile(event) {
+  event.preventDefault();
+  if (state.currentPhase !== phase.idle || !state.projectWorkspaceID) {
+    return;
+  }
+  const filePath = elements.projectPath.value.trim();
+  if (!filePath) {
+    return;
+  }
+  const response = await postMutation(
+    `/api/v1/desk/projects/${encodeURIComponent(state.projectWorkspaceID)}/resources/pin`,
+    { path: filePath },
+  ).catch(() => null);
+  if (response === null) {
+    return;
+  }
+  elements.projectPath.value = "";
+  await refreshProjectContext();
+}
+
+async function addProjectNote(event) {
+  event.preventDefault();
+  if (state.currentPhase !== phase.idle || !state.projectWorkspaceID) {
+    return;
+  }
+  const name = elements.projectNoteName.value.trim();
+  const note = elements.projectNote.value.trim();
+  if (!name || !note) {
+    return;
+  }
+  const response = await postMutation(
+    `/api/v1/desk/projects/${encodeURIComponent(state.projectWorkspaceID)}/resources/notes`,
+    { name, note },
+  ).catch(() => null);
+  if (response === null) {
+    return;
+  }
+  elements.projectNoteName.value = "";
+  elements.projectNote.value = "";
+  await refreshProjectContext();
+}
+
 async function selectModel() {
   if (state.currentPhase !== phase.idle) {
     return;
@@ -2872,6 +3032,11 @@ if (elements.form) {
       renderHelp(result.commands);
     }
   });
+  elements.projectRefresh?.addEventListener("click", () =>
+    refreshProjectContext(),
+  );
+  elements.projectPinForm?.addEventListener("submit", pinProjectFile);
+  elements.projectNoteForm?.addEventListener("submit", addProjectNote);
   globalThis.addEventListener?.("pagehide", closeOwnerOnPageHide);
   void openDesk();
   void fetchCommands();

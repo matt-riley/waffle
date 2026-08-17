@@ -580,6 +580,42 @@ test("Today branches a conversation from a completed exchange", async ({ page })
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+test("Today attaches project context from the open workspace in place", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the project context flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+  const panel = page.locator(".context-panels details").filter({ hasText: "Project context" });
+  await panel.locator("summary").click();
+  await panel.getByRole("button", { name: "Load project context", exact: true }).click();
+  await expect(panel.locator(".context-panel-result")).toContainText(
+    "No pinned resources",
+  );
+
+  // Pin a workspace file through the guarded mutation.
+  await panel.getByLabel("Pin workspace file").fill("docs/plan.md");
+  await panel.getByRole("button", { name: "Pin file", exact: true }).click();
+  await expect(panel.locator(".project-resource-label")).toContainText("plan.md");
+
+  // Attach it to the conversation; the panel flips to Detach.
+  const fileRow = panel.locator(".project-resource").filter({ hasText: "plan.md" });
+  await fileRow.getByRole("button", { name: "Attach", exact: true }).click();
+  await expect(
+    panel.locator(".project-resource").filter({ hasText: "plan.md" }),
+  ).toContainText("Detach");
+
+  // Add an owner note and attach it too.
+  await panel.getByLabel("Add owner note").fill("Guidance");
+  await panel.getByPlaceholder("Note body…").fill("Follow the release checklist.");
+  await panel.getByRole("button", { name: "Add note", exact: true }).click();
+  const noteRow = panel.locator(".project-resource").filter({ hasText: "Guidance" });
+  await expect(noteRow).toContainText("note");
+  await noteRow.getByRole("button", { name: "Attach", exact: true }).click();
+  await expect(
+    panel.locator(".project-resource").filter({ hasText: "Guidance" }),
+  ).toContainText("Detach");
+});
+
 test("Today exposes existing commands and resumes a recent session in place", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the command surface once.");
   await page.goto(deskURL("today"));

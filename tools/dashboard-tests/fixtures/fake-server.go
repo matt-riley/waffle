@@ -26,6 +26,7 @@ import (
 	"github.com/matt-riley/waffle/internal/modelcatalog"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/policy"
+	"github.com/matt-riley/waffle/internal/project"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 	"github.com/matt-riley/waffle/internal/sandbox"
 	"github.com/matt-riley/waffle/internal/schedule"
@@ -54,6 +55,14 @@ func main() {
 		fatal(err)
 	}
 	defer func() { _ = stateStore.Close() }()
+	// Seed the FK rows the project-context surface references (#478): the
+	// primary session and its bound open workspace.
+	if _, err := stateStore.DB.Exec(`INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at) VALUES ('session-primary', 'Release review', '', '')`); err != nil {
+		fatal(err)
+	}
+	if _, err := stateStore.DB.Exec(`INSERT OR IGNORE INTO workspaces (id, repo, url, image, container, volume, session_id, status, created_at, updated_at) VALUES ('workspace-clean', 'matt-riley/waffle', 'https://example.com/matt-riley/waffle', 'waffle-dev:latest', 'c', 'v', 'session-primary', 'open', '', '')`); err != nil {
+		fatal(err)
+	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -176,6 +185,7 @@ func main() {
 		Hub:               hub,
 		ChatClients:       chatClients,
 		Idempotency:       idempotency,
+		Projects:          project.New(stateStore.DB),
 		Operations:        operations,
 		Schedules:         &jobs,
 		Memory:            memoryWorkspace,
@@ -542,6 +552,21 @@ func newFixtureWorkspaces() *fixtureWorkspaces {
 			CreatedAt: fixtureNow.Add(-30 * time.Minute), UpdatedAt: fixtureNow, LastActive: fixtureNow,
 		},
 	}}
+}
+
+// fixtureProjectFiles maps repo-relative paths to content for the project
+// context surface (#478); ReadFile plays the workspace file reader.
+var fixtureProjectFiles = map[string]string{
+	"docs/plan.md": "# Plan\n\nShip the durable-context wave in order.",
+	"README.md":    "# Waffle\n\nFixture readme.",
+}
+
+func (w *fixtureWorkspaces) ReadFile(_ context.Context, _ string, path string) ([]byte, error) {
+	content, ok := fixtureProjectFiles[path]
+	if !ok {
+		return nil, errors.New("no such file")
+	}
+	return []byte(content), nil
 }
 
 func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error) {
