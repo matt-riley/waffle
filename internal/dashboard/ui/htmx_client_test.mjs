@@ -41,6 +41,17 @@ test("skill-import disclosure is removed while imports are disabled", () => {
   assert.match(shim, /waffleSourceAvailable/);
 });
 
+test("editing a schedule restores profile after options reload", () => {
+  assert.match(shim, /loadScheduleOptions\(form\)\.then/);
+  assert.match(shim, /profileSelect\.value = profile/);
+});
+
+test("guided time and cadence write cron and reveal day controls", () => {
+  assert.match(shim, /if \(id === "task-schedule-time"\) updateScheduleGuide\(form\)/);
+  assert.match(shim, /syncGuidedVisibility\(form\)/);
+  assert.match(shim, /dowRow\.hidden = cadence !== "weekly"/);
+});
+
 test("the four migrated sections declare server fragments and Today stays bespoke", () => {
   for (const section of ["capabilities", "tasks", "workspaces", "memory"]) {
     assert.match(templates[section], /hx-(get|post)=/);

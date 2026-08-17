@@ -39,6 +39,7 @@ type TaskScheduleStore interface {
 type TaskRouteConfig struct {
 	Operations  *Operations
 	Schedules   TaskScheduleStore
+	Options     ScheduleOptions
 	Security    *Security
 	Idempotency *IdempotencyStore
 	Events      *EventHub
@@ -51,7 +52,9 @@ type TaskRouteConfig struct {
 // calls this with its process-scoped dependencies.
 func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 	service := NewTasksService(config.Operations)
+	service.SetOptions(config.Options)
 	mux.Handle("GET /api/v1/desk/tasks", negotiateFragments(newTasksReadHandler(service)))
+	mux.Handle("GET /api/v1/desk/tasks/schedules/options", negotiateFragments(newScheduleOptionsHandler(service)))
 	if config.Schedules == nil || config.Security == nil || config.Idempotency == nil {
 		return
 	}
@@ -67,8 +70,25 @@ func RegisterTaskRoutes(mux *http.ServeMux, config TaskRouteConfig) {
 		protected := NewDetachedMutationHandler(config.Security, config.Idempotency, taskMutationMaxBodyBytes, negotiateFragments(next), timeout)
 		return preserveResponseType(protected)
 	}
+	mux.Handle("POST /api/v1/desk/tasks/schedules/preview", mutation(newSchedulePreviewHandler(service)))
 	mux.Handle("POST /api/v1/desk/tasks/schedules", mutation(newTaskScheduleCreateHandler(config.Schedules, events)))
 	mux.Handle("POST /api/v1/desk/tasks/schedules/{id}", mutation(newTaskScheduleUpdateHandler(config.Schedules, events)))
+}
+
+func newScheduleOptionsHandler(service *TasksService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, service.Options())
+	})
+}
+
+func newSchedulePreviewHandler(service *TasksService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request SchedulePreviewRequest
+		if !decodeTaskRequest(w, r, &request) {
+			return
+		}
+		writeJSON(w, http.StatusOK, service.Preview(r.Context(), request))
+	})
 }
 
 func newTasksReadHandler(service *TasksService) http.Handler {

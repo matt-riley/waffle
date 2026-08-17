@@ -258,16 +258,26 @@ func main() {
 	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
-		Observability:     obs,
-		Security:          security,
-		Hub:               hub,
-		ChatClients:       chatClients,
-		Idempotency:       idempotency,
-		Projects:          project.New(stateStore.DB),
-		Artifacts:         artifact.New(stateStore.DB),
-		Previews:          operations.Previews,
-		Operations:        operations,
-		Schedules:         &jobs,
+		Observability: obs,
+		Security:      security,
+		Hub:           hub,
+		ChatClients:   chatClients,
+		Idempotency:   idempotency,
+		Projects:      project.New(stateStore.DB),
+		Artifacts:     artifact.New(stateStore.DB),
+		Previews:      operations.Previews,
+		Operations:    operations,
+		Schedules:     &jobs,
+		ScheduleOptions: dashboard.OperationsScheduleOptions(
+			func() []string {
+				names := make([]string, 0, len(profileCfg.Agent.Profiles))
+				for name := range profileCfg.Agent.Profiles {
+					names = append(names, name)
+				}
+				return names
+			},
+			func() []string { return []string{"telegram"} },
+		),
 		Memory:            memoryWorkspace,
 		WorkspaceEgress:   "allowlist",
 		Capabilities:      capabilities,

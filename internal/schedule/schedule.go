@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -924,4 +925,118 @@ func (s *Scheduler) fire(ctx context.Context, j Job) {
 func ParseTarget(target string) (channel, chatID string, ok bool) {
 	channel, chatID, ok = strings.Cut(target, ":")
 	return channel, chatID, ok && channel != "" && chatID != ""
+}
+
+// DescribeCron renders a validated 5-field cron expression as operator
+// language for schedule cards and the guided editor summary (#460). Unknown
+// or unusual expressions fall back to the raw spec rather than guessing.
+func DescribeCron(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if _, err := parser.Parse(spec); err != nil {
+		return spec
+	}
+	fields := strings.Fields(spec)
+	if len(fields) != 5 {
+		return spec
+	}
+	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
+	// Only describe a fixed minute-of-hour; step/range minutes (e.g. */15)
+	// fall back to the raw expression rather than a misleading summary.
+	if strings.ContainsAny(minute, "*/,-") {
+		return "Cron " + spec
+	}
+	clock := func() string {
+		m := strings.TrimPrefix(minute, "0")
+		if m == "" || m == "0" {
+			return fmt.Sprintf("%s:%02d", hour, 0)
+		}
+		return fmt.Sprintf("%s:%02d", hour, mustAtoi(m))
+	}
+	switch {
+	case dom == "*" && month == "*" && dow == "*":
+		return "Every day at " + clock()
+	case dom == "*" && month == "*" && dow == "1-5":
+		return "Every weekday at " + clock()
+	case dom == "*" && month == "*" && isSingleDay(dow):
+		return "Every " + weekdayName(dow) + " at " + clock()
+	case dom != "*" && month == "*" && dow == "*" && isSingleDay(dom):
+		return "Monthly on the " + ordinal(dom) + " at " + clock()
+	case month != "*" && dom == "*" && dow == "*" && isSingleDay(month):
+		return "Every " + monthName(month) + " at " + clock()
+	default:
+		return "Cron " + spec
+	}
+}
+
+func isSingleDay(value string) bool {
+	if value == "*" || strings.ContainsAny(value, ",/-") {
+		return false
+	}
+	_, err := strconv.Atoi(value)
+	return err == nil
+}
+
+func weekdayName(value string) string {
+	names := map[string]string{
+		"0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+		"4": "Thursday", "5": "Friday", "6": "Saturday", "7": "Sunday",
+	}
+	if name, ok := names[value]; ok {
+		return name
+	}
+	return value
+}
+
+func monthName(value string) string {
+	names := map[string]string{
+		"1": "January", "2": "February", "3": "March", "4": "April",
+		"5": "May", "6": "June", "7": "July", "8": "August",
+		"9": "September", "10": "October", "11": "November", "12": "December",
+	}
+	if name, ok := names[value]; ok {
+		return name
+	}
+	return value
+}
+
+func ordinal(value string) string {
+	n := mustAtoi(value)
+	suffix := "th"
+	switch n % 10 {
+	case 1:
+		if n%100 != 11 {
+			suffix = "st"
+		}
+	case 2:
+		if n%100 != 12 {
+			suffix = "nd"
+		}
+	case 3:
+		if n%100 != 13 {
+			suffix = "rd"
+		}
+	}
+	return fmt.Sprintf("%d%s", n, suffix)
+}
+
+func mustAtoi(value string) int {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// NextRun returns the next scheduled time for a validated cron expression in
+// the host timezone, or the zero time when the expression cannot run again.
+func NextRun(spec string, now time.Time) time.Time {
+	entry, err := parser.Parse(strings.TrimSpace(spec))
+	if err != nil {
+		return time.Time{}
+	}
+	next := entry.Next(now)
+	if next.IsZero() {
+		return time.Time{}
+	}
+	return next
 }

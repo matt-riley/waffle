@@ -33,8 +33,10 @@ type APIConfig struct {
 	Artifacts *artifact.Store
 	Previews  *PreviewStore
 
-	Operations      *Operations
-	Schedules       TaskScheduleStore
+	Operations *Operations
+	Schedules  TaskScheduleStore
+	// ScheduleOptions feeds the guided schedule editor's configured choices.
+	ScheduleOptions ScheduleOptions
 	Memory          memory.Workspace
 	WorkspaceEgress string
 	Capabilities    *Capabilities

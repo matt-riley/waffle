@@ -775,3 +775,34 @@ func TestRunnerNotifyToolDeliversMidRun(t *testing.T) {
 		})
 	}
 }
+
+func TestDescribeCron(t *testing.T) {
+	cases := []struct {
+		spec string
+		want string
+	}{
+		{spec: "0 9 * * *", want: "Every day at 9:00"},
+		{spec: "0 9 * * 1-5", want: "Every weekday at 9:00"},
+		{spec: "30 8 * * 1", want: "Every Monday at 8:30"},
+		{spec: "0 10 1 * *", want: "Monthly on the 1st at 10:00"},
+		{spec: "0 7 * * 3", want: "Every Wednesday at 7:00"},
+		{spec: "*/15 9 * * *", want: "Cron */15 9 * * *"},
+		{spec: "not-a-cron", want: "not-a-cron"},
+	}
+	for _, tc := range cases {
+		if got := DescribeCron(tc.spec); got != tc.want {
+			t.Fatalf("DescribeCron(%q) = %q, want %q", tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestNextRunIsInTheFuture(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	next := NextRun("0 9 * * *", now)
+	if next.IsZero() || !next.After(now) {
+		t.Fatalf("NextRun(%v) = %v, want a future time", now, next)
+	}
+	if NextRun("bad cron", now) != (time.Time{}) {
+		t.Fatal("invalid cron should yield the zero time")
+	}
+}
