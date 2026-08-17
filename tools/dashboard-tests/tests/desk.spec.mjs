@@ -1780,6 +1780,20 @@ test("profile editing is structured, distinct, and reviewable", async ({ page })
   await expect(review).toBeHidden();
 });
 
+test("Capabilities leads with scannable summaries and compact tabs", async ({ page }) => {
+  await page.goto(deskURL("capabilities"));
+  // Models summary states the Waffle-wide roles above the inventory.
+  await expect(page.locator("#capability-models-summary")).toContainText("Default:", { timeout: 10_000 });
+  await expect(page.locator("#capability-models-summary")).toContainText("aliases");
+  // Skills summary counts active skills.
+  await openCapabilityTab(page, "Skills");
+  await expect(page.locator("#capability-skills-summary")).toContainText("skills", { timeout: 10_000 });
+  // Connections summary counts health.
+  await openCapabilityTab(page, "Tools & connections");
+  await expect(page.locator("#capability-connections-summary")).toContainText("connections", { timeout: 10_000 });
+  await expect(page.locator("#capability-connections-summary")).toContainText("need attention");
+});
+
 test("provider enrollment clears and never renders its credential", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the credential boundary flow once.");
   const credential = "desk-secret-canary";

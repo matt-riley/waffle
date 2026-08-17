@@ -369,3 +369,74 @@
   border: 1px solid var(--rule-dark);
   color: var(--muted);
 }
+
+/* Scannable inventory (#466): compact tabs, per-panel summaries, and denser
+   cards so current state is visible before any disclosure is opened. */
+.capability-summary {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0 0 0.6rem;
+}
+
+.capability-summary:empty {
+  display: none;
+}
+
+.capability-tabs a {
+  font-size: 0.8rem;
+  padding: 0.4rem 0.6rem;
+}
+
+.capability-tabs a[aria-current="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.capability-card {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.6rem 0.7rem;
+}
+
+.capability-card h3 {
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.capability-card .waffle-fragment-facts {
+  margin: 0;
+}
+
+.capability-card .waffle-fragment-actions {
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.capability-card .waffle-fragment-actions button {
+  font-size: 0.74rem;
+  padding: 0.3rem 0.5rem;
+}
+
+@media (max-width: 48rem) {
+  .capability-tabs {
+    align-items: stretch;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    margin-left: -0.75rem;
+    margin-right: -0.75rem;
+    overflow-x: auto;
+    padding: 0 0.75rem 0.4rem;
+  }
+
+  .capability-tabs a {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .capabilities-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
