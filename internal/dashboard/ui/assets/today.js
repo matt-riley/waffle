@@ -116,6 +116,27 @@ function setDraft(sessionID, text) {
   saveDraftMap(map);
 }
 
+// Schedule handoff (#486): only explicitly visible prompt text is copied,
+// through same-origin session storage (never the URL/history/referrer), and
+// the Tasks editor opens prefilled with exactly that text.
+const scheduleHandoffKey = "waffle.desk.schedule.draft.v1";
+
+function handoffSchedule(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    return;
+  }
+  try {
+    globalThis.sessionStorage?.setItem(
+      scheduleHandoffKey,
+      JSON.stringify({ text: trimmed.slice(0, 4096) }),
+    );
+  } catch {
+    // Storage denied: opening Tasks alone degrades the handoff to nothing.
+  }
+  globalThis.location = "/desk/?section=tasks";
+}
+
 function clearDraft(sessionID) {
   if (!sessionID) {
     return;
@@ -201,6 +222,7 @@ const elements = {
   message: document.querySelector("#desk-message"),
   send: document.querySelector("#desk-send"),
   cancel: document.querySelector("#desk-cancel"),
+  scheduleDraft: document.querySelector("#desk-schedule-draft"),
   composerStatus: document.querySelector("#desk-composer-status"),
   model: document.querySelector("#desk-model"),
   modelStatus: document.querySelector("#desk-model-status"),
@@ -397,6 +419,10 @@ function updateControls() {
     elements.send.setAttribute("aria-label", "Send message");
   }
   elements.cancel.disabled = !cancellable;
+  if (elements.scheduleDraft) {
+    elements.scheduleDraft.disabled =
+      elements.message.value.trim() === "" || state.currentPhase !== phase.idle;
+  }
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
   elements.skillToggle.disabled = !idle || state.skills.length === 0;
@@ -968,8 +994,19 @@ function renderHistory(history) {
 // responses) to a completed message. The keep boundary is stored on the
 // article so branching stays exact after re-renders.
 function attachTurnAction(article, kind) {
-  if (!article || article.querySelector(".message-edit") || article.querySelector(".message-regenerate")) {
+  if (!article || article.querySelector(".message-edit") || article.querySelector(".message-regenerate") || article.querySelector(".message-schedule")) {
     return;
+  }
+  if (kind === "edit") {
+    const schedule = document.createElement("button");
+    schedule.type = "button";
+    schedule.className = "message-schedule";
+    schedule.textContent = "Schedule";
+    schedule.setAttribute("aria-label", "Create a schedule from this prompt");
+    schedule.addEventListener("click", () => {
+      handoffSchedule(article.dataset.rawText);
+    });
+    article.appendChild(schedule);
   }
   const button = document.createElement("button");
   button.type = "button";
@@ -3390,6 +3427,9 @@ if (elements.form) {
   elements.message.addEventListener("input", onComposerInput);
   elements.message.addEventListener("keydown", handleComposerKeydown);
   elements.cancel.addEventListener("click", cancelTurn);
+  elements.scheduleDraft?.addEventListener("click", () => {
+    handoffSchedule(elements.message.value);
+  });
   elements.model.addEventListener("change", selectModel);
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);

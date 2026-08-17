@@ -259,6 +259,7 @@ function createHarness({
     "#desk-message",
     "#desk-send",
     "#desk-cancel",
+    "#desk-schedule-draft",
     "#desk-composer-status",
     "#desk-model",
     "#desk-model-status",
@@ -3101,3 +3102,38 @@ test("streaming sources event attaches the drawer to the completed exchange", as
   assert.equal(drawer.querySelector(".source-label").textContent, "Example docs");
 });
 
+
+test("a completed user prompt and the composer draft expose Create schedule handoff", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-1",
+          title: "Existing",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Summarize the release queue" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Done." }] },
+          ],
+        }),
+      }),
+  });
+  await flush();
+  const userMessage = harness.elements["#desk-transcript"].querySelector(".user-message");
+  const scheduleButton = userMessage.querySelector(".message-schedule");
+  assert.ok(scheduleButton, "completed user prompt exposes Create schedule");
+  await scheduleButton.listener("click")();
+  assert.equal(
+    JSON.parse(harness.sessionStorage.getItem("waffle.desk.schedule.draft.v1")).text,
+    "Summarize the release queue",
+  );
+
+  // The composer draft handoff carries exactly the visible draft text.
+  harness.elements["#desk-message"].value = "Draft a report every morning";
+  await harness.elements["#desk-schedule-draft"].listener("click")();
+  assert.equal(
+    JSON.parse(harness.sessionStorage.getItem("waffle.desk.schedule.draft.v1")).text,
+    "Draft a report every morning",
+  );
+});

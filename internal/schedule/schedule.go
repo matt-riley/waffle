@@ -1040,3 +1040,9 @@ func NextRun(spec string, now time.Time) time.Time {
 	}
 	return next
 }
+
+// ValidateCron reports whether spec is a parseable 5-field cron expression.
+func ValidateCron(spec string) error {
+	_, err := parser.Parse(strings.TrimSpace(spec))
+	return err
+}

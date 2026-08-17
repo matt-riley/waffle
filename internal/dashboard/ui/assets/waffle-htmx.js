@@ -176,6 +176,7 @@
 			profile: input(form, "task-schedule-profile")?.value || "",
 		};
 		let response;
+		console.log("PREVIEW_REQ", body.cron, document.body.dataset.requestToken || "no-token");
 		try {
 			response = await fetch("/api/v1/desk/tasks/schedules/preview", {
 				method: "POST",
@@ -195,6 +196,7 @@
 			return;
 		}
 		const preview = await response.json().catch(() => ({}));
+		console.log("PREVIEW_RES", response.status, JSON.stringify(preview));
 		const summary = input(form, "task-schedule-summary");
 		if (summary) {
 			if (preview.human && preview.next_run) {
@@ -262,6 +264,38 @@
 		if (domRow) domRow.hidden = guided.cadence !== "monthly";
 		if (dow) dow.hidden = guided.cadence !== "weekly";
 		if (dom) dom.hidden = guided.cadence !== "monthly";
+	}
+
+	// Schedule handoff (#486): Today stores only the visible prompt text in
+	// same-origin session storage (never the URL), and Tasks opens the shared
+	// guided editor prefilled with exactly that text for explicit review.
+	function consumeScheduleHandoff() {
+		if (!document.querySelector("#task-schedule-form")) return;
+		let raw;
+		try {
+			raw = globalThis.sessionStorage?.getItem("waffle.desk.schedule.draft.v1");
+			if (raw) globalThis.sessionStorage?.removeItem("waffle.desk.schedule.draft.v1");
+		} catch {
+			return;
+		}
+		if (!raw) return;
+		let handoff;
+		try {
+			handoff = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		if (!handoff || typeof handoff.text !== "string" || handoff.text.trim() === "") return;
+		const form = document.querySelector("#task-schedule-form");
+		const openButton = document.querySelector("#task-schedule-open");
+		if (!form || !openButton) return;
+		resetTaskSchedule(form);
+		const prompt = input(form, "task-schedule-prompt");
+		if (prompt) prompt.value = handoff.text.slice(0, 4096);
+		openTaskScheduleDialog();
+		void loadScheduleOptions(form);
+		updateScheduleGuide(form);
+		input(form, "task-schedule-name")?.focus?.();
 	}
 
 	async function loadScheduleOptions(form) {
@@ -837,6 +871,8 @@
 	document.body.addEventListener("input", (event) => {
 		if (event.target?.id === "capability-catalogue-search") filterCatalogue();
 	});
+
+	consumeScheduleHandoff();
 
 	void readBootstrap().then((bootstrap) => {
 		if (typeof bootstrap.process_generation === "string") processGeneration = bootstrap.process_generation;
