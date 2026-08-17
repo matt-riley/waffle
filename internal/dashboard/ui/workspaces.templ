@@ -14,6 +14,7 @@ templ Workspaces(view ShellView) {
 			<button id="workspace-open-button" class="workspace-primary" type="button">Open repository</button>
 		</header>
 		<div class="workspaces-errors" id="workspaces-errors" role="status" aria-live="polite" hidden></div>
+		<p class="workspaces-summary" id="workspaces-summary" aria-live="polite"></p>
 		<div class="workspaces-grid" id="workspaces-list" hx-get="/api/v1/desk/workspaces" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 		<p class="workspaces-empty" id="workspaces-empty">Loading workspaces…</p>
 

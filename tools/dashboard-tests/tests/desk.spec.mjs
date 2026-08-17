@@ -1018,6 +1018,38 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
   );
 });
 
+test("workspace cards lead with truthful metadata and distinct actions", async ({ page }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(deskURL("workspaces"));
+  // Page-level summary counts the rendered workspaces by status.
+  await expect(page.locator("#workspaces-summary")).not.toBeEmpty({ timeout: 10_000 });
+  await expect(page.locator("#workspaces-summary")).toContainText("open");
+
+  const clean = page.locator("[data-workspace-id='workspace-clean']");
+  await expect(clean).toBeVisible();
+  // Metadata is ordered and truthful: profile and active session are shown,
+  // opaque IDs stay secondary and copyable.
+  await expect(clean.locator(".waffle-fragment-facts")).toContainText("Profile");
+  await expect(clean.locator(".waffle-fragment-facts")).toContainText("reviewer");
+  await expect(clean.locator(".waffle-fragment-facts")).toContainText("session-primary");
+  const copySession = clean.getByRole("button", { name: "Copy session ID", exact: true });
+  await expect(copySession).toBeVisible();
+  await copySession.click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("session-primary");
+  // The transient feedback appears on the same control without a page change.
+  await expect(clean.locator("[data-waffle-copy]")).toHaveText("Copied");
+
+  // The primary continuation action is distinct from the destructive close.
+  await expect(
+    clean.getByRole("button", { name: "Open at Desk", exact: true }),
+  ).toHaveClass(/workspace-primary/);
+  await expect(
+    clean.getByRole("button", { name: "Review close", exact: true }),
+  ).toHaveClass(/workspace-danger-action/);
+});
+
 test("async review dialogs open as native modals with contained focus", async ({ page }) => {
   await page.goto(deskURL("workspaces"));
   const errors = [];

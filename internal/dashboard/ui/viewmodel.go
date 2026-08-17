@@ -105,8 +105,10 @@ type FragmentAction struct {
 	Swap    string
 	Class   string
 	Include string
-	Fields  []FragmentField
-	Inputs  []FragmentInput
+	// Value carries the copy target for Method "copy" actions (#462).
+	Value  string
+	Fields []FragmentField
+	Inputs []FragmentInput
 }
 
 type FragmentInput struct {
