@@ -393,6 +393,21 @@ func (taskSessionReader) SearchSummaries(context.Context, string, int) ([]sessio
 	return nil, nil
 }
 
+func TestAttentionEvidenceFailedIgnoresUsageAndSessions(t *testing.T) {
+	if attentionEvidenceFailed([]*SectionError{
+		{Section: OperationsSectionUsage},
+		{Section: OperationsSectionSessions},
+	}) {
+		t.Fatal("usage/session errors are not attention evidence")
+	}
+	if !attentionEvidenceFailed([]*SectionError{{Section: OperationsSectionJobs}}) {
+		t.Fatal("jobs errors are attention evidence")
+	}
+	if !attentionEvidenceFailed([]*SectionError{{Section: OperationsSectionRuns}}) {
+		t.Fatal("runs errors are attention evidence")
+	}
+}
+
 func TestTasksAttentionLabel(t *testing.T) {
 	cases := []struct {
 		name      string
