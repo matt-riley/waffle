@@ -125,6 +125,7 @@ type MemoryForgetDialogView struct {
 	Excludes     []string
 	PreviewURL   string
 	PreviewToken string
+	FocusID      string
 }
 
 type SkillReviewFileView struct {

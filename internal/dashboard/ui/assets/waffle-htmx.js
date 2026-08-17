@@ -406,18 +406,43 @@
       if (path.endsWith("/open") || path.endsWith("/close") || path.endsWith("/forget")) {
         event.detail.elt?.closest?.("dialog")?.close?.();
       }
-      if (path.endsWith("/close-preview") || path.endsWith("/forget-preview")) {
-        document.querySelector("#workspace-close-dialog, #memory-forget-dialog")?.showModal?.();
-      }
       for (const [identity, candidate] of intents) {
         if (candidate.key === intent.key) intents.delete(identity);
       }
     }
 	});
 
-	document.body.addEventListener("htmx:afterSwap", () => {
+	document.body.addEventListener("htmx:afterSwap", (event) => {
 		applySkillPrerequisites();
 		filterCatalogue();
+		const requestPath = event.detail?.pathInfo?.requestPath || "";
+		if (requestPath.endsWith("/close-preview") || requestPath.endsWith("/forget-preview")) {
+			// The fragment arrives closed and is already swapped, so showModal
+			// can open it as a genuine native modal: no InvalidStateError,
+			// backdrop, or focus leak (#457).
+			const dialog = document.querySelector("#workspace-close-dialog, #memory-forget-dialog");
+			dialog?.showModal?.();
+			// Initial focus lands on a safe dialog control, never the
+			// destructive confirmation.
+			dialog?.querySelector?.("[data-waffle-dialog-cancel]")?.focus?.();
+			// Escape and explicit Cancel both fire close; restoring the opener
+			// there covers both paths exactly once.
+			dialog?.addEventListener?.(
+				"close",
+				() => {
+					const focusID = dialog.dataset.waffleDialogFocus || "";
+					if (focusID) {
+						for (const candidate of document.querySelectorAll("[data-waffle-action-id]")) {
+							if (candidate.dataset.waffleActionId === focusID) {
+								candidate.focus?.();
+								break;
+							}
+						}
+					}
+				},
+				{ once: true },
+			);
+		}
 	});
 	document.body.addEventListener("htmx:afterSettle", () => {
 		applySkillPrerequisites();
@@ -465,19 +490,8 @@
     }
     const cancel = event.target?.closest?.("[data-waffle-dialog-cancel]");
     if (!cancel) return;
-    const dialog = cancel.closest?.("dialog");
-    if (!dialog) return;
     event.preventDefault();
-    dialog.close?.();
-    const focusID = dialog.dataset.waffleDialogFocus || "";
-    if (focusID && document.querySelectorAll) {
-      for (const candidate of document.querySelectorAll("[data-waffle-action-id]")) {
-        if (candidate.dataset.waffleActionId === focusID) {
-          candidate.focus?.();
-          break;
-        }
-      }
-    }
+    cancel.closest?.("dialog")?.close?.();
 	});
 
 	document.body.addEventListener("input", (event) => {

@@ -1,7 +1,7 @@
 package ui
 
 templ WorkspaceCloseDialog(view WorkspaceCloseDialogView) {
-	<dialog id="workspace-close-dialog" open data-waffle-dialog-focus={ view.FocusID } aria-labelledby="workspace-close-title">
+	<dialog id="workspace-close-dialog" data-waffle-dialog-focus={ view.FocusID } aria-labelledby="workspace-close-title">
 		<div class="workspace-close-content">
 			<header class="workspace-dialog-header">
 				<p class="panel-index">02 / safety check</p>
@@ -29,7 +29,7 @@ templ WorkspaceCloseDialog(view WorkspaceCloseDialogView) {
 }
 
 templ MemoryForgetDialog(view MemoryForgetDialogView) {
-	<dialog id="memory-forget-dialog" open class="memory-forget-dialog" aria-labelledby="memory-forget-title">
+	<dialog id="memory-forget-dialog" class="memory-forget-dialog" data-waffle-dialog-focus={ view.FocusID } aria-labelledby="memory-forget-title">
 		<h2 id="memory-forget-title">Archive this note?</h2>
 		<p id="memory-forget-note">{ view.Excerpt }</p>
 		<p id="memory-forget-scope">{ view.Scope }</p>

@@ -1018,6 +1018,54 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
   );
 });
 
+test("async review dialogs open as native modals with contained focus", async ({ page }) => {
+  await page.goto(deskURL("workspaces"));
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const dirty = page.locator("[data-workspace-id='workspace-dirty']");
+  await expect(dirty).toBeVisible();
+  const review = dirty.getByRole("button", { name: "Review close", exact: true });
+  await review.click();
+  const dialog = page.locator("#workspace-close-dialog");
+  await expect(dialog).toBeVisible();
+  // The swapped fragment enters the modal top layer (backdrop included)
+  // instead of the old pre-opened non-modal state (#457).
+  expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
+  // Initial focus lands on Cancel, never the destructive confirmation.
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  // Tab and Shift+Tab stay inside the open dialog.
+  await page.keyboard.press("Tab");
+  expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press("Shift+Tab");
+  expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  // Escape closes and restores focus to the invoking control.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(review).toBeFocused();
+  // The pre-opened showModal InvalidStateError never fires.
+  expect(errors).toEqual([]);
+});
+
+test("posture dialog contains keyboard focus and restores the opener", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the posture focus flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const trigger = page.getByRole("button", { name: "View system prompt and policy" });
+  await trigger.click();
+  const dialog = page.locator("#desk-posture-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(page.locator("#desk-posture-close")).toBeFocused();
+  for (let index = 0; index < 6; index += 1) {
+    await page.keyboard.press("Tab");
+    expect(
+      await dialog.evaluate((element) => element.contains(document.activeElement)),
+    ).toBe(true);
+  }
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
 test("memory search attaches one source and forgets only after confirmation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the memory lifecycle once.");
   await page.goto(deskURL("memory"));

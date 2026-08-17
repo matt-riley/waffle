@@ -268,6 +268,9 @@ if (dialog) {
     if (!elements.dialog.open) {
       elements.dialog.showModal();
     }
+    // Anchor focus inside the dialog immediately so the native modal trap
+    // contains Tab even while the read is in flight (#457).
+    elements.close?.focus?.();
     try {
       const query = profile ? `?profile=${encodeURIComponent(profile)}` : "";
       // Both reads are independent, so issue them together rather than making
