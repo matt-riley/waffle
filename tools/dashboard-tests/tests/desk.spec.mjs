@@ -754,6 +754,29 @@ test("command palette includes canonical chat commands on Today", async ({ page 
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+test("per-turn task and reasoning modes are honest and persist on the turn", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the turn mode flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  // Plain-language guidance accompanies the mode controls.
+  await page.getByLabel("Task mode").selectOption("deep");
+  await page.getByLabel("Reasoning effort").selectOption("high");
+  const turn = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/v1/desk/chat/turn") &&
+      response.request().method() === "POST",
+  );
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Work this out");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const response = await turn;
+  expect(response.status()).toBe(200);
+  const body = response.request().postDataJSON();
+  expect(body.task_mode).toBe("deep");
+  expect(body.reasoning_effort).toBe("high");
+  await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

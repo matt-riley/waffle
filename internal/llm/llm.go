@@ -371,6 +371,11 @@ type Message struct {
 	Role   Role    `json:"role"`
 	Blocks []Block `json:"blocks"`
 	Seq    int64   `json:"seq,omitempty"`
+	// Metadata carries safe, presentation-neutral turn metadata (e.g. the
+	// task mode or reasoning effort a turn was sent with). It is persisted
+	// with the turn, additive and omitempty, and never rendered in the
+	// transcript (#481).
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // UserText builds a plain-text user message.

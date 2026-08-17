@@ -51,12 +51,33 @@ templ Today(view ShellView) {
 							</div>
 							<p id="desk-skill-status">Changes this conversation only.</p>
 						</div>
+						<div class="turn-mode-fields">
+							<div class="model-field">
+								<label for="desk-task-mode">Task mode</label>
+								<select id="desk-task-mode" name="task_mode" disabled>
+									<option value="">Standard</option>
+									<option value="quick">Quick answer</option>
+									<option value="deep">Deep reasoning</option>
+									<option value="draft">Draft</option>
+								</select>
+								<p id="desk-task-mode-status">Adds trusted guidance; never widens posture.</p>
+							</div>
+							<div class="model-field">
+								<label for="desk-reasoning">Reasoning effort</label>
+								<select id="desk-reasoning" name="reasoning_effort" disabled>
+									<option value="">Provider default</option>
+									<option value="low">Low</option>
+									<option value="medium">Medium</option>
+									<option value="high">High</option>
+								</select>
+								<p id="desk-reasoning-status">Recorded per turn; applied when the provider supports it.</p>
+							</div>
+						</div>
 					</div>
 					<label for="desk-message">Message Waffle</label>
 					<textarea id="desk-message" name="message" rows="3" placeholder="Ask Waffle to help…"></textarea>
 					<input id="desk-attach" type="file" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/csv,text/html,text/xml" multiple hidden/>
 					<p class="composer-hint">Attach images or documents with the button, drag-and-drop, or paste. Enter sends. Shift+Enter adds a new line.</p>
-					<p class="composer-hint">Enter sends. Shift+Enter adds a new line.</p>
 					<p id="desk-composer-status" class="composer-status" role="status" aria-live="polite" hidden></p>
 					<div class="queue-banner" id="desk-queue" aria-label="Follow-up queue" hidden></div>
 					<div class="composer-actions">

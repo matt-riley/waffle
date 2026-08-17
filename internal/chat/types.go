@@ -257,6 +257,21 @@ type Result struct {
 	ShouldClose bool            `json:"should_close"`
 }
 
+// TurnModes is the optional mode-capable extension of Backend. Backends that
+// do not implement it simply run every turn with safe defaults (#481).
+type TurnModes interface {
+	TurnWithModes(context.Context, string, TurnModeOptions, func(Event)) error
+}
+
+// TurnModeOptions is the validated, presentation-neutral per-turn mode
+// request. Modes never widen posture: they only add trusted guidance or
+// narrow request limits.
+type TurnModeOptions struct {
+	TaskMode        string
+	ReasoningEffort string
+	Media           []llm.Block
+}
+
 // MediaTurner is the optional media-capable extension of Backend. Backends
 // that do not implement it reject attachment turns with a clear error so the
 // Desk can keep its mutation contract honest (#473).

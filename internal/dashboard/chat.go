@@ -358,6 +358,13 @@ func (c *ChatClients) Turn(ctx context.Context, clientID, input string) error {
 // without media support reject the turn so the Desk never pretends an
 // attachment was understood (#473).
 func (c *ChatClients) TurnMedia(ctx context.Context, clientID, input string, media []llm.Block) error {
+	return c.TurnModes(ctx, clientID, input, chat.TurnModeOptions{Media: media})
+}
+
+// TurnModes forwards one client turn with validated per-turn modes. Backends
+// without mode support fall back to a plain or media turn; modes never widen
+// posture (#481).
+func (c *ChatClients) TurnModes(ctx context.Context, clientID, input string, options chat.TurnModeOptions) error {
 	if err := c.reap(ctx); err != nil {
 		return err
 	}
@@ -366,11 +373,17 @@ func (c *ChatClients) TurnMedia(ctx context.Context, clientID, input string, med
 		return err
 	}
 	defer c.end(clientID, client)
-	mediaTurner, ok := client.backend.(chat.MediaTurner)
-	if !ok {
-		return errors.New("attachments are not supported by this chat connection")
+	if modeTurner, ok := client.backend.(chat.TurnModes); ok {
+		return modeTurner.TurnWithModes(operationCtx, input, options, c.emit(clientID))
 	}
-	return mediaTurner.TurnMedia(operationCtx, input, media, c.emit(clientID))
+	if len(options.Media) > 0 {
+		mediaTurner, ok := client.backend.(chat.MediaTurner)
+		if !ok {
+			return errors.New("attachments are not supported by this chat connection")
+		}
+		return mediaTurner.TurnMedia(operationCtx, input, options.Media, c.emit(clientID))
+	}
+	return client.backend.Turn(operationCtx, input, c.emit(clientID))
 }
 
 // Command forwards one command while preserving the one-active-operation invariant.

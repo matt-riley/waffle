@@ -262,6 +262,8 @@ const elements = {
   modelStatus: document.querySelector("#desk-model-status"),
   skill: document.querySelector("#desk-skill"),
   skillToggle: document.querySelector("#desk-skill-toggle"),
+  taskMode: document.querySelector("#desk-task-mode"),
+  reasoning: document.querySelector("#desk-reasoning"),
   skillStatus: document.querySelector("#desk-skill-status"),
   profile: document.querySelector("#desk-profile"),
   postureOpen: document.querySelector("#desk-posture-open"),
@@ -483,6 +485,12 @@ function updateControls() {
   elements.model.disabled = !idle;
   elements.skill.disabled = !idle || state.skills.length === 0;
   elements.skillToggle.disabled = !idle || state.skills.length === 0;
+  if (elements.taskMode) {
+    elements.taskMode.disabled = !idle;
+  }
+  if (elements.reasoning) {
+    elements.reasoning.disabled = !idle;
+  }
   elements.refresh.disabled =
     state.currentPhase !== phase.disconnected &&
     state.currentPhase !== phase.recovering;
@@ -1071,6 +1079,12 @@ function renderHistory(history) {
       index += 1;
       continue;
     }
+    if (role === "user" && message.metadata?.task_mode) {
+      const chip = document.createElement("span");
+      chip.className = "message-mode-chip";
+      chip.textContent = taskModeLabel(message.metadata.task_mode);
+      article.querySelector(".message-body")?.appendChild(chip);
+    }
     if (media.length > 0) {
       const holder = document.createElement("div");
       holder.className = "message-attachments";
@@ -1452,6 +1466,14 @@ function renderMediaBlocks(message) {
 // inline citation markers ("[1]", "[2]") appended per cited block, matching
 // the response-level source drawer (#479). Markers are plain text, so model
 // or provider content can never inject markup.
+// taskModeGuidance mirrors the runtime's trusted per-turn guidance so the
+// transcript can strip it from display (it still reaches the model).
+const taskModeGuidance = {
+  quick: "Answer concisely and directly. Avoid unnecessary detail.",
+  deep: "Work through the problem carefully before giving a final answer.",
+  draft: "Draft prose suitable for editing before use.",
+};
+
 function messageTextWithMarkers(message) {
   let text = "";
   let count = 0;
@@ -1460,6 +1482,11 @@ function messageTextWithMarkers(message) {
   }
   for (const block of message.blocks) {
     if (!block || block.type !== "text") {
+      continue;
+    }
+    if (taskModeGuidance[block.text]) {
+      // The trusted task-mode guidance reaches the model but is not visible
+      // transcript content (#481).
       continue;
     }
     text += block.text || "";
@@ -1728,6 +1755,11 @@ function renderAttachmentPreviews() {
     card.appendChild(remove);
     elements.attachmentPreview.appendChild(card);
   }
+}
+
+function taskModeLabel(mode) {
+  const labels = { quick: "Quick answer", deep: "Deep reasoning", draft: "Draft" };
+  return labels[mode] || mode;
 }
 
 function selectedSkill() {
@@ -2587,6 +2619,8 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
         media_type: attachment.mediaType,
         data_base64: attachment.data,
       })),
+      task_mode: elements.taskMode?.value || "",
+      reasoning_effort: elements.reasoning?.value || "",
     }, { idempotencyKey });
     if (state.activeTurn !== turn || generation !== state.generation) {
       return;
