@@ -1091,6 +1091,62 @@ test("keyboard navigation reaches every destination and dialog returns focus", a
   await expect(opener).toBeFocused();
 });
 
+test("fixed mobile navigation never obscures the composer, last content, or dialogs", async ({ page }) => {
+  test.skip(
+    !["mobile", "narrow"].includes(test.info().project.name),
+    "Run the obstruction checks on mobile widths.",
+  );
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Check composer clearance");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+
+  const nav = page.locator(".desk-navigation");
+  const navBox = await nav.boundingBox();
+  // The composer and its actions sit fully above the fixed navigation.
+  await message.focus();
+  await page.evaluate(() =>
+    document.querySelector("#desk-message").scrollIntoView({ block: "end" }),
+  );
+  await page.evaluate(() =>
+    document.querySelector("#desk-message").scrollIntoView({ block: "end" }),
+  );
+  const composer = await message.boundingBox();
+  expect(composer.y + composer.height).toBeLessThanOrEqual(navBox.y + 0.5);
+
+  // The last turn scrolls completely into view above the bar.
+  const last = page.locator(".waffle-message").last();
+  await last.scrollIntoViewIfNeeded();
+  const lastBox = await last.boundingBox();
+  expect(lastBox.y + lastBox.height).toBeLessThanOrEqual(navBox.y + 0.5);
+
+  // Navigation labels stay legible (never sub-10px) at the narrowest width.
+  const labelSize = await page
+    .locator(".section-links a")
+    .first()
+    .evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+  expect(labelSize).toBeGreaterThanOrEqual(10);
+
+  // A review dialog opens in the modal top layer, above the navigation: the
+  // bar is inert while the dialog is open (native modal semantics).
+  await page.getByRole("link", { name: "Workspaces", exact: true }).click();
+  await expect(page).toHaveURL(/section=workspaces/);
+  const dirty = page.locator("[data-workspace-id='workspace-dirty']");
+  await expect(dirty).toBeVisible();
+  await dirty.getByRole("button", { name: "Review close", exact: true }).click();
+  const closeDialog = page.locator("#workspace-close-dialog");
+  await expect(closeDialog).toBeVisible();
+  const before = page.url();
+  await page.getByRole("link", { name: "Tasks", exact: true }).click({ force: true });
+  await page.waitForTimeout(150);
+  expect(page.url()).toBe(before);
+  await closeDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("link", { name: "Tasks", exact: true }).click();
+  await expect(page).toHaveURL(/section=tasks/);
+});
+
 test("reduced motion suppresses animation and preserves an overflow-free desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the motion preference flow once.");
   await page.emulateMedia({ reducedMotion: "reduce" });
