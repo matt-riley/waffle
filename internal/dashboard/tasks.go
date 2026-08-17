@@ -194,26 +194,47 @@ func (s *TasksService) Preview(ctx context.Context, request SchedulePreviewReque
 		Timezone: time.Now().Format("MST (UTC-07:00)"),
 		Errors:   make(map[string]string),
 	}
-	if strings.TrimSpace(request.Name) == "" {
-		response.Errors["name"] = "Give the schedule a name."
-	}
-	if strings.TrimSpace(request.Prompt) == "" {
-		response.Errors["prompt"] = "Describe what the schedule should run."
-	}
-	if err := schedule.ValidateCron(request.Cron); err != nil {
-		response.Errors["cron"] = "That cron expression is not valid. Use the guided controls or the examples below."
+	input, err := schedule.ValidateUpdate(schedule.Update{
+		Name: request.Name, Cron: request.Cron, Prompt: request.Prompt,
+		Deliver: request.Deliver, Profile: request.Profile, Enabled: true,
+	})
+	if err != nil {
+		for key, message := range scheduleValidationFieldErrors(err, request) {
+			response.Errors[key] = message
+		}
+		// Incomplete name/prompt still preview cadence so the guided
+		// editor can show the next run while the operator types.
+		if schedule.ValidateCron(request.Cron) == nil {
+			response.Human = schedule.DescribeCron(request.Cron)
+			response.NextRun = schedule.NextRun(request.Cron, time.Now()).Format(time.RFC3339)
+		}
 		return response
 	}
-	if request.Deliver != "" {
-		if _, _, ok := schedule.ParseTarget(request.Deliver); !ok {
-			response.Errors["deliver"] = "That delivery target is not valid. Choose a configured destination."
-		}
-	}
-	if len(response.Errors) == 0 || response.Errors["cron"] == "" {
-		response.Human = schedule.DescribeCron(request.Cron)
-		response.NextRun = schedule.NextRun(request.Cron, time.Now()).Format(time.RFC3339)
-	}
+	response.Human = schedule.DescribeCron(input.Cron)
+	response.NextRun = schedule.NextRun(input.Cron, time.Now()).Format(time.RFC3339)
 	return response
+}
+
+// scheduleValidationFieldErrors maps a schedule validation failure to the
+// exact field the operator must fix, preserving the draft (#460).
+func scheduleValidationFieldErrors(err error, request SchedulePreviewRequest) map[string]string {
+	message := err.Error()
+	errors := map[string]string{}
+	switch {
+	case strings.Contains(message, "name is required"):
+		errors["name"] = "Give the schedule a name."
+	case strings.Contains(message, "prompt is required"):
+		errors["prompt"] = "Describe what the schedule should run."
+	case strings.Contains(message, "invalid cron"):
+		errors["cron"] = "That cron expression is not valid. Use the guided controls or the examples below."
+	case strings.Contains(message, "delivery"):
+		errors["deliver"] = "That delivery target is not valid. Choose a configured destination."
+	case strings.Contains(message, "profile"):
+		errors["profile"] = "That profile is not configured. Choose one from the list."
+	default:
+		errors["cron"] = message
+	}
+	return errors
 }
 
 func (s *TasksService) Read(ctx context.Context, filter TaskFilter) (TasksSnapshot, error) {

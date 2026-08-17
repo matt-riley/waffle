@@ -176,7 +176,7 @@
 			profile: input(form, "task-schedule-profile")?.value || "",
 		};
 		let response;
-		console.log("PREVIEW_REQ", body.cron, document.body.dataset.requestToken || "no-token");
+
 		try {
 			response = await fetch("/api/v1/desk/tasks/schedules/preview", {
 				method: "POST",
@@ -196,7 +196,7 @@
 			return;
 		}
 		const preview = await response.json().catch(() => ({}));
-		console.log("PREVIEW_RES", response.status, JSON.stringify(preview));
+
 		const summary = input(form, "task-schedule-summary");
 		if (summary) {
 			if (preview.human && preview.next_run) {
