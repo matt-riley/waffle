@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.0](https://github.com/matt-riley/waffle/compare/v0.27.0...v0.28.0) (2026-08-17)
+
+
+### Features
+
+* **desk:** add a workspace-scoped project context library ([#478](https://github.com/matt-riley/waffle/issues/478)) ([#492](https://github.com/matt-riley/waffle/issues/492)) ([1428466](https://github.com/matt-riley/waffle/commit/1428466e30168b0c53ac0c930e3b4b1f984e58c7))
+* **desk:** preview and download session artifacts ([#491](https://github.com/matt-riley/waffle/issues/491)) ([1f4934f](https://github.com/matt-riley/waffle/commit/1f4934fa198085962e37716a5e1829348b044848))
+
 ## [0.27.0](https://github.com/matt-riley/waffle/compare/v0.26.0...v0.27.0) (2026-08-17)
 
 
