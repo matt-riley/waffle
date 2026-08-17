@@ -1304,7 +1304,7 @@ test("new conversation with an empty history atomically replaces the previous tr
   );
 });
 
-test("ownership conflict retries the open and offers inline recovery instead of a fatal screen", async () => {
+test("ownership conflict offers inline recovery instead of a fatal screen", async () => {
   let openAttempts = 0;
   const harness = createHarness({
     openHandler: async () => {
@@ -1315,48 +1315,16 @@ test("ownership conflict retries the open and offers inline recovery instead of 
       );
     },
   });
-  await flush(); // initial open fails and schedules retry 1
-  await harness.runTimers(); // retry 1 fails and schedules retry 2
-  await harness.runTimers(); // retry 2 fails and shows inline recovery
-  assert.equal(openAttempts, 3);
+  await flush();
+  assert.equal(openAttempts, 1);
   assert.equal(harness.elements["#desk-phase"].textContent, "Conversation in use");
   assert.equal(harness.elements["#desk-stale-status"].hidden, false);
   assert.match(harness.elements["#desk-stale-message"].textContent, /Another surface/);
-  // The recoverable conflict never takes the fatal out-of-date treatment.
   assert.match(harness.elements["#desk-stale-label"].textContent, /in use/);
   assert.doesNotMatch(harness.elements["#desk-stale-label"].textContent, /out of date/);
   assert.equal(harness.elements["#desk-recover-new"].hidden, false);
   assert.equal(harness.elements["#desk-recover-new"].disabled, false);
   assert.equal(harness.elements["#desk-refresh"].disabled, false);
-});
-
-test("ownership conflict resolves on retry and the desk returns to Ready", async () => {
-  let openAttempts = 0;
-  const harness = createHarness({
-    openHandler: async () => {
-      openAttempts += 1;
-      if (openAttempts === 1) {
-        return jsonResponse(
-          { code: "session_active", message: "chat session is already active" },
-          false,
-        );
-      }
-      return jsonResponse({
-        client_id: "client-2",
-        reattach_token: "lease-2",
-        state: defaultChatState({
-          session_id: "session-2",
-          title: "Recovered session",
-        }),
-      });
-    },
-  });
-  await flush();
-  await harness.runTimers();
-  assert.equal(openAttempts, 2);
-  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
-  assert.equal(harness.elements["#desk-stale-status"].hidden, true);
-  assert.equal(harness.elements["#desk-message"].disabled, false);
 });
 
 test("Start a new conversation recovery opens a fresh session", async () => {
@@ -1366,7 +1334,7 @@ test("Start a new conversation recovery opens a fresh session", async () => {
     openHandler: async ({ options }) => {
       openAttempts += 1;
       openBodies.push(JSON.parse(options.body));
-      if (openAttempts <= 3) {
+      if (openAttempts === 1) {
         return jsonResponse(
           { code: "session_active", message: "chat session is already active" },
           false,
@@ -1383,15 +1351,13 @@ test("Start a new conversation recovery opens a fresh session", async () => {
     },
   });
   await flush();
-  await harness.runTimers();
-  await harness.runTimers();
   assert.equal(harness.elements["#desk-recover-new"].hidden, false);
   await harness.elements["#desk-recover-new"].listener("click")();
   await flush();
   assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh recovery");
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   const recoveryOpen = openBodies[openBodies.length - 1];
-  assert.equal(openAttempts, 4);
+  assert.equal(openAttempts, 2);
   assert.equal(recoveryOpen.continue, false);
   assert.equal(recoveryOpen.session_id, "");
   assert.equal(recoveryOpen.reattach_client_id, undefined);

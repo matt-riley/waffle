@@ -8,14 +8,6 @@ const phase = Object.freeze({
   recovering: "recovering",
 });
 
-// A recoverable ownership conflict (session_active) is retried briefly in
-// case the other surface releases, then falls back to inline recovery instead
-// of the fatal stale-desk treatment (#454).
-const recoveryConfig = Object.freeze({
-  maxAttempts: 3,
-  baseDelayMs: 300,
-});
-
 const reconnectConfig = Object.freeze({
   maxAttempts: 8,
   // Keep the first retry snappy so a brief blip (or a test unblocking the
@@ -1909,48 +1901,36 @@ async function openDesk({ forceNewSession = false } = {}) {
   }
 }
 
-// openChatWithRecovery opens (or reattaches to) the desk chat. A reaped owner
-// falls back to a fresh open, and a recoverable session_active conflict is
-// retried briefly before inline recovery is shown. Other failures propagate so
-// they keep the fatal stale-desk treatment (#454).
+// openChatWithRecovery opens (or reattaches to) the desk chat. A reaped
+// owner falls back to a fresh open. A live session_active conflict is a
+// real second surface — serve already waited out a draining previous
+// owner — so the desk offers inline recovery instead of retries (#454).
 async function openChatWithRecovery(openBody, owner, generation) {
-  for (let attempt = 0; ; ) {
+  for (;;) {
     try {
       return await postMutation("/api/v1/desk/chat/open", openBody);
     } catch (error) {
-      const conflict = error.safeCode === "session_active";
-      if (!conflict && (!owner || error.safeCode !== "chat_client_not_found")) {
-        throw error;
-      }
-      if (!conflict) {
-        // The stored owner no longer exists (reap, restart): reopen as a
-        // fresh browser owner. The fresh open may itself surface an
-        // ownership conflict, which is handled below.
-        state.clientID = "";
-        state.reattachToken = "";
-        state.storedOwner = null;
-        forgetStoredOwner();
-        owner = null;
-        openBody = {
-          continue: openBody.continue,
-          session_id: openBody.session_id,
-          profile: "",
-          capabilities: [],
-        };
-        continue;
-      }
-      attempt += 1;
-      if (attempt >= recoveryConfig.maxAttempts) {
+      if (error.safeCode === "session_active") {
         if (generation !== state.generation) {
           return null;
         }
         showOwnershipConflict();
         return null;
       }
-      await delay(recoveryConfig.baseDelayMs * attempt);
-      if (generation !== state.generation) {
-        return null;
+      if (!owner || error.safeCode !== "chat_client_not_found") {
+        throw error;
       }
+      state.clientID = "";
+      state.reattachToken = "";
+      state.storedOwner = null;
+      forgetStoredOwner();
+      owner = null;
+      openBody = {
+        continue: openBody.continue,
+        session_id: openBody.session_id,
+        profile: "",
+        capabilities: [],
+      };
     }
   }
 }
@@ -1974,10 +1954,6 @@ function resetOwnershipConflict() {
   if (elements.recoverNew) {
     elements.recoverNew.hidden = true;
   }
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function settleTurn(turn) {
