@@ -354,6 +354,9 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	}
 	r.history = append(r.history, llm.UserText(input))
 	history := append([]llm.Message(nil), r.history...)
+	// persistedStart marks where this turn's new messages begin once the run
+	// appends them, so artifact collection stays scoped to this exchange.
+	persistedStart := r.persisted
 	r.mu.Unlock()
 
 	defer func() {
@@ -445,9 +448,15 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 		r.persisted++
 	}
 	state := r.stateLocked(r.capabilities)
+	// Collect artifacts declared only by this exchange's appended turns so a
+	// later turn never re-emits artifacts from earlier ones (#480 review).
+	artifacts := collectArtifacts(r.history[persistedStart:])
 	r.mu.Unlock()
 	if persistErr != nil {
 		emitEvent(chatpkg.Event{Kind: chatpkg.EventNotice, Text: fmt.Sprintf("persist turn: %v", persistErr), IsError: true})
+	}
+	if len(artifacts) > 0 {
+		emitEvent(chatpkg.Event{Kind: chatpkg.EventArtifact, Artifacts: artifacts})
 	}
 
 	emitMu.Lock()
@@ -455,6 +464,33 @@ func (r *chatRuntime) turn(ctx context.Context, input string, emit func(chatpkg.
 	emitMu.Unlock()
 	emitEvent(chatpkg.Event{Kind: chatpkg.EventTurnDone, IsError: runErr != nil, Usage: usage, State: &state})
 	return runErr
+}
+
+// collectArtifacts projects artifacts declared by the completed exchange
+// into the client-visible shape, in transcript order (#480). Artifacts are
+// declared as BlockArtifact blocks inside tool results (write_artifact); the
+// streaming client renders their cards from this event. An empty result
+// means the exchange declared no artifacts.
+func collectArtifacts(history []llm.Message) []chatpkg.Artifact {
+	var out []chatpkg.Artifact
+	for _, msg := range history {
+		for _, block := range msg.Blocks {
+			if block.Type != llm.BlockToolResult || block.ToolResult == nil {
+				continue
+			}
+			for _, inner := range block.ToolResult.Blocks {
+				if inner.Type != llm.BlockArtifact || inner.Artifact == nil {
+					continue
+				}
+				ref := inner.Artifact
+				out = append(out, chatpkg.Artifact{
+					ID: ref.ID, Name: ref.Name, MediaType: ref.MediaType,
+					Size: ref.Size, Digest: ref.Digest, State: ref.State,
+				})
+			}
+		}
+	}
+	return out
 }
 
 func truncateChatTitle(input string) string {

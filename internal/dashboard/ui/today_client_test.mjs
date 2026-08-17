@@ -232,6 +232,8 @@ function createHarness({
   cancelHandler,
   workspacesHandler,
   projectHandler,
+  artifactHandler,
+
   confirmResult = true,
   storedLease = null,
   sharedStorage = null,
@@ -411,6 +413,12 @@ function createHarness({
     if (path === "/api/v1/desk/chat/close") {
       if (closeHandler) {
         return closeHandler({ path, options });
+      }
+      return jsonResponse({});
+    }
+    if (path.startsWith("/api/v1/desk/artifacts/")) {
+      if (artifactHandler) {
+        return artifactHandler({ path, options });
       }
       return jsonResponse({});
     }
@@ -2648,5 +2656,187 @@ test("project panel pins a workspace file through the guarded mutation", async (
   await flush();
   assert.equal(pinned, "docs/plan.md");
   assert.equal(harness.elements["#desk-project-path"].value, "", "path cleared after pin");
+});
+
+
+
+test("restored history renders artifact cards with preview, download, and copy actions", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: "Here is the report." }],
+            },
+            {
+              role: "user",
+              blocks: [
+                {
+                  type: "tool_result",
+                  tool_result: {
+                    tool_use_id: "t1",
+                    content: "artifact created: report.md",
+                    blocks: [
+                      {
+                        type: "artifact",
+                        artifact: {
+                          id: "art-1",
+                          name: "report.md",
+                          media_type: "text/markdown",
+                          size: 1024,
+                          digest: "abc123",
+                          state: "available",
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    artifactHandler: async ({ path, options }) => {
+      assert.equal(path, "/api/v1/desk/artifacts/art-1/preview");
+      assert.equal(JSON.parse(options.body).client_id, "client-1");
+      return jsonResponse({
+        id: "art-1",
+        name: "report.md",
+        media_type: "text/markdown",
+        size: 1024,
+        digest: "abc123",
+        state: "available",
+        mode: "inline",
+        content: "# Report\n\nFindings.",
+      });
+    },
+  });
+  await flush();
+  const card = harness.elements["#desk-transcript"].querySelector(".artifact-card");
+  assert.ok(card, "artifact card rendered at the producing transcript position");
+  assert.equal(card.querySelector(".artifact-name").textContent, "report.md");
+  assert.match(card.querySelector(".artifact-meta").textContent, /text\/markdown/);
+  assert.match(card.querySelector(".artifact-meta").textContent, /1\.0 KiB/);
+  const preview = card.querySelector(".artifact-preview-toggle");
+  await preview.listener("click")();
+  await flush();
+  assert.match(card.querySelector(".artifact-preview-body").textContent, /Findings/);
+});
+
+test("artifact preview falls back to download-only and stale cards are not served", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "user",
+              blocks: [
+                {
+                  type: "tool_result",
+                  tool_result: {
+                    tool_use_id: "t1",
+                    content: "created",
+                    blocks: [
+                      {
+                        type: "artifact",
+                        artifact: {
+                          id: "art-stale",
+                          name: "old.pdf",
+                          media_type: "application/pdf",
+                          size: 512,
+                          state: "stale",
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    artifactHandler: async () =>
+      jsonResponse({
+        id: "art-1",
+        name: "old.pdf",
+        media_type: "application/pdf",
+        size: 512,
+        state: "available",
+        mode: "download_only",
+        reason: "This artifact type is available for download only.",
+      }),
+  });
+  await flush();
+  const card = harness.elements["#desk-transcript"].querySelector(".artifact-card");
+  assert.ok(card, "stale artifact card rendered");
+  assert.match(card.textContent, /changed or could not be verified/);
+  assert.equal(card.querySelector(".artifact-preview-toggle"), null, "stale cards offer no actions");
+});
+
+test("streamed artifact event appends a card after the tool chips", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({}),
+      }),
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "make an artifact";
+  void message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+  harness.EventSource.instances[0].emit("tool_started", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "tool_started",
+    data: { tool_name: "write_artifact", tool_call_id: "tool-1" },
+  });
+  harness.EventSource.instances[0].emit("tool_finished", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "tool_finished",
+    data: { tool_name: "write_artifact", tool_call_id: "tool-1", is_error: false },
+  });
+  harness.EventSource.instances[0].emit("artifact", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "artifact",
+    data: {
+      artifacts: [
+        {
+          id: "art-2",
+          name: "summary.md",
+          media_type: "text/markdown",
+          size: 64,
+          digest: "def456",
+          state: "available",
+        },
+      ],
+    },
+  });
+  harness.EventSource.instances[0].emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState({ session_id: "session-1" }) },
+  });
+  await flush();
+  const card = harness.elements["#desk-transcript"].querySelector(".artifact-card");
+  assert.ok(card, "streamed artifact card rendered");
+  assert.equal(card.querySelector(".artifact-name").textContent, "summary.md");
 });
 

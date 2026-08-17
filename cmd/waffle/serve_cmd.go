@@ -19,6 +19,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/artifact"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/channel"
 	"github.com/matt-riley/waffle/internal/channel/telegram"
@@ -435,12 +436,15 @@ func serveCmdWithAdapterFactory(ctx context.Context, args []string, stderr io.Wr
 		capabilities.Now = time.Now
 		restart := dashboardRestartScheduler()
 		dashboard.RegisterRoutes(statusMux, dashboard.APIConfig{
-			Observability:   obs,
-			Security:        dashboardSecurity,
-			Hub:             dashboardHub,
-			ChatClients:     dashboardClients,
-			Idempotency:     dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
-			Projects:        project.New(st.DB),
+			Observability: obs,
+			Security:      dashboardSecurity,
+			Hub:           dashboardHub,
+			ChatClients:   dashboardClients,
+			Idempotency:   dashboard.NewIdempotencyStore(time.Now, 512, 10*time.Minute),
+			Projects:      project.New(st.DB),
+			Artifacts:     artifact.New(st.DB),
+			Previews:      operations.Previews,
+
 			Operations:      operations,
 			Schedules:       scheduleStore,
 			Memory:          ws,

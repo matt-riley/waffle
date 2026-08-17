@@ -42,6 +42,10 @@ const (
 	// LabelUntrustedMedia).
 	BlockImage    BlockType = "image"
 	BlockDocument BlockType = "document"
+	// BlockArtifact declares a file intentionally produced inside an
+	// authorized session/workspace (#480). Its payload lives in the artifact
+	// registry keyed by opaque ID; the block carries safe metadata only.
+	BlockArtifact BlockType = "artifact"
 )
 
 // SourceType discriminates BlockSource.
@@ -80,6 +84,20 @@ type Block struct {
 	Source     *BlockSource `json:"source,omitempty"`      // BlockImage, BlockDocument
 	ToolUse    *ToolUse     `json:"tool_use,omitempty"`    // BlockToolUse
 	ToolResult *ToolResult  `json:"tool_result,omitempty"` // BlockToolResult
+	Artifact   *ArtifactRef `json:"artifact,omitempty"`    // BlockArtifact
+}
+
+// ArtifactRef is the safe, persisted metadata of a declared artifact
+// (#480). ID is opaque (never a host path); Name and MediaType are display
+// metadata; Size and Digest let the Desk verify the payload before serving.
+type ArtifactRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Digest    string `json:"digest,omitempty"`
+	// State is one of artifact.States (available, stale, missing).
+	State string `json:"state,omitempty"`
 }
 
 // ToolUse is the model asking for a tool invocation.

@@ -717,6 +717,7 @@ func (c *ChatClients) emit(clientID string) func(chat.Event) {
 				InputTokens:  event.Usage.InputTokens,
 				OutputTokens: event.Usage.OutputTokens,
 			},
+			Artifacts: c.projectChatArtifacts(event.Artifacts),
 		})
 		if err != nil {
 			return
@@ -730,6 +731,23 @@ func (c *ChatClients) projectChatText(event chat.Event) string {
 		return "chat operation failed"
 	}
 	return c.redactExact(event.Text)
+}
+
+// ActiveSessionID returns the current session ID of a live browser chat
+// owner, or "" when the client is unknown or retired. Used by sibling Desk
+// surfaces (artifact preview/download, #480) to enforce that the requesting
+// owner is exactly the session that produced the resource.
+func (c *ChatClients) ActiveSessionID(clientID string) string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	client, ok := c.clients[clientID]
+	if !ok || client.isRetiring() {
+		return ""
+	}
+	return client.state.SessionID
 }
 
 // RedactExact exposes the chat exact-value redactor to sibling Desk surfaces
@@ -802,6 +820,7 @@ type dashboardChatEvent struct {
 	DurationMS int64               `json:"duration_ms,omitempty"`
 	Usage      dashboardUsage      `json:"usage,omitempty"`
 	State      *dashboardChatState `json:"state,omitempty"`
+	Artifacts  []chat.Artifact     `json:"artifacts,omitempty"`
 }
 
 type dashboardChatState struct {
@@ -831,7 +850,7 @@ type dashboardUsage struct {
 
 func dashboardEventKind(kind chat.EventKind) bool {
 	switch kind {
-	case chat.EventTextDelta, chat.EventToolStarted, chat.EventToolFinished, chat.EventNotice, chat.EventState, chat.EventTurnDone:
+	case chat.EventTextDelta, chat.EventToolStarted, chat.EventToolFinished, chat.EventNotice, chat.EventState, chat.EventTurnDone, chat.EventArtifact:
 		return true
 	default:
 		return false
@@ -925,4 +944,29 @@ func closeBackend(ctx context.Context, backend chat.Backend) {
 	closeCtx, cancel := detachedTimeoutContext(ctx, 5*time.Second)
 	defer cancel()
 	_ = backend.Close(closeCtx)
+}
+
+// projectChatArtifacts applies the Desk artifact boundary (#480): IDs must be
+// opaque identifiers (never paths), states clamp to the known lifecycle, and
+// display metadata stays as the redacted runtime projection.
+func (c *ChatClients) projectChatArtifacts(artifacts []chat.Artifact) []chat.Artifact {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	projected := make([]chat.Artifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		id := projectChatIdentifier(c.redactExact(artifact.ID))
+		if id == "" || strings.ContainsAny(id, `/:\`) {
+			continue
+		}
+		artifact.ID = id
+		artifact.ToolName = projectChatToolName(artifact.ToolName)
+		switch artifact.State {
+		case "available", "stale", "missing":
+		default:
+			artifact.State = "available"
+		}
+		projected = append(projected, artifact)
+	}
+	return projected
 }

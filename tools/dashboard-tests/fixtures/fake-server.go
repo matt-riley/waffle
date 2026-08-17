@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/artifact"
 	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/dashboard"
@@ -55,8 +56,8 @@ func main() {
 		fatal(err)
 	}
 	defer func() { _ = stateStore.Close() }()
-	// Seed the FK rows the project-context surface references (#478): the
-	// primary session and its bound open workspace.
+	// Seed the FK rows the project-context and artifact surfaces reference
+	// (#478/#480): the primary session and its bound open workspace.
 	if _, err := stateStore.DB.Exec(`INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at) VALUES ('session-primary', 'Release review', '', '')`); err != nil {
 		fatal(err)
 	}
@@ -163,7 +164,7 @@ func main() {
 
 	chatClients := dashboard.NewChatClients(
 		func(context.Context) (chat.Backend, error) {
-			return &fixtureChatBackend{sessions: sessions, skills: skills}, nil
+			return &fixtureChatBackend{sessions: sessions, skills: skills, artifacts: artifact.New(stateStore.DB)}, nil
 		},
 		entropy,
 	)
@@ -186,6 +187,8 @@ func main() {
 		ChatClients:       chatClients,
 		Idempotency:       idempotency,
 		Projects:          project.New(stateStore.DB),
+		Artifacts:         artifact.New(stateStore.DB),
+		Previews:          operations.Previews,
 		Operations:        operations,
 		Schedules:         &jobs,
 		Memory:            memoryWorkspace,
@@ -932,10 +935,11 @@ type fixtureRestart struct{}
 func (fixtureRestart) Schedule(context.Context, string) error { return nil }
 
 type fixtureChatBackend struct {
-	sessions *fixtureSessions
-	skills   *fixtureSkills
-	session  string
-	history  []llm.Message
+	sessions  *fixtureSessions
+	skills    *fixtureSkills
+	artifacts *artifact.Store
+	session   string
+	history   []llm.Message
 }
 
 func (b *fixtureChatBackend) Open(_ context.Context, options chat.OpenOptions) (chat.State, error) {
@@ -978,6 +982,33 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 	case strings.Contains(strings.ToLower(input), "wide table"):
 		assistantText = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | epsilon | zeta |\n"
 		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+	case strings.Contains(strings.ToLower(input), "artifact"):
+		emit(chat.Event{
+			Kind:       chat.EventToolStarted,
+			ToolName:   "write_artifact",
+			ToolCallID: "tool-art",
+		})
+		emit(chat.Event{
+			Kind:       chat.EventToolFinished,
+			ToolName:   "write_artifact",
+			ToolCallID: "tool-art",
+			ByteCount:  26,
+			DurationMS: 4,
+		})
+		stored, err := b.artifacts.Write(ctx, b.session, "write_artifact", "release.md", "text/markdown", []byte("# Release\n\nReady for review."))
+		if err != nil {
+			emit(chat.Event{Kind: chat.EventNotice, Text: "artifact write failed", IsError: true})
+		} else {
+			assistantText = "created artifact " + stored.Name
+			emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
+			emit(chat.Event{
+				Kind: chat.EventArtifact,
+				Artifacts: []chat.Artifact{{
+					ID: stored.ID, Name: stored.Name, MediaType: stored.MediaType,
+					Size: stored.Size, Digest: stored.Digest, State: stored.State,
+				}},
+			})
+		}
 	default:
 		assistantText = "Fixture reply"
 		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
