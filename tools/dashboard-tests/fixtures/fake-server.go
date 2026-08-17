@@ -90,7 +90,7 @@ func main() {
 	if err := os.WriteFile(filepath.Join(memoryRoot, "MEMORY.md"), []byte(memoryLine), 0o600); err != nil {
 		fatal(err)
 	}
-	notes := fixtureNotes{memoryPath: filepath.Join(memoryRoot, "MEMORY.md")}
+	notes := &fixtureNotes{memoryPath: filepath.Join(memoryRoot, "MEMORY.md")}
 	jobs := fixtureJobs{
 		{
 			ID:          "job-daily",
@@ -203,6 +203,31 @@ func main() {
 		providers.mu.Lock()
 		providers.probeFailure = r.URL.Query().Get("failure")
 		providers.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// Test-only control route: drives memory search hit/error states so
+	// rendered tests cover results, no-results, partial, and total failure
+	// (#458).
+	mux.HandleFunc("POST /api/v1/desk/test/memory-search", func(w http.ResponseWriter, r *http.Request) {
+		empty := r.URL.Query().Get("hits") == "0"
+		errState := r.URL.Query().Get("error")
+		sessions.mu.Lock()
+		sessions.searchEmpty = empty
+		sessions.searchErr = ""
+		notes.mu.Lock()
+		notes.searchEmpty = empty
+		notes.searchErr = ""
+		switch errState {
+		case "all":
+			sessions.searchErr = "fixture failure"
+			notes.searchErr = "fixture failure"
+		case "notes":
+			notes.searchErr = "fixture failure"
+		case "sessions":
+			sessions.searchErr = "fixture failure"
+		}
+		sessions.mu.Unlock()
+		notes.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
@@ -370,8 +395,10 @@ func cloneJob(job schedule.Job) *schedule.Job {
 }
 
 type fixtureSessions struct {
-	mu       sync.Mutex
-	sessions map[string]*session.Session
+	mu          sync.Mutex
+	sessions    map[string]*session.Session
+	searchEmpty bool
+	searchErr   string
 }
 
 func newFixtureSessions() *fixtureSessions {
@@ -399,10 +426,23 @@ func (s *fixtureSessions) Get(_ context.Context, id string) (*session.Session, e
 }
 
 func (s *fixtureSessions) Search(context.Context, string, int) ([]session.Hit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.searchErr != "" {
+		return nil, errors.New(s.searchErr)
+	}
 	return []session.Hit{}, nil
 }
 
 func (s *fixtureSessions) SearchSummaries(context.Context, string, int) ([]session.Hit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.searchErr != "" {
+		return nil, errors.New(s.searchErr)
+	}
+	if s.searchEmpty {
+		return []session.Hit{}, nil
+	}
 	return []session.Hit{
 		{
 			SessionID: "session-primary",
@@ -515,10 +555,21 @@ func (s *fixtureSessions) ReplaceModelAlias(_ context.Context, from, to string) 
 }
 
 type fixtureNotes struct {
-	memoryPath string
+	mu          sync.Mutex
+	memoryPath  string
+	searchEmpty bool
+	searchErr   string
 }
 
-func (n fixtureNotes) Search(context.Context, string, int) ([]memory.NoteHit, error) {
+func (n *fixtureNotes) Search(context.Context, string, int) ([]memory.NoteHit, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.searchErr != "" {
+		return nil, errors.New(n.searchErr)
+	}
+	if n.searchEmpty {
+		return []memory.NoteHit{}, nil
+	}
 	content, err := os.ReadFile(n.memoryPath)
 	if err != nil {
 		return nil, err
@@ -1291,7 +1342,7 @@ var (
 	_ dashboard.TaskScheduleStore       = (*fixtureJobs)(nil)
 	_ dashboard.SessionStore            = (*fixtureSessions)(nil)
 	_ dashboard.CapabilitySessions      = (*fixtureSessions)(nil)
-	_ dashboard.NotesSearcher           = fixtureNotes{}
+	_ dashboard.NotesSearcher           = (*fixtureNotes)(nil)
 	_ dashboard.WorksetStore            = (*fixtureWorkset)(nil)
 	_ dashboard.UsageReader             = fixtureUsage{}
 	_ dashboard.WorkspaceManager        = (*fixtureWorkspaces)(nil)

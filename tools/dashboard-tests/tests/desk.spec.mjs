@@ -1066,6 +1066,66 @@ test("posture dialog contains keyboard focus and restores the opener", async ({ 
   await expect(trigger).toBeFocused();
 });
 
+test("memory search status settles and never coexists with stale instructions", async ({ page }) => {
+  await page.goto(deskURL("memory"));
+  const status = page.locator("#memory-status");
+  await expect(status).toHaveText("Enter a search to begin.");
+
+  const query = page.getByLabel("Search turns, summaries, and notes");
+  const search = page.getByRole("button", { name: "Search memory", exact: true });
+
+  // Settled results: the count replaces the initial instruction.
+  await query.fill("release artifact");
+  await search.click();
+  await expect(status).toHaveText("2 results");
+  const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
+  await expect(note.locator(".waffle-fragment-kind")).toHaveText("Note");
+  await expect(note.locator(".waffle-fragment-excerpt")).toContainText(
+    "Use the verified release artifact.",
+  );
+  // Metadata makes source/time/session scannable on the card.
+  await expect(note.locator(".waffle-fragment-facts")).toContainText("Source ID");
+  await expect(note.locator(".waffle-fragment-facts")).toContainText("Time");
+
+  // No results is a distinct settled state, not the loading instruction.
+  await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?hits=0`);
+  try {
+    await query.fill("nothing matches this");
+    await search.click();
+    await expect(status).toHaveText("No attributed memory matched that search.");
+    await expect(page.locator("#memory-results .waffle-fragment-empty")).toContainText(
+      "No attributed memory",
+    );
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+
+  // Total failure renders a distinct actionable state.
+  await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?error=all`);
+  try {
+    await query.fill("release artifact");
+    await search.click();
+    await expect(status).toHaveText("Memory search is unavailable right now.");
+    await expect(page.locator("#memory-results .waffle-fragment-empty")).toContainText(
+      "could not be completed",
+    );
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+
+  // Partial failure keeps healthy results and names the limitation.
+  await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?error=notes`);
+  try {
+    await query.fill("release artifact");
+    await search.click();
+    await expect(status).toHaveText(
+      "1 result(s) — some memory sources are unavailable.",
+    );
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+});
+
 test("memory search attaches one source and forgets only after confirmation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the memory lifecycle once.");
   await page.goto(deskURL("memory"));
