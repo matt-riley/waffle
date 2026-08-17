@@ -2343,6 +2343,7 @@ function settleTurn(turn) {
   state.activeTurn = null;
   state.activeOperation = null;
   state.pendingTurn = null;
+  elements.composerActions?.querySelector(".retry-button")?.remove();
   setPhase(phase.idle);
   maybeDispatchFollowUp(turn);
 }
@@ -2659,6 +2660,7 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
     retry.className = "retry-button";
     retry.textContent = "Retry";
     retry.addEventListener("click", () => {
+      retry.remove();
       setStatusMessage(elements.composerStatus, "", false, "composer");
       elements.message.value = turn.text;
       state.attachments = (turn.attachments || []).slice();

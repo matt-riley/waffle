@@ -34,6 +34,130 @@ test.afterAll(async () => {
   await stopFixture(server);
 });
 
+// Every rendered test fails on unexpected console errors and page errors
+// (#469). Known benign noise is allowlisted; anything else is a regression.
+let consoleFailures = [];
+let pageerrorFailures = [];
+// Tests that intentionally trigger an error response (a validation failure,
+// an owner-only export denial, ...) opt in before doing so (#469).
+let allowedDiagnostics = [];
+
+function allowDiagnostics(...patterns) {
+  allowedDiagnostics.push(...patterns);
+}
+
+test.beforeEach(async ({ page }) => {
+  allowedDiagnostics = [];
+
+
+
+  consoleFailures = [];
+  pageerrorFailures = [];
+  page.on("console", (message) => {
+    if (message.type() !== "error" && message.type() !== "warning") {
+      return;
+    }
+    const text = message.text();
+    if (
+      text.includes("favicon") ||
+      text.includes("net::ERR_ABORTED") ||
+      text.includes("SpeechSynthesis") ||
+      text.includes("speechSynthesis")
+    ) {
+      return;
+    }
+    consoleFailures.push(`${message.type()}: ${text}`);
+  });
+  page.on("pageerror", (error) => {
+    pageerrorFailures.push(String(error));
+  });
+});
+
+test.afterEach(async () => {
+  const filtered = consoleFailures.filter(
+    (entry) => !allowedDiagnostics.some((pattern) => entry.includes(pattern)),
+  );
+  const unexpected = [
+    ...filtered.map((entry) => `console ${entry}`),
+    ...pageerrorFailures.map((entry) => `pageerror ${entry}`),
+  ];
+  if (unexpected.length > 0) {
+    throw new Error(`Unexpected page diagnostics:\n${unexpected.join("\n")}`);
+  }
+});
+
+// Obstruction detection (#469): at mobile widths the fixed bottom navigation
+// must not cover the section's last interactive content, and nothing may be
+// clipped vertically by a viewport-sized container.
+async function expectSectionObstructionFree(page, section, lastSelector) {
+  await page.goto(deskURL(section));
+  const metrics = await page.evaluate(
+    ({ lastSelector }) => {
+      const nav = document.querySelector(".desk-nav");
+      const last = document.querySelector(lastSelector);
+      const navRect = nav ? nav.getBoundingClientRect() : null;
+      const lastRect = last ? last.getBoundingClientRect() : null;
+      return {
+        viewport: window.innerHeight,
+        navTop: navRect ? navRect.top : null,
+        navHeight: navRect ? navRect.height : 0,
+        lastBottom: lastRect ? lastRect.bottom : null,
+        scrollHeight: document.documentElement.scrollHeight,
+        clientHeight: document.documentElement.clientHeight,
+      };
+    },
+    { lastSelector },
+  );
+  if (metrics.navTop !== null && metrics.lastBottom !== null) {
+    // The last interactive element must sit above the fixed nav.
+    expect(metrics.lastBottom).toBeLessThanOrEqual(metrics.navTop + 1);
+  }
+  // No viewport-sized clipping: the document may scroll, but it must be
+  // possible to reach the bottom of the content.
+  expect(metrics.scrollHeight).toBeGreaterThanOrEqual(metrics.viewport);
+}
+
+// Visual baselines (#469): the five destinations at every configured width,
+// captured on a fresh fixture so the renders are deterministic. Baselines are
+// intentional and reviewable in CI artifacts; regenerate with
+// `npx playwright test --update-snapshots` after a deliberate visual change.
+const visualSections = [
+  ["today", "today", ".today"],
+  ["tasks", "tasks", ".tasks-board"],
+  ["workspaces", "workspaces", ".workspaces-grid"],
+  ["memory", "memory", ".memory-search-panel"],
+  ["capabilities", "capabilities", "#desk-capabilities"],
+];
+
+for (const [name, section, settled] of visualSections) {
+  test(`visual baseline ${name} renders scannable and unclipped at every width`, async ({ page }) => {
+    // The obstruction probe below re-navigates; the prior page's pagehide
+    // closes the chat owner, so the reattach 404s and silently opens fresh.
+    allowDiagnostics("404", "Response Status Error Code 404");
+    await page.goto(deskURL(section));
+    if (section === "today") {
+      await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    } else if (section === "capabilities") {
+      // Panels are display:none until their tab is targeted; open Models.
+      await openCapabilityTab(page, "Models");
+      await expect(page.locator("#capability-models .capability-card").first()).toBeVisible({
+        timeout: 10_000,
+      });
+    } else {
+      await expect(page.locator(settled)).toBeVisible();
+      // Section fragments settle their async content.
+      await page.waitForTimeout(600);
+    }
+    // The rendered surface must not clip vertically or overlap the fixed nav.
+    await expectSectionObstructionFree(page, section, settled);
+    await expect(page).toHaveScreenshot(`desk-visual-${name}-${test.info().project.name}.png`, {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.005,
+    });
+  });
+}
+
 test("fixture serves the embedded Desk through the production security boundary", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the fixture contract once.");
   const response = await page.goto(deskURL("today"));
@@ -54,7 +178,7 @@ test("security boundary rejects cross-site requests and protects mutations", asy
   expect(allowed.status()).toBe(200);
   expect(allowed.headers()).toMatchObject({
     "content-security-policy":
-      "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
@@ -401,6 +525,7 @@ test("Tasks schedule advanced cron validates inline and rejects bad expressions"
   );
   await form.getByRole("button", { name: "Create schedule", exact: true }).click();
   await invalid;
+  allowDiagnostics("422", "Response Status Error Code 422");
   await expect(form.locator("[data-waffle-error='true']")).toContainText("schedule definition is invalid");
 });
 
@@ -698,6 +823,10 @@ test("Today attaches images securely, previews them, and sends them with the tur
 
 test("command palette opens everywhere, searches, and invokes existing actions", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the palette flow once.");
+  // Navigating between sections closes the chat owner on pagehide; the next
+  // Today load reattaches, finds the closed client, and silently opens fresh.
+  // The resulting 404 is the expected recovery path, not a regression.
+  allowDiagnostics("404", "Response Status Error Code 404");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const palette = page.locator("#command-palette");
@@ -808,6 +937,87 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
     getComputedStyle(document.querySelector("#desk-message")).boxShadow,
   );
   expect(ring).toContain("rgba(221, 113, 40");
+});
+
+test("Today retries a rejected turn with the same idempotency key", async ({ page }) => {
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Retry me");
+
+  // Force the fixture to fail the turn once, then restore it.
+  await page.request.post(`${baseURL}/api/v1/desk/test/turn-fail?on=1`);
+  try {
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    const retry = page.locator(".retry-button");
+    await expect(retry).toBeVisible();
+    // The failure state is explicit, not a silent hang.
+    await expect(page.locator("#desk-composer-status")).toContainText("could not be completed");
+    allowDiagnostics("400", "Bad Request");
+    // Restore the fixture so the retry succeeds, then retry in place.
+    await page.request.post(`${baseURL}/api/v1/desk/test/turn-fail?on=0`);
+    const second = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/desk/chat/turn") &&
+        response.request().method() === "POST" &&
+        response.status() === 200,
+    );
+    await retry.click();
+    await second;
+    await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
+    await expect(page.locator(".retry-button")).toHaveCount(0);
+  } finally {
+    try {
+      await page.request.post(`${baseURL}/api/v1/desk/test/turn-fail?on=0`, {
+        timeout: 5_000,
+      });
+    } catch {
+      // Best effort: the fixture still serves later tests.
+    }
+  }
+});
+
+test("Today plain Enter sends and streaming markdown renders long content", async ({ page }) => {
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+
+  // Plain Enter (no modifiers) sends the turn (#469).
+  const turn = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/v1/desk/chat/turn") &&
+      response.request().method() === "POST",
+  );
+  await message.fill("markdown please");
+  await message.press("Enter");
+  const response = await turn;
+  expect(response.status()).toBe(200);
+
+  // The streamed markdown settles into headings, code, and a table.
+  await expect(page.locator(".waffle-message h2")).toContainText("Fixture markdown");
+  await expect(page.locator(".waffle-message code").filter({ hasText: "mise" })).toBeVisible();
+  await expect(page.locator(".waffle-message table")).toContainText("figma");
+  await expect(page.locator(".waffle-message pre code")).toContainText("fmt.Println");
+  // The composer cleared for the next turn.
+  await expect(message).toHaveValue("");
+});
+
+
+test("Today slash menu completes commands and skills", async ({ page }) => {
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("/ne");
+  await expect(page.locator("#desk-slash-menu")).toBeVisible();
+  await expect(page.locator("#desk-slash-menu")).toContainText("/new");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  // Tab completes the selection; the message keeps the prefix.
+  await message.fill("/ne");
+  await page.keyboard.press("Tab");
+  await expect(message).toHaveValue("/new ");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#desk-slash-menu")).toBeHidden();
 });
 
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
@@ -1159,6 +1369,9 @@ test("conversation rows rename, pin, and delete with a named confirmation", asyn
 
 test("Today reload and navigate-away recovery returns to a usable single desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the ownership lifecycle once.");
+  // The navigate-away step closes the owner on pagehide; returning to Today
+  // reattaches, finds the closed client, and silently opens fresh (#454).
+  allowDiagnostics("404", "Response Status Error Code 404");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const before = await page.evaluate(() =>
@@ -1233,6 +1446,8 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
 
 test("Today reconnects after SSE drop without tearing down the desk", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the recovery flow once.");
+  // The route abort below deliberately refuses the stream connection.
+  allowDiagnostics("ERR_CONNECTION_REFUSED");
 
   // Gate the event stream so we can force a drop and then restore it without
   // racing Playwright unroute against an exponential backoff timer that was
@@ -1265,6 +1480,9 @@ test("Today reconnects after SSE drop without tearing down the desk", async ({ p
 
 test("session model remains scoped away from the Waffle-wide default", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful scope flow once.");
+  // The reload races the keepalive close fired on pagehide; the reattach
+  // finds the retiring client and silently opens fresh.
+  allowDiagnostics("404", "Response Status Error Code 404");
   await page.goto(deskURL("today"));
   const sessionModel = page.getByLabel("Session model");
   await expect(sessionModel).toBeEnabled();
@@ -1296,7 +1514,11 @@ test("attention task opens its persisted session at Today", async ({ page }) => 
 });
 
 test("workspace lifecycle is deterministic and dirty close remains blocked", async ({ page }) => {
-  test.skip(test.info().project.name !== "desktop", "Run the workspace lifecycle once.");
+  test.skip(
+    ["desktop", "mobile", "narrow"].includes(test.info().project.name)
+      ? false
+      : "Run the workspace lifecycle on desktop and mobile widths.",
+  );
   await page.goto(deskURL("workspaces"));
 
   const cards = page.locator(".workspace-card");
@@ -1466,6 +1688,7 @@ test("memory attach uses a session picker with stale-selection recovery", async 
   // drops the invalid option instead of leaving it resubmittable.
   await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?empty=1`);
   try {
+    allowDiagnostics("404", "Response Status Error Code 404");
     await picker.selectOption("session-primary");
     await attach.click();
     await expect(page.locator("#memory-attach-status")).toContainText(
@@ -1540,7 +1763,11 @@ test("memory search status settles and never coexists with stale instructions", 
 });
 
 test("memory search attaches one source and forgets only after confirmation", async ({ page }) => {
-  test.skip(test.info().project.name !== "desktop", "Run the memory lifecycle once.");
+  test.skip(
+    ["desktop", "mobile", "narrow"].includes(test.info().project.name)
+      ? false
+      : "Run the memory lifecycle on desktop and mobile widths.",
+  );
   await page.goto(deskURL("memory"));
 
   await page.getByLabel("Search turns, summaries, and notes").fill("release artifact");
@@ -1577,6 +1804,9 @@ test("memory search attaches one source and forgets only after confirmation", as
 
 test("keyboard navigation reaches every destination and dialog returns focus", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the keyboard flow once.");
+  // Each destination hop closes the chat owner on pagehide; the next Today
+  // visit reattaches, finds the closed client, and silently opens fresh.
+  allowDiagnostics("404", "Response Status Error Code 404");
   const destinations = [
     ["Today", "today", ".today"],
     ["Tasks", "tasks", ".tasks"],
@@ -1678,7 +1908,11 @@ test("reduced motion suppresses animation and preserves an overflow-free desk", 
 });
 
 test("skill installation stays inactive until explicit activation", async ({ page }) => {
-  test.skip(test.info().project.name !== "desktop", "Run the staged install flow once.");
+  test.skip(
+    ["desktop", "mobile", "narrow"].includes(test.info().project.name)
+      ? false
+      : "Run the staged install flow on desktop and mobile widths.",
+  );
   await page.goto(deskURL("capabilities"));
   await openCapabilityTab(page, "Skills");
   await openCapabilityDisclosure(page, "Add a skill for review");

@@ -3699,3 +3699,30 @@ test("per-turn task and reasoning modes are sent with the turn and rendered as a
   assert.equal(body.task_mode, "deep");
   assert.equal(body.reasoning_effort, "high");
 });
+
+test("a successful retry clears the stale retry control", async () => {
+  let turnCalls = 0;
+  const harness = createHarness({
+    turnHandler: async () => {
+      turnCalls += 1;
+      if (turnCalls === 1) {
+        return jsonResponse(
+          { code: "turn_rejected", message: "Turn rejected by policy." },
+          false,
+        );
+      }
+      return jsonResponse({});
+    },
+  });
+  await flush();
+  harness.elements["#desk-message"].value = "Retry me";
+  await harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  const actions = harness.elements[".composer-actions"];
+  const retry = actions.querySelector(".retry-button");
+  assert.ok(retry, "retry control appears after a rejected turn");
+  retry.listener("click")();
+  await flush();
+  assert.equal(actions.querySelector(".retry-button"), null);
+  assert.equal(turnCalls, 2);
+});
