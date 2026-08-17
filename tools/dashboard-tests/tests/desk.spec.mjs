@@ -148,7 +148,10 @@ for (const [name, section, settled] of visualSections) {
     await expect(page).toHaveScreenshot(`desk-visual-${name}-${test.info().project.name}.png`, {
       animations: "disabled",
       caret: "hide",
-      maxDiffPixelRatio: 0.005,
+      // Cross-platform font metrics shift a little text wrapping; keep the
+      // threshold tight enough to catch layout regressions but not platform
+      // font variance.
+      maxDiffPixelRatio: 0.02,
     });
   });
 }
