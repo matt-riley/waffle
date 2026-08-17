@@ -230,7 +230,7 @@
 		const showDisclosure = loaded && availableSource;
 		if (disclosure) {
 			disclosure.hidden = !showDisclosure;
-			disclosure.open = false;
+			if (!showDisclosure) disclosure.open = false;
 			disclosure.setAttribute("aria-disabled", showDisclosure ? "false" : "true");
 		}
 		if (prerequisite) {
