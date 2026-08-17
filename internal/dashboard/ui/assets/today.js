@@ -227,6 +227,7 @@ const elements = {
   dictateHint: document.querySelector("#desk-dictate-hint"),
   composerStatus: document.querySelector("#desk-composer-status"),
   model: document.querySelector("#desk-model"),
+  modelDetail: document.querySelector("#desk-model-detail"),
   modelStatus: document.querySelector("#desk-model-status"),
   skill: document.querySelector("#desk-skill"),
   skillToggle: document.querySelector("#desk-skill-toggle"),
@@ -280,6 +281,7 @@ const state = {
   sessionID: "",
   skills: [],
   modelAlias: "",
+  models: [],
   connectionLabel: "Connected",
   reconnecting: false,
   reconnectAttempts: 0,
@@ -1475,6 +1477,7 @@ function persistOwner() {
 }
 
 function renderModels(models, currentAlias) {
+  state.models = Array.isArray(models) ? models : [];
   clearNode(elements.model);
   const available = Array.isArray(models) ? models : [];
   for (const model of available) {
@@ -1483,6 +1486,9 @@ function renderModels(models, currentAlias) {
     option.textContent = model.provider
       ? `${model.alias} · ${model.provider}`
       : model.alias || "Unnamed model";
+    if (model.description) {
+      option.title = model.description;
+    }
     option.selected = Boolean(model.current) || model.alias === currentAlias;
     elements.model.appendChild(option);
   }
@@ -1493,6 +1499,43 @@ function renderModels(models, currentAlias) {
     option.selected = true;
     elements.model.appendChild(option);
   }
+  if (currentAlias) {
+    elements.model.value = currentAlias;
+  }
+  updateModelDetail();
+}
+
+// updateModelDetail renders the selected model's decision support: alias,
+// provider connection, exact upstream id, Waffle-wide roles, and any
+// operator-authored "use for" note. Missing descriptions are labelled
+// honestly rather than invented (#484).
+function updateModelDetail() {
+  if (!elements.modelDetail) {
+    return;
+  }
+  const alias = elements.model.value || "";
+  const model = (Array.isArray(state.models) ? state.models : []).find(
+    (candidate) => candidate.alias === alias,
+  );
+  const parts = [];
+  if (model) {
+    const roles = [];
+    if (model.default) roles.push("Waffle-wide default");
+    if (model.utility) roles.push("Utility model");
+    if (model.current) roles.push("This conversation");
+    if (roles.length > 0) {
+      parts.push(roles.join(" · "));
+    }
+    if (model.provider) {
+      parts.push(`${model.provider} → ${model.upstream || "upstream model"}`);
+    }
+    if (model.description) {
+      parts.push(model.description);
+    } else {
+      parts.push("No operator description configured.");
+    }
+  }
+  elements.modelDetail.textContent = parts.join(" · ");
 }
 
 function selectedSkill() {
@@ -3505,7 +3548,10 @@ if (elements.form) {
       dictation.stop({ returnFocus: true, textarea: elements.message });
     }
   });
-  elements.model.addEventListener("change", selectModel);
+  elements.model.addEventListener("change", () => {
+    updateModelDetail();
+    selectModel();
+  });
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);

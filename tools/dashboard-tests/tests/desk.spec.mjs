@@ -602,6 +602,22 @@ test("composer exposes a privacy-first dictation control with clear states", asy
   }
 });
 
+test("Today model choices explain roles and operator descriptions", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the model picker flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const detail = page.locator("#desk-model-detail");
+  await expect(detail).toContainText("Waffle-wide default", { timeout: 10_000 });
+  await expect(detail).toContainText("Utility model");
+  await expect(detail).toContainText("fixture → primary-model");
+  await expect(detail).toContainText("Everyday reasoning and tool use");
+  // Switching choices updates the explanation; the alias stays prominent in
+  // the option itself.
+  await page.getByLabel("Session model").selectOption("local");
+  await expect(detail).toContainText("fixture → local-model");
+  await expect(detail).toContainText("Fast local drafts");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

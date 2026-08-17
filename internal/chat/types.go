@@ -24,6 +24,11 @@ type Model struct {
 	Provider string `json:"provider"`
 	Upstream string `json:"upstream"`
 	Current  bool   `json:"current"`
+	// Default and Utility record the Waffle-wide roles an alias holds.
+	Default bool `json:"default,omitempty"`
+	Utility bool `json:"utility,omitempty"`
+	// Description is an optional operator-authored "use for" note (#484).
+	Description string `json:"description,omitempty"`
 }
 
 // Session is the client-visible summary of a stored chat session.

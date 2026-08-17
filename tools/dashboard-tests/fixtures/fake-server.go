@@ -1363,8 +1363,8 @@ func (b *fixtureChatBackend) state() (chat.State, error) {
 			ForkedAtSeq: b.sessionLineageSeq(),
 		},
 		Models: []chat.Model{
-			{Alias: "primary", Provider: "fixture", Upstream: "primary-model", Current: current.ModelAlias == "primary"},
-			{Alias: "local", Provider: "fixture", Upstream: "local-model", Current: current.ModelAlias == "local"},
+			{Alias: "primary", Provider: "fixture", Upstream: "primary-model", Current: current.ModelAlias == "primary", Default: true, Utility: true, Description: "Everyday reasoning and tool use."},
+			{Alias: "local", Provider: "fixture", Upstream: "local-model", Current: current.ModelAlias == "local", Description: "Fast local drafts."},
 		},
 		Skills: []chat.SkillRef{
 			{Name: "review", Description: "Review changes"},

@@ -33,6 +33,7 @@ func RedactResult(result Result, redact RedactFunc) Result {
 		result.Models[i].Alias = redact(result.Models[i].Alias)
 		result.Models[i].Provider = redact(result.Models[i].Provider)
 		result.Models[i].Upstream = redact(result.Models[i].Upstream)
+		result.Models[i].Description = redact(result.Models[i].Description)
 	}
 	for i := range result.Sessions {
 		result.Sessions[i].Title = redact(result.Sessions[i].Title)
@@ -65,6 +66,7 @@ func RedactState(state State, redact RedactFunc) State {
 		state.Models[i].Alias = redact(state.Models[i].Alias)
 		state.Models[i].Provider = redact(state.Models[i].Provider)
 		state.Models[i].Upstream = redact(state.Models[i].Upstream)
+		state.Models[i].Description = redact(state.Models[i].Description)
 	}
 	state.Skills = append([]SkillRef(nil), state.Skills...)
 	for i := range state.Skills {
