@@ -2847,3 +2847,147 @@ func TestChatRuntimeBranchRejectsInvalidBoundaryAndKeepsSession(t *testing.T) {
 		}
 	}
 }
+
+// TestChatRuntimeTurnEmitsArtifactEvent pins the streamed artifact contract
+// (#480): when a tool result declares a BlockArtifact, the turn emits one
+// artifact event with the safe projection and the declaration persists into
+// the stored turn.
+func TestChatRuntimeTurnEmitsArtifactEvent(t *testing.T) {
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	state, err := runtime.Open(ctx, chatpkg.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tool call that returns an artifact-bearing result (write_artifact shape).
+	toolUse := llm.Block{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "call-1", Name: "write_artifact", Input: json.RawMessage(`{}`)}}
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{{
+		response: llm.Response{
+			StopReason: llm.StopToolUse,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{toolUse}},
+			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+		},
+	}, {
+		response: llm.Response{
+			StopReason: llm.StopEndTurn,
+			Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}},
+			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+		},
+	}}}
+	// The second step must run the tool; route it to a registry that returns
+	// an artifact-bearing result.
+	runtime.agent.Tools = tool.NewRegistry(&runtimeArtifactTool{})
+	var events []chatpkg.Event
+	if err := runtime.Turn(ctx, "write a report", func(event chatpkg.Event) { events = append(events, event) }); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	var artifacts []chatpkg.Artifact
+	for _, event := range events {
+		if event.Kind == chatpkg.EventArtifact {
+			artifacts = event.Artifacts
+		}
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifact events = %+v, want one artifact", artifacts)
+	}
+	if artifacts[0].ID == "" || artifacts[0].Name != "report.md" || artifacts[0].MediaType != "text/markdown" {
+		t.Fatalf("artifact = %+v", artifacts[0])
+	}
+	// The declaration persists at the correct transcript position.
+	stored, err := sessions.Turns(ctx, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, msg := range stored {
+		for _, block := range msg.Blocks {
+			if block.Type != llm.BlockToolResult || block.ToolResult == nil {
+				continue
+			}
+			for _, inner := range block.ToolResult.Blocks {
+				if inner.Type == llm.BlockArtifact && inner.Artifact != nil && inner.Artifact.Name == "report.md" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("artifact declaration not persisted in the turn")
+	}
+}
+
+// runtimeArtifactTool is a scripted tool that returns an artifact-bearing
+// result without needing the artifact store.
+type runtimeArtifactTool struct{}
+
+func (runtimeArtifactTool) Def() llm.Tool {
+	return llm.Tool{Name: "write_artifact"}
+}
+
+func (runtimeArtifactTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+	return "artifact created: report.md", nil
+}
+
+func (runtimeArtifactTool) RunBlocks(_ context.Context, _ json.RawMessage) (string, []llm.Block, error) {
+	return "artifact created: report.md", []llm.Block{{
+		Type: llm.BlockArtifact,
+		Artifact: &llm.ArtifactRef{
+			ID: "art-test", Name: "report.md", MediaType: "text/markdown", Size: 9,
+			Digest: "abc", State: "available",
+		},
+	}}, nil
+}
+
+// TestChatRuntimeArtifactsNotReemittedOnLaterTurns pins that artifact events
+// are scoped to the exchange that declared them: a later plain turn must not
+// re-emit artifacts from earlier turns (#480 review).
+func TestChatRuntimeArtifactsNotReemittedOnLaterTurns(t *testing.T) {
+	ctx := context.Background()
+	runtime, _ := newRuntimeFixture(t, configuredChatModels())
+	if _, err := runtime.Open(ctx, chatpkg.OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	toolUse := llm.Block{Type: llm.BlockToolUse, ToolUse: &llm.ToolUse{ID: "call-1", Name: "write_artifact", Input: json.RawMessage(`{}`)}}
+	artifactResponse := llm.Response{
+		StopReason: llm.StopToolUse,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{toolUse}},
+		Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+	}
+	// Second provider step for the tool result loop must be an end-turn text.
+	endTurn := llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "done"}}},
+		Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+	}
+	plain := llm.Response{
+		StopReason: llm.StopEndTurn,
+		Message:    llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: "plain reply"}}},
+		Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+	}
+	runtime.agent.Tools = tool.NewRegistry(&runtimeArtifactTool{})
+	runtime.agent.Provider = &runtimeScriptedProvider{responses: []runtimeProviderStep{
+		{response: artifactResponse}, {response: endTurn}, {response: plain},
+	}}
+	var artifactEvents int
+	if err := runtime.Turn(ctx, "make an artifact", func(event chatpkg.Event) {
+		if event.Kind == chatpkg.EventArtifact {
+			artifactEvents++
+		}
+	}); err != nil {
+		t.Fatalf("first Turn: %v", err)
+	}
+	if artifactEvents != 1 {
+		t.Fatalf("artifact events after first turn = %d, want 1", artifactEvents)
+	}
+	artifactEvents = 0
+	if err := runtime.Turn(ctx, "another question", func(event chatpkg.Event) {
+		if event.Kind == chatpkg.EventArtifact {
+			artifactEvents++
+		}
+	}); err != nil {
+		t.Fatalf("second Turn: %v", err)
+	}
+	if artifactEvents != 0 {
+		t.Fatalf("artifact events re-emitted on a later turn = %d, want 0", artifactEvents)
+	}
+}

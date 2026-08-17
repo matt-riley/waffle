@@ -16,6 +16,7 @@ type RedactFunc func(string) string
 func RedactEvent(event Event, redact RedactFunc) Event {
 	event.Text = redact(event.Text)
 	event.ToolName = redact(event.ToolName)
+	event.Artifacts = RedactArtifacts(event.Artifacts, redact)
 	if event.State != nil {
 		state := RedactState(*event.State, redact)
 		event.State = &state
@@ -105,8 +106,29 @@ func RedactMessage(message llm.Message, redact RedactFunc) llm.Message {
 			// inside a block-carrying result cannot leak through projection.
 			block.ToolResult.Blocks = RedactBlocks(block.ToolResult.Blocks, redact)
 		}
+		if block.Artifact != nil {
+			ref := *block.Artifact
+			block.Artifact = &ref
+			block.Artifact.Name = redact(block.Artifact.Name)
+			block.Artifact.MediaType = redact(block.Artifact.MediaType)
+			block.Artifact.Digest = redact(block.Artifact.Digest)
+		}
 	}
 	return message
+}
+
+// RedactArtifacts returns a copy of artifact projections with every display
+// field passed through redact (#480). The opaque ID is a server-assigned
+// identifier and is left untouched so the client can still address it.
+func RedactArtifacts(artifacts []Artifact, redact RedactFunc) []Artifact {
+	out := append([]Artifact(nil), artifacts...)
+	for i := range out {
+		out[i].Name = redact(out[i].Name)
+		out[i].MediaType = redact(out[i].MediaType)
+		out[i].Digest = redact(out[i].Digest)
+		out[i].ToolName = redact(out[i].ToolName)
+	}
+	return out
 }
 
 // RedactBlocks returns a copy of blocks with every projected text field

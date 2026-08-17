@@ -12,6 +12,7 @@ import (
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/agentbuild"
 	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/artifact"
 	"github.com/matt-riley/waffle/internal/broker"
 	chatpkg "github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/chatwire"
@@ -308,9 +309,14 @@ func buildAgentWithProfileRuntime(ctx context.Context, cfg config.Config, ws mem
 // remote MCP for docker-mode groups at build (#249).
 func buildAgentWithProfileRuntimeContext(ctx context.Context, cfg config.Config, ws memory.Workspace, skills []skill.Skill, sessions *session.Store, group, profileName string, runtime *modelRuntimeResolver, remoteEgress *mcp.RemoteEgress, api apiBrokerWiring) (*agent.Agent, agentCleanupContext, error) {
 	secrets, _ := secret.TryOpen() // nil without an identity; remote MCP tokens fail closed then
+	var artifacts *artifact.Store
+	if sessions != nil && sessions.DB() != nil {
+		artifacts = artifact.New(sessions.DB())
+	}
 	builder := &agentbuild.Builder{
 		Config:       cfg,
 		Sessions:     sessions,
+		Artifacts:    artifacts,
 		Workspace:    ws,
 		Skills:       skills,
 		Runtime:      runtime,

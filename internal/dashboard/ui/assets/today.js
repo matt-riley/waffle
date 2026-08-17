@@ -888,6 +888,12 @@ function renderHistory(history) {
   let lastUserText = "";
   let index = 0;
   for (const message of history) {
+    // Artifact declarations ride on tool-result carriers, which have no
+    // visible text and are skipped below; render their cards first so they
+    // still appear at the producing transcript position (#480).
+    for (const ref of artifactRefsFromMessage(message)) {
+      elements.transcript.appendChild(renderArtifactCard(ref));
+    }
     const text = messageText(message);
     const role = message.role === "user" ? "user" : "assistant";
     if (text === "") {
@@ -906,11 +912,13 @@ function renderHistory(history) {
       lastUserText = text;
       article.dataset.branchKeep = String(index);
       attachTurnAction(article, "edit");
-    } else if (lastUserIndex >= 0) {
-      article.dataset.branchKeep = String(lastUserIndex);
-      article.dataset.promptText = lastUserText;
-      attachTurnAction(article, "regenerate");
-      attachBranchButton(article, message.seq > 0 ? String(message.seq) : "");
+    } else {
+      if (lastUserIndex >= 0) {
+        article.dataset.branchKeep = String(lastUserIndex);
+        article.dataset.promptText = lastUserText;
+        attachTurnAction(article, "regenerate");
+        attachBranchButton(article, message.seq > 0 ? String(message.seq) : "");
+      }
     }
     index += 1;
   }
@@ -1043,6 +1051,191 @@ function renderLineage(lineage) {
     : `Branched from session ${forkedFrom}`;
 }
 
+
+// artifactRefsFromMessage collects artifact declarations carried by a
+// message's tool-result blocks, in transcript order (#480).
+function artifactRefsFromMessage(message) {
+  const refs = [];
+  if (!message || !Array.isArray(message.blocks)) {
+    return refs;
+  }
+  for (const block of message.blocks) {
+    const inner = block && block.tool_result && Array.isArray(block.tool_result.blocks)
+      ? block.tool_result.blocks
+      : [];
+    for (const candidate of inner) {
+      if (candidate && candidate.type === "artifact" && candidate.artifact) {
+        refs.push(candidate.artifact);
+      }
+    }
+  }
+  return refs;
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function renderArtifactCard(ref) {
+  const card = document.createElement("article");
+  card.className = "artifact-card";
+  card.setAttribute("aria-label", `Artifact ${ref.name || ref.id || ""}`);
+  const head = document.createElement("div");
+  head.className = "artifact-head";
+  const name = document.createElement("strong");
+  name.className = "artifact-name";
+  name.textContent = ref.name || "Artifact";
+  const meta = document.createElement("span");
+  meta.className = "artifact-meta";
+  meta.textContent = [ref.media_type || "file", formatBytes(ref.size)].filter(Boolean).join(" · ");
+  head.append(name, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "artifact-actions";
+  if (ref.state && ref.state !== "available") {
+    const unavailable = document.createElement("p");
+    unavailable.className = "artifact-unavailable";
+    unavailable.textContent =
+      ref.state === "stale"
+        ? "This artifact changed or could not be verified and is not served."
+        : "This artifact is no longer available.";
+    card.append(head, unavailable);
+    return card;
+  }
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = "artifact-preview-toggle";
+  preview.textContent = "Preview";
+  preview.addEventListener("click", () => previewArtifact(ref, preview, card));
+  const download = document.createElement("button");
+  download.type = "button";
+  download.textContent = "Download";
+  download.addEventListener("click", () => downloadArtifact(ref, download));
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy reference";
+  copy.addEventListener("click", () => copyReference(ref.id || "", copy));
+  actions.append(preview, download, copy);
+  card.append(head, actions);
+  return card;
+}
+
+// previewArtifact fetches the owner-authorized preview projection and renders
+// inline text/markdown, an image content URL, or a download-only notice.
+async function previewArtifact(ref, button, card) {
+  if (button.disabled) {
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Loading";
+  let body;
+  try {
+    body = card.querySelector(".artifact-preview-body");
+    if (!body) {
+      body = document.createElement("div");
+      body.className = "artifact-preview-body";
+      card.appendChild(body);
+    }
+    body.textContent = "Loading preview…";
+    const view = await postMutation(
+      `/api/v1/desk/artifacts/${encodeURIComponent(ref.id)}/preview`,
+      { client_id: state.clientID },
+    );
+    clearNode(body);
+    if (view.mode === "inline") {
+      renderMarkdown(body, view.content || "");
+    } else if (view.mode === "content" && view.content_url) {
+      const img = document.createElement("img");
+      img.className = "artifact-image";
+      img.setAttribute("src", view.content_url);
+      img.setAttribute("alt", ref.name || "artifact preview");
+      body.appendChild(img);
+    } else {
+      const note = document.createElement("p");
+      note.className = "artifact-unavailable";
+      note.textContent =
+        view.reason || "This artifact type is available for download only.";
+      body.appendChild(note);
+    }
+  } catch {
+    if (body) {
+      clearNode(body);
+      const note = document.createElement("p");
+      note.className = "artifact-unavailable";
+      note.textContent = "Preview is unavailable for this artifact.";
+      body.appendChild(note);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = "Preview";
+  }
+}
+
+// downloadArtifact streams the verified payload through the owner-authorized
+// download endpoint and saves it under its safe name.
+async function downloadArtifact(ref, button) {
+  if (button && button.disabled) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Downloading";
+  }
+  try {
+    const response = await fetch("/api/v1/desk/artifacts/" + encodeURIComponent(ref.id) + "/download", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Waffle-Desk-Token": state.requestToken,
+        "Idempotency-Key": `download-${ref.id}-${state.clientID}`,
+      },
+      body: JSON.stringify({ client_id: state.clientID }),
+    });
+    if (!response.ok) {
+      throw new Error("download_failed");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = ref.name || "artifact";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    if (button) {
+      button.textContent = "Download failed";
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+      setTimeout(() => {
+        button.textContent = "Download";
+      }, 1500);
+    }
+  }
+}
+
+async function copyReference(id, button) {
+  const reference = id ? `artifact:${id}` : "artifact";
+  try {
+    await navigator.clipboard.writeText(reference);
+    button.textContent = "Copied";
+  } catch {
+    button.textContent = "Copy unavailable";
+  }
+  setTimeout(() => {
+    button.textContent = "Copy reference";
+  }, 1500);
+}
 function persistOwner() {
   if (!state.clientID || !state.reattachToken) {
     return;
@@ -1339,6 +1532,11 @@ function handleDeskEvent(event) {
     case "tool_finished":
       appendToolActivity(envelope.type, data);
       break;
+    case "artifact":
+      for (const ref of data.artifacts || []) {
+        elements.transcript.appendChild(renderArtifactCard(ref));
+      }
+      break;
     case "notice":
       if (data.text) {
         elements.phase.textContent = data.text;
@@ -1426,6 +1624,7 @@ function openEventStream() {
     "tool_started",
     "tool_finished",
     "notice",
+    "artifact",
     "turn_done",
   ]) {
     eventSource.addEventListener(kind, handleCurrentEvent);

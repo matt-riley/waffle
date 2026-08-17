@@ -53,3 +53,19 @@ func TestRedactMessageRunsOnTextPartsOfMixedContent(t *testing.T) {
 		t.Errorf("original mutated: %q", msg.Blocks[0].Text)
 	}
 }
+
+// TestRedactArtifactsScrubsDisplayMetadata pins the artifact boundary (#480):
+// artifact names, media types, digests, and tool names pass through the
+// exact-value redactor; the opaque ID is left for the client to address.
+func TestRedactArtifactsScrubsDisplayMetadata(t *testing.T) {
+	redact := func(s string) string { return strings.ReplaceAll(s, "sk-artifact-secret", "[redacted]") }
+	out := RedactArtifacts([]Artifact{
+		{ID: "art-1", Name: "sk-artifact-secret.md", MediaType: "text/markdown", Digest: "sk-artifact-secret", ToolName: "write_artifact"},
+	}, redact)
+	if out[0].ID != "art-1" {
+		t.Fatalf("opaque id changed: %q", out[0].ID)
+	}
+	if out[0].Name != "[redacted].md" || out[0].Digest != "[redacted]" {
+		t.Fatalf("artifact metadata = %+v", out[0])
+	}
+}

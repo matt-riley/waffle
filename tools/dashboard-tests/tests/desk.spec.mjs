@@ -482,6 +482,7 @@ test("Today renders Markdown, keyboard send, and paired tool evidence", async ({
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
+
 test("busy composer queues a visible follow-up that is held on cancel", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the queue flow once.");
   await page.goto(deskURL("today"));
@@ -614,6 +615,37 @@ test("Today attaches project context from the open workspace in place", async ({
   await expect(
     panel.locator(".project-resource").filter({ hasText: "Guidance" }),
   ).toContainText("Detach");
+});
+
+
+
+test("Today previews, downloads, and references a declared session artifact", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the artifact card flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Make an artifact");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+
+  const card = page.locator(".artifact-card");
+  await expect(card).toBeVisible();
+  await expect(card.locator(".artifact-name")).toHaveText("release.md");
+  await expect(card.locator(".artifact-meta")).toContainText("text/markdown");
+
+  await card.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(card.locator(".artifact-preview-body")).toContainText(
+    "Ready for review",
+  );
+
+  const download = page.waitForEvent("download");
+  await card.getByRole("button", { name: "Download", exact: true }).click();
+  const artifactDownload = await download;
+  expect(artifactDownload.suggestedFilename()).toBe("release.md");
+
+  await card.getByRole("button", { name: "Copy reference", exact: true }).click();
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
 test("Today exposes existing commands and resumes a recent session in place", async ({ page }) => {

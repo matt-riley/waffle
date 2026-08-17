@@ -118,31 +118,49 @@ const (
 	EventState EventKind = "state"
 	// EventTurnDone marks completion of the current model turn.
 	EventTurnDone EventKind = "turn_done"
+	// EventArtifact announces artifacts declared by the completed exchange
+	// (#480).
+	EventArtifact EventKind = "artifact"
 )
+
+// Artifact is the client-visible, redacted projection of a declared session
+// artifact (#480). ID is opaque (never a host path); Name and MediaType are
+// safe display metadata; Size and Digest let the Desk verify before serving.
+type Artifact struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Digest    string `json:"digest,omitempty"`
+	State     string `json:"state,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+}
 
 // Event is one presentation-neutral streamed backend update.
 type Event struct {
-	Kind       EventKind `json:"kind"`
-	Text       string    `json:"text"`
-	ToolName   string    `json:"tool_name"`
-	ToolCallID string    `json:"tool_call_id"`
-	IsError    bool      `json:"is_error"`
-	ByteCount  int       `json:"byte_count"`
-	DurationMS int64     `json:"duration_ms"`
-	Usage      llm.Usage `json:"usage"`
-	State      *State    `json:"state"`
+	Kind       EventKind  `json:"kind"`
+	Text       string     `json:"text"`
+	ToolName   string     `json:"tool_name"`
+	ToolCallID string     `json:"tool_call_id"`
+	IsError    bool       `json:"is_error"`
+	ByteCount  int        `json:"byte_count"`
+	DurationMS int64      `json:"duration_ms"`
+	Usage      llm.Usage  `json:"usage"`
+	State      *State     `json:"state"`
+	Artifacts  []Artifact `json:"artifacts,omitempty"`
 }
 
 type eventJSON struct {
-	Kind       EventKind `json:"kind"`
-	Text       string    `json:"text"`
-	ToolName   string    `json:"tool_name"`
-	ToolCallID string    `json:"tool_call_id"`
-	IsError    bool      `json:"is_error"`
-	ByteCount  int       `json:"byte_count"`
-	DurationMS int64     `json:"duration_ms"`
-	Usage      usageJSON `json:"usage"`
-	State      *State    `json:"state"`
+	Kind       EventKind  `json:"kind"`
+	Text       string     `json:"text"`
+	ToolName   string     `json:"tool_name"`
+	ToolCallID string     `json:"tool_call_id"`
+	IsError    bool       `json:"is_error"`
+	ByteCount  int        `json:"byte_count"`
+	DurationMS int64      `json:"duration_ms"`
+	Usage      usageJSON  `json:"usage"`
+	State      *State     `json:"state"`
+	Artifacts  []Artifact `json:"artifacts,omitempty"`
 }
 
 type usageJSON struct {
@@ -165,7 +183,8 @@ func (e Event) MarshalJSON() ([]byte, error) {
 			InputTokens:  e.Usage.InputTokens,
 			OutputTokens: e.Usage.OutputTokens,
 		},
-		State: e.State,
+		State:     e.State,
+		Artifacts: e.Artifacts,
 	})
 }
 
@@ -187,7 +206,8 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 			InputTokens:  wire.Usage.InputTokens,
 			OutputTokens: wire.Usage.OutputTokens,
 		},
-		State: wire.State,
+		State:     wire.State,
+		Artifacts: wire.Artifacts,
 	}
 	return nil
 }

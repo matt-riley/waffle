@@ -37,6 +37,15 @@ func RegisterRoutes(mux *http.ServeMux, config APIConfig) {
 	if config.ChatClients != nil && config.Idempotency != nil {
 		registerChatRoutes(mux, config)
 	}
+	if config.ChatClients != nil && config.Artifacts != nil {
+		RegisterArtifactRoutes(mux, ArtifactRouteConfig{
+			Clients:     config.ChatClients,
+			Artifacts:   config.Artifacts,
+			Previews:    config.Previews,
+			Security:    config.Security,
+			Idempotency: config.Idempotency,
+		})
+	}
 	if config.Operations != nil {
 		RegisterTaskRoutes(mux, TaskRouteConfig{
 			Operations:  config.Operations,

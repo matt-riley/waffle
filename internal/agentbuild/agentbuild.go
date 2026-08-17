@@ -26,6 +26,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/agent"
 	"github.com/matt-riley/waffle/internal/apiface"
+	"github.com/matt-riley/waffle/internal/artifact"
 	"github.com/matt-riley/waffle/internal/broker"
 	"github.com/matt-riley/waffle/internal/codeintel"
 	"github.com/matt-riley/waffle/internal/config"
@@ -64,8 +65,11 @@ type Runtime interface {
 // lifetime; Build may be called many times (serve builds one agent per
 // group/profile combination).
 type Builder struct {
-	Config    config.Config
-	Sessions  *session.Store
+	Config   config.Config
+	Sessions *session.Store
+	// Artifacts, when set, enables the session-scoped write_artifact tool
+	// (#480); nil disables artifact declaration entirely.
+	Artifacts *artifact.Store
 	Workspace memory.Workspace
 	Skills    []skill.Skill
 	// Runtime resolves and serves model calls. Must be non-nil.
@@ -398,6 +402,15 @@ func (b *Builder) Build(ctx context.Context, group, profileName string) (*agent.
 	var mcpRedactors []func(string) string
 
 	boxes := []tool.Toolbox{execTools, hostTools}
+	// The artifact declaration tool is explicit and session-scoped (#480):
+	// it persists produced files by opaque ID so the Desk can preview and
+	// download them without ever exposing host paths.
+	if b.Artifacts != nil {
+		boxes = append(boxes, tool.NewRegistry(&tool.WriteArtifact{
+			Store:     b.Artifacts,
+			SessionID: agent.SessionID,
+		}))
+	}
 	// MCP before codeintel fallback so a real language server wins on name clash.
 	// MCP servers contribute their tools (the long tail). All launches use the
 	// #77 restricted executor (ConnectRestricted / BuildProcessEnv) — never

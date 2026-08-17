@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/artifact"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/project"
@@ -26,7 +27,12 @@ type APIConfig struct {
 	Idempotency   *IdempotencyStore
 	// Projects is the workspace-scoped project context store (#478); nil
 	// disables the project surface.
-	Projects        *project.Store
+	Projects *project.Store
+	// Artifacts is the session artifact registry (#480); nil disables the
+	// artifact surface. Previews is the shared one-time token store.
+	Artifacts *artifact.Store
+	Previews  *PreviewStore
+
 	Operations      *Operations
 	Schedules       TaskScheduleStore
 	Memory          memory.Workspace

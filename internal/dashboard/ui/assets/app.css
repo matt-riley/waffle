@@ -785,6 +785,7 @@ h3 {
   color: var(--ginger-dark);
 }
 
+
 .message-edit,
 .message-regenerate {
   background: transparent;
@@ -831,6 +832,74 @@ h3 {
   color: var(--ginger-dark);
 }
 
+
+
+.artifact-card {
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.75rem;
+}
+
+.artifact-head {
+  align-items: baseline;
+  display: flex;
+  gap: 0.6rem;
+  justify-content: space-between;
+}
+
+.artifact-name {
+  font-size: 0.9rem;
+}
+
+.artifact-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.artifact-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.artifact-actions button {
+  background: var(--paper);
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+}
+
+.artifact-actions button:hover,
+.artifact-actions button:focus-visible {
+  border-color: var(--ginger-dark);
+  color: var(--ginger-dark);
+}
+
+.artifact-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.artifact-preview-body {
+  font-size: 0.82rem;
+  margin-top: 0.6rem;
+  max-height: 20rem;
+  overflow: auto;
+}
+
+.artifact-image {
+  max-height: 18rem;
+  max-width: 100%;
+}
+
+.artifact-unavailable {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0.5rem 0 0;
+}
 .retry-button {
   background: var(--paper);
   border-color: var(--ginger-dark);
