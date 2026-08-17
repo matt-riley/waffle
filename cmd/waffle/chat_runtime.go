@@ -516,8 +516,12 @@ func collectCitations(history []llm.Message) []chatpkg.Source {
 				continue
 			}
 			for _, citation := range block.Citations {
+				id := strings.TrimSpace(citation.ID)
+				if id == "" {
+					id = fmt.Sprintf("s%d", next)
+				}
 				sources = append(sources, chatpkg.Source{
-					ID:         fmt.Sprintf("s%d", next),
+					ID:         id,
 					Label:      citation.Label,
 					Kind:       string(citation.Kind),
 					URL:        citation.URL,

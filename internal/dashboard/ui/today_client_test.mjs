@@ -2919,7 +2919,9 @@ test("unsafe citation URLs and hostile schemes never become links", async () => 
                   text: "Careful.",
                   citations: [
                     { id: "s1", label: "Bad", kind: "web", url: "javascript:alert(1)" },
-                    { id: "s2", label: "Missing metadata" },
+                    { id: "s2", label: "Mail", kind: "web", url: "mailto:someone@example.com" },
+                    { id: "s3", label: "Relative", kind: "web", url: "/desk/" },
+                    { id: "s4", label: "Missing metadata" },
                   ],
                 },
               ],

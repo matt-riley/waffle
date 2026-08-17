@@ -992,14 +992,14 @@ func TestFromMessageTranslatesProviderCitations(t *testing.T) {
 		t.Fatalf("citations = %+v, want 2", citations)
 	}
 	web := citations[0]
-	if web.Kind != llm.CitationWeb || web.Label != "Waffle docs" || web.URL != "https://example.com/docs" {
+	if web.ID != "c1" || web.Kind != llm.CitationWeb || web.Label != "Waffle docs" || web.URL != "https://example.com/docs" {
 		t.Fatalf("web citation = %+v", web)
 	}
 	if web.Snippet != "the cited line" {
 		t.Fatalf("web snippet = %q", web.Snippet)
 	}
 	doc := citations[1]
-	if doc.Kind != llm.CitationWorkspace || doc.Label != "Project plan" || doc.Resource != "file_42" {
+	if doc.ID != "c2" || doc.Kind != llm.CitationWorkspace || doc.Label != "Project plan" || doc.Resource != "file_42" {
 		t.Fatalf("document citation = %+v", doc)
 	}
 	if doc.URL != "" {

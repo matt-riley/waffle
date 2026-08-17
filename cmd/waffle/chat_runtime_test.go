@@ -3030,7 +3030,7 @@ func TestChatRuntimeTurnEmitsSourcesForCompletedExchange(t *testing.T) {
 	if len(sources) != 2 {
 		t.Fatalf("sources event = %+v, want 2 sources", sources)
 	}
-	if sources[0].Label != "Waffle docs" || sources[0].URL != "https://example.com/docs" || sources[0].Kind != "web" {
+	if sources[0].ID != "c1" || sources[0].Label != "Waffle docs" || sources[0].URL != "https://example.com/docs" || sources[0].Kind != "web" {
 		t.Fatalf("web source = %+v", sources[0])
 	}
 	if sources[1].Kind != "workspace" || sources[1].Resource != "file-42" || sources[1].URL != "" {

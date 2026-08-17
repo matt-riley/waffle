@@ -548,6 +548,17 @@ function isSafeLink(href) {
   return name === "http" || name === "https" || name === "mailto";
 }
 
+// isHttpLink reports whether href is an http/https destination only. Source
+// drawers must never navigate to mailto, relative, or hostile targets (#479).
+function isHttpLink(href) {
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(href || "");
+  if (!scheme) {
+    return false;
+  }
+  const name = scheme[1].toLowerCase();
+  return name === "http" || name === "https";
+}
+
 async function copyCode(text, button) {
   try {
     if (globalThis.navigator?.clipboard?.writeText) {
@@ -1318,7 +1329,9 @@ function attachSourcesDrawer(article, sources) {
       snippet.textContent = source.snippet;
       item.appendChild(snippet);
     }
-    if (source.kind === "web" && isSafeLink(source.url)) {
+    // Web sources become links only for http/https destinations; mailto,
+    // relative, and hostile schemes render as plain workspace-style labels.
+    if (source.kind === "web" && isHttpLink(source.url)) {
       const open = document.createElement("a");
       open.className = "source-open";
       open.setAttribute("href", source.url);

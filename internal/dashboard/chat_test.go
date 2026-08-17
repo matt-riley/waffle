@@ -1521,7 +1521,7 @@ func TestChatClientProjectsSafeSources(t *testing.T) {
 	backend := &fakeChatBackend{turnEvent: chat.Event{
 		Kind: chat.EventSources,
 		Sources: []chat.Source{
-			{ID: "s1", Label: "docs " + canary, Kind: "web", URL: "https://example.com/" + canary, Snippet: "line " + canary},
+			{ID: "../secret", Label: "docs " + canary, Kind: "web", URL: "https://example.com/" + canary, Snippet: "line " + canary},
 			{ID: "s2", Label: "javascript", Kind: "web", URL: "javascript:alert(1)"},
 			{ID: "s3", Label: "plan", Kind: "workspace", URL: "/var/lib/waffle/private/plan.md", Resource: "file-42"},
 		},
@@ -1543,6 +1543,9 @@ func TestChatClientProjectsSafeSources(t *testing.T) {
 	data := string(event.Data)
 	if !strings.Contains(data, `"label":"docs [redacted]"`) {
 		t.Fatalf("web label not redacted: %s", data)
+	}
+	if !strings.Contains(data, `"id":"[redacted]"`) || strings.Contains(data, "../secret") {
+		t.Fatalf("source id not projected safely: %s", data)
 	}
 	if !strings.Contains(data, `"url":"https://example.com/[redacted]"`) {
 		t.Fatalf("web url not redacted: %s", data)

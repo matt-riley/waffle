@@ -659,7 +659,7 @@ test("Today renders a source drawer with safe destinations after a cited reply",
   await message.fill("Show sources");
   await message.press("Control+Enter");
 
-  const reply = page.locator(".waffle-message");
+  const reply = page.locator(".waffle-message").last();
   await expect(reply.locator(".message-body")).toContainText(
     "The release queue is summarized in the fixture sources.",
   );

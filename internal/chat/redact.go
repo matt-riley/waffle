@@ -93,6 +93,7 @@ func RedactMessage(message llm.Message, redact RedactFunc) llm.Message {
 		if len(block.Citations) > 0 {
 			block.Citations = append([]llm.Citation(nil), block.Citations...)
 			for i := range block.Citations {
+				block.Citations[i].ID = redact(block.Citations[i].ID)
 				block.Citations[i].Label = redact(block.Citations[i].Label)
 				block.Citations[i].URL = redact(block.Citations[i].URL)
 				block.Citations[i].Resource = redact(block.Citations[i].Resource)
@@ -156,6 +157,7 @@ func RedactBlocks(blocks []llm.Block, redact RedactFunc) []llm.Block {
 		if len(out[i].Citations) > 0 {
 			out[i].Citations = append([]llm.Citation(nil), out[i].Citations...)
 			for j := range out[i].Citations {
+				out[i].Citations[j].ID = redact(out[i].Citations[j].ID)
 				out[i].Citations[j].Label = redact(out[i].Citations[j].Label)
 				out[i].Citations[j].URL = redact(out[i].Citations[j].URL)
 				out[i].Citations[j].Resource = redact(out[i].Citations[j].Resource)

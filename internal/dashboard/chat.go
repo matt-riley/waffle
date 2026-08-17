@@ -822,6 +822,7 @@ func (c *ChatClients) projectChatSources(sources []chat.Source) []chat.Source {
 	}
 	projected := make([]chat.Source, 0, len(sources))
 	for _, source := range sources {
+		source.ID = projectChatIdentifier(c.redactExact(source.ID))
 		label := c.redactExact(source.Label)
 		if label == "" {
 			label = "Unnamed source"
