@@ -329,7 +329,7 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 				},
 			}
 			if probed && probe.Outcome != providerconfig.ProbeOutcomeSuccess {
-				item.Detail = "Re-check the connection or re-enroll the provider."
+				item.Detail, _ = capabilityProbeMessage(string(probe.Outcome))
 			}
 			item.Actions = append(item.Actions, ui.FragmentAction{ID: "connection-check-" + name, Label: "Check connection", URL: "/api/v1/desk/providers/" + url.PathEscape(name) + "/test", Target: "#capability-connections", Swap: "outerHTML"})
 			view.Items = append(view.Items, item)
