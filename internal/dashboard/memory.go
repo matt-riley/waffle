@@ -101,26 +101,33 @@ func NewMemoryService(operations *Operations, workspace memory.Workspace) *Memor
 
 // Search merges only turns, summaries, and curated notes. Every dependency is
 // queried with the same bounded overfetch before one deterministic total sort.
-func (s *MemoryService) Search(ctx context.Context, query string, limit int) ([]MemoryHit, error) {
+// Per-source failures are reported as section errors while healthy sources
+// still return results, so the Desk can distinguish partial from total
+// failure instead of showing a misleading empty state (#458).
+func (s *MemoryService) Search(ctx context.Context, query string, limit int) ([]MemoryHit, []*SectionError, error) {
 	query, err := normalizeMemoryQuery(query)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if s == nil || s.operations == nil || s.operations.Sessions == nil || s.operations.Notes == nil {
-		return nil, ErrMemoryUnavailable
+		return nil, nil, ErrMemoryUnavailable
 	}
 
+	var sectionErrors []*SectionError
 	turns, err := s.operations.Sessions.Search(ctx, query, MemorySearchLimit)
 	if err != nil {
-		return nil, fmt.Errorf("%w: turns", ErrMemoryUnavailable)
+		sectionErrors = append(sectionErrors, newSectionError("turns", err))
+		turns = nil
 	}
 	summaries, err := s.operations.Sessions.SearchSummaries(ctx, query, MemorySearchLimit)
 	if err != nil {
-		return nil, fmt.Errorf("%w: summaries", ErrMemoryUnavailable)
+		sectionErrors = append(sectionErrors, newSectionError("summaries", err))
+		summaries = nil
 	}
 	notes, err := s.operations.Notes.Search(ctx, query, MemorySearchLimit)
 	if err != nil {
-		return nil, fmt.Errorf("%w: notes", ErrMemoryUnavailable)
+		sectionErrors = append(sectionErrors, newSectionError("notes", err))
+		notes = nil
 	}
 
 	hits := make([]MemoryHit, 0, len(turns)+len(summaries)+len(notes))
@@ -163,7 +170,7 @@ func (s *MemoryService) Search(ctx context.Context, query string, limit int) ([]
 	if hits == nil {
 		hits = make([]MemoryHit, 0)
 	}
-	return hits, nil
+	return hits, sectionErrors, nil
 }
 
 // Attach resolves the source again, verifies the explicit persisted session,

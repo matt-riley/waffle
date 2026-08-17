@@ -207,3 +207,62 @@
     width: 100%;
   }
 }
+
+/* Memory result cards lead with kind, then a bounded readable excerpt. Raw
+   markers stay visible but at a lower visual weight than the content (#458). */
+.memory-hit .waffle-fragment-kind {
+  border: 1px solid var(--rule-dark);
+  background: #ffd8b9;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin: 0 0 0.6rem;
+  padding: 0.25rem 0.45rem;
+  text-transform: uppercase;
+  width: fit-content;
+}
+
+.memory-hit .waffle-fragment-facts {
+  margin: 0;
+}
+
+.memory-hit .waffle-fragment-facts dt,
+.memory-hit .waffle-fragment-facts dd {
+  font-size: 0.76rem;
+}
+
+.memory-hit .waffle-fragment-facts dd {
+  color: var(--muted);
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.waffle-fragment-excerpt {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  display: -webkit-box;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  margin: 0.65rem 0 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.waffle-fragment-expand {
+  margin: 0.65rem 0 0;
+}
+
+.waffle-fragment-expand summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.76rem;
+}
+
+.waffle-fragment-expand[open] + .waffle-fragment-excerpt {
+  -webkit-line-clamp: unset;
+}
+
+.memory-hit .memory-status + .memory-results {
+  margin-top: 0.8rem;
+}

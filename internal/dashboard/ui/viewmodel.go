@@ -27,12 +27,17 @@ type FragmentView struct {
 }
 
 type FragmentItem struct {
-	ID                     string
-	Class                  string
-	Kind                   string
-	Title                  string
-	Detail                 string
-	DetailClass            string
+	ID          string
+	Class       string
+	Kind        string
+	Title       string
+	Detail      string
+	DetailClass string
+	// Excerpt is an optional bounded readable body rendered below the item's
+	// metadata; ExcerptLong adds a native details toggle that expands the
+	// clamped text instead of hiding it (#458).
+	Excerpt                string
+	ExcerptLong            bool
 	DataTaskID             string
 	DataWorkspaceID        string
 	DataTaskName           string

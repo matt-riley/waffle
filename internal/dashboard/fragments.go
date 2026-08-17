@@ -157,11 +157,11 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 	case WorkspaceGitView:
 		return ui.FragmentList(workspaceGitFragment(typed))
 	case MemorySearchResponse:
-		query := ""
-		if r != nil {
+		query := typed.Query
+		if query == "" && r != nil {
 			query = r.URL.Query().Get("query")
 		}
-		fragment := memoryFragment(typed.Hits, query)
+		fragment := memoryFragment(typed.Hits, query, typed.Errors)
 		fragment.GetURL = "/api/v1/desk/memory?query=" + url.QueryEscape(query)
 		fragment.Trigger = "waffle:refresh from:body"
 		return ui.FragmentList(fragment)
@@ -594,16 +594,77 @@ func workspaceGitFragment(view WorkspaceGitView) ui.FragmentView {
 	return ui.FragmentView{ID: "workspace-git-" + view.WorkspaceID, Class: "workspace-git", Empty: "Git status unavailable.", Items: []ui.FragmentItem{{ID: view.WorkspaceID, Class: "workspace-git-card", Title: "Git status", Detail: detail}}}
 }
 
-func memoryFragment(hits []MemoryHit, query string) ui.FragmentView {
-	fragment := ui.FragmentView{ID: "memory-results", Class: "memory-results", Empty: "No attributed memory matched that search."}
+func memoryFragment(hits []MemoryHit, query string, sectionErrors []*SectionError) ui.FragmentView {
+	empty := "No attributed memory matched that search."
+	if len(sectionErrors) > 0 && len(hits) == 0 {
+		empty = "Memory search could not be completed right now."
+	}
+	fragment := ui.FragmentView{ID: "memory-results", Class: "memory-results", Empty: empty}
+	// The status line is swapped with every search so the initial instruction
+	// never coexists with settled results (#458).
+	fragment.TextSwaps = append(fragment.TextSwaps, ui.FragmentTextSwap{
+		ID:    "memory-status",
+		Class: "memory-status",
+		Text:  memoryStatusMessage(len(hits), sectionErrors),
+	})
 	for _, hit := range hits {
-		item := ui.FragmentItem{ID: hit.SourceID, Class: "memory-hit", Kind: hit.Source, Title: hit.Excerpt, Detail: hit.Provenance, Fields: []ui.FragmentField{{Label: "Source ID", Value: hit.SourceID}}, Actions: []ui.FragmentAction{{ID: "memory-attach-" + hit.SourceID, Label: "Attach to session", URL: "/api/v1/desk/memory/attach", Target: "#memory-attach-status", Swap: "innerHTML", Include: "#memory-session-id", Fields: []ui.FragmentField{{Label: "query", Value: query}, {Label: "source", Value: hit.Source}, {Label: "source_id", Value: hit.SourceID}}}}}
+		fields := []ui.FragmentField{
+			{Label: "Session", Value: emptyValue(hit.Provenance, "—")},
+			{Label: "Time", Value: emptyValue(memoryTimeLabel(hit.Timestamp), "—")},
+			{Label: "Source ID", Value: hit.SourceID},
+		}
+		item := ui.FragmentItem{
+			ID: hit.SourceID, Class: "memory-hit", Kind: memorySourceLabel(hit.Source),
+			Excerpt: hit.Excerpt, ExcerptLong: len(hit.Excerpt) > memoryExcerptClampBytes,
+			Fields:  fields,
+			Actions: []ui.FragmentAction{{ID: "memory-attach-" + hit.SourceID, Label: "Attach to session", URL: "/api/v1/desk/memory/attach", Target: "#memory-attach-status", Swap: "innerHTML", Include: "#memory-session-id", Fields: []ui.FragmentField{{Label: "query", Value: query}, {Label: "source", Value: hit.Source}, {Label: "source_id", Value: hit.SourceID}}}},
+		}
+		if hit.Archived {
+			item.Class += " is-archived"
+		}
 		if hit.Source == MemorySourceNote && !hit.Archived {
 			item.Actions = append(item.Actions, ui.FragmentAction{ID: "memory-forget-" + hit.SourceID, Label: "Forget…", URL: "/api/v1/desk/memory/" + url.PathEscape(hit.SourceID) + "/forget-preview", Target: "#memory-forget-dialog", Swap: "outerHTML", Fields: []ui.FragmentField{{Label: "query", Value: query}}})
 		}
 		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
+}
+
+const memoryExcerptClampBytes = 180
+
+func memoryStatusMessage(hits int, sectionErrors []*SectionError) string {
+	switch {
+	case len(sectionErrors) > 0 && hits == 0:
+		return "Memory search is unavailable right now."
+	case len(sectionErrors) > 0:
+		return fmt.Sprintf("%d result(s) — some memory sources are unavailable.", hits)
+	case hits == 0:
+		return "No attributed memory matched that search."
+	case hits == 1:
+		return "1 result"
+	default:
+		return fmt.Sprintf("%d results", hits)
+	}
+}
+
+func memoryTimeLabel(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format("2 Jan 2006 15:04")
+}
+
+func memorySourceLabel(source string) string {
+	switch source {
+	case MemorySourceNote:
+		return "Note"
+	case MemorySourceSummary:
+		return "Summary"
+	case MemorySourceTurn:
+		return "Turn"
+	default:
+		return source
+	}
 }
 
 func workspaceGitDetail(view WorkspaceGitView) string {
@@ -648,7 +709,9 @@ func formatInt64(value int64) string { return strconv.FormatInt(value, 10) }
 // Keep the response type named so both JSON and fragment paths share the same
 // public object instead of one path inventing a second payload shape.
 type MemorySearchResponse struct {
-	Hits []MemoryHit `json:"hits"`
+	Query  string          `json:"query"`
+	Hits   []MemoryHit     `json:"hits"`
+	Errors []*SectionError `json:"errors"`
 }
 
 type MemoryAttachResponse struct {

@@ -13,7 +13,15 @@ templ FragmentList(view FragmentView) {
 				if item.Kind != "" {
 					<p class="waffle-fragment-kind">{ item.Kind }</p>
 				}
-				<h3>{ item.Title }</h3>
+				if item.Title != "" {
+					<h3>{ item.Title }</h3>
+				}
+				if item.Excerpt != "" {
+					if item.ExcerptLong {
+						<details class="waffle-fragment-expand"><summary>Show full text</summary></details>
+					}
+					<p class="waffle-fragment-excerpt">{ item.Excerpt }</p>
+				}
 				if item.Detail != "" {
 					if item.DetailClass != "" {
 						<p class={ item.DetailClass }>{ item.Detail }</p>

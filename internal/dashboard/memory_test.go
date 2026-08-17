@@ -41,11 +41,11 @@ func TestMemorySearchKeepsSourceAndStableID(t *testing.T) {
 	}}
 	service := NewMemoryService(&Operations{Sessions: sessions, Notes: notes}, memory.Workspace{})
 
-	first, err := service.Search(context.Background(), "security", 20)
+	first, _, err := service.Search(context.Background(), "security", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Search(context.Background(), "security", 20)
+	second, _, err := service.Search(context.Background(), "security", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestMemorySearchCapsMergedResultsAtTwenty(t *testing.T) {
 		Notes:    &memoryNotesStore{},
 	}, memory.Workspace{})
 
-	hits, err := service.Search(context.Background(), "bounded", 200)
+	hits, _, err := service.Search(context.Background(), "bounded", 200)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestMemoryAttachNormalizesInvalidUTF8BeforeBoundingWorksetBody(t *testing.T
 		Workset:  worksets,
 	}, memory.Workspace{})
 
-	hits, err := service.Search(context.Background(), "waffle", MemorySearchLimit)
+	hits, _, err := service.Search(context.Background(), "waffle", MemorySearchLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestMemorySearchUsesPersistedSummaryUpdatedAtForNewestFirst(t *testing.T) {
 		Notes:    &memoryNotesStore{},
 	}, memory.Workspace{})
 
-	hits, err := service.Search(ctx, "security", MemorySearchLimit)
+	hits, _, err := service.Search(ctx, "security", MemorySearchLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,10 +385,12 @@ func containsString(values []string, needle string) bool {
 }
 
 type memorySessionStore struct {
-	turns     []session.Hit
-	summaries []session.Hit
-	get       map[string]*session.Session
-	err       error
+	turns        []session.Hit
+	summaries    []session.Hit
+	get          map[string]*session.Session
+	err          error
+	turnsErr     error
+	summariesErr error
 }
 
 func (s *memorySessionStore) Get(_ context.Context, id string) (*session.Session, error) {
@@ -403,11 +405,19 @@ func (s *memorySessionStore) Get(_ context.Context, id string) (*session.Session
 }
 
 func (s *memorySessionStore) Search(context.Context, string, int) ([]session.Hit, error) {
-	return append([]session.Hit(nil), s.turns...), s.err
+	err := s.turnsErr
+	if err == nil {
+		err = s.err
+	}
+	return append([]session.Hit(nil), s.turns...), err
 }
 
 func (s *memorySessionStore) SearchSummaries(context.Context, string, int) ([]session.Hit, error) {
-	return append([]session.Hit(nil), s.summaries...), s.err
+	err := s.summariesErr
+	if err == nil {
+		err = s.err
+	}
+	return append([]session.Hit(nil), s.summaries...), err
 }
 
 type memoryNotesStore struct {
@@ -458,3 +468,63 @@ func (r *countingEntropy) Read(p []byte) (int, error) {
 }
 
 var _ io.Reader = (*countingEntropy)(nil)
+
+func TestMemorySearchReportsPerSourceFailuresWithoutDroppingHealthyResults(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	sessions := &memorySessionStore{
+		summaries: []session.Hit{
+			{SessionID: "session-summary", Snippet: "healthy summary", CreatedAt: now},
+		},
+	}
+	sessions.turnsErr = errors.New("turns unavailable")
+	notes := &memoryNotesStore{err: errors.New("notes unavailable")}
+	service := NewMemoryService(&Operations{Sessions: sessions, Notes: notes}, memory.Workspace{})
+
+	hits, sectionErrors, err := service.Search(context.Background(), "healthy", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].SourceID != "session-summary" {
+		t.Fatalf("partial hits = %#v, want the healthy summary", hits)
+	}
+	if len(sectionErrors) != 2 {
+		t.Fatalf("section errors = %d, want 2 (turns + notes)", len(sectionErrors))
+	}
+
+	// Total failure: every source is down.
+	sessions.turnsErr = errors.New("down")
+	sessions.summariesErr = errors.New("down")
+	hits, sectionErrors, err = service.Search(context.Background(), "healthy", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("total failure hits = %#v, want none", hits)
+	}
+	if len(sectionErrors) != 3 {
+		t.Fatalf("total failure section errors = %d, want 3", len(sectionErrors))
+	}
+}
+
+func TestMemorySearchStatusMessages(t *testing.T) {
+	errs := []*SectionError{newSectionError("notes", errors.New("down"))}
+	cases := []struct {
+		name string
+		hits int
+		errs []*SectionError
+		want string
+	}{
+		{name: "results", hits: 3, want: "3 results"},
+		{name: "single", hits: 1, want: "1 result"},
+		{name: "none", hits: 0, want: "No attributed memory matched that search."},
+		{name: "partial", hits: 2, errs: errs, want: "2 result(s) — some memory sources are unavailable."},
+		{name: "total failure", hits: 0, errs: errs, want: "Memory search is unavailable right now."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := memoryStatusMessage(tc.hits, tc.errs); got != tc.want {
+				t.Fatalf("memoryStatusMessage(%d, %v) = %q, want %q", tc.hits, tc.errs != nil, got, tc.want)
+			}
+		})
+	}
+}

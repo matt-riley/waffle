@@ -52,12 +52,12 @@ func newMemorySearchHandler(service *MemoryService) http.Handler {
 			writeMemoryError(w, ErrMemoryInvalidQuery)
 			return
 		}
-		hits, err := service.Search(r.Context(), query[0], MemorySearchLimit)
+		hits, sectionErrors, err := service.Search(r.Context(), query[0], MemorySearchLimit)
 		if err != nil {
 			writeMemoryError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, MemorySearchResponse{Hits: hits})
+		writeJSON(w, http.StatusOK, MemorySearchResponse{Query: query[0], Hits: hits, Errors: sectionErrors})
 	})
 }
 
