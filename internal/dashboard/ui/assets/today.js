@@ -1462,8 +1462,11 @@ function renderCanonicalState(chatState, includeHistory) {
       globalThis.waffleDeskRail?.modelScopes?.session || "session",
     );
   }
-  if (includeHistory && Array.isArray(chatState.history)) {
-    renderHistory(chatState.history);
+  // An authoritative state always owns the transcript: a missing or null
+  // history means an empty session, so the previous conversation must be
+  // replaced atomically instead of being left on screen (#455).
+  if (includeHistory) {
+    renderHistory(Array.isArray(chatState.history) ? chatState.history : []);
   }
   persistOwner();
 }

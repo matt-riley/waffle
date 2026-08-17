@@ -1252,6 +1252,56 @@ test("new conversation requires explicit confirmation then replaces canonical st
   );
 });
 
+test("new conversation with an empty history atomically replaces the previous transcript", async () => {
+  // The real backend serializes a fresh session's nil history as a
+  // missing/null history, so the confirm state carries no transcript (#455).
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          session_id: "session-old",
+          title: "Old conversation",
+          history: [
+            { role: "user", blocks: [{ type: "text", text: "Previous prompt" }] },
+            { role: "assistant", blocks: [{ type: "text", text: "Previous reply" }] },
+          ],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "new" && command.args === "") {
+        return jsonResponse({ confirm: true, text: "Start over?" });
+      }
+      if (command.name === "new" && command.args === "confirm") {
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "session-new",
+            title: "Fresh desk",
+            history: null,
+          }),
+        });
+      }
+      return jsonResponse({}, false);
+    },
+  });
+  await flush();
+  assert.match(harness.elements["#desk-transcript"].textContent, /Previous reply/);
+
+  await harness.elements["#desk-new"].listener("click")();
+  await flush();
+
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh desk");
+  // The previous conversation is gone and the new session owns an empty
+  // transcript instead of inheriting the old DOM (#455).
+  assert.doesNotMatch(harness.elements["#desk-transcript"].textContent, /Previous reply/);
+  assert.match(
+    harness.elements["#desk-transcript"].textContent,
+    /The desk is ready\. What are we working on\?/,
+  );
+});
+
 test("declining new conversation confirmation preserves the current session", async () => {
   const harness = createHarness({
     confirmResult: false,
