@@ -2063,7 +2063,10 @@ func TestConnectConcurrentTunnelsShareTheSessionBudget(t *testing.T) {
 	_ = first.Close()
 
 	// After the reservation is released and the 16 bytes persisted, a new
-	// tunnel fits in the remaining allowance.
+	// tunnel fits in the remaining allowance. Persist is visible first
+	// (handleConnect records bytes, then drops the live reservation), so
+	// waiting only for the byte count races the conservative over-count
+	// window and flakes as 429 under CI load.
 	usageStore := usage.New(st)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -2079,9 +2082,18 @@ func TestConnectConcurrentTunnelsShareTheSessionBudget(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	status, third := connectThroughBroker(t, addr, "localhost:"+originPort, token)
-	defer func() { _ = third.Close() }()
-	if !strings.Contains(status, "200") {
-		t.Fatalf("CONNECT after release status = %q, want 200", status)
+	deadline = time.Now().Add(2 * time.Second)
+	var third net.Conn
+	for {
+		status, third = connectThroughBroker(t, addr, "localhost:"+originPort, token)
+		if strings.Contains(status, "200") {
+			break
+		}
+		_ = third.Close()
+		if !strings.Contains(status, "429") || time.Now().After(deadline) {
+			t.Fatalf("CONNECT after release status = %q, want 200", status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	defer func() { _ = third.Close() }()
 }
