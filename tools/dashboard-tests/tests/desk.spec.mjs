@@ -498,6 +498,36 @@ test("Today sends a streamed reply and confirms cancellation", async ({ page }) 
   await expect(cancel).toBeDisabled();
 });
 
+test("a Today prompt hands off into the reviewed schedule editor", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the handoff flow once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const message = page.getByLabel("Message Waffle");
+  await message.fill("Summarize the release queue every morning");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".user-message .message-body")).toHaveText(
+    "Summarize the release queue every morning",
+  );
+
+  // The completed user prompt exposes Create schedule; the handoff never puts
+  // the prompt text in the URL.
+  const userMessage = page.locator(".user-message").last();
+  await userMessage.getByRole("button", { name: "Create a schedule from this prompt" }).click();
+  await expect(page).toHaveURL(/section=tasks/);
+  expect(decodeURIComponent(page.url())).not.toContain("Summarize the release queue");
+
+  // Tasks opens the shared guided editor prefilled with exactly that prompt.
+  const form = page.locator("#task-schedule-form");
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Prompt")).toHaveValue("Summarize the release queue every morning");
+  await expect(form.locator("#task-schedule-summary")).toContainText("Every weekday at 09:00");
+
+  // The handoff state is consumed: reopening the dialog starts clean.
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
+  await expect(form.getByLabel("Prompt")).toHaveValue("");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

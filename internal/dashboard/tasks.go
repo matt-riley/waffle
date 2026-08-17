@@ -187,6 +187,8 @@ func (s *TasksService) Options() ScheduleOptionsView {
 
 // Preview validates one schedule draft and returns the human summary plus the
 // next run in the host timezone, with exact field errors for inline feedback.
+// The cadence summary is computed even while the draft is incomplete so the
+// guided editor can preview a schedule before the name/prompt are typed.
 func (s *TasksService) Preview(ctx context.Context, request SchedulePreviewRequest) SchedulePreviewResponse {
 	response := SchedulePreviewResponse{
 		Timezone: time.Now().Format("MST (UTC-07:00)"),
@@ -199,6 +201,12 @@ func (s *TasksService) Preview(ctx context.Context, request SchedulePreviewReque
 	if err != nil {
 		for key, message := range scheduleValidationFieldErrors(err, request) {
 			response.Errors[key] = message
+		}
+		// Incomplete name/prompt still preview cadence so the guided
+		// editor can show the next run while the operator types.
+		if schedule.ValidateCron(request.Cron) == nil {
+			response.Human = schedule.DescribeCron(request.Cron)
+			response.NextRun = schedule.NextRun(request.Cron, time.Now()).Format(time.RFC3339)
 		}
 		return response
 	}
