@@ -593,7 +593,6 @@ func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitV
 		// Truthful human empty states: never a blank definition row (#462).
 		fields := []ui.FragmentField{
 			{Label: "Profile", Value: emptyValue(workspace.Profile, "No profile")},
-			{Label: "Session", Value: emptyValue(workspace.SessionID, "No active session")},
 			{Label: "Network", Value: emptyValue(workspace.Egress, "No network")},
 		}
 		item := ui.FragmentItem{ID: workspace.ID, DataWorkspaceID: workspace.ID, Class: "workspace-card", Kind: workspace.Status, Title: workspace.Repository, Fields: fields}
@@ -601,13 +600,12 @@ func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitV
 			item.DetailClass = "workspace-git"
 			item.Detail = workspaceGitDetail(status)
 		}
-		if workspace.Status == "open" || workspace.Status == "idle" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
-		}
 		if workspace.Status == "open" {
+			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
 			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Idle", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/idle", Target: "#workspaces-list", Swap: "innerHTML"})
 		}
 		if workspace.Status == "idle" {
+			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
 			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Resume", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/resume", Target: "#workspaces-list", Swap: "innerHTML"})
 		}
 		if workspace.SessionID != "" {
@@ -622,7 +620,7 @@ func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitV
 }
 
 func workspaceSummaryLabel(summary map[string]int) string {
-	order := []string{"open", "idle", "attention", "closed"}
+	order := []string{"open", "idle", "failed", "closed"}
 	parts := make([]string, 0, len(order))
 	for _, status := range order {
 		count := summary[status]

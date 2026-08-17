@@ -1027,11 +1027,11 @@ test("workspace cards lead with truthful metadata and distinct actions", async (
 
   const clean = page.locator("[data-workspace-id='workspace-clean']");
   await expect(clean).toBeVisible();
-  // Metadata is ordered and truthful: profile and active session are shown,
-  // opaque IDs stay secondary and copyable.
+  // Metadata is ordered and truthful: profile is primary, opaque IDs stay
+  // secondary and copyable.
   await expect(clean.locator(".waffle-fragment-facts")).toContainText("Profile");
   await expect(clean.locator(".waffle-fragment-facts")).toContainText("reviewer");
-  await expect(clean.locator(".waffle-fragment-facts")).toContainText("session-primary");
+  await expect(clean.locator(".waffle-fragment-facts")).not.toContainText("session-primary");
   const copySession = clean.getByRole("button", { name: "Copy session ID", exact: true });
   await expect(copySession).toBeVisible();
   await copySession.click();
