@@ -777,6 +777,39 @@ test("per-turn task and reasoning modes are honest and persist on the turn", asy
   await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
 });
 
+test("the shared visual system keeps hierarchy, density, and focus readable", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the visual system once.");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  // The conversation is the strongest surface on Today.
+  const tokens = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const conversation = getComputedStyle(document.querySelector(".conversation"));
+    const context = getComputedStyle(document.querySelector(".task-context"));
+    const send = getComputedStyle(document.querySelector("#desk-send"));
+    return {
+      tokenRadius: root.getPropertyValue("--radius-card").trim(),
+      conversationRadius: conversation.borderRadius,
+      contextShadow: context.boxShadow,
+      sendBackground: send.backgroundColor,
+      focusRing: root.getPropertyValue("--focus-ring").trim(),
+    };
+  });
+  expect(tokens.tokenRadius).not.toBe("");
+  expect(tokens.conversationRadius).not.toBe("0px");
+  expect(tokens.focusRing).toContain("221 113 40");
+  // The primary send is the orange personality button; the side context is
+  // a quieter surface.
+  expect(tokens.sendBackground).toBe("rgb(221, 113, 40)");
+  expect(tokens.contextShadow).toBe("none");
+  // Keyboard focus is visibly ringed.
+  await page.getByLabel("Message Waffle").focus();
+  const ring = await page.evaluate(() =>
+    getComputedStyle(document.querySelector("#desk-message")).boxShadow,
+  );
+  expect(ring).toContain("rgba(221, 113, 40");
+});
+
 test("Today replaces the previous transcript when starting a new conversation", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the stateful chat flow once.");
   await page.goto(deskURL("today"));

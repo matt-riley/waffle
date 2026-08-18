@@ -2241,3 +2241,115 @@ h3 {
   font-family: SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.72rem;
 }
+
+/* Visual system (#468): shared tokens and a calmer chrome that keeps the
+   cream/ink/orange identity while flattening the hierarchy so the live
+   information reads first. */
+:root {
+  --radius-card: 8px;
+  --radius-control: 6px;
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.9rem;
+  --space-lg: 1.5rem;
+  --surface-strong: #fffaf0;
+  --surface-soft: #faf4e8;
+  --focus-ring: 0 0 0 3px rgb(221 113 40 / 35%);
+  --shadow-soft: 0 1px 2px rgb(33 29 25 / 8%);
+  --shadow-card: 0 1px 3px rgb(33 29 25 / 10%), 0 4px 14px rgb(33 29 25 / 6%);
+}
+
+body {
+  background: #efe6d6;
+}
+
+button,
+select,
+textarea,
+input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])) {
+  border-radius: var(--radius-control);
+}
+
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: 0;
+}
+
+/* Action hierarchy: one primary, quiet secondary/utility, and separated
+   destructive treatment across sections. */
+.action-primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.action-quiet {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.action-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Cards and panels: softer edges, rounded corners, lighter elevation. */
+.conversation,
+.task-context,
+.capability-panel,
+.tasks-board,
+.schedule-editor,
+.memory-search-panel,
+.memory-attach-panel,
+.workspace-card,
+.memory-hit,
+.profile-card,
+.task-card {
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  border-width: 1px;
+}
+
+.panel-heading {
+  border-bottom-color: var(--rule);
+}
+
+/* Today gives the conversation itself the strongest visual weight. */
+.today-columns .conversation {
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-card), 0 0 0 1px rgb(221 113 40 / 18%);
+}
+
+.today-columns .task-context {
+  background: var(--surface-soft);
+  box-shadow: none;
+}
+
+/* Denser forms and metadata. */
+.waffle-fragment-facts dd,
+.workspace-card .waffle-fragment-facts dd,
+.memory-hit .waffle-fragment-facts dd {
+  font-size: 0.82rem;
+}
+
+.task-card,
+.capability-card,
+.workspace-card,
+.memory-hit {
+  padding: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  select,
+  textarea,
+  input {
+    transition-duration: 0.01ms !important;
+  }
+}
