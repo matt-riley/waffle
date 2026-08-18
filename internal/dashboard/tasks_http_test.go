@@ -466,8 +466,17 @@ func TestTaskMutationProductionStoreDeadlineLeavesScheduleUnchanged(t *testing.T
 		t.Fatal("deadline mutation published an event")
 	}
 	replay := serveTaskUpdateID(handler, security, context.Background(), "production-deadline", job.ID)
-	if replay.Code != rec.Code || !bytes.Equal(replay.Body.Bytes(), rec.Body.Bytes()) {
-		t.Fatalf("replay = %d %q, want %d %q", replay.Code, replay.Body.Bytes(), rec.Code, rec.Body.Bytes())
+	// A non-committed mutation is not cached as terminal: a same-key retry
+	// re-runs and commits now that the production store lock is free (#469).
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay = %d %q, want 200 re-run", replay.Code, replay.Body.String())
+	}
+	stored, err = schedules.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != "Edited" {
+		t.Fatalf("retried mutation did not commit: %+v", stored)
 	}
 }
 

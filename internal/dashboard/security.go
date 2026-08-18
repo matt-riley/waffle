@@ -14,7 +14,10 @@ import (
 	"strings"
 )
 
-const contentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+// contentSecurityPolicy is deny-by-default. img-src additionally permits
+// data:/blob: so the Desk's local attachment previews render — the bytes are
+// the user's own files on the same machine and never leave it (#469/#473).
+const contentSecurityPolicy = "default-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 // tailnetServePort is the port `tailscale serve --https=443` answers on, and so
 // the port implied by a proxied Host header that carries no explicit port.

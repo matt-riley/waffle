@@ -264,10 +264,8 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 	case "models":
 		view.ID = "capability-models"
 		view.Empty = "No model aliases are enrolled."
-		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
-			ID: "capability-models-summary", Class: "capability-summary",
-			Text: modelsSummaryLabel(snapshot),
-		})
+		view.SummaryID = "capability-models-summary"
+		view.SummaryText = modelsSummaryLabel(snapshot)
 		aliases := make([]string, 0, len(snapshot.Providers.Models))
 		for alias := range snapshot.Providers.Models {
 			aliases = append(aliases, alias)
@@ -297,10 +295,8 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 	case "skills":
 		view.ID = "capability-skills"
 		view.Empty = "No reviewed skills are installed."
-		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
-			ID: "capability-skills-summary", Class: "capability-summary",
-			Text: skillsSummaryLabel(snapshot.Skills),
-		})
+		view.SummaryID = "capability-skills-summary"
+		view.SummaryText = skillsSummaryLabel(snapshot.Skills)
 		for _, skill := range snapshot.Skills {
 			status := "inactive"
 			if skill.Active {
@@ -327,17 +323,15 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 			}
 			view.Items = append(view.Items, item)
 		}
-		view.TextSwaps = append(view.TextSwaps,
-			ui.FragmentTextSwap{ID: "capability-skill-local-help", Text: capabilitySourceHelp("Allowed local roots", snapshot.SkillSources.LocalRoots), Source: "local", Available: len(snapshot.SkillSources.LocalRoots) > 0},
-			ui.FragmentTextSwap{ID: "capability-skill-git-help", Text: capabilitySourceHelp("Allowed Git hosts", snapshot.SkillSources.GitHosts), Source: "git", Available: len(snapshot.SkillSources.GitHosts) > 0},
+		view.Footers = append(view.Footers,
+			ui.FragmentTextSwap{ID: "capability-skill-local-help", Class: "skill-source-help", Text: capabilitySourceHelp("Allowed local roots", snapshot.SkillSources.LocalRoots), Source: "local", Available: len(snapshot.SkillSources.LocalRoots) > 0},
+			ui.FragmentTextSwap{ID: "capability-skill-git-help", Class: "skill-source-help", Text: capabilitySourceHelp("Allowed Git hosts", snapshot.SkillSources.GitHosts), Source: "git", Available: len(snapshot.SkillSources.GitHosts) > 0},
 		)
 	case "connections":
 		view.ID = "capability-connections"
 		view.Empty = "No enrolled connections."
-		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
-			ID: "capability-connections-summary", Class: "capability-summary",
-			Text: connectionsSummaryLabel(snapshot),
-		})
+		view.SummaryID = "capability-connections-summary"
+		view.SummaryText = connectionsSummaryLabel(snapshot)
 		connections := make([]string, 0, len(snapshot.Providers.Providers))
 		for name := range snapshot.Providers.Providers {
 			connections = append(connections, name)

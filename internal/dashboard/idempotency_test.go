@@ -159,3 +159,34 @@ func TestIdempotencyStoreDoesNotEvictInFlightEntry(t *testing.T) {
 	close(release)
 	<-done
 }
+
+func TestIdempotencyStoreRetriesFailedMutationWithSameKey(t *testing.T) {
+	store := NewIdempotencyStore(nil, 512, 10*time.Minute)
+	calls := 0
+	run := func(context.Context) (int, []byte) {
+		calls++
+		if calls == 1 {
+			return http.StatusBadRequest, []byte(`{"code":"turn_failed"}`)
+		}
+		return http.StatusOK, []byte(`{"ok":true}`)
+	}
+
+	status, _, err := store.Do(context.Background(), "key", "POST /api/v1/desk/chat/turn", "digest", run)
+	if err != nil {
+		t.Fatalf("first Do() error = %v", err)
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("first Do() status = %d, want 400", status)
+	}
+	// The failure is not cached as terminal: the same key re-runs.
+	status, body, err := store.Do(context.Background(), "key", "POST /api/v1/desk/chat/turn", "digest", run)
+	if err != nil {
+		t.Fatalf("retry Do() error = %v", err)
+	}
+	if status != http.StatusOK || string(body) != `{"ok":true}` {
+		t.Fatalf("retry Do() = %d %q, want the re-run result", status, body)
+	}
+	if calls != 2 {
+		t.Errorf("callback calls = %d, want 2 (failure must be retryable)", calls)
+	}
+}
