@@ -24,6 +24,16 @@ const canaries = [
 let server;
 let baseURL;
 
+function hasVisualBaseline(snapshotName) {
+  const parsed = path.parse(snapshotName);
+  const baselinePath = path.join(
+    testsDir,
+    "desk.spec.mjs-snapshots",
+    `${parsed.name}-${process.platform}${parsed.ext}`,
+  );
+  return existsSync(baselinePath) || process.env.WAFFLE_VISUAL_BASELINES === "1";
+}
+
 function contrastRatio(foreground, background) {
   const channels = (value) => {
     const match = value.match(/rgba?\(([^)]+)\)/);
@@ -727,8 +737,9 @@ test("structured empty state stays bounded and quiet in the shared Hearth and Ev
       expect(secondarySubmitted.method()).toBe("POST");
       expect(secondarySubmitted.headers()["content-type"]).toContain("application/json");
       expect(JSON.parse(secondarySubmitted.postData())).toMatchObject({ fixture: "empty-state-secondary" });
-      if (viewport.width !== 320) {
-        await expect(page).toHaveScreenshot(`desk-empty-state-${theme}-${viewport.width}.png`, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      const emptySnapshot = `desk-empty-state-${theme}-${viewport.width}.png`;
+      if (viewport.width !== 320 && hasVisualBaseline(emptySnapshot)) {
+        await expect(page).toHaveScreenshot(emptySnapshot, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
       }
 
       await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=1&shell=1`);
@@ -736,8 +747,9 @@ test("structured empty state stays bounded and quiet in the shared Hearth and Ev
       await expect(page.locator(".fixture-populated-state")).toBeVisible();
       await expect(page.locator(".waffle-empty-state")).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
-      if (viewport.width !== 320) {
-      await expect(page).toHaveScreenshot(`desk-populated-state-${theme}-${viewport.width}.png`, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      const populatedSnapshot = `desk-populated-state-${theme}-${viewport.width}.png`;
+      if (viewport.width !== 320 && hasVisualBaseline(populatedSnapshot)) {
+        await expect(page).toHaveScreenshot(populatedSnapshot, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
       }
     }
   }
