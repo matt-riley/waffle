@@ -20,9 +20,12 @@ type FragmentView struct {
 	Status      string
 	GetURL      string
 	Trigger     string
+	SummaryID   string
+	SummaryText string
 	Items       []FragmentItem
 	OptionLists []FragmentOptionList
 	TextSwaps   []FragmentTextSwap
+	Footers     []FragmentTextSwap
 	Filters     []FragmentFilter
 }
 

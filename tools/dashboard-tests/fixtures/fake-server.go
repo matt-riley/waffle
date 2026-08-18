@@ -180,9 +180,10 @@ func main() {
 	// recoverable ownership conflict so rendered tests can exercise the
 	// Desk recovery flow (#454).
 	sessionLock := &atomic.Bool{}
+	turnFail := &atomic.Bool{}
 	chatClients := dashboard.NewChatClients(
 		func(context.Context) (chat.Backend, error) {
-			return &fixtureChatBackend{sessions: sessions, skills: skills, artifacts: artifact.New(stateStore.DB), sessionLock: sessionLock}, nil
+			return &fixtureChatBackend{sessions: sessions, skills: skills, artifacts: artifact.New(stateStore.DB), sessionLock: sessionLock, turnFail: turnFail}, nil
 		},
 		entropy,
 	)
@@ -197,6 +198,10 @@ func main() {
 	obs.MarkSchedulerTick()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/desk/test/turn-fail", func(w http.ResponseWriter, r *http.Request) {
+		turnFail.Store(r.URL.Query().Get("on") != "0")
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /api/v1/desk/test/lock-latest", func(w http.ResponseWriter, r *http.Request) {
 		sessionLock.Store(r.URL.Query().Get("on") != "0")
 		w.WriteHeader(http.StatusNoContent)
@@ -1069,6 +1074,7 @@ type fixtureChatBackend struct {
 	history     []llm.Message
 	temporary   bool
 	sessionLock *atomic.Bool
+	turnFail    *atomic.Bool
 }
 
 // fixtureSessionActiveError mirrors the real runtime's recoverable ownership
@@ -1100,6 +1106,9 @@ func (b *fixtureChatBackend) Open(_ context.Context, options chat.OpenOptions) (
 }
 
 func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(chat.Event)) error {
+	if b.turnFail.Load() {
+		return errors.New("fixture turn failed")
+	}
 	if strings.Contains(strings.ToLower(input), "wait") {
 		<-ctx.Done()
 		emit(chat.Event{Kind: chat.EventTurnDone})

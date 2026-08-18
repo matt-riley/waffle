@@ -149,15 +149,24 @@ func (s *IdempotencyStore) do(
 
 	s.mu.Lock()
 	if rec, ok := s.entries.get(key); ok && rec.Value.ready == ready {
-		completed := rec.Value
-		completed.status = status
-		completed.body = append([]byte(nil), body...)
-		completed.ready = nil
-		s.entries.put(key, ttlRecord[idempotencyValue]{
-			Value:     completed,
-			ExpiresAt: s.now().Add(s.ttl),
-			Sticky:    false,
-		})
+		if status >= http.StatusOK && status < http.StatusMultipleChoices {
+			// Committed: cache as the terminal, replayable response so a
+			// lost-response retry sees the same outcome.
+			completed := rec.Value
+			completed.status = status
+			completed.body = append([]byte(nil), body...)
+			completed.ready = nil
+			s.entries.put(key, ttlRecord[idempotencyValue]{
+				Value:     completed,
+				ExpiresAt: s.now().Add(s.ttl),
+				Sticky:    false,
+			})
+		} else {
+			// The mutation did not commit: drop the entry so a retry with
+			// the same key re-runs instead of replaying the failure. This is
+			// the Desk's official recovery contract (#469).
+			s.entries.delete(key)
+		}
 		close(ready)
 	}
 	s.mu.Unlock()

@@ -2,6 +2,9 @@ package ui
 
 templ FragmentList(view FragmentView) {
 	<div id={ view.ID } class={ view.Class } data-waffle-fragment="true" if view.GetURL != "" { hx-get={ view.GetURL } hx-trigger={ view.Trigger } hx-target="this" hx-swap="outerHTML" }>
+		if view.SummaryText != "" {
+			<p class="capability-summary" id={ view.SummaryID } aria-live="polite">{ view.SummaryText }</p>
+		}
 		if view.Status != "" {
 			<p class="waffle-fragment-status" role="status">{ view.Status }</p>
 		}
@@ -69,6 +72,9 @@ templ FragmentList(view FragmentView) {
 					</div>
 				}
 			</article>
+		}
+		for _, footer := range view.Footers {
+			<p id={ footer.ID } class={ footer.Class } data-waffle-skill-source={ footer.Source } data-waffle-source-available={ fragmentBool(footer.Available) }>{ footer.Text }</p>
 		}
 	</div>
 	for _, options := range view.OptionLists {
