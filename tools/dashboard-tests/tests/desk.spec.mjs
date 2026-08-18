@@ -703,20 +703,62 @@ test("structured empty state stays bounded and quiet in the shared Hearth and Ev
   expect(darkCanvas).not.toBe(lightCanvas);
 });
 
-test("structured empty state remains reachable at 200 percent zoom", async ({ page }) => {
+test("structured empty state reflows at an honest 200 percent zoom equivalent", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the explicit zoom contract once.");
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0&shell=1`);
+  const before = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    clientWidth: document.documentElement.clientWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+    maxWidth200: window.matchMedia("(max-width: 200px)").matches,
+  }));
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
-  await expectNoHorizontalOverflow(page);
+  // A 200% browser zoom gives a 375px physical viewport roughly 188 CSS px
+  // wide. Device metrics emulation applies that layout viewport directly;
+  // page-scale-factor alone changes compositor scale without reflowing CSS.
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 188,
+    height: 406,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 375,
+    screenHeight: 812,
+  });
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
+  const after = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    clientWidth: document.documentElement.clientWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+    maxWidth200: window.matchMedia("(max-width: 200px)").matches,
+  }));
+  expect(after.innerWidth).toBeLessThan(before.innerWidth);
+  expect(after.innerHeight).toBeLessThan(before.innerHeight);
+  expect(after.clientWidth).toBe(after.innerWidth);
+  expect(after.visualViewportWidth).toBe(after.innerWidth);
+  expect(after.maxWidth200).toBe(true);
+  expect(before.maxWidth200).toBe(false);
+  const overflow = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    clientWidth: document.documentElement.clientWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+  }));
+  expect(overflow.documentScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
+  expect(overflow.bodyScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
+  const primary = page.locator(".waffle-empty-state .action-primary");
+  await primary.scrollIntoViewIfNeeded();
   const metrics = await page.locator(".waffle-empty-state").evaluate((empty) => {
+    const region = empty.getBoundingClientRect();
     const image = empty.querySelector("img").getBoundingClientRect();
     const primary = empty.querySelector(".action-primary").getBoundingClientRect();
     const nav = document.querySelector(".desk-navigation").getBoundingClientRect();
     return {
+      region: { left: region.left, right: region.right },
       image: { width: image.width, height: image.height, right: image.right },
-      primary: { top: primary.top, bottom: primary.bottom, right: primary.right },
+      primary: { left: primary.left, top: primary.top, bottom: primary.bottom, right: primary.right },
       nav: { top: nav.top, bottom: nav.bottom },
       viewport: { width: window.innerWidth, height: window.innerHeight },
       scrollWidth: document.documentElement.scrollWidth,
@@ -724,10 +766,58 @@ test("structured empty state remains reachable at 200 percent zoom", async ({ pa
   });
   expect(metrics.image.width).toBeLessThanOrEqual(320);
   expect(metrics.image.height).toBeLessThanOrEqual(320);
+  expect(metrics.region.left).toBeGreaterThanOrEqual(0);
+  expect(metrics.region.right).toBeLessThanOrEqual(metrics.viewport.width);
+  expect(metrics.primary.left).toBeGreaterThanOrEqual(0);
   expect(metrics.primary.right).toBeLessThanOrEqual(metrics.viewport.width);
   expect(metrics.primary.top).toBeGreaterThanOrEqual(0);
   expect(metrics.primary.bottom).toBeLessThanOrEqual(metrics.nav.top + 1);
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewport.width);
+});
+
+test("compact Today opens at the top while preserving message focus", async ({ page }) => {
+  test.skip(!["tablet", "mobile", "narrow"].includes(test.info().project.name), "Run the compact initial-state contract on tablet and mobile widths.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const metrics = await page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const bounds = element.getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right };
+    };
+    const main = document.querySelector("main");
+    const columns = document.querySelector(".today-columns");
+    return {
+      activeElement: document.activeElement?.id || "",
+      mainScrollTop: main?.scrollTop ?? 0,
+      columnsScrollTop: columns?.scrollTop ?? 0,
+      main: rect("main"),
+      today: rect(".today"),
+      columns: rect(".today-columns"),
+      conversation: rect(".conversation"),
+      transcript: rect("#desk-transcript"),
+      context: rect(".task-context"),
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(metrics.activeElement).toBe("desk-message");
+  expect(metrics.mainScrollTop).toBe(0);
+  expect(metrics.columnsScrollTop).toBe(0);
+  expect(metrics.columns).not.toBeNull();
+  expect(metrics.conversation).not.toBeNull();
+  expect(metrics.transcript).not.toBeNull();
+  expect(metrics.context).not.toBeNull();
+  expect(metrics.conversation.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
+  expect(metrics.transcript.top).toBeGreaterThanOrEqual(metrics.conversation.top - 1);
+  expect(metrics.context.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
+  expect(metrics.today.top).toBeGreaterThanOrEqual(metrics.main.top - 1);
+  expect(metrics.today.bottom).toBeGreaterThan(metrics.columns.top);
+  expect(metrics.columns.top).toBeGreaterThanOrEqual(0);
+  expect(metrics.columns.bottom).toBeGreaterThan(metrics.columns.top);
 });
 
 // Visual baselines (#469): the five destinations at every configured width,
@@ -2940,8 +3030,25 @@ test("200 percent zoom preserves keyboard-discoverable content", async ({ page }
   test.skip(test.info().project.name !== "desktop", "Run the explicit zoom gate once.");
   await page.setViewportSize({ width: 735, height: 500 });
   await page.goto(deskURL("today"));
+  const before = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+  }));
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 368,
+    height: 250,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 735,
+    screenHeight: 500,
+  });
+  const after = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+  }));
+  expect(after.innerWidth).toBeLessThan(before.innerWidth);
+  expect(after.visualViewportWidth).toBe(after.innerWidth);
 
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeAttached();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();

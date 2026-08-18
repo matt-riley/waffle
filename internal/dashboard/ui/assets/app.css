@@ -145,7 +145,7 @@ html {
 body {
   height: 100%;
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   overflow-x: hidden;
 }
 
@@ -1873,6 +1873,7 @@ h3 {
     flex-direction: column;
     min-height: 0;
     overflow-y: auto;
+    scroll-padding-bottom: calc(var(--desk-navigation-clearance) + var(--desk-action-height));
   }
 
   .composer textarea {
