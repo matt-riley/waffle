@@ -1,17 +1,110 @@
 :root {
+  /* Keep the shipped brand values. Map semantics onto them. */
   --cream: #f4eddf;
   --paper: #fffaf0;
   --ink: #211d19;
   --muted: #746b61;
   --ginger: #dd7128;
   --ginger-dark: #9d421f;
+  --ginger-light: #f5c579;
   --healthy: #2f7d55;
   --danger: #b83a32;
-  --danger-text: #f3d8cf;
+  --danger-surface: #f3d8cf;
+  --danger-text: #6f302c;
+  --success-surface: #e2efd8;
+  --success-border: #5f7f46;
+  --success-text: #3d5a26;
+  --warning-surface: #f7ddbf;
+  --warning-border: #c98957;
+  --warning-text: #7a4b0e;
+  --surface-code: #eadfce;
+  --surface-memory-source: #ffd8b9;
+  --surface-memory-archive: #e4ddd4;
   --rule: #d7c9b7;
   --rule-dark: #aa9985;
-  --shadow: 3px 3px 0 var(--ink);
+  --rail-rule: #6c6259;
+  --hairline: var(--rule);
+  --message-rule: rgb(221 113 40 / 45%);
+  --overlay: rgb(33 29 25 / 55%);
+  --overlay-strong: rgb(33 29 25 / 45%);
+  --overlay-black: rgb(0 0 0 / 45%);
+  --shadow-menu: 0 4px 12px rgb(0 0 0 / 15%);
   --ease-desk: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --surface-canvas: var(--cream);
+  --surface-card: var(--paper);
+  --surface-strong: var(--paper);
+  --surface-soft: #faf4e8;
+  --surface-sidebar: var(--ink);
+  --surface-user: var(--warning-surface);
+  --text-primary: var(--ink);
+  --text-muted: var(--muted);
+  --text-sidebar: var(--cream);
+  --text-on-accent: var(--ink);
+  --text-on-code: var(--paper);
+  --text-danger: var(--danger-text);
+  --border-default: var(--rule-dark);
+  --border-focus: var(--ginger);
+  --border-user: var(--warning-border);
+  --focus-ring-color: var(--ginger-dark);
+  --accent-halo: 0 0 0 1px rgb(221 113 40 / 18%);
+  --radius-card: 8px;
+  --radius-control: 6px;
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.9rem;
+  --space-lg: 1.5rem;
+  --focus-ring: 0 0 0 3px var(--focus-ring-color);
+  --shadow-soft: 0 1px 2px rgb(33 29 25 / 8%);
+  --shadow-card: 0 1px 3px rgb(33 29 25 / 10%), 0 4px 14px rgb(33 29 25 / 6%);
+  --shadow: var(--shadow-soft);
+}
+
+/* Contrast notes: --ink on --cream is 14.37:1 and on --paper is 16.09:1;
+   --ink on the evening canvas is 15.37:1 and on raised paper is 14.17:1;
+   --ginger-dark is used for light focus rings (at least 5.9:1), while
+   --ginger-light is used on evening ground (11.57:1); dark --danger is
+   #f3a199 on the evening canvas (9.12:1). */
+html[data-theme="dark"] {
+  --cream: #17130f;
+  --paper: #211b15;
+  --ink: #f2e9dc;
+  --muted: #c4b2a0;
+  --ginger-dark: #f0a267;
+  --healthy: #9ac7a5;
+  --danger: #f3a199;
+  --danger-surface: #43211e;
+  --danger-text: #ffb5ab;
+  --success-surface: #213b2b;
+  --success-border: #8fb99a;
+  --success-text: #b7e0bd;
+  --warning-surface: #3f2b1c;
+  --warning-border: #c98a4f;
+  --warning-text: #f5c579;
+  --surface-code: #100d0b;
+  --surface-memory-source: #4d2b1b;
+  --surface-memory-archive: #342e28;
+  --rule: #45382b;
+  --rule-dark: #775e4a;
+  --rail-rule: #554638;
+  --message-rule: rgb(245 197 121 / 55%);
+  --overlay: rgb(0 0 0 / 55%);
+  --overlay-strong: rgb(0 0 0 / 45%);
+  --overlay-black: rgb(0 0 0 / 60%);
+  --shadow-menu: 0 4px 12px rgb(0 0 0 / 40%);
+  --surface-strong: var(--paper);
+  --surface-soft: #2a2018;
+  --surface-sidebar: #0f0d0b;
+  --text-sidebar: var(--ink);
+  --text-on-accent: #211d19;
+  --text-on-code: var(--ink);
+  --text-danger: var(--danger-text);
+  --border-focus: var(--ginger-light);
+  --border-user: #ab6c3f;
+  --focus-ring-color: var(--ginger-light);
+  --accent-halo: 0 0 0 1px rgb(245 197 121 / 28%);
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 40%);
 }
 
 * {
@@ -19,8 +112,8 @@
 }
 
 html {
-  background: var(--cream);
-  color: var(--ink);
+  background: var(--surface-canvas);
+  color: var(--text-primary);
   font-family: "Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif;
   height: 100%;
 }
@@ -50,14 +143,14 @@ button,
 select,
 textarea,
 input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])) {
-  border: 1px solid var(--ink);
-  border-radius: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
 }
 
 button {
-  background: var(--paper);
-  box-shadow: 2px 2px 0 var(--ink);
-  color: var(--ink);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-primary);
   cursor: pointer;
   min-height: 2.75rem;
   padding: 0.65rem 0.9rem;
@@ -70,7 +163,7 @@ button {
 
 button:hover:not(:disabled) {
   transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--ink);
+  box-shadow: var(--shadow-soft);
 }
 
 button:active:not(:disabled) {
@@ -89,8 +182,8 @@ input:disabled {
 select,
 textarea,
 input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"])) {
-  background: var(--paper);
-  color: var(--ink);
+  background: var(--surface-card);
+  color: var(--text-primary);
   max-width: 100%;
   min-height: 2.75rem;
   padding: 0.75rem;
@@ -104,7 +197,7 @@ textarea {
 }
 
 :focus-visible {
-  outline: 3px solid var(--ginger);
+  outline: 3px solid var(--focus-ring-color);
   outline-offset: 3px;
 }
 
@@ -122,8 +215,8 @@ textarea {
 }
 
 .skip-link {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
   left: 0.75rem;
   padding: 0.65rem 0.85rem;
   position: fixed;
@@ -143,8 +236,8 @@ textarea {
 }
 
 .desk-navigation {
-  background: var(--ink);
-  color: var(--cream);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
@@ -177,11 +270,11 @@ textarea {
 .section-links a[aria-current="page"],
 .section-links a:hover {
   background: var(--ginger);
-  color: var(--ink);
+  color: var(--text-on-accent);
 }
 
 .rail-status {
-  border-top: 1px solid #6c6259;
+  border-top: 1px solid var(--rail-rule);
   display: grid;
   gap: 0.4rem;
   margin-top: auto;
@@ -221,13 +314,13 @@ code,
 }
 
 .rail-status code {
-  color: var(--cream);
+  color: var(--text-sidebar);
   overflow-wrap: anywhere;
 }
 
 .rail-status[data-connection-state="disconnected"] #rail-connection,
 .rail-status[data-connection-state="degraded"] #rail-connection {
-  color: var(--danger-text);
+  color: var(--text-danger);
 }
 
 main {
@@ -342,7 +435,7 @@ h3 {
 
 .stale-banner {
   align-items: center;
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border: 1px solid var(--danger);
   display: flex;
   gap: 1rem;
@@ -357,7 +450,7 @@ h3 {
 }
 
 .stale-banner span {
-  color: #6f302c;
+  color: var(--danger-text);
   font-size: 0.85rem;
 }
 
@@ -411,7 +504,7 @@ h3 {
 }
 
 .message-list {
-  border-left: 1px solid rgba(221, 113, 40, 0.45);
+  border-left: 1px solid var(--message-rule);
   display: grid;
   flex: 1;
   gap: 0.8rem;
@@ -481,7 +574,7 @@ h3 {
 }
 
 .message-body code {
-  background: #eadfce;
+  background: var(--surface-code);
   border: 1px solid var(--rule);
   font-family: SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.86em;
@@ -522,7 +615,7 @@ h3 {
 }
 
 .message-body th {
-  background: #eadfce;
+  background: var(--surface-code);
   font-weight: 700;
 }
 
@@ -570,8 +663,8 @@ h3 {
 }
 
 .user-message .message-body {
-  background: #f7ddbf;
-  border-color: #c98957;
+  background: var(--surface-user);
+  border-color: var(--border-user);
   white-space: pre-wrap;
 }
 
@@ -631,7 +724,7 @@ h3 {
 }
 
 .tool-chip.is-success {
-  border-color: #477d56;
+  border-color: var(--success-border);
 }
 
 .tool-chip.is-error {
@@ -660,7 +753,7 @@ h3 {
 .slash-menu {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 3px 3px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   display: grid;
   max-height: 14rem;
   overflow-y: auto;
@@ -840,7 +933,7 @@ h3 {
 
 
 .artifact-card {
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--hairline);
   border-radius: 6px;
   margin: 0.6rem 0;
   padding: 0.6rem 0.75rem;
@@ -870,7 +963,7 @@ h3 {
 
 .artifact-actions button {
   background: var(--paper);
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--hairline);
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.72rem;
@@ -906,7 +999,7 @@ h3 {
   margin: 0.5rem 0 0;
 }
 .sources-drawer {
-  border-top: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  border-top: 1px solid var(--hairline);
   margin-top: 0.6rem;
   padding-top: 0.4rem;
 }
@@ -1067,6 +1160,7 @@ h3 {
 
 .send-button {
   background: var(--ginger);
+  color: var(--text-on-accent);
   font-weight: 700;
 }
 
@@ -1181,7 +1275,7 @@ h3 {
   background: var(--cream);
   border: 1px solid var(--rule-dark);
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-menu);
   min-width: 10rem;
   padding: 0.25rem;
   position: absolute;
@@ -1209,7 +1303,7 @@ h3 {
 
 .session-menu-item:hover,
 .session-menu-item:focus-visible {
-  background: #eadfce;
+  background: var(--surface-code);
   border-color: var(--rule-dark);
   outline: none;
 }
@@ -1273,7 +1367,7 @@ h3 {
 }
 
 .session-choice.is-selected {
-  background: #eadfce;
+  background: var(--surface-code);
   border-color: var(--ginger-dark);
 }
 
@@ -1379,7 +1473,7 @@ h3 {
 }
 
 .tasks-attention {
-  background: #f7ddbf;
+  background: var(--warning-surface);
   border: 1px solid var(--ginger-dark);
   font-size: 0.8rem;
   margin: 0;
@@ -1387,9 +1481,9 @@ h3 {
 }
 
 .tasks-attention.is-error {
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border-color: var(--danger);
-  color: #6f302c;
+  color: var(--danger-text);
 }
 
 .task-filters {
@@ -1410,9 +1504,9 @@ h3 {
 }
 
 .tasks-errors {
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border: 1px solid var(--danger);
-  color: #6f302c;
+  color: var(--danger-text);
   margin-bottom: 1rem;
   padding: 0.75rem 0.9rem;
 }
@@ -1430,7 +1524,7 @@ h3 {
 #task-schedule-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-height: calc(100vh - 2rem);
   max-width: min(34rem, calc(100vw - 2rem));
@@ -1440,7 +1534,7 @@ h3 {
 }
 
 #task-schedule-dialog::backdrop {
-  background: rgb(33 29 25 / 55%);
+  background: var(--overlay);
 }
 
 #task-schedule-dialog .schedule-editor {
@@ -1562,7 +1656,7 @@ h3 {
 .task-card-actions a {
   background: var(--ginger);
   border: 1px solid var(--ink);
-  box-shadow: 2px 2px 0 var(--ink);
+  box-shadow: var(--shadow-soft);
   min-height: 2.75rem;
   padding: 0.7rem 0.85rem;
   text-decoration: none;
@@ -1649,7 +1743,7 @@ h3 {
     min-height: 100dvh;
     /* Reserve the fixed navigation's full height plus the device safe-area
        inset so every section's last row can scroll clear of the bar (#467). */
-    padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
   }
 
   .desk-shell[data-active-section="today"] main,
@@ -1713,7 +1807,7 @@ h3 {
   .conversation {
     /* Leave the composer (and its slash menu) fully visible above the fixed
        navigation plus the device safe-area inset (#467). */
-    min-height: calc(100dvh - 8.75rem - 4.75rem - env(safe-area-inset-bottom, 0px));
+    min-height: calc(100dvh - 8.75rem - 7.5rem - env(safe-area-inset-bottom, 0px));
   }
 
   .composer,
@@ -1721,7 +1815,7 @@ h3 {
     /* scrollIntoView and keyboard focus stop the composer (and the focused
        textarea inside it) clear of the fixed bar instead of docking it
        underneath (#467). */
-    scroll-margin-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+    scroll-margin-bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
   }
 
   .message-list {
@@ -1764,7 +1858,7 @@ h3 {
 
   .conversation,
   .task-context {
-    box-shadow: 2px 2px 0 var(--ink);
+    box-shadow: var(--shadow-card);
     padding: 1rem 0.8rem;
   }
 
@@ -1811,7 +1905,7 @@ h3 {
 }
 
 .project-form {
-  border-top: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  border-top: 1px solid var(--hairline);
   display: grid;
   gap: 0.3rem;
   margin-top: 0.6rem;
@@ -1829,7 +1923,7 @@ h3 {
 
 .project-form input[type="text"],
 .project-form textarea {
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--hairline);
   border-radius: 4px;
   flex: 1;
   font-size: 0.75rem;
@@ -1839,7 +1933,7 @@ h3 {
 
 .project-form button {
   background: var(--paper);
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--hairline);
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.72rem;
@@ -1872,7 +1966,7 @@ h3 {
 
 .project-resource button {
   background: var(--paper);
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--hairline);
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.7rem;
@@ -1959,7 +2053,7 @@ h3 {
 
 .schedule-field-errors {
   border: 1px solid var(--danger);
-  color: #6f302c;
+  color: var(--danger-text);
   font-size: 0.8rem;
   margin: 0.6rem 0 0;
   padding: 0.45rem 0.6rem;
@@ -2007,7 +2101,7 @@ h3 {
 }
 
 .dictate-button.is-listening {
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border-color: var(--danger);
   color: var(--danger);
   font-weight: 700;
@@ -2034,9 +2128,9 @@ h3 {
 }
 
 .temporary-badge {
-  background: #f7ddbf;
+  background: var(--warning-surface);
   border: 1px solid var(--ginger-dark);
-  color: #7a4b0e;
+  color: var(--warning-text);
   font-size: 0.74rem;
   margin: 0;
   padding: 0.3rem 0.5rem;
@@ -2109,7 +2203,7 @@ h3 {
 /* Command palette (#477): a global Ctrl/Cmd+K surface backed by existing
    Desk actions and canonical command metadata. */
 .command-palette {
-  background: rgb(33 29 25 / 45%);
+  background: var(--overlay-strong);
   inset: 0;
   padding: 4rem 1rem 1rem;
   position: fixed;
@@ -2119,7 +2213,7 @@ h3 {
 .palette-box {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   margin: 0 auto;
   max-width: 34rem;
   padding: 0.8rem;
@@ -2175,7 +2269,7 @@ h3 {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  color: var(--ink);
+  color: var(--text-primary);
   display: flex;
   gap: 0.6rem;
   justify-content: space-between;
@@ -2186,8 +2280,8 @@ h3 {
 
 .palette-item:hover,
 .palette-item:focus {
-  background: var(--cream);
-  outline: 1px solid var(--ginger);
+  background: var(--surface-canvas);
+  outline: 1px solid var(--border-focus);
 }
 
 .palette-item-label {
@@ -2228,6 +2322,23 @@ h3 {
   width: fit-content;
 }
 
+.theme-control {
+  color: var(--text-sidebar);
+  display: grid;
+  font-size: 0.72rem;
+  font-weight: 700;
+  gap: 0.35rem;
+}
+
+.theme-control select {
+  background: var(--surface-sidebar);
+  border-color: var(--rail-rule);
+  color: var(--text-sidebar);
+  min-height: 2.5rem;
+  padding: 0.45rem 0.55rem;
+  width: 100%;
+}
+
 @media (max-width: 768px) {
   .palette-open {
     display: none;
@@ -2242,25 +2353,8 @@ h3 {
   font-size: 0.72rem;
 }
 
-/* Visual system (#468): shared tokens and a calmer chrome that keeps the
-   cream/ink/orange identity while flattening the hierarchy so the live
-   information reads first. */
-:root {
-  --radius-card: 8px;
-  --radius-control: 6px;
-  --space-xs: 0.25rem;
-  --space-sm: 0.5rem;
-  --space-md: 0.9rem;
-  --space-lg: 1.5rem;
-  --surface-strong: #fffaf0;
-  --surface-soft: #faf4e8;
-  --focus-ring: 0 0 0 3px rgb(221 113 40 / 35%);
-  --shadow-soft: 0 1px 2px rgb(33 29 25 / 8%);
-  --shadow-card: 0 1px 3px rgb(33 29 25 / 10%), 0 4px 14px rgb(33 29 25 / 6%);
-}
-
 body {
-  background: #efe6d6;
+  background: var(--surface-canvas);
 }
 
 button,
@@ -2282,9 +2376,9 @@ a:focus-visible {
 /* Action hierarchy: one primary, quiet secondary/utility, and separated
    destructive treatment across sections. */
 .action-primary {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
+  background: var(--surface-sidebar);
+  border-color: var(--surface-sidebar);
+  color: var(--text-sidebar);
 }
 
 .action-quiet {
@@ -2323,7 +2417,7 @@ a:focus-visible {
 /* Today gives the conversation itself the strongest visual weight. */
 .today-columns .conversation {
   background: var(--surface-strong);
-  box-shadow: var(--shadow-card), 0 0 0 1px rgb(221 113 40 / 18%);
+  box-shadow: var(--shadow-card), var(--accent-halo);
 }
 
 .today-columns .task-context {

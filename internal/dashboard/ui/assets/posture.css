@@ -1,7 +1,7 @@
 #desk-posture-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-height: calc(100vh - 2rem);
   max-width: min(46rem, calc(100vw - 2rem));
@@ -11,7 +11,7 @@
 }
 
 #desk-posture-dialog::backdrop {
-  background: rgb(0 0 0 / 45%);
+  background: var(--overlay-black);
 }
 
 .posture-header {

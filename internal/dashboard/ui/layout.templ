@@ -11,6 +11,7 @@ templ Shell(view ShellView) {
 			if view.ActiveSection != "today" {
 				@HtmxAssets(view)
 			}
+			<script src={ AssetURL("theme-boot.js", view.AssetVersion) }></script>
 			<link rel="stylesheet" href={ AssetURL("app.css", view.AssetVersion) }/>
 			<script type="module" src={ AssetURL("app.js", view.AssetVersion) }></script>
 			if view.ActiveSection == "workspaces" {

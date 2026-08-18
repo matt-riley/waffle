@@ -83,7 +83,7 @@
 #profile-review-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-height: calc(100vh - 2rem);
   max-width: min(46rem, calc(100vw - 2rem));
@@ -93,7 +93,7 @@
 }
 
 #profile-review-dialog::backdrop {
-  background: rgb(0 0 0 / 45%);
+  background: var(--overlay-black);
 }
 
 /* Before and after sit side by side on a wide desk and stack on a narrow one,
@@ -172,7 +172,7 @@
 }
 
 .policy-change.is-narrowed dt {
-  color: #3d5a26;
+  color: var(--success-text);
 }
 
 .policy-change.is-widened dt {
@@ -185,6 +185,6 @@
 }
 
 .posture-note.is-narrowing {
-  color: #3d5a26;
+  color: var(--success-text);
   font-weight: 700;
 }

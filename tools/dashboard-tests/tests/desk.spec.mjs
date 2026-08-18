@@ -935,7 +935,7 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   });
   expect(tokens.tokenRadius).not.toBe("");
   expect(tokens.conversationRadius).not.toBe("0px");
-  expect(tokens.focusRing).toContain("221 113 40");
+  expect(tokens.focusRing).toContain("#9d421f");
   // The primary send is the orange personality button; the side context is
   // a quieter surface.
   expect(tokens.sendBackground).toBe("rgb(221, 113, 40)");
@@ -945,7 +945,54 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   const ring = await page.evaluate(() =>
     getComputedStyle(document.querySelector("#desk-message")).boxShadow,
   );
-  expect(ring).toContain("rgba(221, 113, 40");
+  expect(ring).toMatch(/rgb\(157, 66, 31/);
+});
+
+test("the shared theme contract paints light and dark without a flash", async ({ page }) => {
+  const project = test.info().project.name;
+  test.skip(!["desktop", "mobile"].includes(project), "Run the theme contract at desktop and mobile sizes.");
+  allowDiagnostics("404 (Not Found)");
+
+  await page.setViewportSize(
+    project === "desktop"
+      ? { width: 1414, height: 786 }
+      : { width: 375, height: 812 },
+  );
+
+  const cases = [
+    { stored: "light", colorScheme: "light", theme: "light", canvas: "rgb(244, 237, 223)", rail: "rgb(33, 29, 25)" },
+    { stored: "system", colorScheme: "dark", theme: "dark", canvas: "rgb(23, 19, 15)", rail: "rgb(15, 13, 11)" },
+    { stored: "dark", colorScheme: "light", theme: "dark", canvas: "rgb(23, 19, 15)", rail: "rgb(15, 13, 11)" },
+  ];
+
+  for (const themeCase of cases) {
+    await page.addInitScript(({ stored }) => {
+      localStorage.setItem("waffle.desk.theme", stored);
+    }, { stored: themeCase.stored });
+    await page.emulateMedia({ colorScheme: themeCase.colorScheme });
+    await page.goto(deskURL("today"));
+
+    const rendered = await page.evaluate(() => {
+      const html = getComputedStyle(document.documentElement);
+      const rail = getComputedStyle(document.querySelector(".desk-navigation"));
+      const send = getComputedStyle(document.querySelector("#desk-send"));
+      return {
+        theme: document.documentElement.dataset.theme,
+        preference: document.documentElement.dataset.themePreference,
+        canvas: html.backgroundColor,
+        rail: rail.backgroundColor,
+        send: send.backgroundColor,
+      };
+    });
+    expect(rendered).toEqual({
+      theme: themeCase.theme,
+      preference: themeCase.stored,
+      canvas: themeCase.canvas,
+      rail: themeCase.rail,
+      send: "rgb(221, 113, 40)",
+    });
+    await expect(page.getByLabel("Theme")).toHaveValue(themeCase.stored);
+  }
 });
 
 test("Today retries a rejected turn with the same idempotency key", async ({ page }) => {
