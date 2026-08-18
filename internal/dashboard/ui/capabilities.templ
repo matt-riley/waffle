@@ -30,6 +30,7 @@ templ Capabilities() {
 				<header>
 					<h2 id="capability-models-title">Choose where Waffle thinks</h2>
 				</header>
+				<p class="capability-summary" id="capability-models-summary" aria-live="polite"></p>
 				<div id="capability-models" class="capability-list" hx-get="/api/v1/desk/capabilities?part=models" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 				<details class="capability-disclosure">
 					<summary>Set default and utility models</summary>
@@ -90,6 +91,7 @@ templ Capabilities() {
 				<header>
 					<h2 id="capability-skills-title">Reviewed skills</h2>
 				</header>
+				<p class="capability-summary" id="capability-skills-summary" aria-live="polite"></p>
 				<div id="capability-skills" class="capability-list" hx-get="/api/v1/desk/capabilities?part=skills" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 				<p id="capability-skill-stage-prerequisite" class="capability-form-status" role="status" aria-live="polite" hidden></p>
 				<details class="capability-disclosure" id="capability-skill-import-disclosure" aria-disabled="true" hidden>
@@ -121,6 +123,7 @@ templ Capabilities() {
 					<h2 id="capability-connections-title">Tools &amp; connections</h2>
 				</header>
 				<p class="scope-note"><strong>Connection health only.</strong> Credentials, endpoints, commands, environment, and tool policy details stay private. Provider removal is previewed first and stays blocked while model aliases reference the connection.</p>
+				<p class="capability-summary" id="capability-connections-summary" aria-live="polite"></p>
 				<div id="capability-connections" class="capability-list connection-list" hx-get="/api/v1/desk/capabilities?part=connections" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
 				<details class="capability-disclosure">
 					<summary>Enroll a provider</summary>

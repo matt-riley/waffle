@@ -264,6 +264,10 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 	case "models":
 		view.ID = "capability-models"
 		view.Empty = "No model aliases are enrolled."
+		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
+			ID: "capability-models-summary", Class: "capability-summary",
+			Text: modelsSummaryLabel(snapshot),
+		})
 		aliases := make([]string, 0, len(snapshot.Providers.Models))
 		for alias := range snapshot.Providers.Models {
 			aliases = append(aliases, alias)
@@ -293,6 +297,10 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 	case "skills":
 		view.ID = "capability-skills"
 		view.Empty = "No reviewed skills are installed."
+		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
+			ID: "capability-skills-summary", Class: "capability-summary",
+			Text: skillsSummaryLabel(snapshot.Skills),
+		})
 		for _, skill := range snapshot.Skills {
 			status := "inactive"
 			if skill.Active {
@@ -326,6 +334,10 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 	case "connections":
 		view.ID = "capability-connections"
 		view.Empty = "No enrolled connections."
+		view.TextSwaps = append(view.TextSwaps, ui.FragmentTextSwap{
+			ID: "capability-connections-summary", Class: "capability-summary",
+			Text: connectionsSummaryLabel(snapshot),
+		})
 		connections := make([]string, 0, len(snapshot.Providers.Providers))
 		for name := range snapshot.Providers.Providers {
 			connections = append(connections, name)
@@ -492,6 +504,67 @@ func connectionLastCheckLabel(probe ConnectionProbe, probed bool) string {
 	default:
 		return probe.CheckedAt.Format("2006-01-02 15:04")
 	}
+}
+
+// modelsSummaryLabel summarises the current Waffle-wide roles above the
+// dense alias inventory so defaults are scannable without reading every row
+// (#466).
+func modelsSummaryLabel(snapshot CapabilitiesSnapshot) string {
+	parts := make([]string, 0, 3)
+	if snapshot.Providers.DefaultModel != "" {
+		parts = append(parts, "Default: "+snapshot.Providers.DefaultModel)
+	}
+	if snapshot.Providers.UtilityModel != "" {
+		parts = append(parts, "Utility: "+snapshot.Providers.UtilityModel)
+	}
+	if len(snapshot.Providers.Models) > 0 {
+		parts = append(parts, fmt.Sprintf("%d aliases", len(snapshot.Providers.Models)))
+	}
+	if len(parts) == 0 {
+		return "No model roles are set."
+	}
+	return strings.Join(parts, " · ")
+}
+
+func skillsSummaryLabel(skills []CapabilitySkill) string {
+	active := 0
+	for _, skill := range skills {
+		if skill.Active {
+			active++
+		}
+	}
+	if len(skills) == 0 {
+		return "No reviewed skills are installed."
+	}
+	return fmt.Sprintf("%d skills · %d active", len(skills), active)
+}
+
+func connectionsSummaryLabel(snapshot CapabilitiesSnapshot) string {
+	healthy := 0
+	attention := 0
+	for name := range snapshot.Providers.Providers {
+		probe, probed := snapshot.Probes[name]
+		if !probed {
+			attention++
+			continue
+		}
+		if probe.Outcome == providerconfig.ProbeOutcomeSuccess {
+			healthy++
+		} else {
+			attention++
+		}
+	}
+	if len(snapshot.Providers.Providers) == 0 {
+		return "No connections are enrolled."
+	}
+	summary := fmt.Sprintf("%d connections", len(snapshot.Providers.Providers))
+	if healthy > 0 {
+		summary += fmt.Sprintf(" · %d healthy", healthy)
+	}
+	if attention > 0 {
+		summary += fmt.Sprintf(" · %d need attention", attention)
+	}
+	return summary
 }
 
 // tasksAttentionLabel renders the settled attention chip truthfully: the

@@ -320,3 +320,28 @@ func TestWorkspaceSummaryLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestCapabilitySummaries(t *testing.T) {
+	models := CapabilitiesSnapshot{Providers: providerconfig.Listing{Models: map[string]providerconfig.ModelSummary{}}}
+	models.Providers.DefaultModel = "primary"
+	models.Providers.UtilityModel = "primary"
+	models.Providers.Models = map[string]providerconfig.ModelSummary{
+		"primary": {Provider: "fixture", Model: "m1"},
+		"local":   {Provider: "fixture", Model: "m2"},
+	}
+	got := modelsSummaryLabel(models)
+	if got != "Default: primary · Utility: primary · 2 aliases" {
+		t.Fatalf("models summary = %q", got)
+	}
+	skills := skillsSummaryLabel([]CapabilitySkill{{Name: "a", Active: true}, {Name: "b"}})
+	if skills != "2 skills · 1 active" {
+		t.Fatalf("skills summary = %q", skills)
+	}
+	conns := connectionsSummaryLabel(CapabilitiesSnapshot{
+		Providers: providerconfig.Listing{Providers: map[string]providerconfig.ProviderSummary{"a": {}}},
+		Probes:    map[string]ConnectionProbe{"a": {Outcome: providerconfig.ProbeOutcomeSuccess}},
+	})
+	if conns != "1 connections · 1 healthy" {
+		t.Fatalf("connections summary = %q", conns)
+	}
+}
