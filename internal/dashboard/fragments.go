@@ -285,10 +285,21 @@ func capabilityFragment(snapshot CapabilitiesSnapshot, part string) ui.FragmentV
 				kind = strings.Join(roles, " / ")
 			}
 			item := ui.FragmentItem{ID: alias, Class: "capability-card", Kind: kind, Title: alias, Fields: []ui.FragmentField{{Label: "Connection", Value: model.Provider}, {Label: "Provider model", Value: model.Model}}}
-			item.Actions = append(item.Actions,
-				ui.FragmentAction{ID: "model-default-" + alias, Label: "Make default", URL: "/api/v1/desk/models/default", Target: "#capability-default-status", Swap: "innerHTML", Fields: []ui.FragmentField{{Label: "alias", Value: alias}}},
-				ui.FragmentAction{ID: "model-utility-" + alias, Label: "Make utility", URL: "/api/v1/desk/models/utility", Target: "#capability-utility-status", Swap: "innerHTML", Fields: []ui.FragmentField{{Label: "alias", Value: alias}}},
-			)
+			defaultAction := ui.FragmentAction{ID: "model-default-" + alias, Label: "Make default", URL: "/api/v1/desk/models/default", Target: "#capability-default-status", Swap: "innerHTML", Fields: []ui.FragmentField{{Label: "alias", Value: alias}}}
+			if alias == snapshot.Providers.DefaultModel {
+				defaultAction.Label = "Default"
+				defaultAction.Disabled = true
+				defaultAction.Pressed = true
+				defaultAction.HasPressed = true
+			}
+			utilityAction := ui.FragmentAction{ID: "model-utility-" + alias, Label: "Make utility", URL: "/api/v1/desk/models/utility", Target: "#capability-utility-status", Swap: "innerHTML", Fields: []ui.FragmentField{{Label: "alias", Value: alias}}}
+			if alias == snapshot.Providers.UtilityModel {
+				utilityAction.Label = "Utility model"
+				utilityAction.Disabled = true
+				utilityAction.Pressed = true
+				utilityAction.HasPressed = true
+			}
+			item.Actions = append(item.Actions, defaultAction, utilityAction)
 			view.Items = append(view.Items, item)
 		}
 		view.OptionLists = capabilityModelOptions(snapshot, aliases)

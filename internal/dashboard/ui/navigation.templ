@@ -2,7 +2,10 @@ package ui
 
 templ Navigation(view ShellView) {
 	<nav class="desk-navigation" aria-label="Waffle Desk sections">
-		<a class="brand" href="/desk/" aria-label="Waffle Desk home">Waffle Desk</a>
+		<a class="brand" href="/desk/" aria-label="Waffle Desk home">
+			<img class="brand-waffle" src={ AssetURL("waffle-mark-sitting.png", view.AssetVersion) } width="128" height="128" alt="" aria-hidden="true"/>
+			<span>Waffle Desk</span>
+		</a>
 		<button id="palette-open" class="palette-open" type="button" aria-haspopup="dialog" aria-controls="command-palette">Commands <kbd>Ctrl K</kbd></button>
 		<label class="theme-control">
 			<span>Theme</span>

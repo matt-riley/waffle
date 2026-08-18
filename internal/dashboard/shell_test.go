@@ -33,6 +33,22 @@ func TestShellRendersApprovedFiveSectionNavigation(t *testing.T) {
 	}
 }
 
+func TestShellBrandUsesOneApprovedVersionedWaffleMark(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newTestShellHandler(t, ui.ShellView{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
+	body := rec.Body.String()
+	want := `<img class="brand-waffle" src="/desk/assets/waffle-mark-sitting.png?v=` + ui.AssetVersion() + `" width="128" height="128" alt="" aria-hidden="true">`
+	if strings.Count(body, `class="brand-waffle"`) != 1 {
+		t.Fatalf("brand mark count = %d, want one", strings.Count(body, `class="brand-waffle"`))
+	}
+	if !strings.Contains(body, want) {
+		t.Fatalf("shell missing the approved versioned brand mark %q:\n%s", want, body)
+	}
+	if !strings.Contains(body, `<a class="brand" href="/desk/" aria-label="Waffle Desk home">`) {
+		t.Fatal("brand link lost its existing accessible home label")
+	}
+}
+
 func TestShellProvidesThemeBootAndSharedThemeControl(t *testing.T) {
 	rec := httptest.NewRecorder()
 	newTestShellHandler(t, ui.ShellView{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
@@ -58,14 +74,19 @@ func TestShellProvidesThemeBootAndSharedThemeControl(t *testing.T) {
 	}
 }
 
-func TestShellMobileNavigationRemovesRedundantBrandFromTabOrder(t *testing.T) {
+func TestShellMobileNavigationKeepsBrandAndPaletteReachable(t *testing.T) {
 	handler := newTestShellHandler(t, ui.ShellView{})
 	asset := httptest.NewRecorder()
 	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/desk/assets/app.css", nil))
 
-	mobileBrandDisplay := regexp.MustCompile(`(?s)@media \(max-width: 768px\) \{.*?\.brand \{[^}]*display:\s*none;`)
-	if !mobileBrandDisplay.Match(asset.Body.Bytes()) {
-		t.Fatal("mobile navigation must remove the redundant brand link from the tab order")
+	css := asset.Body.String()
+	mobileBrand := regexp.MustCompile(`(?s)@media \(max-width: 768px\) \{.*?\.brand \{[^}]*position:\s*fixed;[^}]*z-index:\s*4;`)
+	if !mobileBrand.MatchString(css) {
+		t.Fatal("mobile navigation must keep the shared brand link reachable")
+	}
+	mobilePalette := regexp.MustCompile(`(?s)@media \(max-width: 768px\) \{[^}]*\.palette-open \{[^}]*position:\s*fixed;[^}]*z-index:\s*4;`)
+	if !mobilePalette.MatchString(css) {
+		t.Fatal("mobile navigation must keep the command palette reachable")
 	}
 }
 

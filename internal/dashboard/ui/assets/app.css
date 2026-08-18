@@ -67,6 +67,14 @@
   --shadow-soft: 0 1px 2px rgb(33 29 25 / 8%);
   --shadow-card: 0 1px 3px rgb(33 29 25 / 10%), 0 4px 14px rgb(33 29 25 / 6%);
   --shadow: var(--shadow-soft);
+  --desk-navigation-height: 7.5rem;
+  --desk-composer-height: 0px;
+  --desk-action-height: 0px;
+  --desk-utility-height: 3.75rem;
+  --desk-top-clearance: calc(var(--desk-utility-height) + env(safe-area-inset-top, 0px));
+  --desk-navigation-clearance: calc(var(--desk-navigation-height) + env(safe-area-inset-bottom, 0px));
+  --desk-composer-overflow: max(0px, calc(var(--desk-composer-height) - (100dvh - var(--desk-navigation-height) - env(safe-area-inset-bottom, 0px))));
+  --desk-content-clearance: calc(var(--desk-navigation-height) + var(--desk-action-height) + env(safe-area-inset-bottom, 0px));
 }
 
 /* Contrast notes: --ink on --cream is 14.37:1 and on --paper is 16.09:1;
@@ -261,12 +269,22 @@ textarea {
 }
 
 .brand {
+  align-items: center;
   color: var(--accent-sidebar);
+  display: flex;
   font-family: "Avenir Next Rounded", "Avenir Next", Avenir, sans-serif;
   font-size: 1.35rem;
   font-weight: 700;
+  gap: 0.5rem;
   letter-spacing: -0.02em;
   text-decoration-thickness: 2px;
+}
+
+.brand-waffle {
+  flex: none;
+  height: 28px;
+  object-fit: contain;
+  width: 28px;
 }
 
 .section-links {
@@ -1759,14 +1777,21 @@ h3 {
     min-height: 100dvh;
     /* Reserve the fixed navigation's full height plus the device safe-area
        inset so every section's last row can scroll clear of the bar (#467). */
-    padding-bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
+    padding-bottom: var(--desk-navigation-clearance);
   }
 
   .desk-shell[data-active-section="today"] main,
   .desk-shell[data-active-section=""] main {
     display: block;
     overflow: auto;
-    padding: 1rem 0.85rem 1.25rem;
+    padding: var(--desk-top-clearance) 0.85rem var(--desk-content-clearance);
+    scroll-padding-bottom: var(--desk-content-clearance);
+  }
+
+  .desk-shell > main {
+    padding-top: var(--desk-top-clearance);
+    padding-bottom: var(--desk-content-clearance);
+    scroll-padding-bottom: var(--desk-content-clearance);
   }
 
   .desk-navigation {
@@ -1787,7 +1812,14 @@ h3 {
   }
 
   .brand {
-    display: none;
+    background: var(--surface-sidebar);
+    font-size: 0.95rem;
+    gap: 0.3rem;
+    left: 0.75rem;
+    padding: 0.2rem 0.35rem;
+    position: fixed;
+    top: calc(0.5rem + env(safe-area-inset-top, 0px));
+    z-index: 4;
   }
 
   .rail-status {
@@ -1823,26 +1855,38 @@ h3 {
   .conversation {
     /* Leave the composer (and its slash menu) fully visible above the fixed
        navigation plus the device safe-area inset (#467). */
-    min-height: calc(100dvh - 8.75rem - 7.5rem - env(safe-area-inset-bottom, 0px));
+    min-height: calc(100dvh - 8.75rem - var(--desk-navigation-clearance));
   }
 
   .composer,
-  #desk-message {
+  #desk-message,
+  #desk-send,
+  #desk-cancel {
     /* scrollIntoView and keyboard focus stop the composer (and the focused
        textarea inside it) clear of the fixed bar instead of docking it
        underneath (#467). */
-    scroll-margin-bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
+    scroll-margin-bottom: var(--desk-content-clearance);
+  }
+
+  main a[href],
+  main button,
+  main input,
+  main select,
+  main textarea {
+    scroll-margin-bottom: var(--desk-content-clearance);
   }
 
   .message-list {
     max-height: none;
     min-height: 12rem;
+    padding-bottom: max(1rem, var(--desk-composer-overflow));
   }
 }
 
 @media (max-width: 520px) {
   main {
-    padding: 1rem 0.75rem;
+    padding: var(--desk-top-clearance) 0.75rem var(--desk-content-clearance);
+    scroll-padding-bottom: var(--desk-content-clearance);
   }
 
   .today-header,
@@ -2357,7 +2401,10 @@ h3 {
 
 @media (max-width: 768px) {
   .palette-open {
-    display: none;
+    position: fixed;
+    right: 0.75rem;
+    top: calc(0.5rem + env(safe-area-inset-top, 0px));
+    z-index: 4;
   }
 }
 
@@ -2412,6 +2459,85 @@ a:focus-visible {
 .action-danger {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.waffle-empty-state {
+  align-items: center;
+  display: grid;
+  gap: clamp(1rem, 3vw, 2rem);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  margin: 0 auto;
+  max-width: 48rem;
+  min-width: 0;
+  padding: clamp(1rem, 4vw, 2rem);
+  text-align: left;
+}
+
+.waffle-empty-state-art {
+  display: block;
+  height: auto;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.waffle-empty-state-art-tasks {
+  width: clamp(7.5rem, 24vw, 10rem);
+}
+
+.waffle-empty-state-art-workspaces {
+  width: clamp(6rem, 18vw, 8rem);
+}
+
+.waffle-empty-state-art-memory {
+  width: clamp(5rem, 16vw, 7rem);
+}
+
+.waffle-empty-state-copy {
+  min-width: 0;
+}
+
+.waffle-empty-state-copy h2,
+.waffle-empty-state-copy p {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.waffle-empty-state-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.waffle-empty-state-actions form {
+  display: block;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.waffle-empty-state-action {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  text-decoration: none;
+}
+
+@media (max-width: 520px) {
+  .waffle-empty-state {
+    grid-template-columns: minmax(0, 1fr);
+    text-align: center;
+  }
+
+  .waffle-empty-state-art {
+    justify-self: center;
+  }
+
+  .waffle-empty-state-actions {
+    justify-content: center;
+  }
 }
 
 /* Cards and panels: softer edges, rounded corners, lighter elevation. */

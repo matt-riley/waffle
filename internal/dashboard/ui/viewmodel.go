@@ -17,6 +17,7 @@ type FragmentView struct {
 	ID          string
 	Class       string
 	Empty       string
+	EmptyState  *EmptyStateView
 	Status      string
 	GetURL      string
 	Trigger     string
@@ -27,6 +28,67 @@ type FragmentView struct {
 	TextSwaps   []FragmentTextSwap
 	Footers     []FragmentTextSwap
 	Filters     []FragmentFilter
+}
+
+// EmptyStateKey names the small set of approved Waffle Desk illustrations.
+// Consumers choose a semantic state rather than selecting artwork directly.
+type EmptyStateKey string
+
+const (
+	EmptyStateTasks      EmptyStateKey = "tasks"
+	EmptyStateWorkspaces EmptyStateKey = "workspaces"
+	EmptyStateMemory     EmptyStateKey = "memory"
+)
+
+type EmptyStateArtwork struct {
+	AssetName string
+	Width     string
+	Height    string
+	Class     string
+}
+
+type EmptyStateView struct {
+	Title           string
+	Body            string
+	TitleID         string
+	PrimaryAction   *FragmentAction
+	SecondaryAction *FragmentAction
+	Artwork         EmptyStateArtwork
+}
+
+// WaffleEmptyStateMap is the shared semantic-to-artwork contract for later
+// section consumers. Copy, actions, and heading IDs remain consumer-owned so
+// each downstream issue can supply its exact authoritative presentation.
+var WaffleEmptyStateMap = map[EmptyStateKey]EmptyStateArtwork{
+	EmptyStateTasks: {
+		AssetName: "waffle-empty-curled.png",
+		Width:     "480",
+		Height:    "320",
+		Class:     "waffle-empty-state-art-tasks",
+	},
+	EmptyStateWorkspaces: {
+		AssetName: "waffle-empty-sitting.png",
+		Width:     "320",
+		Height:    "320",
+		Class:     "waffle-empty-state-art-workspaces",
+	},
+	EmptyStateMemory: {
+		AssetName: "waffle-empty-curious.png",
+		Width:     "256",
+		Height:    "256",
+		Class:     "waffle-empty-state-art-memory",
+	},
+}
+
+// NewWaffleEmptyStateView combines approved artwork with copy owned by the
+// section consumer. Unknown semantic keys are rejected rather than falling
+// back to an unapproved illustration.
+func NewWaffleEmptyStateView(key EmptyStateKey, title, body, titleID string, primaryAction, secondaryAction *FragmentAction) (EmptyStateView, bool) {
+	artwork, ok := WaffleEmptyStateMap[key]
+	if !ok {
+		return EmptyStateView{}, false
+	}
+	return EmptyStateView{Title: title, Body: body, TitleID: titleID, PrimaryAction: primaryAction, SecondaryAction: secondaryAction, Artwork: artwork}, true
 }
 
 type FragmentItem struct {
@@ -100,14 +162,17 @@ type FragmentFilter struct {
 }
 
 type FragmentAction struct {
-	ID      string
-	Label   string
-	Method  string
-	URL     string
-	Target  string
-	Swap    string
-	Class   string
-	Include string
+	ID         string
+	Label      string
+	Method     string
+	URL        string
+	Target     string
+	Swap       string
+	Class      string
+	Include    string
+	Disabled   bool
+	Pressed    bool
+	HasPressed bool
 	// Value carries the copy target for Method "copy" actions (#462).
 	Value  string
 	Fields []FragmentField
@@ -176,4 +241,8 @@ func fragmentBool(value bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func emptyStateArtworkClass(view EmptyStateView) string {
+	return "waffle-empty-state-art " + view.Artwork.Class
 }

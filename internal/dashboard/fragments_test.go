@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +212,47 @@ func TestCapabilityFragmentsKeepCatalogueActionsAndSkillSourceState(t *testing.T
 	}
 	if !strings.Contains(skillsBody.String(), `data-waffle-skill-source="local" data-waffle-source-available="true"`) {
 		t.Fatalf("skill fragment did not carry source availability: %s", skillsBody.String())
+	}
+}
+
+func TestCapabilityModelActionsAreCompactAndTruthful(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/capabilities?part=models", nil)
+	component := fragmentComponent(request, http.StatusOK, CapabilitiesSnapshot{
+		Providers: providerconfig.Listing{
+			DefaultModel: "primary",
+			UtilityModel: "utility",
+			Models: map[string]providerconfig.ModelSummary{
+				"primary": {Provider: "fixture", Model: "primary-model"},
+				"utility": {Provider: "fixture", Model: "utility-model"},
+				"local":   {Provider: "fixture", Model: "local-model"},
+			},
+		},
+	})
+	var rendered bytes.Buffer
+	if err := component.Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, pattern := range []string{
+		`data-waffle-action-id="model-default-primary"[^>]*disabled[^>]*aria-pressed="true"[^>]*>Default</button>`,
+		`data-waffle-action-id="model-utility-utility"[^>]*disabled[^>]*aria-pressed="true"[^>]*>Utility model</button>`,
+		`data-waffle-action-id="model-default-local"[^>]*>Make default</button>`,
+		`data-waffle-action-id="model-utility-local"[^>]*>Make utility</button>`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(body) {
+			t.Errorf("model fragment missing pattern %q:\n%s", pattern, body)
+		}
+	}
+	for _, actionID := range []string{"model-default-local", "model-utility-local"} {
+		button := regexp.MustCompile(`<button[^>]*data-waffle-action-id="` + actionID + `"[^>]*>[^<]+</button>`).FindString(body)
+		if strings.Contains(button, "aria-pressed") {
+			t.Errorf("unselected model action %q unexpectedly has toggle semantics: %s", actionID, button)
+		}
+	}
+	for _, want := range []string{`hx-post="/api/v1/desk/models/default"`, `hx-post="/api/v1/desk/models/utility"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("model fragment missing %q:\n%s", want, body)
+		}
 	}
 }
 

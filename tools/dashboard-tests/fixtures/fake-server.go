@@ -22,6 +22,7 @@ import (
 	"github.com/matt-riley/waffle/internal/chat"
 	"github.com/matt-riley/waffle/internal/config"
 	"github.com/matt-riley/waffle/internal/dashboard"
+	"github.com/matt-riley/waffle/internal/dashboard/ui"
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/memory"
 	"github.com/matt-riley/waffle/internal/modelcatalog"
@@ -198,6 +199,33 @@ func main() {
 	obs.MarkSchedulerTick()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /test/empty-state", func(w http.ResponseWriter, r *http.Request) {
+		theme := r.URL.Query().Get("theme")
+		if theme != "dark" {
+			theme = "light"
+		}
+		populated := r.URL.Query().Get("populated") == "1"
+		state, ok := ui.NewWaffleEmptyStateView(
+			ui.EmptyStateTasks,
+			"Tasks are resting",
+			"This fixture copy belongs to the section consumer.",
+			"fixture-empty-state-title",
+			nil,
+			nil,
+		)
+		if !ok {
+			http.Error(w, "empty state fixture unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html><html data-theme="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"></head><body><main class="test-empty-state-surface"><section class="tasks" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
+		if populated {
+			_, _ = io.WriteString(w, `<article class="fixture-populated-state"><h2>Morning review</h2><p>One settled task keeps the populated surface quiet.</p></article>`)
+		} else if err := ui.WaffleEmptyState(state).Render(r.Context(), w); err != nil {
+			return
+		}
+		_, _ = io.WriteString(w, `</section></main></body></html>`)
+	})
 	mux.HandleFunc("POST /api/v1/desk/test/turn-fail", func(w http.ResponseWriter, r *http.Request) {
 		turnFail.Store(r.URL.Query().Get("on") != "0")
 		w.WriteHeader(http.StatusNoContent)

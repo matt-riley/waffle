@@ -81,6 +81,32 @@ if (themeMediaQuery) {
   }
 }
 
+// Mobile clearance (#540): the fixed navigation and Today composer can both
+// change height as content, controls, or safe-area insets change. Keep the
+// CSS contract sourced from their rendered boxes rather than a breakpoint
+// guess.
+const deskLayoutRoot = document.documentElement;
+const deskNavigation = document.querySelector(".desk-navigation");
+const deskComposer = document.querySelector("#desk-composer");
+const deskComposerActions = document.querySelector(".composer-actions");
+
+function deskLayoutHeight(element) {
+  return element?.getBoundingClientRect().height || 0;
+}
+
+function updateDeskLayoutMetrics() {
+  deskLayoutRoot?.style?.setProperty("--desk-navigation-height", `${deskLayoutHeight(deskNavigation)}px`);
+  deskLayoutRoot?.style?.setProperty("--desk-composer-height", `${deskLayoutHeight(deskComposer)}px`);
+  deskLayoutRoot?.style?.setProperty("--desk-action-height", `${deskLayoutHeight(deskComposerActions)}px`);
+}
+
+if (typeof ResizeObserver === "function") {
+  const deskLayoutObserver = new ResizeObserver(updateDeskLayoutMetrics);
+  [deskNavigation, deskComposer, deskComposerActions].filter(Boolean).forEach((element) => deskLayoutObserver.observe(element));
+}
+window.addEventListener?.("resize", updateDeskLayoutMetrics);
+updateDeskLayoutMetrics();
+
 const railElements = {
   status: document.querySelector("#rail-status"),
   dot: document.querySelector("#rail-status-dot"),
