@@ -28,8 +28,20 @@ jobs:
 
   # release-please publishes a release with no assets, so a consumer has
   # nothing to verify. Build the linux artifact at the tagged commit, attest
-  # its provenance through Sigstore, and attach the artifact plus the
-  # attestation bundle to the release.
+  # its provenance through Sigstore, attach both to the release, and only then
+  # publish it.
+  #
+  # The publish step is not optional here: this repository has immutable
+  # releases enabled, and a published release rejects asset uploads with
+  # "HTTP 422: Cannot upload assets to an immutable release". So the release
+  # is created as a draft (see release-please-config.json) and becomes
+  # immutable at the end of this job, with its artifacts already attached.
+  # force-tag-creation keeps the git tag appearing immediately, which a draft
+  # release would otherwise defer until publication -- the build stamps its
+  # version from `git describe --tags`.
+  #
+  # A failure anywhere below leaves the release unpublished rather than
+  # published-and-unverifiable, which is the right way round.
   #
   # This runs here rather than on `release: published` because the release is
   # created with GITHUB_TOKEN, and events raised by GITHUB_TOKEN never start a
@@ -71,7 +83,9 @@ jobs:
           subject-path: ${{ runner.temp }}/waffle-artifact/waffle-linux-amd64.tar.gz
       - name: Stage the provenance bundle beside the artifact
         run: cp "${{ steps.attest.outputs.bundle-path }}" "$RUNNER_TEMP/waffle-artifact/waffle-linux-amd64.tar.gz.intoto.jsonl"
-      - name: Attach the artifact and its provenance to the release
+      # `gh release upload` resolves a draft release by its pending tag name,
+      # so the tag argument is the same either way.
+      - name: Attach the artifact and its provenance to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
@@ -79,3 +93,7 @@ jobs:
           "$RUNNER_TEMP/waffle-artifact/waffle-linux-amd64.tar.gz"
           "$RUNNER_TEMP/waffle-artifact/waffle-linux-amd64.tar.gz.intoto.jsonl"
           --clobber
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG_NAME" --draft=false
