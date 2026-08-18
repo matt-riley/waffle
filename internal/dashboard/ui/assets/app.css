@@ -42,7 +42,7 @@
   --text-sidebar: var(--cream);
   --text-sidebar-danger: #f3a199;
   --text-on-accent: var(--ink);
-  --text-on-code: var(--paper);
+  --text-on-code: var(--ink);
   --text-on-danger: var(--paper);
   --text-danger: var(--danger-text);
   --accent-fill: var(--ginger);
@@ -107,7 +107,7 @@ html[data-theme="dark"] {
   --text-sidebar: var(--ink);
   --text-on-accent: #211d19;
   --text-on-code: var(--ink);
-  --text-on-danger: var(--ink);
+  --text-on-danger: #211d19;
   --text-danger: var(--danger-text);
   --accent-fill: var(--ginger);
   --accent-text: var(--ginger-light);

@@ -24,6 +24,36 @@ const canaries = [
 let server;
 let baseURL;
 
+function contrastRatio(foreground, background) {
+  const channels = (value) => {
+    const match = value.match(/rgba?\(([^)]+)\)/);
+    if (!match) {
+      throw new Error(`expected an RGB color, got ${value}`);
+    }
+    return match[1].split(",").slice(0, 3).map((part) => Number(part.trim())).map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.03928
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+  };
+  const luminance = (value) => {
+    const [red, green, blue] = channels(value);
+    return red * 0.2126 + green * 0.7152 + blue * 0.0722;
+  };
+  const light = Math.max(luminance(foreground), luminance(background));
+  const dark = Math.min(luminance(foreground), luminance(background));
+  return (light + 0.05) / (dark + 0.05);
+}
+
+function shadowColor(shadow) {
+  const match = shadow.match(/rgba?\([^)]*\)/);
+  if (!match) {
+    throw new Error(`expected an RGB focus ring, got ${shadow}`);
+  }
+  return match[0];
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({}, testInfo) => {
@@ -1040,6 +1070,39 @@ test("theme preference persists through reload and section navigation", async ({
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
+test("light code and dark destructive surfaces meet computed contrast", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the focused contrast regression once.");
+  await page.addInitScript(() => localStorage.setItem("waffle.desk.theme", "light"));
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByLabel("Message Waffle").fill("markdown");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const lightCode = await page.locator(".code-block pre").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  const lightCodeContrast = contrastRatio(lightCode.color, lightCode.background);
+
+  await page.goto(deskURL("workspaces"));
+  await page.getByLabel("Theme").selectOption("dark");
+  const clean = page.locator("[data-workspace-id='workspace-clean']");
+  await expect(clean).toBeVisible();
+  await clean.getByRole("button", { name: "Review close", exact: true }).click();
+  await expect(page.locator("#workspace-close-dialog")).toBeVisible();
+  const darkDanger = await page.locator("#workspace-close-confirm").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  const darkDangerContrast = contrastRatio(darkDanger.color, darkDanger.background);
+
+  expect.soft(lightCode).toEqual({ background: "rgb(234, 223, 206)", color: "rgb(33, 29, 25)" });
+  expect.soft(lightCodeContrast, `light code contrast: ${lightCodeContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  expect.soft(darkDanger).toEqual({ background: "rgb(243, 161, 153)", color: "rgb(33, 29, 25)" });
+  expect.soft(darkDangerContrast, `dark destructive contrast: ${darkDangerContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
 test("Evening role tokens keep rail, code, actions, and accents readable", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run semantic Evening surface checks once.");
   await page.addInitScript(() => localStorage.setItem("waffle.desk.theme", "dark"));
@@ -1070,15 +1133,6 @@ test("Evening role tokens keep rail, code, actions, and accents readable", async
   const themeControl = page.locator("#desk-theme");
   await themeControl.selectOption("light");
   const lightRail = await page.evaluate(() => {
-    const rgb = (value) => value.match(/rgb\(([^)]+)\)/)[1].split(",").map((part) => Number(part.trim()));
-    const luminance = (value) => rgb(value).map((channel) => channel / 255).map((channel) =>
-      channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
-    ).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
-    const contrast = (foreground, background) => {
-      const light = Math.max(luminance(foreground), luminance(background));
-      const dark = Math.min(luminance(foreground), luminance(background));
-      return (light + 0.05) / (dark + 0.05);
-    };
     const rail = getComputedStyle(document.querySelector(".desk-navigation"));
     const status = document.querySelector("#rail-status");
     status.dataset.connectionState = "disconnected";
@@ -1086,21 +1140,11 @@ test("Evening role tokens keep rail, code, actions, and accents readable", async
     return {
       background: rail.backgroundColor,
       danger: danger.color,
-      dangerContrast: contrast(danger.color, rail.backgroundColor),
     };
   });
   await focusWithKeyboard(themeControl);
   const lightRailFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
-  const lightRailFocusContrast = await page.evaluate(({ shadow }) => {
-    const color = shadow.match(/rgb\([^)]*\)/)[0];
-    const rgb = (value) => value.match(/rgb\(([^)]+)\)/)[1].split(",").map((part) => Number(part.trim()));
-    const luminance = (value) => rgb(value).map((channel) => channel / 255).map((channel) =>
-      channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
-    ).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
-    const foreground = luminance(color);
-    const background = luminance("rgb(33, 29, 25)");
-    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
-  }, { shadow: lightRailFocusShadow });
+  const lightRailFocusContrast = contrastRatio(shadowColor(lightRailFocusShadow), lightRail.background);
   await themeControl.selectOption("dark");
   await focusWithKeyboard(themeControl);
   const railFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
@@ -1112,25 +1156,6 @@ test("Evening role tokens keep rail, code, actions, and accents readable", async
   await expect.poll(() => workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow)).toContain("rgb(245, 197, 121)");
   const workspaceFocusShadow = await workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow);
   const surfaces = await page.evaluate(({ railFocusShadow, selectedFocusShadow, workspaceFocusShadow }) => {
-    const rgb = (value) => {
-      const match = value.match(/rgb\(([^)]+)\)/);
-      return match ? match[1].split(",").map((part) => Number(part.trim())) : null;
-    };
-    const luminance = (value) => {
-      const channels = rgb(value).map((channel) => channel / 255).map((channel) =>
-        channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
-      );
-      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
-    };
-    const contrast = (foreground, background) => {
-      const light = Math.max(luminance(foreground), luminance(background));
-      const dark = Math.min(luminance(foreground), luminance(background));
-      return (light + 0.05) / (dark + 0.05);
-    };
-    const ringContrast = (shadow, background) => {
-      const match = shadow.match(/rgb\([^)]*\)/);
-      return match ? contrast(match[0], background) : 0;
-    };
     const nav = document.querySelector(".desk-navigation");
     const railStatus = document.querySelector("#rail-status");
     railStatus.dataset.connectionState = "disconnected";
@@ -1143,29 +1168,31 @@ test("Evening role tokens keep rail, code, actions, and accents readable", async
     return {
       railBackground: navStyle.backgroundColor,
       dangerColor: dangerStyle.color,
-      dangerContrast: contrast(dangerStyle.color, navStyle.backgroundColor),
       railFocusShadow,
-      railFocusContrast: ringContrast(railFocusShadow, navStyle.backgroundColor),
       selectedBackground: getComputedStyle(selected).backgroundColor,
       selectedFocusShadow,
       primaryBackground: workspaceStyle.backgroundColor,
       primaryColor: workspaceStyle.color,
       workspaceFocusShadow,
-      workspaceFocusContrast: ringContrast(workspaceFocusShadow, workspaceCard.backgroundColor),
+      workspaceCardBackground: workspaceCard.backgroundColor,
       brandColor: getComputedStyle(document.querySelector(".brand")).color,
       paletteColor: getComputedStyle(document.querySelector("#palette-open")).color,
       paletteKbdColor: getComputedStyle(document.querySelector("#palette-open kbd")).color,
     };
   }, { railFocusShadow, selectedFocusShadow, workspaceFocusShadow });
+  const lightRailDangerContrast = contrastRatio(lightRail.danger, lightRail.background);
+  const darkRailDangerContrast = contrastRatio(surfaces.dangerColor, surfaces.railBackground);
+  const darkRailFocusContrast = contrastRatio(shadowColor(surfaces.railFocusShadow), surfaces.railBackground);
+  const workspaceFocusContrast = contrastRatio(shadowColor(surfaces.workspaceFocusShadow), surfaces.workspaceCardBackground);
   expect(lightRail.background).toBe("rgb(33, 29, 25)");
   expect(lightRail.danger).toBe("rgb(243, 161, 153)");
-  expect(lightRail.dangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(lightRailDangerContrast).toBeGreaterThanOrEqual(4.5);
   expect(lightRailFocusShadow).toContain("rgb(221, 113, 40)");
   expect(lightRailFocusContrast).toBeGreaterThanOrEqual(3);
   expect(surfaces.railBackground).toBe("rgb(15, 13, 11)");
-  expect(surfaces.dangerContrast).toBeGreaterThanOrEqual(4.5);
-  expect(surfaces.railFocusContrast).toBeGreaterThanOrEqual(3);
-  expect(surfaces.workspaceFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(darkRailDangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(darkRailFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(workspaceFocusContrast).toBeGreaterThanOrEqual(3);
   expect(surfaces.selectedBackground).toBe("rgb(221, 113, 40)");
   expect(surfaces.primaryBackground).toBe("rgb(15, 13, 11)");
   expect(surfaces.primaryColor).toBe("rgb(242, 233, 220)");
