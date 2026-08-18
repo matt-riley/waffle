@@ -208,6 +208,20 @@ async function expectControlsClearOfNavigation(page, selectors) {
 }
 
 async function expectTodayComposerClearance(page) {
+  // Textarea field-sizing and ResizeObserver delivery happen on separate
+  // render steps. Wait for the measured CSS contract to catch up with the
+  // rendered boxes before asserting the settled geometry.
+  await expect.poll(() => page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const composer = document.querySelector("#desk-composer")?.getBoundingClientRect();
+    const actions = document.querySelector(".composer-actions")?.getBoundingClientRect();
+    const composerVariable = parseFloat(root.getPropertyValue("--desk-composer-height")) || 0;
+    const actionVariable = parseFloat(root.getPropertyValue("--desk-action-height")) || 0;
+    return Math.max(
+      Math.abs(composerVariable - (composer?.height ?? 0)),
+      Math.abs(actionVariable - (actions?.height ?? 0)),
+    );
+  }), "measured composer clearance catches up to rendered geometry").toBeLessThan(0.5);
   const layout = await page.evaluate(() => {
     const root = getComputedStyle(document.documentElement);
     const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
@@ -748,8 +762,50 @@ test("structured empty state reflows at an honest 200 percent zoom equivalent", 
   }));
   expect(overflow.documentScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
   expect(overflow.bodyScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
-  const primary = page.locator(".waffle-empty-state .action-primary");
-  await primary.scrollIntoViewIfNeeded();
+  const initial = await page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        bottom: bounds.bottom,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const main = document.querySelector("main");
+    const scrollingElement = document.scrollingElement;
+    return {
+      mainScrollTop: main?.scrollTop ?? 0,
+      documentScrollTop: scrollingElement?.scrollTop ?? 0,
+      windowScrollY: window.scrollY,
+      empty: rect(".waffle-empty-state"),
+      image: rect(".waffle-empty-state img"),
+      primary: rect(".waffle-empty-state .action-primary"),
+      navigation: rect(".desk-navigation"),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
+  });
+  expect(initial.mainScrollTop).toBe(0);
+  expect(initial.documentScrollTop).toBe(0);
+  expect(initial.windowScrollY).toBe(0);
+  expect(initial.empty).not.toBeNull();
+  expect(initial.primary).not.toBeNull();
+  expect(initial.navigation).not.toBeNull();
+  expect(initial.primary.left).toBeGreaterThanOrEqual(0);
+  expect(initial.primary.right).toBeLessThanOrEqual(initial.viewport.width);
+  expect(initial.primary.top).toBeGreaterThanOrEqual(0);
+  expect(initial.primary.bottom, JSON.stringify(initial)).toBeLessThanOrEqual(initial.navigation.top + 1);
+  expect(initial.image).not.toBeNull();
+  expect(initial.image.width, JSON.stringify(initial)).toBeGreaterThan(0);
+  expect(initial.image.height, JSON.stringify(initial)).toBeGreaterThan(0);
+  expect(initial.image.left, JSON.stringify(initial)).toBeGreaterThanOrEqual(0);
+  expect(initial.image.right, JSON.stringify(initial)).toBeLessThanOrEqual(initial.viewport.width);
   const metrics = await page.locator(".waffle-empty-state").evaluate((empty) => {
     const region = empty.getBoundingClientRect();
     const image = empty.querySelector("img").getBoundingClientRect();

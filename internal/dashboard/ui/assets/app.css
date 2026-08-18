@@ -2611,6 +2611,58 @@ a:focus-visible {
   }
 }
 
+@media (max-width: 240px) {
+  /* At an effective 200% zoom viewport, preserve the state copy and first
+     action instead of reserving the whole compact canvas for decorative art. */
+  .waffle-empty-state {
+    gap: 0;
+    padding: 0.4rem;
+    position: relative;
+  }
+
+  .waffle-empty-state-art {
+    height: 1.25rem;
+    position: absolute;
+    right: 0.4rem;
+    top: 0.4rem;
+    width: 1.25rem;
+    z-index: 1;
+  }
+
+  .waffle-empty-state-actions {
+    margin-top: 0.35rem;
+  }
+
+  .waffle-empty-state-copy p {
+    margin-bottom: 0;
+  }
+
+  .waffle-empty-state-actions form.waffle-action-form-with-inputs {
+    align-items: end;
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 5.25rem);
+  }
+
+  .waffle-empty-state-actions form.waffle-action-form-with-inputs label {
+    grid-column: 1 / -1;
+  }
+
+  .waffle-empty-state-actions form.waffle-action-form-with-inputs input:not([type="hidden"]) {
+    grid-column: 1;
+    width: 100%;
+  }
+
+  .waffle-empty-state-actions form.waffle-action-form-with-inputs .waffle-empty-state-action {
+    font-size: 0.7rem;
+    grid-column: 2;
+    line-height: 1.1;
+    min-width: 0;
+    padding: 0.25rem 0.15rem;
+    width: 100%;
+  }
+}
+
 /* Cards and panels: softer edges, rounded corners, lighter elevation. */
 .conversation,
 .task-context,
