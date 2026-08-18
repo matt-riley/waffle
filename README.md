@@ -85,3 +85,6 @@ then, treat tags as preview.
 Bug reports are welcome if you actually ran it. This is a personal agent,
 not a feature-intake queue. Report vulnerabilities privately through
 [SECURITY.md](SECURITY.md), never as a public issue.
+
+Setup, the commands that matter, and what a good pull request looks like are
+in [CONTRIBUTING.md](CONTRIBUTING.md).
