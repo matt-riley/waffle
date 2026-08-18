@@ -50,7 +50,7 @@ jobs:
     name: attach signed release artifacts
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: write # upload assets onto the published release

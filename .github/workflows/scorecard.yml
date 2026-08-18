@@ -17,7 +17,7 @@ permissions: read-all
 jobs:
   analysis:
     name: scorecard analysis
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       # OIDC identity proving to the OpenSSF API that the result came from

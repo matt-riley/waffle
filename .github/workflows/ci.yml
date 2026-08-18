@@ -17,7 +17,7 @@ permissions:
 jobs:
   deterministic-eval:
     name: deterministic agent evals
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
@@ -33,7 +33,7 @@ jobs:
 
   dashboard-browser:
     name: dashboard browser
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -59,7 +59,7 @@ jobs:
 
   website:
     name: website
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -84,7 +84,7 @@ jobs:
   # so every other run keeps restoring warm caches.
   ci:
     name: ci (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-${{ matrix.name }}
@@ -152,7 +152,7 @@ jobs:
 
   ci-aux:
     name: ci build, vet, dashboard
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-aux
@@ -180,7 +180,7 @@ jobs:
     name: save CI caches
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: [ci, ci-aux]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-cache-save
@@ -250,7 +250,7 @@ jobs:
 
   build-linux-artifact:
     name: build linux artifact
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # linux-artifact-repro deliberately does not gate this job: running the
     # build in parallel with the repro check removes ~140s of serial time from
     # every main run. The repro gate moves to request-infra-deploy instead, so
@@ -289,7 +289,7 @@ jobs:
 
   linux-artifact-repro:
     name: linux artifact repro
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
