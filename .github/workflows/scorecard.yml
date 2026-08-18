@@ -1,0 +1,45 @@
+name: scorecard
+
+# Scorecard grades the repository, not a diff, so this runs on the default
+# branch only. No push trigger: the inputs it reads change far more slowly
+# than main does, and a weekly run plus a manual one covers it.
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "25 7 * * 1"
+  workflow_dispatch:
+
+# Publishing results requires the workflow to hold no write scope, no
+# top-level env or defaults, and to grant id-token: write to the scorecard job
+# alone. The API rejects results from a workflow that breaks those rules.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # OIDC identity proving to the OpenSSF API that the result came from
+      # this repository's own workflow.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Replaces the OpenSSF weekly scan with this run, which is what
+          # scorecard.dev and the README badge serve. Public repos only.
+          publish_results: true
+      # Results are readable in the job log; the artifact keeps a copy for
+      # five days. Only actions/checkout, actions/upload-artifact,
+      # github/codeql-action/upload-sarif, ossf/scorecard-action and
+      # step-security/harden-runner may run in this job.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5

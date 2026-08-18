@@ -1,5 +1,7 @@
 # waffle
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/matt-riley/waffle/badge)](https://scorecard.dev/viewer/?uri=github.com/matt-riley/waffle)
+
 A personal AI agent, written in Go, that you run on your own hardware. One
 binary holds the agent loop, a Telegram gateway, terminal chat, Waffle Desk,
 and a provider-agnostic LLM layer. It serves exactly one owner. Sandbox and
