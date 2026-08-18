@@ -9,6 +9,7 @@ import (
 )
 
 func TestResolveVersionFromControlledBuildInfo(t *testing.T) {
+	t.Parallel()
 	bi := &debug.BuildInfo{Main: debug.Module{Version: "v9.8.7"}}
 	if got := resolveVersionInfo("dev", bi, true); got != "v9.8.7" {
 		t.Fatalf("resolveVersionInfo = %q, want v9.8.7", got)
@@ -20,6 +21,7 @@ func TestResolveVersionFromControlledBuildInfo(t *testing.T) {
 }
 
 func TestResolveVersionPrefersStamped(t *testing.T) {
+	t.Parallel()
 	if got := resolveVersion("v1.2.3"); got != "v1.2.3" {
 		t.Errorf("resolveVersion(stamped) = %q, want stamped value", got)
 	}
@@ -29,6 +31,7 @@ func TestResolveVersionPrefersStamped(t *testing.T) {
 }
 
 func TestResolveVersionDevFallback(t *testing.T) {
+	t.Parallel()
 	// Without controlling build info we only assert the function returns a
 	// non-empty string: either VCS/module info or the "dev" placeholder.
 	got := resolveVersion("dev")
@@ -38,6 +41,7 @@ func TestResolveVersionDevFallback(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	if err := run(context.Background(), []string{"version"}, strings.NewReader(""), &stdout, &stderr); err != nil {
 		t.Fatalf("run version: %v", err)

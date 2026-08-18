@@ -1,32 +1,35 @@
 #!/usr/bin/env bash
 # Runs `go test -race` on one shard of the repository's Go tests.
 #
-# Two modes:
+# Three modes:
 #   pkg SHARD TOTAL        shard of the package list. The split is a greedy
 #                          balanced partition using measured per-package test
 #                          weights from scripts/ci-test-shard-weights.tsv, so
-#                          the heavy packages (cmd/waffle, internal/skill)
+#                          the heavy packages (internal/skill, internal/session)
 #                          land on different shards and every shard finishes
-#                          in roughly the same time. internal/workspace is
-#                          excluded here because it runs via the workspace
-#                          mode below.
+#                          in roughly the same time. internal/workspace and
+#                          cmd/waffle are excluded here because they run via
+#                          the named-test modes below.
 #   workspace GROUP TOTAL  shard of internal/workspace's tests by name, using
 #                          measured per-test weights from
-#                          scripts/ci-test-workspace-weights.tsv. The workspace
-#                          package is ~half of all CI test time under -race on
-#                          4-vCPU runners, so it is split across three runners
-#                          with -run instead of serializing on one runner.
+#                          scripts/ci-test-workspace-weights.tsv.
+#   cmd GROUP TOTAL        shard ./cmd/waffle by test name using
+#                          scripts/ci-test-cmd-weights.tsv. TestServe* lifecycle
+#                          and socket tests stay together on the final group so
+#                          sharding does not split their process-level context;
+#                          the remaining tests are balanced across the other
+#                          groups.
 #
 # Items without a weight entry default to 1s, so newly added packages/tests
 # attach to the currently-lightest shard without manual bookkeeping.
 #
-# Usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]
+# Usage: ci-test-shard.sh pkg|workspace|cmd SHARD TOTAL [--list]
 #   SHARD/GROUP are 1-based. --list prints the split without running tests.
 set -euo pipefail
 
-mode="${1:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
-shard="${2:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
-total="${3:?usage: ci-test-shard.sh pkg|workspace SHARD TOTAL [--list]}"
+mode="${1:?usage: ci-test-shard.sh pkg|workspace|cmd SHARD TOTAL [--list]}"
+shard="${2:?usage: ci-test-shard.sh pkg|workspace|cmd SHARD TOTAL [--list]}"
+total="${3:?usage: ci-test-shard.sh pkg|workspace|cmd SHARD TOTAL [--list]}"
 list_only="${4:-}"
 
 if (( shard < 1 || shard > total )); then
@@ -35,6 +38,8 @@ if (( shard < 1 || shard > total )); then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+partition_shard="$shard"
+partition_total="$total"
 
 case "$mode" in
   pkg)
@@ -43,20 +48,43 @@ case "$mode" in
     # ./ prefix so go resolves the paths relative to the module rather than
     # treating them as std import paths (go test internal/config fails).
     prefix="./"
-    input="$(go list ./... | sed "s|^${module}/||" | grep -v '^internal/workspace$')"
+    input="$(go list ./... | sed "s|^${module}/||" | grep -v -e '^internal/workspace$' -e '^cmd/waffle$')"
     ;;
   workspace)
     weights_file="$script_dir/ci-test-workspace-weights.tsv"
     prefix=""
-    input="$(go test -list '^Test' ./internal/workspace | grep '^Test')"
+    test_pkg="./internal/workspace"
+    input="$(go test -list '^Test' "$test_pkg" | grep '^Test')"
+    ;;
+  cmd)
+    weights_file="$script_dir/ci-test-cmd-weights.tsv"
+    prefix=""
+    test_pkg="./cmd/waffle"
+    all_tests="$(go test -list '^Test' "$test_pkg" | grep '^Test')"
+    if (( total > 1 )); then
+      if (( shard == total )); then
+        # Serve exercises daemon lifecycle, Unix sockets, listeners and
+        # process-level coordination. Keep those tests in one process rather
+        # than making their behaviour depend on which named-test shard they
+        # happened to land in.
+        input="$(grep '^TestServe' <<< "$all_tests")"
+        partition_shard=1
+        partition_total=1
+      else
+        input="$(grep -v '^TestServe' <<< "$all_tests")"
+        partition_total=$((total - 1))
+      fi
+    else
+      input="$all_tests"
+    fi
     ;;
   *)
-    echo "error: unknown mode $mode (expected pkg or workspace)" >&2
+    echo "error: unknown mode $mode (expected pkg, workspace, or cmd)" >&2
     exit 1
     ;;
 esac
 
-selected="$(awk -v shard="$shard" -v total="$total" -v wf="$weights_file" -v prefix="$prefix" '
+selected="$(awk -v shard="$partition_shard" -v total="$partition_total" -v wf="$weights_file" -v prefix="$prefix" '
 BEGIN {
   while ((getline line < wf) > 0) {
     split(line, a, "\t")
@@ -106,11 +134,11 @@ if [[ "$list_only" == "--list" ]]; then
   exit 0
 fi
 
-if [[ "$mode" == "workspace" ]]; then
+if [[ "$mode" == "workspace" || "$mode" == "cmd" ]]; then
   # Join the newline-separated test names into a -run alternation. The regex
   # is anchored so partial name prefixes cannot match extra tests.
   run_regex="^($(printf '%s' "$selected" | tr '\n' '|'))$"
-  go test -race ./internal/workspace -run "$run_regex"
+  go test -race "$test_pkg" -run "$run_regex"
 else
   # shellcheck disable=SC2086 # intentional word splitting into go test args
   go test -race $selected

@@ -1,5 +1,5 @@
 # package	weight (seconds; CI-measured where available, else 4-core local x1.8; refreshed 2026-08-14)
-cmd/waffle	151
+# cmd/waffle is sharded by test name (scripts/ci-test-cmd-weights.tsv), not here.
 internal/agent	14
 internal/agentbuild	17
 internal/apiface	1

@@ -7,6 +7,7 @@ import (
 )
 
 func TestAcquireWaitsForDrainingOwner(t *testing.T) {
+	t.Parallel()
 	owners := newChatSessionOwners()
 	holder := &chatRuntime{closed: true}
 	owners.owners["s"] = holder
@@ -29,6 +30,7 @@ func TestAcquireWaitsForDrainingOwner(t *testing.T) {
 }
 
 func TestAcquireFailsFastForLiveOwner(t *testing.T) {
+	t.Parallel()
 	owners := newChatSessionOwners()
 	holder := &chatRuntime{}
 	owners.owners["s"] = holder

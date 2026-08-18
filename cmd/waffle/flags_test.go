@@ -6,6 +6,7 @@ import (
 )
 
 func TestTakeJSONFlag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		args    []string

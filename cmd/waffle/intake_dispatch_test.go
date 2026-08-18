@@ -86,6 +86,7 @@ func (o *fakeIssueOpener) CloseWorkspace(_ context.Context, workspaceID string, 
 // Docker: workspace open → before_run → agent Run (scripted provider) →
 // session turns → after_run. Composed with Watcher for claim + delivery.
 func TestIssueDispatcherDispatchE2E(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
 	if err != nil {
@@ -327,6 +328,7 @@ func TestIssueDispatcherDispatchE2E(t *testing.T) {
 // update (MarkRunning) is treated as a dispatch failure, not silently
 // discarded, and the run never reaches the agent (#296).
 func TestIssueDispatcherClaimUpdateFailureAbortsDispatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
 	if err != nil {
@@ -471,6 +473,7 @@ func (f *failingTurns) AppendTurn(ctx context.Context, sessionID string, msg llm
 }
 
 func TestDispatchFailsWhenTranscriptPersistFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "waffle.db"))
 	if err != nil {
@@ -524,6 +527,7 @@ func TestDispatchFailsWhenTranscriptPersistFails(t *testing.T) {
 // owner while it works. A log-only watcher (no target) gets no sender and
 // the tool degrades to a no-op — never an error.
 func TestIssueDispatchNotifyToolDeliversMidRun(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		deliver string

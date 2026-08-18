@@ -9,6 +9,7 @@ import (
 )
 
 func TestRunTUIChatHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	backend := &plainBackend{state: chatpkg.State{SessionID: "01TUI"}}
@@ -19,6 +20,7 @@ func TestRunTUIChatHonorsCancelledContext(t *testing.T) {
 }
 
 func TestChatRendererRoutingUsesTUIOnlyForTTY(t *testing.T) {
+	t.Parallel()
 	if !shouldRunPlain(chatOptions{}, strings.NewReader(""), &strings.Builder{}, func(int) bool { return true }) {
 		t.Fatal("non-files must remain plain")
 	}
