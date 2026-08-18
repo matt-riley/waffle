@@ -3,7 +3,9 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "include-v-in-tag": true
+      "include-v-in-tag": true,
+      "draft": true,
+      "force-tag-creation": true
     }
   }
 }
