@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/matt-riley/waffle/compare/v0.30.0...v0.30.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* correct stale toolchain pins and migration head in the guide files ([#526](https://github.com/matt-riley/waffle/issues/526)) ([0f4e11e](https://github.com/matt-riley/waffle/commit/0f4e11e942901d56bc59a3b811b061894f252f3a))
+
 ## [0.30.0](https://github.com/matt-riley/waffle/compare/v0.29.0...v0.30.0) (2026-08-17)
 
 
