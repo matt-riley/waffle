@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Hearth — Waffle Desk</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap"/>
+  <link rel="stylesheet" href="mock.css"/>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Waffle Desk">
+      <a class="brand" href="#"><img src="../../assets/brand/waffle/poses/sitting.png" alt=""/> <span>Waffle Desk</span></a>
+      <button class="palette-btn" type="button">Commands <kbd>⌘K</kbd></button>
+      <div class="nav">
+        <a href="#" aria-current="page">Today</a>
+        <a href="#">Tasks</a>
+        <a href="#">Workspaces</a>
+        <a href="#">Memory</a>
+        <a href="#">Capabilities</a>
+      </div>
+      <div class="rail-sessions">
+        <button class="new-chat" type="button">New conversation</button>
+        <input class="search" type="search" placeholder="Find a conversation" value=""/>
+        <p class="group-label">Pinned</p>
+        <div class="session-list">
+          <button class="session" type="button"><strong>Sandbox policy</strong><span>Pinned · flash-0731</span></button>
+        </div>
+        <p class="group-label">Today</p>
+        <div class="session-list">
+          <button class="session is-current" type="button"><strong>Release review</strong><span>12 min ago · flash-0731</span></button>
+          <button class="session" type="button"><strong>Desk composer density</strong><span>2 hr ago</span></button>
+        </div>
+        <p class="group-label">Yesterday</p>
+        <div class="session-list">
+          <button class="session" type="button"><strong>Workspace allowlist</strong><span>Yesterday</span></button>
+        </div>
+      </div>
+      <div class="rail-status">
+        <span><i class="dot"></i>Connected</span>
+        <code>deepseek-v4-flash-0731</code>
+      </div>
+    </nav>
+    <main class="main">
+      <header class="top">
+        <div>
+          <p class="eyebrow">Today</p>
+          <h1>Release review</h1>
+        </div>
+        <div class="meta-pills">
+          <span class="pill ok">Ready</span>
+          <span class="pill">matt-riley/waffle</span>
+          <button class="ghost" type="button">Session &amp; files</button>
+        </div>
+      </header>
+      <div class="stage">
+        <section class="conversation">
+          <div class="column">
+            <div class="transcript">
+              <article class="turn user">
+                <div class="turn-head">You</div>
+                <div class="bubble">Look at issues 532–536. Do you agree? Add more meat — stricter instructions and acceptance criteria.</div>
+              </article>
+              <article class="turn assistant">
+                <div class="turn-head">Waffle</div>
+                <div class="reasoning">Reasoning · closed</div>
+                <div class="prose">
+                  <p>Direction is right. The original tickets invent shipped work and would paint Desk zinc-grey. Keep cream, ink, and ginger; fix the column, the composer stack, and the permanent aside.</p>
+                  <div class="code">
+                    <div class="code-head"><span>go</span><span>Copy</span></div>
+                    <pre><code>func adjustComposerHeight(el *html.Element) {
+    // one row → 15rem cap
+}</code></pre>
+                  </div>
+                  <div class="artifact">
+                    <div><strong>desk-issues.md</strong><div style="color:var(--ink-muted);font-size:0.75rem">text/markdown · 4.2 KiB</div></div>
+                    <button type="button">Open in canvas</button>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button type="button">Copy</button>
+                  <button type="button">Regenerate</button>
+                  <button type="button">Branch</button>
+                  <button type="button">Read aloud</button>
+                </div>
+              </article>
+            </div>
+            <form class="composer">
+              <textarea rows="1" placeholder="Message Waffle…">Collapse the composer. Keep Queue follow-up.</textarea>
+              <div class="toolbar">
+                <button class="chip" type="button">flash-0731 ▾</button>
+                <button class="chip" type="button">No skill ▾</button>
+                <button class="chip" type="button">Standard ▾</button>
+                <button class="chip" type="button">Attach</button>
+                <button class="chip" type="button">Dictate</button>
+                <button class="send" type="button">Send</button>
+              </div>
+            </form>
+            <p class="hint">Enter sends · Shift+Enter newline · ⌘K commands</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

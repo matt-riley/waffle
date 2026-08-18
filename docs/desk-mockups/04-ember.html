@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en" data-layout="ember">
+<head>
+  <meta charset="utf-8"/>
+  <title>Ember — Waffle Desk</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap"/>
+  <link rel="stylesheet" href="mock.css"/>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Waffle Desk">
+      <a class="brand" href="#"><img src="../../assets/brand/waffle/poses/sitting.png" alt="Waffle Desk"/><span>Waffle Desk</span></a>
+      <button class="palette-btn" type="button" title="Commands">⌘K<span>Commands</span></button>
+      <div class="nav">
+        <a href="#" aria-current="page">Today</a>
+        <a href="#">Tasks</a>
+        <a href="#">Spaces</a>
+        <a href="#">Memory</a>
+        <a href="#">Caps</a>
+      </div>
+      <div class="rail-status" style="margin-top:auto;border:0;padding:0.4rem 0;text-align:center">
+        <span><i class="dot"></i></span>
+      </div>
+    </nav>
+    <div class="stage-wrap">
+      <aside class="history-peek" aria-label="Conversations">
+        <button class="new-chat" type="button">New conversation</button>
+        <input class="search" type="search" placeholder="Find…" style="background:#fffaf0;color:#1a1612;border-color:#e4d6c4"/>
+        <p class="group-label">Today</p>
+        <div class="session-list">
+          <button class="session is-current" type="button" style="color:#1a1612"><strong>Quiet desk</strong><span>Now</span></button>
+          <button class="session" type="button" style="color:#1a1612"><strong>Release review</strong><span>12 min</span></button>
+          <button class="session" type="button" style="color:#1a1612"><strong>Composer density</strong><span>2 hr</span></button>
+        </div>
+        <p class="group-label">Yesterday</p>
+        <div class="session-list">
+          <button class="session" type="button" style="color:#1a1612"><strong>Allowlist host</strong><span>Yesterday</span></button>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="top">
+          <div>
+            <p class="eyebrow">Today</p>
+            <h1>Quiet desk</h1>
+            <p class="caption">Maximum transcript. Icon rail. History as a paper strip, not a second product.</p>
+          </div>
+          <div class="meta-pills">
+            <span class="pill ok">Ready · flash-0731</span>
+            <button class="ghost" type="button">Hide history</button>
+            <button class="ghost" type="button">Files</button>
+          </div>
+        </header>
+        <div class="stage">
+          <section class="conversation">
+            <div class="column">
+              <div class="transcript">
+                <article class="turn user">
+                  <div class="turn-head">You</div>
+                  <div class="bubble">I want the chat to be the thing I look at. Everything else should get out of the way.</div>
+                </article>
+                <article class="turn assistant">
+                  <div class="turn-head">Waffle</div>
+                  <div class="prose">
+                    <p>Then the rail becomes a matchstick: five destinations, one kitten, one palette. History is a paper strip you can hide. The composer is a single pill. Session metadata lives behind <strong>Files</strong>.</p>
+                    <p>Still Waffle — warm paper, ginger send, no graphite, no bubble-on-bubble cosplay. Just less furniture.</p>
+                    <div class="code">
+                      <div class="code-head"><span>text</span><span>Copy</span></div>
+                      <pre><code>Transcript is the product.
+Composer is one card.
+Chrome is a match.</code></pre>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button type="button">Copy</button>
+                    <button type="button">Regenerate</button>
+                    <button type="button">Branch</button>
+                  </div>
+                </article>
+                <article class="turn user">
+                  <div class="turn-head">You</div>
+                  <div class="bubble">Yes. That.</div>
+                </article>
+              </div>
+              <form class="composer">
+                <textarea rows="1" placeholder="Message Waffle…">Ship this if Hearth still feels busy.</textarea>
+                <div class="toolbar">
+                  <button class="chip" type="button">flash-0731 ▾</button>
+                  <button class="chip" type="button">Attach</button>
+                  <button class="send" type="button">Send</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
