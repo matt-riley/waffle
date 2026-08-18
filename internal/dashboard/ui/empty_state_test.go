@@ -2,9 +2,17 @@ package ui
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestEmptyStatePublicViewCannotOverrideApprovedArtwork(t *testing.T) {
+	typeOfView := reflect.TypeOf(EmptyStateView{})
+	if artwork, ok := typeOfView.FieldByName("Artwork"); ok && artwork.PkgPath == "" {
+		t.Fatalf("EmptyStateView exposes mutable artwork metadata: %s", artwork.Type)
+	}
+}
 
 func TestWaffleEmptyStateMapUsesApprovedDeskArtwork(t *testing.T) {
 	cases := []struct {
@@ -19,13 +27,6 @@ func TestWaffleEmptyStateMapUsesApprovedDeskArtwork(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.key), func(t *testing.T) {
-			artwork, ok := WaffleEmptyStateMap[tc.key]
-			if !ok {
-				t.Fatalf("missing semantic empty-state map entry %q", tc.key)
-			}
-			if artwork.AssetName != tc.assetName || artwork.Width != tc.width || artwork.Height != tc.height {
-				t.Fatalf("empty state artwork %q = %#v", tc.key, artwork)
-			}
 			view, ok := NewWaffleEmptyStateView(tc.key, "Consumer-owned title", "Consumer-owned body", string(tc.key)+"-title", nil, nil)
 			if !ok {
 				t.Fatalf("constructor rejected known semantic key %q", tc.key)
@@ -41,6 +42,7 @@ func TestWaffleEmptyStateMapUsesApprovedDeskArtwork(t *testing.T) {
 			for _, want := range []string{
 				`class="waffle-empty-state"`,
 				`role="region"`,
+				`src="/desk/assets/` + tc.assetName + `?v=`,
 				`alt=""`,
 				`aria-hidden="true"`,
 				`loading="lazy"`,
@@ -58,6 +60,9 @@ func TestWaffleEmptyStateMapUsesApprovedDeskArtwork(t *testing.T) {
 				t.Fatalf("empty state %q rendered more than two actions: %s", tc.key, body)
 			}
 		})
+	}
+	if _, ok := NewWaffleEmptyStateView(EmptyStateKey("unapproved"), "", "", "", nil, nil); ok {
+		t.Fatal("constructor accepted an unapproved semantic artwork key")
 	}
 }
 
@@ -88,8 +93,15 @@ func TestFragmentListRendersOptionalStructuredEmptyStateOnlyWhenEmpty(t *testing
 }
 
 func TestWaffleEmptyStateActionTiersAreExplicit(t *testing.T) {
-	primary := FragmentAction{ID: "retry", Label: "Retry", Method: "post", URL: "/retry", Target: "#tasks-list", Swap: "outerHTML"}
-	secondary := FragmentAction{ID: "filter", Label: "Show active", Method: "get", URL: "/tasks?filter=active"}
+	primary := FragmentAction{
+		ID: "retry", Label: "Retry", Method: "post", URL: "/retry", Target: "#tasks-list", Swap: "outerHTML",
+		Fields: []FragmentField{{Label: "session_id", Value: "session-1"}},
+		Inputs: []FragmentInput{{ID: "retry-reason", Name: "reason", Type: "text", Label: "Reason", Placeholder: "Why?", Value: "later", Required: true}},
+	}
+	secondary := FragmentAction{
+		ID: "filter", Label: "Show active", Method: "post", URL: "/tasks/filter", Target: "#tasks-list", Swap: "outerHTML",
+		Fields: []FragmentField{{Label: "filter", Value: "active"}},
+	}
 	state, ok := NewWaffleEmptyStateView(EmptyStateTasks, "Tasks title", "Tasks body", "tasks-title", &primary, &secondary)
 	if !ok {
 		t.Fatal("failed to construct task empty state")
@@ -104,5 +116,35 @@ func TestWaffleEmptyStateActionTiersAreExplicit(t *testing.T) {
 	}
 	if !strings.Contains(body, `data-waffle-action-id="retry"`) || !strings.Contains(body, `data-waffle-action-id="filter"`) {
 		t.Fatalf("empty state lost canonical action IDs: %s", body)
+	}
+	for _, want := range []string{
+		`hx-post="/retry"`,
+		`hx-target="#tasks-list"`,
+		`hx-swap="outerHTML"`,
+		`name="session_id" value="session-1"`,
+		`id="retry-reason"`,
+		`name="reason"`,
+		`placeholder="Why?"`,
+		`value="later"`,
+		`required`,
+		`hx-disabled-elt="this"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("empty state action missing canonical payload/submit attribute %q: %s", want, body)
+		}
+	}
+	if strings.Count(body, `class="waffle-action-form-with-inputs"`) != 1 {
+		t.Fatalf("expected only the visible-input action to receive the bounded form class: %s", body)
+	}
+}
+
+func TestFragmentActionFormClassOnlyVisibleInputs(t *testing.T) {
+	fieldsOnly := FragmentAction{Fields: []FragmentField{{Label: "fixture", Value: "fields-only"}}}
+	if got := fragmentActionFormClass(fieldsOnly); got != "" {
+		t.Fatalf("fields-only action form class = %q, want compact default", got)
+	}
+	withInput := FragmentAction{Inputs: []FragmentInput{{ID: "note", Name: "note", Type: "text"}}}
+	if got := fragmentActionFormClass(withInput); got != "waffle-action-form-with-inputs" {
+		t.Fatalf("visible-input action form class = %q, want bounded input class", got)
 	}
 }

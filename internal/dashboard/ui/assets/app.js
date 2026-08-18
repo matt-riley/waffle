@@ -102,7 +102,15 @@ function updateDeskLayoutMetrics() {
 
 if (typeof ResizeObserver === "function") {
   const deskLayoutObserver = new ResizeObserver(updateDeskLayoutMetrics);
-  [deskNavigation, deskComposer, deskComposerActions].filter(Boolean).forEach((element) => deskLayoutObserver.observe(element));
+  if (deskNavigation) {
+    deskLayoutObserver.observe(deskNavigation);
+  }
+  if (deskComposer) {
+    deskLayoutObserver.observe(deskComposer);
+  }
+  if (deskComposerActions) {
+    deskLayoutObserver.observe(deskComposerActions);
+  }
 }
 window.addEventListener?.("resize", updateDeskLayoutMetrics);
 updateDeskLayoutMetrics();

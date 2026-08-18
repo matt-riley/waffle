@@ -74,7 +74,7 @@
   --desk-top-clearance: calc(var(--desk-utility-height) + env(safe-area-inset-top, 0px));
   --desk-navigation-clearance: calc(var(--desk-navigation-height) + env(safe-area-inset-bottom, 0px));
   --desk-composer-overflow: max(0px, calc(var(--desk-composer-height) - (100dvh - var(--desk-navigation-height) - env(safe-area-inset-bottom, 0px))));
-  --desk-content-clearance: calc(var(--desk-navigation-height) + var(--desk-action-height) + env(safe-area-inset-bottom, 0px));
+  --desk-content-clearance: var(--desk-navigation-clearance);
 }
 
 /* Contrast notes: --ink on --cream is 14.37:1 and on --paper is 16.09:1;
@@ -1097,7 +1097,10 @@ h3 {
 }
 
 .composer textarea {
+  field-sizing: content;
+  max-height: min(12rem, 24dvh);
   min-height: 4.5rem;
+  overflow-y: auto;
 }
 
 .composer-session {
@@ -1773,24 +1776,29 @@ h3 {
 @media (max-width: 768px) {
   .desk-shell {
     display: block;
-    height: auto;
+    height: 100dvh;
     min-height: 100dvh;
-    /* Reserve the fixed navigation's full height plus the device safe-area
-       inset so every section's last row can scroll clear of the bar (#467). */
-    padding-bottom: var(--desk-navigation-clearance);
+    overflow: hidden;
   }
 
   .desk-shell[data-active-section="today"] main,
   .desk-shell[data-active-section=""] main {
-    display: block;
-    overflow: auto;
-    padding: var(--desk-top-clearance) 0.85rem var(--desk-content-clearance);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding: var(--desk-top-clearance) 0.85rem var(--desk-navigation-clearance);
     scroll-padding-bottom: var(--desk-content-clearance);
   }
 
   .desk-shell > main {
+    box-sizing: border-box;
+    height: 100%;
+    min-height: 0;
+    overflow: auto;
     padding-top: var(--desk-top-clearance);
-    padding-bottom: var(--desk-content-clearance);
+    padding-bottom: var(--desk-navigation-clearance);
     scroll-padding-bottom: var(--desk-content-clearance);
   }
 
@@ -1853,9 +1861,35 @@ h3 {
   }
 
   .conversation {
-    /* Leave the composer (and its slash menu) fully visible above the fixed
-       navigation plus the device safe-area inset (#467). */
-    min-height: calc(100dvh - 8.75rem - var(--desk-navigation-clearance));
+    flex: 1 1 auto;
+    max-height: 100%;
+    min-height: min(20rem, calc(100dvh - var(--desk-top-clearance) - var(--desk-navigation-clearance)));
+    overflow: hidden;
+  }
+
+  .today-columns {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .composer textarea {
+    max-height: min(12rem, 11dvh);
+  }
+
+  .composer-actions {
+    background: var(--surface-strong);
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+  }
+
+  .slash-menu {
+    position: sticky;
+    top: 0;
+    transform: translateY(-100%);
   }
 
   .composer,
@@ -1877,9 +1911,10 @@ h3 {
   }
 
   .message-list {
+    flex: 1 1 0;
     max-height: none;
-    min-height: 12rem;
-    padding-bottom: max(1rem, var(--desk-composer-overflow));
+    min-height: min(12rem, 22dvh);
+    padding-bottom: 1rem;
   }
 }
 
@@ -1940,6 +1975,26 @@ h3 {
   .composer-actions button,
   .tasks-header-actions button {
     width: 100%;
+  }
+
+  .composer-actions {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .composer-actions button {
+    font-size: 0.72rem;
+    line-height: 1.1;
+    min-width: 0;
+    padding: 0.35rem 0.1rem;
+  }
+
+  .dictate-hint {
+    clip: rect(0 0 0 0);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
   }
 
   .context-heading {
@@ -2514,6 +2569,21 @@ a:focus-visible {
   display: block;
   flex: 0 0 auto;
   margin: 0;
+}
+
+.waffle-empty-state-actions form.waffle-action-form-with-inputs {
+  flex: 1 1 18rem;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.waffle-empty-state-actions form.waffle-action-form-with-inputs input:not([type="hidden"]) {
+  box-sizing: border-box;
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
 }
 
 .waffle-empty-state-action {

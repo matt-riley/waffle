@@ -50,44 +50,7 @@ templ FragmentList(view FragmentView) {
 				if len(item.Actions) > 0 {
 					<div class="waffle-fragment-actions">
 						for _, action := range item.Actions {
-							if action.Method == "get" {
-								<a class={ action.Class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
-							} else if action.Method == "copy" {
-								if action.HasPressed {
-									<button class={ action.Class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-								} else {
-									<button class={ action.Class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled }>{ action.Label }</button>
-								}
-							} else if action.Method == "edit" {
-								if action.HasPressed {
-									<button class={ action.Class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-								} else {
-									<button class={ action.Class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
-								}
-							} else if len(action.Fields) > 0 || len(action.Inputs) > 0 {
-								<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
-									for _, field := range action.Fields {
-										<input type="hidden" name={ field.Label } value={ field.Value }/>
-									}
-									for _, input := range action.Inputs {
-										<label for={ input.ID }>{ input.Label }</label>
-										<input id={ input.ID } name={ input.Name } type={ input.Type } placeholder={ input.Placeholder } value={ input.Value } required?={ input.Required }/>
-									}
-									if action.HasPressed {
-										<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-									} else {
-										<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit" disabled?={ action.Disabled }>{ action.Label }</button>
-									}
-								</form>
-							} else {
-								<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
-									if action.HasPressed {
-										<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit" hx-disabled-elt="this" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-									} else {
-										<button class={ action.Class } data-waffle-action-id={ action.ID } type="submit" hx-disabled-elt="this" disabled?={ action.Disabled }>{ action.Label }</button>
-									}
-								</form>
-							}
+							@FragmentActionControl(action, action.Class)
 						}
 					</div>
 				}
@@ -112,6 +75,39 @@ templ FragmentList(view FragmentView) {
 	}
 	for _, filter := range view.Filters {
 		<button id={ filter.ID } class="task-filter" type="button" data-task-filter={ filter.Name } aria-pressed={ fragmentBool(filter.Pressed) } hx-get={ filter.URL } hx-target="#tasks-list" hx-swap="outerHTML" hx-swap-oob="outerHTML">{ filter.Label }</button>
+	}
+}
+
+templ FragmentActionControl(action FragmentAction, class string) {
+	if action.Method == "get" {
+		<a class={ class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
+	} else if action.Method == "copy" {
+		if action.HasPressed {
+			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
+		} else {
+			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled }>{ action.Label }</button>
+		}
+	} else if action.Method == "edit" {
+		if action.HasPressed {
+			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
+		} else {
+			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
+		}
+	} else {
+		<form class={ fragmentActionFormClass(action) } hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
+			for _, field := range action.Fields {
+				<input type="hidden" name={ field.Label } value={ field.Value }/>
+			}
+			for _, input := range action.Inputs {
+				<label for={ input.ID }>{ input.Label }</label>
+				<input id={ input.ID } name={ input.Name } type={ input.Type } placeholder={ input.Placeholder } value={ input.Value } required?={ input.Required }/>
+			}
+			if action.HasPressed {
+				<button class={ class } data-waffle-action-id={ action.ID } type="submit" hx-disabled-elt="this" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
+			} else {
+				<button class={ class } data-waffle-action-id={ action.ID } type="submit" hx-disabled-elt="this" disabled?={ action.Disabled }>{ action.Label }</button>
+			}
+		</form>
 	}
 }
 

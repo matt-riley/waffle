@@ -40,7 +40,7 @@ const (
 	EmptyStateMemory     EmptyStateKey = "memory"
 )
 
-type EmptyStateArtwork struct {
+type emptyStateArtwork struct {
 	AssetName string
 	Width     string
 	Height    string
@@ -53,42 +53,46 @@ type EmptyStateView struct {
 	TitleID         string
 	PrimaryAction   *FragmentAction
 	SecondaryAction *FragmentAction
-	Artwork         EmptyStateArtwork
+	artwork         emptyStateArtwork
 }
 
-// WaffleEmptyStateMap is the shared semantic-to-artwork contract for later
-// section consumers. Copy, actions, and heading IDs remain consumer-owned so
-// each downstream issue can supply its exact authoritative presentation.
-var WaffleEmptyStateMap = map[EmptyStateKey]EmptyStateArtwork{
-	EmptyStateTasks: {
-		AssetName: "waffle-empty-curled.png",
-		Width:     "480",
-		Height:    "320",
-		Class:     "waffle-empty-state-art-tasks",
-	},
-	EmptyStateWorkspaces: {
-		AssetName: "waffle-empty-sitting.png",
-		Width:     "320",
-		Height:    "320",
-		Class:     "waffle-empty-state-art-workspaces",
-	},
-	EmptyStateMemory: {
-		AssetName: "waffle-empty-curious.png",
-		Width:     "256",
-		Height:    "256",
-		Class:     "waffle-empty-state-art-memory",
-	},
+func emptyStateArtworkFor(key EmptyStateKey) (emptyStateArtwork, bool) {
+	switch key {
+	case EmptyStateTasks:
+		return emptyStateArtwork{
+			AssetName: "waffle-empty-curled.png",
+			Width:     "480",
+			Height:    "320",
+			Class:     "waffle-empty-state-art-tasks",
+		}, true
+	case EmptyStateWorkspaces:
+		return emptyStateArtwork{
+			AssetName: "waffle-empty-sitting.png",
+			Width:     "320",
+			Height:    "320",
+			Class:     "waffle-empty-state-art-workspaces",
+		}, true
+	case EmptyStateMemory:
+		return emptyStateArtwork{
+			AssetName: "waffle-empty-curious.png",
+			Width:     "256",
+			Height:    "256",
+			Class:     "waffle-empty-state-art-memory",
+		}, true
+	default:
+		return emptyStateArtwork{}, false
+	}
 }
 
 // NewWaffleEmptyStateView combines approved artwork with copy owned by the
 // section consumer. Unknown semantic keys are rejected rather than falling
 // back to an unapproved illustration.
 func NewWaffleEmptyStateView(key EmptyStateKey, title, body, titleID string, primaryAction, secondaryAction *FragmentAction) (EmptyStateView, bool) {
-	artwork, ok := WaffleEmptyStateMap[key]
+	artwork, ok := emptyStateArtworkFor(key)
 	if !ok {
 		return EmptyStateView{}, false
 	}
-	return EmptyStateView{Title: title, Body: body, TitleID: titleID, PrimaryAction: primaryAction, SecondaryAction: secondaryAction, Artwork: artwork}, true
+	return EmptyStateView{Title: title, Body: body, TitleID: titleID, PrimaryAction: primaryAction, SecondaryAction: secondaryAction, artwork: artwork}, true
 }
 
 type FragmentItem struct {
@@ -243,6 +247,13 @@ func fragmentBool(value bool) string {
 	return "false"
 }
 
+func fragmentActionFormClass(action FragmentAction) string {
+	if len(action.Inputs) == 0 {
+		return ""
+	}
+	return "waffle-action-form-with-inputs"
+}
+
 func emptyStateArtworkClass(view EmptyStateView) string {
-	return "waffle-empty-state-art " + view.Artwork.Class
+	return "waffle-empty-state-art " + view.artwork.Class
 }

@@ -205,26 +205,54 @@ func main() {
 			theme = "light"
 		}
 		populated := r.URL.Query().Get("populated") == "1"
+		shell := r.URL.Query().Get("shell") == "1"
+		primary := ui.FragmentAction{
+			ID: "fixture-primary", Label: "Start with Tasks", Method: "post", URL: "/api/v1/desk/test/empty-action",
+			Target: "#fixture-action-status", Swap: "innerHTML",
+			Fields: []ui.FragmentField{{Label: "fixture", Value: "empty-state"}},
+			Inputs: []ui.FragmentInput{{ID: "fixture-note", Name: "note", Type: "text", Label: "Note", Placeholder: "Optional note", Value: "", Required: false}},
+		}
+		secondary := ui.FragmentAction{
+			ID: "fixture-secondary", Label: "Review later", Method: "post", URL: "/api/v1/desk/test/empty-action",
+			Target: "#fixture-action-status", Swap: "innerHTML",
+			Fields: []ui.FragmentField{{Label: "fixture", Value: "empty-state-secondary"}},
+		}
 		state, ok := ui.NewWaffleEmptyStateView(
 			ui.EmptyStateTasks,
 			"Tasks are resting",
 			"This fixture copy belongs to the section consumer.",
 			"fixture-empty-state-title",
-			nil,
-			nil,
+			&primary,
+			&secondary,
 		)
 		if !ok {
 			http.Error(w, "empty state fixture unavailable", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, `<!doctype html><html data-theme="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"></head><body><main class="test-empty-state-surface"><section class="tasks" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
+		if shell {
+			view := ui.ShellView{Title: "Empty state fixture", ActiveSection: "tasks", Connection: "Fixture", ModelAlias: "fixture", AssetVersion: ui.AssetVersion()}
+			_, _ = io.WriteString(w, `<!doctype html><html lang="en" data-theme="`+theme+`" data-theme-preference="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="icon" href="`+ui.AssetURL("favicon.svg", ui.AssetVersion())+`"><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"><script defer src="`+ui.AssetURL("htmx.min.js", ui.AssetVersion())+`"></script><script defer src="`+ui.AssetURL("waffle-htmx.js", ui.AssetVersion())+`"></script><script type="module" src="`+ui.AssetURL("app.js", ui.AssetVersion())+`"></script></head><body data-request-token="fixture"><a class="skip-link" href="#main-content">Skip to main content</a><div class="desk-shell" data-active-section="tasks">`)
+			if err := ui.Navigation(view).Render(r.Context(), w); err != nil {
+				return
+			}
+			_, _ = io.WriteString(w, `<main id="main-content" tabindex="-1"><section class="tasks test-empty-state-surface" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
+		} else {
+			_, _ = io.WriteString(w, `<!doctype html><html lang="en" data-theme="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"></head><body><main class="test-empty-state-surface"><section class="tasks" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
+		}
 		if populated {
 			_, _ = io.WriteString(w, `<article class="fixture-populated-state"><h2>Morning review</h2><p>One settled task keeps the populated surface quiet.</p></article>`)
 		} else if err := ui.WaffleEmptyState(state).Render(r.Context(), w); err != nil {
 			return
 		}
-		_, _ = io.WriteString(w, `</section></main></body></html>`)
+		if shell {
+			_, _ = io.WriteString(w, `<p id="fixture-action-status" class="visually-hidden"></p></section></main></div><div class="command-palette" id="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" hidden><div class="palette-box"><div class="palette-search-row"><input id="palette-search" type="search" aria-label="Search commands"/><kbd>Esc</kbd></div></div></div></body></html>`)
+		} else {
+			_, _ = io.WriteString(w, `</section></main></body></html>`)
+		}
+	})
+	mux.HandleFunc("POST /api/v1/desk/test/empty-action", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /api/v1/desk/test/turn-fail", func(w http.ResponseWriter, r *http.Request) {
 		turnFail.Store(r.URL.Query().Get("on") != "0")

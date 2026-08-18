@@ -77,6 +77,13 @@ function allowDiagnostics(...patterns) {
   allowedDiagnostics.push(...patterns);
 }
 
+function allowExpectedResponse(status, path) {
+  allowDiagnostics(
+    `response ${status} ${baseURL}${path}`,
+    `Response Status Error Code ${status} from ${path}`,
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   allowedDiagnostics = [];
 
@@ -91,6 +98,7 @@ test.beforeEach(async ({ page }) => {
     const text = message.text();
     if (
       text.includes("favicon") ||
+      (text.includes("Failed to load resource") && text.includes("404")) ||
       text.includes("net::ERR_ABORTED") ||
       text.includes("SpeechSynthesis") ||
       text.includes("speechSynthesis")
@@ -101,6 +109,11 @@ test.beforeEach(async ({ page }) => {
   });
   page.on("pageerror", (error) => {
     pageerrorFailures.push(String(error));
+  });
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      consoleFailures.push(`response ${response.status()} ${response.url()}`);
+    }
   });
 });
 
@@ -161,9 +174,9 @@ async function expectControlsClearOfNavigation(page, selectors) {
     for (let index = 0; index < count; index += 1) {
       const target = targets.nth(index);
       await expect(target).toBeVisible();
-      const enabled = await target.isEnabled().catch(() => false);
-      if (enabled) {
-        await target.focus().catch(() => {});
+      if (await target.isEnabled().catch(() => false)) {
+        await target.focus();
+        await expect(target).toBeFocused();
       }
       await target.evaluate((element) => element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }));
       metrics.push(await target.evaluate((element, identity) => {
@@ -175,6 +188,7 @@ async function expectControlsClearOfNavigation(page, selectors) {
           viewport: { width: window.innerWidth, height: window.innerHeight },
           navigationHeight: nav?.height ?? 0,
           measuredHeight: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--desk-navigation-height")) || 0,
+          topClearance: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--desk-top-clearance")) || 0,
           selector: identity.selector,
           index: identity.index,
         };
@@ -186,7 +200,7 @@ async function expectControlsClearOfNavigation(page, selectors) {
     expect(metric.rect).not.toBeNull();
     expect(metric.navigationHeight).toBeGreaterThan(0);
     expect(metric.measuredHeight).toBeCloseTo(metric.navigationHeight, 0);
-    expect(metric.rect.top, `${metric.selector}[${metric.index}] top`).toBeGreaterThanOrEqual(0);
+    expect(metric.rect.top, `${metric.selector}[${metric.index}] top`).toBeGreaterThanOrEqual(metric.topClearance - 1);
     expect(metric.rect.bottom, `${metric.selector}[${metric.index}] bottom`).toBeLessThanOrEqual(metric.viewport.height + 1);
     expect(metric.rect.bottom, `${metric.selector}[${metric.index}] above navigation`).toBeLessThanOrEqual(metric.nav.top + 1);
     expect(rectIntersects(metric.rect, metric.nav), `${metric.selector}[${metric.index}] intersects fixed navigation`).toBe(false);
@@ -223,18 +237,17 @@ async function expectTodayComposerClearance(page) {
   expect(layout.actionVariable).toBeCloseTo(layout.actionHeight, 0);
   expect(layout.transcriptOverflowY).toBe("auto");
   expect(layout.actionBottom).toBeLessThanOrEqual(layout.navTop + 1);
-  if (layout.composerHeight + layout.navHeight > layout.viewportHeight) {
+  if (layout.composerHeight + layout.navHeight > layout.viewportHeight && layout.transcriptScrollHeight > layout.transcriptClientHeight) {
     // A tall composer keeps a real transcript scroll container; the action
     // row remains a sibling above the fixed navigation instead of becoming
     // the hidden scroll target beneath it.
     expect(layout.transcriptClientHeight).toBeGreaterThan(0);
     const scrollState = await page.locator("#desk-transcript").evaluate((element) => {
-      element.scrollTop = element.scrollHeight;
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
       return { scrollTop: element.scrollTop, scrollable: element.scrollHeight > element.clientHeight };
     });
-    if (scrollState.scrollable) {
-      expect(scrollState.scrollTop).toBeGreaterThan(0);
-    }
+    expect(scrollState.scrollable).toBe(true);
+    expect(scrollState.scrollTop).toBeGreaterThan(0);
     const actionBottom = await page.locator(".composer-actions").evaluate((element) => element.getBoundingClientRect().bottom);
     const navTop = await page.locator(".desk-navigation").evaluate((element) => element.getBoundingClientRect().top);
     expect(actionBottom).toBeLessThanOrEqual(navTop + 1);
@@ -274,10 +287,17 @@ async function expectLastFocusableClear(page, sectionSelector) {
   const metrics = await last.evaluate((element) => {
     const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
     const rect = element.getBoundingClientRect();
-    return { navTop: nav?.top ?? null, bottom: rect.bottom };
+    return {
+      nav: nav && { left: nav.left, right: nav.right, top: nav.top, bottom: nav.bottom },
+      rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
   });
-  expect(metrics.navTop).not.toBeNull();
-  expect(metrics.bottom, `${sectionSelector} last focusable`).toBeLessThanOrEqual(metrics.navTop + 1);
+  expect(metrics.nav).not.toBeNull();
+  expect(metrics.rect.top, `${sectionSelector} last focusable top`).toBeGreaterThanOrEqual(0);
+  expect(metrics.rect.bottom, `${sectionSelector} last focusable bottom`).toBeLessThanOrEqual(metrics.viewport.height + 1);
+  expect(metrics.rect.bottom, `${sectionSelector} last focusable above navigation`).toBeLessThanOrEqual(metrics.nav.top + 1);
+  expect(rectIntersects(metrics.rect, metrics.nav), `${sectionSelector} last focusable intersects navigation`).toBe(false);
 }
 
 test("Capabilities actions are compact, touch-sized, and honest at desktop and mobile widths", async ({ page }) => {
@@ -342,7 +362,7 @@ test("shared navigation reserves its measured bar and clears every section at re
   test.skip(test.info().project.name !== "desktop", "Run the explicit fixed-navigation contract once.");
   // The fixture closes Today ownership when navigating sections; its next
   // attach reports the expected recovery 404 before opening a fresh turn.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   const widths = [
     { width: 320, height: 812 },
     { width: 375, height: 812 },
@@ -393,9 +413,113 @@ test("shared navigation reserves its measured bar and clears every section at re
   }
 });
 
+test("Today keeps a long transcript scrollable while the real composer remains above navigation", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit dynamic composer contract once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  const widths = [
+    { width: 320, height: 812 },
+    { width: 375, height: 812 },
+    { width: 768, height: 1000 },
+  ];
+  for (const viewport of widths) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("today"));
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    await page.locator("#desk-message").fill("/");
+    await expect(page.locator("#desk-slash-menu")).toBeVisible();
+    const initialTextareaHeight = await page.locator("#desk-message").evaluate((element) => element.getBoundingClientRect().height);
+    await page.locator("#desk-message").fill(`${"A deliberately long composer draft ".repeat(160)}/`);
+    const grownTextareaHeight = await page.locator("#desk-message").evaluate((element) => element.getBoundingClientRect().height);
+    expect(grownTextareaHeight).toBeGreaterThan(initialTextareaHeight);
+    await expect(page.locator("#desk-slash-menu")).toBeVisible();
+    await page.locator("#desk-transcript").evaluate((transcript) => {
+      transcript.replaceChildren(...Array.from({ length: 30 }, (_, index) => {
+        const row = document.createElement("p");
+        row.className = "waffle-message assistant-message";
+        row.textContent = `Injected long transcript row ${index}: ${"A settled response that must remain inside the shrinking transcript. ".repeat(16)}`;
+        return row;
+      }));
+    });
+    await expect.poll(() => page.locator("#desk-transcript").evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))).toEqual(expect.objectContaining({ clientHeight: expect.any(Number) }));
+    const transcriptState = await page.locator("#desk-transcript").evaluate((element) => {
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(transcriptState.scrollHeight).toBeGreaterThan(transcriptState.clientHeight);
+    expect(transcriptState.scrollTop).toBeGreaterThan(0);
+    const geometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) {
+          return null;
+        }
+        const bounds = element.getBoundingClientRect();
+        return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+      };
+      const root = getComputedStyle(document.documentElement);
+      return {
+        message: rect("#desk-message"),
+        composer: rect("#desk-composer"),
+        actions: rect(".composer-actions"),
+        send: rect("#desk-send"),
+        cancel: rect("#desk-cancel"),
+        transcript: rect("#desk-transcript"),
+        slashMenu: rect("#desk-slash-menu"),
+        navigation: rect(".desk-navigation"),
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        topClearance: parseFloat(root.getPropertyValue("--desk-top-clearance")) || 0,
+      };
+    });
+    expect(geometry.slashMenu).not.toBeNull();
+    expect(geometry.navigation).not.toBeNull();
+    const simultaneousTargets = ["message", "actions", "send", "cancel", "slashMenu"];
+    for (const target of simultaneousTargets) {
+      expect(geometry[target], `${target} is visible in the settled geometry`).not.toBeNull();
+      expect(geometry[target].top, `${target} top`).toBeGreaterThanOrEqual(geometry.topClearance - 1);
+      expect(geometry[target].top, `${target} viewport top`).toBeGreaterThanOrEqual(-1);
+      expect(geometry[target].bottom, `${target} viewport bottom`).toBeLessThanOrEqual(geometry.viewport.height + 1);
+      expect(geometry[target].bottom, `${target} above navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+      expect(rectIntersects(geometry[target], geometry.navigation), `${target} intersects navigation`).toBe(false);
+    }
+    expect(geometry.composer).not.toBeNull();
+    expect(geometry.transcript).not.toBeNull();
+    await expectTodayComposerClearance(page);
+    await expectMobileUtilityHeaderClearance(page);
+    await page.locator("#palette-open").click();
+    await expect(page.locator("#command-palette")).toBeVisible();
+    await page.keyboard.press("Escape");
+    const trailing = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const shell = document.querySelector(".desk-shell");
+      const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+      return {
+        documentHeight: document.documentElement.scrollHeight,
+        bodyHeight: document.body.scrollHeight,
+        mainHeight: main?.scrollHeight ?? 0,
+        mainRect: main ? (() => { const rect = main.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, height: rect.height }; })() : null,
+        shellHeight: shell?.scrollHeight ?? 0,
+        shellRect: shell ? (() => { const rect = shell.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, height: rect.height }; })() : null,
+        todayRect: (() => { const rect = document.querySelector(".today")?.getBoundingClientRect(); return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height } : null; })(),
+        columnsRect: (() => { const rect = document.querySelector(".today-columns")?.getBoundingClientRect(); return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height } : null; })(),
+        navHeight: nav?.height ?? 0,
+        viewportHeight: window.innerHeight,
+      };
+    });
+    expect(trailing.bodyHeight - trailing.viewportHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(24);
+    expect(trailing.shellHeight - trailing.mainHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(trailing.navHeight + 24);
+  }
+});
+
 test("approved Waffle identity stays visible in Hearth and Evening at desktop and mobile sizes", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the shared identity render contract once.");
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   for (const theme of ["light", "dark"]) {
     for (const viewport of [{ width: 1414, height: 786 }, { width: 375, height: 812 }]) {
       await page.setViewportSize(viewport);
@@ -420,17 +544,19 @@ test("approved Waffle identity stays visible in Hearth and Evening at desktop an
   }
 });
 
-test("structured empty state stays bounded and quiet beside a populated Hearth surface", async ({ page }) => {
+test("structured empty state stays bounded and quiet in the shared Hearth and Evening shell", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the structured empty-state render contract once.");
-  allowDiagnostics("404", "Response Status Error Code 404");
   const viewports = [
     { width: 1414, height: 786 },
     { width: 375, height: 812 },
+    { width: 320, height: 812 },
   ];
   for (const theme of ["light", "dark"]) {
     for (const viewport of viewports) {
       await page.setViewportSize(viewport);
-      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=0`);
+      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=0&shell=1`);
+      await expect(page.locator(".desk-shell")).toBeVisible();
+      await expect(page.locator(".desk-navigation")).toBeVisible();
       const empty = page.locator(".waffle-empty-state");
       await expect(empty).toBeVisible();
       const rendered = await empty.evaluate((element) => {
@@ -440,6 +566,7 @@ test("structured empty state stays bounded and quiet beside a populated Hearth s
         const rootStyle = getComputedStyle(document.documentElement);
         return {
           role: element.getAttribute("role"),
+          live: element.getAttribute("aria-live"),
           labelledBy: element.getAttribute("aria-labelledby"),
           width: rect.width,
           imageWidth: imageRect.width,
@@ -454,6 +581,8 @@ test("structured empty state stays bounded and quiet beside a populated Hearth s
         };
       });
       expect(rendered.role).toBe("region");
+      expect(rendered.role).not.toBe("status");
+      expect(rendered.live).toBeNull();
       expect(rendered.labelledBy).toBe("fixture-empty-state-title");
       expect(rendered.imageLoading).toBe("lazy");
       expect(rendered.imageDecoding).toBe("async");
@@ -463,18 +592,142 @@ test("structured empty state stays bounded and quiet beside a populated Hearth s
       expect(rendered.imageWidth).toBeLessThanOrEqual(160);
       expect(rendered.scrollWidth).toBeLessThanOrEqual(rendered.viewportWidth);
       await expectNoHorizontalOverflow(page);
+      await expect(empty.locator(".action-primary")).toBeVisible();
+      await expect(empty.locator(".action-quiet")).toBeVisible();
+      const actionForm = empty.locator("form").first();
+      const actionGeometry = await empty.evaluate((element) => {
+        const rect = (selector) => {
+          const node = element.querySelector(selector);
+          const bounds = node.getBoundingClientRect();
+          return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+        };
+        const region = element.getBoundingClientRect();
+        const copy = element.querySelector(".waffle-empty-state-copy").getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+        const paddingRight = Number.parseFloat(style.paddingRight) || 0;
+        const forms = [...element.querySelectorAll(".waffle-empty-state-actions form")].map((form) => {
+          const bounds = form.getBoundingClientRect();
+          const button = form.querySelector("button").getBoundingClientRect();
+          return {
+            className: form.className,
+            left: bounds.left,
+            right: bounds.right,
+            width: bounds.width,
+            buttonWidth: button.width,
+          };
+        });
+        return {
+          region: { left: region.left, right: region.right, top: region.top, bottom: region.bottom },
+          content: { left: region.left + paddingLeft, right: region.right - paddingRight },
+          copy: { left: copy.left, right: copy.right, top: copy.top, bottom: copy.bottom },
+          forms,
+          inputs: [...element.querySelectorAll("form input:not([type=hidden])")].map((input) => {
+            const bounds = input.getBoundingClientRect();
+            return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+          }),
+          viewportWidth: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      });
+      expect(actionGeometry.forms).toHaveLength(2);
+      const inputForm = actionGeometry.forms[0];
+      const fieldsOnlyForm = actionGeometry.forms[1];
+      expect(inputForm.className).toContain("waffle-action-form-with-inputs");
+      expect(fieldsOnlyForm.className).not.toContain("waffle-action-form-with-inputs");
+      expect(inputForm.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+      expect(inputForm.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      expect(actionGeometry.copy.left).toBeGreaterThanOrEqual(actionGeometry.content.left - 1);
+      expect(actionGeometry.copy.right).toBeLessThanOrEqual(actionGeometry.content.right + 1);
+      expect(inputForm.left).toBeGreaterThanOrEqual(actionGeometry.content.left - 1);
+      expect(inputForm.right).toBeLessThanOrEqual(actionGeometry.content.right + 1);
+      expect(fieldsOnlyForm.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+      expect(fieldsOnlyForm.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      expect(fieldsOnlyForm.width).toBeLessThan(actionGeometry.copy.right - actionGeometry.copy.left);
+      for (const input of actionGeometry.inputs) {
+        expect(input.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+        expect(input.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      }
+      expect(actionGeometry.scrollWidth).toBeLessThanOrEqual(actionGeometry.viewportWidth);
+      await actionForm.getByLabel("Note", { exact: true }).fill("review payload");
+      const filledInputGeometry = await empty.evaluate((element) => {
+        const style = getComputedStyle(element);
+        const region = element.getBoundingClientRect();
+        const contentLeft = region.left + (Number.parseFloat(style.paddingLeft) || 0);
+        const contentRight = region.right - (Number.parseFloat(style.paddingRight) || 0);
+        const form = element.querySelector("form").getBoundingClientRect();
+        const input = element.querySelector("form input:not([type=hidden])").getBoundingClientRect();
+        return {
+          form: { left: form.left, right: form.right },
+          input: { left: input.left, right: input.right },
+          content: { left: contentLeft, right: contentRight },
+          scrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(filledInputGeometry.form.left).toBeGreaterThanOrEqual(filledInputGeometry.content.left - 1);
+      expect(filledInputGeometry.form.right).toBeLessThanOrEqual(filledInputGeometry.content.right + 1);
+      expect(filledInputGeometry.input.left).toBeGreaterThanOrEqual(filledInputGeometry.content.left - 1);
+      expect(filledInputGeometry.input.right).toBeLessThanOrEqual(filledInputGeometry.content.right + 1);
+      expect(filledInputGeometry.scrollWidth).toBeLessThanOrEqual(filledInputGeometry.viewportWidth);
+      const actionRequest = page.waitForRequest((request) => request.url().endsWith("/api/v1/desk/test/empty-action"));
+      await actionForm.getByRole("button", { name: "Start with Tasks", exact: true }).click();
+      const submitted = await actionRequest;
+      expect(submitted.method()).toBe("POST");
+      expect(submitted.headers()["content-type"]).toContain("application/json");
+      expect(JSON.parse(submitted.postData())).toMatchObject({ fixture: "empty-state", note: "review payload" });
+      const secondaryRequest = page.waitForRequest((request) => request.url().endsWith("/api/v1/desk/test/empty-action") && request !== submitted);
+      await empty.locator("form").nth(1).getByRole("button", { name: "Review later", exact: true }).click();
+      const secondarySubmitted = await secondaryRequest;
+      expect(secondarySubmitted.method()).toBe("POST");
+      expect(secondarySubmitted.headers()["content-type"]).toContain("application/json");
+      expect(JSON.parse(secondarySubmitted.postData())).toMatchObject({ fixture: "empty-state-secondary" });
+      if (viewport.width !== 320) {
+        await expect(page).toHaveScreenshot(`desk-empty-state-${theme}-${viewport.width}.png`, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      }
 
-      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=1`);
+      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=1&shell=1`);
+      await expect(page.locator(".desk-shell")).toBeVisible();
       await expect(page.locator(".fixture-populated-state")).toBeVisible();
       await expect(page.locator(".waffle-empty-state")).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
+      if (viewport.width !== 320) {
+      await expect(page).toHaveScreenshot(`desk-populated-state-${theme}-${viewport.width}.png`, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      }
     }
   }
-  await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0`);
+  await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0&shell=1`);
   const lightCanvas = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--surface-canvas").trim());
-  await page.goto(`${baseURL}/test/empty-state?theme=dark&populated=0`);
+  await page.goto(`${baseURL}/test/empty-state?theme=dark&populated=0&shell=1`);
   const darkCanvas = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--surface-canvas").trim());
   expect(darkCanvas).not.toBe(lightCanvas);
+});
+
+test("structured empty state remains reachable at 200 percent zoom", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit zoom contract once.");
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0&shell=1`);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await expectNoHorizontalOverflow(page);
+  const metrics = await page.locator(".waffle-empty-state").evaluate((empty) => {
+    const image = empty.querySelector("img").getBoundingClientRect();
+    const primary = empty.querySelector(".action-primary").getBoundingClientRect();
+    const nav = document.querySelector(".desk-navigation").getBoundingClientRect();
+    return {
+      image: { width: image.width, height: image.height, right: image.right },
+      primary: { top: primary.top, bottom: primary.bottom, right: primary.right },
+      nav: { top: nav.top, bottom: nav.bottom },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      scrollWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(metrics.image.width).toBeLessThanOrEqual(320);
+  expect(metrics.image.height).toBeLessThanOrEqual(320);
+  expect(metrics.primary.right).toBeLessThanOrEqual(metrics.viewport.width);
+  expect(metrics.primary.top).toBeGreaterThanOrEqual(0);
+  expect(metrics.primary.bottom).toBeLessThanOrEqual(metrics.nav.top + 1);
+  expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewport.width);
 });
 
 // Visual baselines (#469): the five destinations at every configured width,
@@ -1194,7 +1447,7 @@ test("command palette opens everywhere, searches, and invokes existing actions",
   // Navigating between sections closes the chat owner on pagehide; the next
   // Today load reattaches, finds the closed client, and silently opens fresh.
   // The resulting 404 is the expected recovery path, not a regression.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const palette = page.locator("#command-palette");
@@ -1965,7 +2218,7 @@ test("Today reload and navigate-away recovery returns to a usable single desk", 
   test.skip(test.info().project.name !== "desktop", "Run the ownership lifecycle once.");
   // The navigate-away step closes the owner on pagehide; returning to Today
   // reattaches, finds the closed client, and silently opens fresh (#454).
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const before = await page.evaluate(() =>
@@ -2076,7 +2329,7 @@ test("session model remains scoped away from the Waffle-wide default", async ({ 
   test.skip(test.info().project.name !== "desktop", "Run the stateful scope flow once.");
   // The reload races the keepalive close fired on pagehide; the reattach
   // finds the retiring client and silently opens fresh.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   const sessionModel = page.getByLabel("Session model");
   await expect(sessionModel).toBeEnabled();
@@ -2282,7 +2535,7 @@ test("memory attach uses a session picker with stale-selection recovery", async 
   // drops the invalid option instead of leaving it resubmittable.
   await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?empty=1`);
   try {
-    allowDiagnostics("404", "Response Status Error Code 404");
+    allowExpectedResponse(404, "/api/v1/desk/memory/attach");
     await picker.selectOption("session-primary");
     await attach.click();
     await expect(page.locator("#memory-attach-status")).toContainText(
@@ -2400,7 +2653,7 @@ test("keyboard navigation reaches every destination and dialog returns focus", a
   test.skip(test.info().project.name !== "desktop", "Run the keyboard flow once.");
   // Each destination hop closes the chat owner on pagehide; the next Today
   // visit reattaches, finds the closed client, and silently opens fresh.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   const destinations = [
     ["Today", "today", ".today"],
     ["Tasks", "tasks", ".tasks"],

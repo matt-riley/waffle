@@ -2,40 +2,20 @@ package ui
 
 templ WaffleEmptyState(view EmptyStateView) {
 	<section class="waffle-empty-state" role="region" aria-labelledby={ view.TitleID }>
-		<img class={ emptyStateArtworkClass(view) } src={ AssetURL(view.Artwork.AssetName, AssetVersion()) } width={ view.Artwork.Width } height={ view.Artwork.Height } alt="" aria-hidden="true" loading="lazy" decoding="async"/>
+		<img class={ emptyStateArtworkClass(view) } src={ AssetURL(view.artwork.AssetName, AssetVersion()) } width={ view.artwork.Width } height={ view.artwork.Height } alt="" aria-hidden="true" loading="lazy" decoding="async"/>
 		<div class="waffle-empty-state-copy">
 			<h2 id={ view.TitleID }>{ view.Title }</h2>
 			<p>{ view.Body }</p>
 			if view.PrimaryAction != nil || view.SecondaryAction != nil {
 				<div class="waffle-empty-state-actions">
 					if view.PrimaryAction != nil {
-						@WaffleEmptyStateAction(*view.PrimaryAction, "waffle-empty-state-action action-primary")
+						@FragmentActionControl(*view.PrimaryAction, "waffle-empty-state-action action-primary")
 					}
 					if view.SecondaryAction != nil {
-						@WaffleEmptyStateAction(*view.SecondaryAction, "waffle-empty-state-action action-quiet")
+						@FragmentActionControl(*view.SecondaryAction, "waffle-empty-state-action action-quiet")
 					}
 				</div>
 			}
 		</div>
 	</section>
-}
-
-templ WaffleEmptyStateAction(action FragmentAction, class string) {
-	if action.Method == "get" {
-		<a class={ class } data-waffle-action-id={ action.ID } href={ action.URL }>{ action.Label }</a>
-	} else if action.Method == "copy" {
-		if action.HasPressed {
-			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-		} else {
-			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled }>{ action.Label }</button>
-		}
-	} else {
-		<form hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
-			if action.HasPressed {
-				<button class={ class } data-waffle-action-id={ action.ID } type="submit" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
-			} else {
-				<button class={ class } data-waffle-action-id={ action.ID } type="submit" disabled?={ action.Disabled }>{ action.Label }</button>
-			}
-		</form>
-	}
 }
