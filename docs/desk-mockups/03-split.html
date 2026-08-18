@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en" data-layout="split">
+<head>
+  <meta charset="utf-8"/>
+  <title>Split kiln — Waffle Desk</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap"/>
+  <link rel="stylesheet" href="mock.css"/>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Waffle Desk">
+      <a class="brand" href="#"><img src="../../assets/brand/waffle/poses/sitting.png" alt=""/> <span>Waffle Desk</span></a>
+      <button class="palette-btn" type="button">Commands <kbd>⌘K</kbd></button>
+      <div class="nav">
+        <a href="#" aria-current="page">Today</a>
+        <a href="#">Tasks</a>
+        <a href="#">Workspaces</a>
+        <a href="#">Memory</a>
+        <a href="#">Capabilities</a>
+      </div>
+      <div class="rail-sessions">
+        <button class="new-chat" type="button">New conversation</button>
+        <input class="search" type="search" placeholder="Find a conversation"/>
+        <p class="group-label">Today</p>
+        <div class="session-list">
+          <button class="session is-current" type="button"><strong>Artifact pass</strong><span>Now</span></button>
+          <button class="session" type="button"><strong>Release review</strong><span>12 min ago</span></button>
+        </div>
+      </div>
+      <div class="rail-status">
+        <span><i class="dot"></i>Connected</span>
+        <code>deepseek-v4-flash-0731</code>
+      </div>
+    </nav>
+    <main class="main">
+      <header class="top">
+        <div>
+          <p class="eyebrow">Today</p>
+          <h1>Artifact pass</h1>
+        </div>
+        <div class="meta-pills">
+          <span class="pill ok">Ready</span>
+          <span class="pill">matt-riley/waffle</span>
+          <button class="ghost" type="button">Close canvas</button>
+        </div>
+      </header>
+      <div class="stage">
+        <section class="conversation">
+          <div class="column">
+            <div class="transcript">
+              <article class="turn user">
+                <div class="turn-head">You</div>
+                <div class="bubble">Write the tightened issue bodies into a markdown file I can paste.</div>
+              </article>
+              <article class="turn assistant">
+                <div class="turn-head">Waffle</div>
+                <div class="prose">
+                  <p>Wrote <strong>desk-issues.md</strong>. Open it beside the chat — preview stays host-served and read-only.</p>
+                  <div class="artifact">
+                    <div><strong>desk-issues.md</strong><div style="color:var(--ink-muted);font-size:0.75rem">text/markdown · 4.2 KiB</div></div>
+                    <button type="button">Opened</button>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <form class="composer">
+              <textarea rows="1" placeholder="Message Waffle…">Tighten the acceptance criteria on 536.</textarea>
+              <div class="toolbar">
+                <button class="chip" type="button">flash-0731 ▾</button>
+                <button class="chip" type="button">Attach</button>
+                <button class="send" type="button">Send</button>
+              </div>
+            </form>
+          </div>
+        </section>
+        <aside class="canvas" aria-label="Canvas">
+          <div class="canvas-head">
+            <div class="tabs">
+              <button class="is-on" type="button">Artifact</button>
+              <button type="button">Session</button>
+              <button type="button">Diagnostics</button>
+              <button type="button">Project</button>
+            </div>
+            <button class="ghost" type="button">Download</button>
+          </div>
+          <div class="canvas-body"># 536 — on-demand canvas
+
+Default Today is conversation + composer.
+No permanent Session aside.
+
+Open this panel for:
+- artifact preview / download
+- usage, permissions, workset
+- project pin + owner note
+
+Escape closes. Focus returns to
+the Open in canvas trigger.
+
+Usage auto-hydrates:
+3 requests · 120 in · 45 out</div>
+        </aside>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

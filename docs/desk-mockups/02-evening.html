@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-theme="evening">
+<head>
+  <meta charset="utf-8"/>
+  <title>Evening — Waffle Desk</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap"/>
+  <link rel="stylesheet" href="mock.css"/>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Waffle Desk">
+      <a class="brand" href="#"><img src="../../assets/brand/waffle/poses/sitting.png" alt=""/> <span>Waffle Desk</span></a>
+      <button class="palette-btn" type="button">Commands <kbd>⌘K</kbd></button>
+      <div class="nav">
+        <a href="#" aria-current="page">Today</a>
+        <a href="#">Tasks</a>
+        <a href="#">Workspaces</a>
+        <a href="#">Memory</a>
+        <a href="#">Capabilities</a>
+      </div>
+      <div class="rail-sessions">
+        <button class="new-chat" type="button">New conversation</button>
+        <input class="search" type="search" placeholder="Find a conversation"/>
+        <p class="group-label">Today</p>
+        <div class="session-list">
+          <button class="session is-current" type="button"><strong>Night notes</strong><span>Now · flash-0731</span></button>
+          <button class="session" type="button"><strong>Netlock review</strong><span>1 hr ago</span></button>
+          <button class="session" type="button"><strong>Upgrade SHA check</strong><span>3 hr ago</span></button>
+        </div>
+        <p class="group-label">Yesterday</p>
+        <div class="session-list">
+          <button class="session" type="button"><strong>Telegram gateway</strong><span>Yesterday</span></button>
+        </div>
+      </div>
+      <div class="rail-status">
+        <span><i class="dot"></i>Connected</span>
+        <code>deepseek-v4-flash-0731</code>
+      </div>
+    </nav>
+    <main class="main">
+      <header class="top">
+        <div>
+          <p class="eyebrow">Today · evening</p>
+          <h1>Night notes</h1>
+        </div>
+        <div class="meta-pills">
+          <span class="pill ok">Ready</span>
+          <span class="pill">Theme: Evening</span>
+          <button class="ghost" type="button">System / Light / Dark</button>
+        </div>
+      </header>
+      <div class="stage">
+        <section class="conversation">
+          <div class="column">
+            <div class="transcript">
+              <article class="turn user">
+                <div class="turn-head">You</div>
+                <div class="bubble">Dark mode, but it still has to look like Waffle. Not ChatGPT graphite.</div>
+              </article>
+              <article class="turn assistant">
+                <div class="turn-head">Waffle</div>
+                <div class="reasoning">Reasoning · closed</div>
+                <div class="prose">
+                  <p>Evening ground from the docs site: <strong>#17130f</strong> canvas, raised <strong>#211b15</strong> paper, cream text, ginger-light for focus. Ginger stays a fill on dark — it can carry text here.</p>
+                  <div class="code">
+                    <div class="code-head"><span>css</span><span>Copy</span></div>
+                    <pre><code>html[data-theme="dark"] {
+  --cream: #17130f;
+  --paper: #211b15;
+  --ink: #f2e9dc;
+}</code></pre>
+                  </div>
+                  <p>Same layout as Hearth. Only the kiln goes out. Identity holds because the warmth stays — brown-black, not zinc.</p>
+                </div>
+                <div class="actions">
+                  <button type="button">Copy</button>
+                  <button type="button">Regenerate</button>
+                  <button type="button">Branch</button>
+                </div>
+              </article>
+            </div>
+            <form class="composer">
+              <textarea rows="1" placeholder="Message Waffle…">Keep the evening tokens. No slate.</textarea>
+              <div class="toolbar">
+                <button class="chip" type="button">flash-0731 ▾</button>
+                <button class="chip" type="button">Deep ▾</button>
+                <button class="chip" type="button">Attach</button>
+                <button class="send" type="button">Send</button>
+              </div>
+            </form>
+            <p class="hint">Same bones as Hearth. Dark is a token map, not a new product.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
