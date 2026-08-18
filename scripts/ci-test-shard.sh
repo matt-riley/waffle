@@ -13,10 +13,12 @@
 #   workspace GROUP TOTAL  shard of internal/workspace's tests by name, using
 #                          measured per-test weights from
 #                          scripts/ci-test-workspace-weights.tsv.
-#   cmd GROUP TOTAL        same, for ./cmd/waffle, using
-#                          scripts/ci-test-cmd-weights.tsv. cmd/waffle is the
-#                          heaviest remaining package (~151s under -race), so
-#                          it is split across three runners with -run.
+#   cmd GROUP TOTAL        shard ./cmd/waffle by test name using
+#                          scripts/ci-test-cmd-weights.tsv. TestServe* lifecycle
+#                          and socket tests stay together on the final group so
+#                          sharding does not split their process-level context;
+#                          the remaining tests are balanced across the other
+#                          groups.
 #
 # Items without a weight entry default to 1s, so newly added packages/tests
 # attach to the currently-lightest shard without manual bookkeeping.
@@ -36,6 +38,8 @@ if (( shard < 1 || shard > total )); then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+partition_shard="$shard"
+partition_total="$total"
 
 case "$mode" in
   pkg)
@@ -56,7 +60,23 @@ case "$mode" in
     weights_file="$script_dir/ci-test-cmd-weights.tsv"
     prefix=""
     test_pkg="./cmd/waffle"
-    input="$(go test -list '^Test' "$test_pkg" | grep '^Test')"
+    all_tests="$(go test -list '^Test' "$test_pkg" | grep '^Test')"
+    if (( total > 1 )); then
+      if (( shard == total )); then
+        # Serve exercises daemon lifecycle, Unix sockets, listeners and
+        # process-level coordination. Keep those tests in one process rather
+        # than making their behaviour depend on which named-test shard they
+        # happened to land in.
+        input="$(grep '^TestServe' <<< "$all_tests")"
+        partition_shard=1
+        partition_total=1
+      else
+        input="$(grep -v '^TestServe' <<< "$all_tests")"
+        partition_total=$((total - 1))
+      fi
+    else
+      input="$all_tests"
+    fi
     ;;
   *)
     echo "error: unknown mode $mode (expected pkg, workspace, or cmd)" >&2
@@ -64,7 +84,7 @@ case "$mode" in
     ;;
 esac
 
-selected="$(awk -v shard="$shard" -v total="$total" -v wf="$weights_file" -v prefix="$prefix" '
+selected="$(awk -v shard="$partition_shard" -v total="$partition_total" -v wf="$weights_file" -v prefix="$prefix" '
 BEGIN {
   while ((getline line < wf) > 0) {
     split(line, a, "\t")
