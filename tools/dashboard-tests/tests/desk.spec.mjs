@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { existsSync } from "node:fs";
 
 import { expect, test } from "@playwright/test";
 
@@ -131,6 +132,16 @@ const visualSections = [
 
 for (const [name, section, settled] of visualSections) {
   test(`visual baseline ${name} renders scannable and unclipped at every width`, async ({ page }) => {
+    const baselinePath = path.join(
+      testsDir,
+      "desk.spec.mjs-snapshots",
+      `desk-visual-${name}-${test.info().project.name}-${process.platform}.png`,
+    );
+    if (!existsSync(baselinePath) && process.env.WAFFLE_VISUAL_BASELINES !== "1") {
+      test.skip(
+        `no committed ${process.platform} baseline for ${name}; set WAFFLE_VISUAL_BASELINES=1 with --update-snapshots to generate`,
+      );
+    }
     await page.goto(deskURL(section));
     if (section === "today") {
       await expect(page.locator("#desk-phase")).toHaveText("Ready");
@@ -151,7 +162,7 @@ for (const [name, section, settled] of visualSections) {
       // Cross-platform font metrics shift a little text wrapping; keep the
       // threshold tight enough to catch layout regressions but not platform
       // font variance.
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
   });
 }

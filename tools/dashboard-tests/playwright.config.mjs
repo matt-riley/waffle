@@ -9,10 +9,11 @@ const viewports = [
 
 export default defineConfig({
   testDir: "./tests",
-  // Visual baselines are platform-neutral so one reviewed set gates every
-  // platform (macOS local runs and the Linux CI gate). Regenerate with
-  // --update-snapshots after a deliberate visual change (#469).
-  snapshotPathTemplate: "{testDir}/{testFilePath}-snapshots/{arg}{ext}",
+  // Visual baselines are platform-specific (font metrics differ across
+  // macOS/Linux), so the platform is part of the snapshot name. Tests skip
+  // when no baseline exists for the current platform and are enforced where
+  // one does (#469). Regenerate with --update-snapshots.
+  snapshotPathTemplate: "{testDir}/{testFilePath}-snapshots/{arg}-{platform}{ext}",
   fullyParallel: false,
   workers: 1,
   retries: 0,
