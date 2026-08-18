@@ -72,7 +72,7 @@
 
 .profile-form [aria-invalid="true"] {
   border-width: 2px;
-  outline: 2px solid var(--ginger);
+  outline: 2px solid var(--focus-ring-color);
 }
 
 .profile-form-status {
@@ -147,9 +147,9 @@
 /* Card actions: Edit is the primary continuation, Copy stays secondary, and
    Delete is a separated destructive path (#465). */
 .profile-actions [data-action="edit"] {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
+  background: var(--action-primary-surface);
+  border-color: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .profile-actions [data-action="copy"] {

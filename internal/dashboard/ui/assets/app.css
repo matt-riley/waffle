@@ -17,7 +17,6 @@
   --warning-surface: #f7ddbf;
   --warning-border: #c98957;
   --warning-text: #7a4b0e;
-  --surface-code: #eadfce;
   --surface-memory-source: #ffd8b9;
   --surface-memory-archive: #e4ddd4;
   --rule: #d7c9b7;
@@ -37,16 +36,26 @@
   --surface-soft: #faf4e8;
   --surface-sidebar: var(--ink);
   --surface-user: var(--warning-surface);
+  --surface-code: #eadfce;
   --text-primary: var(--ink);
   --text-muted: var(--muted);
   --text-sidebar: var(--cream);
+  --text-sidebar-danger: #f3a199;
   --text-on-accent: var(--ink);
   --text-on-code: var(--paper);
+  --text-on-danger: var(--paper);
   --text-danger: var(--danger-text);
+  --accent-fill: var(--ginger);
+  --accent-text: var(--ginger-dark);
+  --accent-sidebar: var(--ginger);
   --border-default: var(--rule-dark);
   --border-focus: var(--ginger);
   --border-user: var(--warning-border);
   --focus-ring-color: var(--ginger-dark);
+  --focus-ring-sidebar-color: var(--ginger);
+  --focus-ring-sidebar: 0 0 0 3px var(--focus-ring-sidebar-color);
+  --action-primary-surface: var(--surface-sidebar);
+  --action-primary-text: var(--text-sidebar);
   --accent-halo: 0 0 0 1px rgb(221 113 40 / 18%);
   --radius-card: 8px;
   --radius-control: 6px;
@@ -62,15 +71,14 @@
 
 /* Contrast notes: --ink on --cream is 14.37:1 and on --paper is 16.09:1;
    --ink on the evening canvas is 15.37:1 and on raised paper is 14.17:1;
-   --ginger-dark is used for light focus rings (at least 5.9:1), while
-   --ginger-light is used on evening ground (11.57:1); dark --danger is
-   #f3a199 on the evening canvas (9.12:1). */
+   --ginger-dark is used for light body focus rings (at least 5.9:1),
+   --ginger is used for light rail focus (5.15:1), and --ginger-light is
+   used on the evening rail/ground; sidebar danger uses #f3a199. */
 html[data-theme="dark"] {
   --cream: #17130f;
   --paper: #211b15;
   --ink: #f2e9dc;
   --muted: #c4b2a0;
-  --ginger-dark: #f0a267;
   --healthy: #9ac7a5;
   --danger: #f3a199;
   --danger-surface: #43211e;
@@ -95,13 +103,21 @@ html[data-theme="dark"] {
   --surface-strong: var(--paper);
   --surface-soft: #2a2018;
   --surface-sidebar: #0f0d0b;
+  --text-sidebar-danger: #f3a199;
   --text-sidebar: var(--ink);
   --text-on-accent: #211d19;
   --text-on-code: var(--ink);
+  --text-on-danger: var(--ink);
   --text-danger: var(--danger-text);
+  --accent-fill: var(--ginger);
+  --accent-text: var(--ginger-light);
+  --accent-sidebar: var(--ginger-light);
   --border-focus: var(--ginger-light);
   --border-user: #ab6c3f;
   --focus-ring-color: var(--ginger-light);
+  --focus-ring-sidebar-color: var(--ginger-light);
+  --action-primary-surface: var(--surface-sidebar);
+  --action-primary-text: var(--text-sidebar);
   --accent-halo: 0 0 0 1px rgb(245 197 121 / 28%);
   --shadow-soft: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 40%);
@@ -245,7 +261,7 @@ textarea {
 }
 
 .brand {
-  color: var(--ginger);
+  color: var(--accent-sidebar);
   font-family: "Avenir Next Rounded", "Avenir Next", Avenir, sans-serif;
   font-size: 1.35rem;
   font-weight: 700;
@@ -269,7 +285,7 @@ textarea {
 
 .section-links a[aria-current="page"],
 .section-links a:hover {
-  background: var(--ginger);
+  background: var(--accent-fill);
   color: var(--text-on-accent);
 }
 
@@ -298,7 +314,7 @@ textarea {
 }
 
 .status-dot.is-degraded {
-  background: var(--ginger);
+  background: var(--accent-fill);
 }
 
 .status-dot.is-disconnected {
@@ -320,7 +336,7 @@ code,
 
 .rail-status[data-connection-state="disconnected"] #rail-connection,
 .rail-status[data-connection-state="degraded"] #rail-connection {
-  color: var(--text-danger);
+  color: var(--text-sidebar-danger);
 }
 
 main {
@@ -426,7 +442,7 @@ h3 {
 }
 
 .connection.is-reconnecting {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 .connection.is-reconnecting .connection-light {
@@ -620,7 +636,7 @@ h3 {
 }
 
 .message-body a {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
   text-decoration: underline;
   text-underline-offset: 0.12em;
 }
@@ -630,8 +646,8 @@ h3 {
 }
 
 .code-block pre {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--surface-code);
+  color: var(--text-on-code);
   overflow-x: auto;
   padding: 1rem;
 }
@@ -685,7 +701,7 @@ h3 {
 }
 
 .tool-ledger-heading span {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
   font-size: 0.66rem;
   text-transform: uppercase;
 }
@@ -880,7 +896,7 @@ h3 {
 }
 
 .message-copy:hover {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 
@@ -902,7 +918,7 @@ h3 {
 .message-edit:focus-visible,
 .message-regenerate:focus-visible {
   border-color: var(--rule-dark);
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 .message-edit[disabled],
@@ -927,7 +943,7 @@ h3 {
 
 .message-branch:hover,
 .message-branch:focus-visible {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 
@@ -972,8 +988,8 @@ h3 {
 
 .artifact-actions button:hover,
 .artifact-actions button:focus-visible {
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
 }
 
 .artifact-actions button:disabled {
@@ -1013,7 +1029,7 @@ h3 {
 
 .sources-drawer summary:hover,
 .sources-drawer summary:focus-visible {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 .sources-list {
@@ -1044,13 +1060,13 @@ h3 {
 }
 
 .source-open {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 .retry-button {
   background: var(--paper);
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   font-weight: 700;
 }
 
@@ -1147,7 +1163,7 @@ h3 {
 
 .queue-actions button:hover,
 .queue-actions button:focus-visible {
-  border-color: var(--ginger-dark);
+  border-color: var(--accent-text);
 }
 
 .composer-actions {
@@ -1266,7 +1282,7 @@ h3 {
 .session-menu-trigger:hover,
 .session-menu-trigger:focus-visible,
 .session-menu-trigger[aria-expanded="true"] {
-  border-color: var(--ginger-dark);
+  border-color: var(--accent-text);
   color: inherit;
   outline: none;
 }
@@ -1362,13 +1378,13 @@ h3 {
 }
 
 .session-choice:focus-visible {
-  border-color: var(--ginger-dark);
+  border-color: var(--accent-text);
   outline: none;
 }
 
 .session-choice.is-selected {
   background: var(--surface-code);
-  border-color: var(--ginger-dark);
+  border-color: var(--accent-text);
 }
 
 .session-title {
@@ -1474,7 +1490,7 @@ h3 {
 
 .tasks-attention {
   background: var(--warning-surface);
-  border: 1px solid var(--ginger-dark);
+  border: 1px solid var(--accent-text);
   font-size: 0.8rem;
   margin: 0;
   padding: 0.55rem 0.7rem;
@@ -1499,8 +1515,8 @@ h3 {
 }
 
 .task-filter[aria-pressed="true"] {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .tasks-errors {
@@ -1943,8 +1959,8 @@ h3 {
 
 .project-form button:hover,
 .project-form button:focus-visible {
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
 }
 
 .project-resource {
@@ -1975,8 +1991,8 @@ h3 {
 
 .project-resource button:hover,
 .project-resource button:focus-visible {
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
 }
 
 /* Guided schedule editor (#460): common cadences in plain language, a live
@@ -2068,8 +2084,8 @@ h3 {
 
 .schedule-button {
   background: transparent;
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   font-size: 0.78rem;
 }
 
@@ -2081,8 +2097,8 @@ h3 {
 }
 
 .message-read.is-speaking {
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   font-weight: 700;
 }
 
@@ -2095,8 +2111,8 @@ h3 {
 
 .dictate-button {
   background: transparent;
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   font-size: 0.78rem;
 }
 
@@ -2129,7 +2145,7 @@ h3 {
 
 .temporary-badge {
   background: var(--warning-surface);
-  border: 1px solid var(--ginger-dark);
+  border: 1px solid var(--accent-text);
   color: var(--warning-text);
   font-size: 0.74rem;
   margin: 0;
@@ -2175,8 +2191,8 @@ h3 {
 
 .attach-button {
   background: transparent;
-  border-color: var(--ginger-dark);
-  color: var(--ginger-dark);
+  border-color: var(--accent-text);
+  color: var(--accent-text);
   font-size: 0.78rem;
 }
 
@@ -2314,8 +2330,8 @@ h3 {
 
 .palette-open {
   background: transparent;
-  border-color: var(--ginger-dark);
-  color: var(--ginger);
+  border-color: var(--accent-text);
+  color: var(--accent-sidebar);
   font-size: 0.78rem;
   padding: 0.4rem 0.5rem;
   text-align: left;
@@ -2348,7 +2364,7 @@ h3 {
 .palette-open kbd {
   background: transparent;
   border: 0;
-  color: var(--ginger);
+  color: var(--accent-sidebar);
   font-family: SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.72rem;
 }
@@ -2373,12 +2389,17 @@ a:focus-visible {
   outline: 0;
 }
 
+.desk-navigation :focus-visible {
+  box-shadow: var(--focus-ring-sidebar);
+  outline: 0;
+}
+
 /* Action hierarchy: one primary, quiet secondary/utility, and separated
    destructive treatment across sections. */
 .action-primary {
-  background: var(--surface-sidebar);
-  border-color: var(--surface-sidebar);
-  color: var(--text-sidebar);
+  background: var(--action-primary-surface);
+  border-color: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .action-quiet {

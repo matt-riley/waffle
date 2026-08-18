@@ -208,12 +208,13 @@
 
 .workspace-danger {
   background: var(--danger);
-  color: var(--paper);
+  color: var(--text-on-danger);
 }
 
 .workspaces :focus-visible {
-  outline: 3px solid var(--ginger);
+  box-shadow: var(--focus-ring);
   outline-offset: 3px;
+  outline: 0;
 }
 
 @media (max-width: 900px) {
@@ -269,9 +270,9 @@
 }
 
 .workspace-card .waffle-fragment-actions .workspace-primary {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
+  background: var(--action-primary-surface);
+  border-color: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .workspace-card .waffle-fragment-actions .workspace-danger-action {

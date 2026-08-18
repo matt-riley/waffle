@@ -948,16 +948,9 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   expect(ring).toMatch(/rgb\(157, 66, 31/);
 });
 
-test("the shared theme contract paints light and dark without a flash", async ({ page }) => {
+test("theme boot paints each case before app.js can run", async ({ browser }) => {
   const project = test.info().project.name;
   test.skip(!["desktop", "mobile"].includes(project), "Run the theme contract at desktop and mobile sizes.");
-  allowDiagnostics("404 (Not Found)");
-
-  await page.setViewportSize(
-    project === "desktop"
-      ? { width: 1414, height: 786 }
-      : { width: 375, height: 812 },
-  );
 
   const cases = [
     { stored: "light", colorScheme: "light", theme: "light", canvas: "rgb(244, 237, 223)", rail: "rgb(33, 29, 25)" },
@@ -966,22 +959,48 @@ test("the shared theme contract paints light and dark without a flash", async ({
   ];
 
   for (const themeCase of cases) {
-    await page.addInitScript(({ stored }) => {
+    const context = await browser.newContext({
+      colorScheme: themeCase.colorScheme,
+      viewport: project === "desktop"
+        ? { width: 1414, height: 786 }
+        : { width: 375, height: 812 },
+    });
+    const casePage = await context.newPage();
+    const diagnostics = [];
+    const requests = [];
+    casePage.on("console", (message) => {
+      if (message.type() === "error" || message.type() === "warning") {
+        const text = message.text();
+        if (!text.includes("favicon") && !text.includes("net::ERR_ABORTED")) {
+          diagnostics.push(`${message.type()}: ${text}`);
+        }
+      }
+    });
+    casePage.on("pageerror", (error) => diagnostics.push(`pageerror: ${String(error)}`));
+    casePage.on("request", (request) => {
+      const url = request.url();
+      if (url.includes("theme-boot.js") || url.includes("app.css") || url.includes("app.js")) {
+        requests.push(url);
+      }
+    });
+    await casePage.route("**/desk/assets/app.js*", (route) => route.fulfill({
+      status: 200,
+      contentType: "text/javascript",
+      body: "",
+    }));
+    await casePage.addInitScript(({ stored }) => {
       localStorage.setItem("waffle.desk.theme", stored);
     }, { stored: themeCase.stored });
-    await page.emulateMedia({ colorScheme: themeCase.colorScheme });
-    await page.goto(deskURL("today"));
+    await casePage.goto(deskURL("tasks"));
 
-    const rendered = await page.evaluate(() => {
+    const rendered = await casePage.evaluate(() => {
       const html = getComputedStyle(document.documentElement);
       const rail = getComputedStyle(document.querySelector(".desk-navigation"));
-      const send = getComputedStyle(document.querySelector("#desk-send"));
       return {
         theme: document.documentElement.dataset.theme,
         preference: document.documentElement.dataset.themePreference,
         canvas: html.backgroundColor,
         rail: rail.backgroundColor,
-        send: send.backgroundColor,
       };
     });
     expect(rendered).toEqual({
@@ -989,10 +1008,173 @@ test("the shared theme contract paints light and dark without a flash", async ({
       preference: themeCase.stored,
       canvas: themeCase.canvas,
       rail: themeCase.rail,
-      send: "rgb(221, 113, 40)",
     });
-    await expect(page.getByLabel("Theme")).toHaveValue(themeCase.stored);
+    expect(requests.findIndex((url) => url.includes("theme-boot.js"))).toBeLessThan(
+      requests.findIndex((url) => url.includes("app.css")),
+    );
+    expect(requests.filter((url) => url.includes("app.js"))).toHaveLength(1);
+    expect(diagnostics).toEqual([]);
+    await context.close();
   }
+});
+
+test("theme preference persists through reload and section navigation", async ({ page }) => {
+  const project = test.info().project.name;
+  test.skip(!["desktop", "mobile"].includes(project), "Run theme persistence at desktop and mobile sizes.");
+  await page.setViewportSize(
+    project === "desktop" ? { width: 1414, height: 786 } : { width: 375, height: 812 },
+  );
+  await page.goto(deskURL("tasks"));
+  await page.getByLabel("Theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-preference", "dark");
+  await page.reload();
+  await expect(page.getByLabel("Theme")).toHaveValue("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.goto(deskURL("memory"));
+  await expect(page.getByLabel("Theme")).toHaveValue("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByLabel("Theme").selectOption("light");
+  await page.goto(deskURL("workspaces"));
+  await expect(page.getByLabel("Theme")).toHaveValue("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("Evening role tokens keep rail, code, actions, and accents readable", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run semantic Evening surface checks once.");
+  await page.addInitScript(() => localStorage.setItem("waffle.desk.theme", "dark"));
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByLabel("Message Waffle").fill("markdown");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".code-block pre")).toBeVisible();
+  const codeSurface = await page.locator(".code-block pre").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  expect(codeSurface).toEqual({ background: "rgb(16, 13, 11)", color: "rgb(242, 233, 220)" });
+
+  await page.goto(deskURL("workspaces"));
+  await expect(page.locator(".workspace-card .workspace-primary").first()).toBeVisible();
+  const focusWithKeyboard = async (locator) => {
+    await page.evaluate(() => document.activeElement?.blur());
+    for (let index = 0; index < 40; index += 1) {
+      if (await locator.evaluate((element) => element === document.activeElement)) {
+        return;
+      }
+      await page.keyboard.press("Tab");
+    }
+    throw new Error(`could not keyboard-focus ${await locator.getAttribute("id")}`);
+  };
+  const themeControl = page.locator("#desk-theme");
+  await themeControl.selectOption("light");
+  const lightRail = await page.evaluate(() => {
+    const rgb = (value) => value.match(/rgb\(([^)]+)\)/)[1].split(",").map((part) => Number(part.trim()));
+    const luminance = (value) => rgb(value).map((channel) => channel / 255).map((channel) =>
+      channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    ).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const contrast = (foreground, background) => {
+      const light = Math.max(luminance(foreground), luminance(background));
+      const dark = Math.min(luminance(foreground), luminance(background));
+      return (light + 0.05) / (dark + 0.05);
+    };
+    const rail = getComputedStyle(document.querySelector(".desk-navigation"));
+    const status = document.querySelector("#rail-status");
+    status.dataset.connectionState = "disconnected";
+    const danger = getComputedStyle(document.querySelector("#rail-connection"));
+    return {
+      background: rail.backgroundColor,
+      danger: danger.color,
+      dangerContrast: contrast(danger.color, rail.backgroundColor),
+    };
+  });
+  await focusWithKeyboard(themeControl);
+  const lightRailFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
+  const lightRailFocusContrast = await page.evaluate(({ shadow }) => {
+    const color = shadow.match(/rgb\([^)]*\)/)[0];
+    const rgb = (value) => value.match(/rgb\(([^)]+)\)/)[1].split(",").map((part) => Number(part.trim()));
+    const luminance = (value) => rgb(value).map((channel) => channel / 255).map((channel) =>
+      channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    ).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const foreground = luminance(color);
+    const background = luminance("rgb(33, 29, 25)");
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  }, { shadow: lightRailFocusShadow });
+  await themeControl.selectOption("dark");
+  await focusWithKeyboard(themeControl);
+  const railFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
+  const selectedLink = page.locator('.section-links a[aria-current="page"]');
+  await focusWithKeyboard(selectedLink);
+  const selectedFocusShadow = await selectedLink.evaluate((element) => getComputedStyle(element).boxShadow);
+  const workspacePrimary = page.locator(".workspace-card .workspace-primary").first();
+  await focusWithKeyboard(workspacePrimary);
+  await expect.poll(() => workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow)).toContain("rgb(245, 197, 121)");
+  const workspaceFocusShadow = await workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow);
+  const surfaces = await page.evaluate(({ railFocusShadow, selectedFocusShadow, workspaceFocusShadow }) => {
+    const rgb = (value) => {
+      const match = value.match(/rgb\(([^)]+)\)/);
+      return match ? match[1].split(",").map((part) => Number(part.trim())) : null;
+    };
+    const luminance = (value) => {
+      const channels = rgb(value).map((channel) => channel / 255).map((channel) =>
+        channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+      );
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    const contrast = (foreground, background) => {
+      const light = Math.max(luminance(foreground), luminance(background));
+      const dark = Math.min(luminance(foreground), luminance(background));
+      return (light + 0.05) / (dark + 0.05);
+    };
+    const ringContrast = (shadow, background) => {
+      const match = shadow.match(/rgb\([^)]*\)/);
+      return match ? contrast(match[0], background) : 0;
+    };
+    const nav = document.querySelector(".desk-navigation");
+    const railStatus = document.querySelector("#rail-status");
+    railStatus.dataset.connectionState = "disconnected";
+    const selected = document.querySelector('.section-links a[aria-current="page"]');
+    const workspacePrimary = document.querySelector(".workspace-card .workspace-primary");
+    const navStyle = getComputedStyle(nav);
+    const dangerStyle = getComputedStyle(document.querySelector("#rail-connection"));
+    const workspaceStyle = getComputedStyle(workspacePrimary);
+    const workspaceCard = getComputedStyle(workspacePrimary.closest(".workspace-card"));
+    return {
+      railBackground: navStyle.backgroundColor,
+      dangerColor: dangerStyle.color,
+      dangerContrast: contrast(dangerStyle.color, navStyle.backgroundColor),
+      railFocusShadow,
+      railFocusContrast: ringContrast(railFocusShadow, navStyle.backgroundColor),
+      selectedBackground: getComputedStyle(selected).backgroundColor,
+      selectedFocusShadow,
+      primaryBackground: workspaceStyle.backgroundColor,
+      primaryColor: workspaceStyle.color,
+      workspaceFocusShadow,
+      workspaceFocusContrast: ringContrast(workspaceFocusShadow, workspaceCard.backgroundColor),
+      brandColor: getComputedStyle(document.querySelector(".brand")).color,
+      paletteColor: getComputedStyle(document.querySelector("#palette-open")).color,
+      paletteKbdColor: getComputedStyle(document.querySelector("#palette-open kbd")).color,
+    };
+  }, { railFocusShadow, selectedFocusShadow, workspaceFocusShadow });
+  expect(lightRail.background).toBe("rgb(33, 29, 25)");
+  expect(lightRail.danger).toBe("rgb(243, 161, 153)");
+  expect(lightRail.dangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(lightRailFocusShadow).toContain("rgb(221, 113, 40)");
+  expect(lightRailFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(surfaces.railBackground).toBe("rgb(15, 13, 11)");
+  expect(surfaces.dangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(surfaces.railFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(surfaces.workspaceFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(surfaces.selectedBackground).toBe("rgb(221, 113, 40)");
+  expect(surfaces.primaryBackground).toBe("rgb(15, 13, 11)");
+  expect(surfaces.primaryColor).toBe("rgb(242, 233, 220)");
+  expect(surfaces.brandColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.paletteColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.paletteKbdColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.railFocusShadow).toContain("rgb(245, 197, 121)");
+  expect(surfaces.selectedFocusShadow).toContain("rgb(245, 197, 121)");
+  expect(surfaces.workspaceFocusShadow).toContain("rgb(245, 197, 121)");
 });
 
 test("Today retries a rejected turn with the same idempotency key", async ({ page }) => {

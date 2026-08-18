@@ -354,7 +354,7 @@
 
 .connection-card.is-degraded .waffle-fragment-kind {
   background: var(--warning-surface);
-  border: 1px solid var(--ginger-dark);
+  border: 1px solid var(--accent-text);
   color: var(--warning-text);
 }
 

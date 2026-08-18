@@ -77,6 +77,7 @@ function createHarness({
   bootstrapError = false,
   capabilitiesError = false,
   activeSection = "tasks",
+  storageSetError = false,
 } = {}) {
   const elements = {
     "#rail-status": new FakeElement(),
@@ -136,7 +137,12 @@ function createHarness({
     fetch,
     localStorage: {
       getItem: (key) => stored.get(key) ?? null,
-      setItem: (key, value) => stored.set(key, String(value)),
+      setItem: (key, value) => {
+        if (storageSetError) {
+          throw new Error("storage denied");
+        }
+        stored.set(key, String(value));
+      },
     },
     window: {
       matchMedia: () => ({
@@ -168,10 +174,15 @@ function createHarness({
   };
 }
 
-function runThemeBoot({ stored, prefersDark }) {
+function runThemeBoot({ stored, prefersDark, storageGetError = false }) {
   const attributes = new Map();
   const storage = {
-    getItem: () => stored,
+    getItem: () => {
+      if (storageGetError) {
+        throw new Error("storage denied");
+      }
+      return stored;
+    },
   };
   const context = vm.createContext({
     document: {
@@ -197,10 +208,12 @@ test("theme boot resolves system and invalid preferences before paint", () => {
     "data-theme": "dark",
     "data-theme-preference": "dark",
   });
-  assert.deepEqual(runThemeBoot({ stored: "not-a-theme", prefersDark: false }), {
-    "data-theme": "light",
-    "data-theme-preference": "system",
-  });
+  for (const stored of ["not-a-theme", "toString", "constructor", "__proto__"]) {
+    assert.deepEqual(runThemeBoot({ stored, prefersDark: true }), {
+      "data-theme": "dark",
+      "data-theme-preference": "system",
+    });
+  }
 });
 
 test("theme control persists the preference and updates document attributes", () => {
@@ -210,6 +223,24 @@ test("theme control persists the preference and updates document attributes", ()
   harness.elements["#desk-theme"].dispatchEvent("change");
 
   assert.equal(harness.stored.get("waffle.desk.theme"), "dark");
+  assert.equal(harness.documentElement.getAttribute("data-theme"), "dark");
+  assert.equal(harness.documentElement.getAttribute("data-theme-preference"), "dark");
+});
+
+test("theme boot falls back to system when storage reads throw", () => {
+  assert.deepEqual(runThemeBoot({ storageGetError: true, prefersDark: true }), {
+    "data-theme": "dark",
+    "data-theme-preference": "system",
+  });
+});
+
+test("theme control applies in memory when storage writes throw", () => {
+  const harness = createHarness({ storageSetError: true });
+
+  harness.elements["#desk-theme"].value = "dark";
+  harness.elements["#desk-theme"].dispatchEvent("change");
+
+  assert.equal(harness.stored.has("waffle.desk.theme"), false);
   assert.equal(harness.documentElement.getAttribute("data-theme"), "dark");
   assert.equal(harness.documentElement.getAttribute("data-theme-preference"), "dark");
 });
