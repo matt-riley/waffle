@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.2](https://github.com/matt-riley/waffle/compare/v0.30.1...v0.30.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* attach release artifacts before the release becomes immutable ([#528](https://github.com/matt-riley/waffle/issues/528)) ([cf9bafc](https://github.com/matt-riley/waffle/commit/cf9bafcaf108a6b673b7b2b202c1f154899fe3f3))
+
 ## [0.30.1](https://github.com/matt-riley/waffle/compare/v0.30.0...v0.30.1) (2026-08-18)
 
 
