@@ -42,6 +42,19 @@ import (
 
 var fixtureNow = time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
+func emptyStateThemeDocumentStart(requested string, shell bool) string {
+	if shell {
+		if requested == "dark" {
+			return `<!doctype html><html lang="en" data-theme="dark" data-theme-preference="dark">`
+		}
+		return `<!doctype html><html lang="en" data-theme="light" data-theme-preference="light">`
+	}
+	if requested == "dark" {
+		return `<!doctype html><html lang="en" data-theme="dark">`
+	}
+	return `<!doctype html><html lang="en" data-theme="light">`
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -200,12 +213,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /test/empty-state", func(w http.ResponseWriter, r *http.Request) {
-		theme := r.URL.Query().Get("theme")
-		if theme != "dark" {
-			theme = "light"
-		}
 		populated := r.URL.Query().Get("populated") == "1"
 		shell := r.URL.Query().Get("shell") == "1"
+		documentStart := emptyStateThemeDocumentStart(r.URL.Query().Get("theme"), shell)
 		primary := ui.FragmentAction{
 			ID: "fixture-primary", Label: "Start with Tasks", Method: "post", URL: "/api/v1/desk/test/empty-action",
 			Target: "#fixture-action-status", Swap: "innerHTML",
@@ -232,13 +242,13 @@ func main() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if shell {
 			view := ui.ShellView{Title: "Empty state fixture", ActiveSection: "tasks", Connection: "Fixture", ModelAlias: "fixture", AssetVersion: ui.AssetVersion()}
-			_, _ = io.WriteString(w, `<!doctype html><html lang="en" data-theme="`+theme+`" data-theme-preference="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="icon" href="`+ui.AssetURL("favicon.svg", ui.AssetVersion())+`"><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"><script defer src="`+ui.AssetURL("htmx.min.js", ui.AssetVersion())+`"></script><script defer src="`+ui.AssetURL("waffle-htmx.js", ui.AssetVersion())+`"></script><script type="module" src="`+ui.AssetURL("app.js", ui.AssetVersion())+`"></script></head><body data-request-token="fixture"><a class="skip-link" href="#main-content">Skip to main content</a><div class="desk-shell" data-active-section="tasks">`)
+			_, _ = io.WriteString(w, documentStart+`<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="icon" href="`+ui.AssetURL("favicon.svg", ui.AssetVersion())+`"><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"><script defer src="`+ui.AssetURL("htmx.min.js", ui.AssetVersion())+`"></script><script defer src="`+ui.AssetURL("waffle-htmx.js", ui.AssetVersion())+`"></script><script type="module" src="`+ui.AssetURL("app.js", ui.AssetVersion())+`"></script></head><body data-request-token="fixture"><a class="skip-link" href="#main-content">Skip to main content</a><div class="desk-shell" data-active-section="tasks">`)
 			if err := ui.Navigation(view).Render(r.Context(), w); err != nil {
 				return
 			}
 			_, _ = io.WriteString(w, `<main id="main-content" tabindex="-1"><section class="tasks test-empty-state-surface" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
 		} else {
-			_, _ = io.WriteString(w, `<!doctype html><html lang="en" data-theme="`+theme+`"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"></head><body><main class="test-empty-state-surface"><section class="tasks" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
+			_, _ = io.WriteString(w, documentStart+`<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Empty state fixture</title><link rel="stylesheet" href="`+ui.AssetURL("app.css", ui.AssetVersion())+`"></head><body><main class="test-empty-state-surface"><section class="tasks" aria-labelledby="fixture-section-title"><h1 id="fixture-section-title">Tasks fixture</h1>`)
 		}
 		if populated {
 			_, _ = io.WriteString(w, `<article class="fixture-populated-state"><h2>Morning review</h2><p>One settled task keeps the populated surface quiet.</p></article>`)

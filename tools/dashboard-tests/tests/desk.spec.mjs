@@ -478,6 +478,17 @@ test("Today keeps a long transcript scrollable while the real composer remains a
         return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
       };
       const root = getComputedStyle(document.documentElement);
+      const slashMenu = document.querySelector("#desk-slash-menu");
+      const slashBounds = slashMenu?.getBoundingClientRect();
+      const conversationBounds = document.querySelector(".conversation")?.getBoundingClientRect();
+      const columnsBounds = document.querySelector(".today-columns")?.getBoundingClientRect();
+      const slashVisibleTop = Math.max(slashBounds?.top ?? 0, conversationBounds?.top ?? 0, columnsBounds?.top ?? 0, 0);
+      const slashVisibleBottom = Math.min(
+        slashBounds?.bottom ?? 0,
+        conversationBounds?.bottom ?? 0,
+        columnsBounds?.bottom ?? 0,
+        window.innerHeight,
+      );
       return {
         message: rect("#desk-message"),
         composer: rect("#desk-composer"),
@@ -486,13 +497,33 @@ test("Today keeps a long transcript scrollable while the real composer remains a
         cancel: rect("#desk-cancel"),
         transcript: rect("#desk-transcript"),
         slashMenu: rect("#desk-slash-menu"),
+        conversation: rect(".conversation"),
+        todayColumns: rect(".today-columns"),
         navigation: rect(".desk-navigation"),
         viewport: { width: window.innerWidth, height: window.innerHeight },
         topClearance: parseFloat(root.getPropertyValue("--desk-top-clearance")) || 0,
+        slashMenuStickyTop: slashMenu ? parseFloat(getComputedStyle(slashMenu).top) || 0 : 0,
+        slashMenuVisibleHeight: Math.max(0, slashVisibleBottom - slashVisibleTop),
+        slashMenuPainted: slashBounds && slashVisibleBottom > slashVisibleTop
+          ? slashMenu.contains(document.elementFromPoint(
+              slashBounds.left + slashBounds.width / 2,
+              slashVisibleTop + (slashVisibleBottom - slashVisibleTop) / 2,
+            ))
+          : false,
       };
     });
     expect(geometry.slashMenu).not.toBeNull();
+    expect(geometry.conversation).not.toBeNull();
     expect(geometry.navigation).not.toBeNull();
+    expect(geometry.slashMenuStickyTop, `${viewport.width}px slash menu keeps a positive sticky inset`).toBeGreaterThan(0);
+    expect(geometry.slashMenuVisibleHeight, `${viewport.width}px slash menu retains a painted touch row`).toBeGreaterThanOrEqual(44);
+    expect(geometry.slashMenuPainted, `${viewport.width}px slash menu is painted inside the compact scrollport`).toBe(true);
+    expect(geometry.slashMenu.top, `${viewport.width}px slash menu stays inside the clipped conversation top`).toBeGreaterThanOrEqual(
+      geometry.conversation.top - 1,
+    );
+    expect(geometry.slashMenu.bottom, `${viewport.width}px slash menu stays inside the clipped conversation bottom`).toBeLessThanOrEqual(
+      geometry.conversation.bottom + 1,
+    );
     const simultaneousTargets = ["message", "actions", "send", "cancel", "slashMenu"];
     for (const target of simultaneousTargets) {
       expect(geometry[target], `${target} is visible in the settled geometry`).not.toBeNull();

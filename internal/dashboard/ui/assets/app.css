@@ -1889,8 +1889,7 @@ h3 {
 
   .slash-menu {
     position: sticky;
-    top: 0;
-    transform: translateY(-100%);
+    top: var(--space-xs);
   }
 
   .composer,
