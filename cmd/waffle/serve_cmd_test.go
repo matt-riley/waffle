@@ -223,6 +223,7 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 	t.Setenv("WAFFLE_HOME", t.TempDir())
 	t.Setenv("INVOCATION_ID", "")
+	setServeTestSecretIdentity(t)
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -434,6 +435,7 @@ learn = false
 func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
 	home := unixServeTempDir(t)
 	t.Setenv("WAFFLE_HOME", home)
+	setServeTestSecretIdentity(t)
 	clearServeActivationEnvironment(t)
 	statusAddr := unusedTCPAddress(t)
 	socketPath := filepath.Join(home, "chat.sock")
@@ -1004,6 +1006,15 @@ func clearServeActivationEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setServeTestSecretIdentity(t *testing.T) {
+	t.Helper()
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(secret.EnvIdentity, identity.String())
 }
 
 type blockingAdapter struct{}
