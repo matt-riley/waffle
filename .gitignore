@@ -1,6 +1,9 @@
 # build output
 /waffle
 /bin/
+# Stray `go build -o fixtures` output; an 18MB Mach-O binary was committed
+# by accident in e7e322b and removed in this change.
+/fixtures
 /dist/
 /.worktrees/
 /.superpowers/
