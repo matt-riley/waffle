@@ -320,7 +320,13 @@ const palette = (() => {
       case "today":
         items.push(
           { label: "New conversation", hint: "today", run: () => run(document.querySelector("#desk-new")) },
-          { label: "Recent conversations", hint: "today", run: () => run(document.querySelector("#desk-session-refresh")) },
+          {
+            label: "Find a conversation",
+            hint: "today",
+            run: () => document.dispatchEvent(
+              new CustomEvent("waffle:find-conversation"),
+            ),
+          },
           { label: "Export conversation", hint: "today", run: () => run(document.querySelector("#desk-export")) },
           { label: "Schedule this draft", hint: "today", run: () => run(document.querySelector("#desk-schedule-draft")) },
           { label: "Start dictation", hint: "today", run: () => run(document.querySelector("#desk-dictate")) },
@@ -646,9 +652,16 @@ const moduleName = {
 
 if (moduleName) {
   const moduleURL = new URL(`./${moduleName}`, import.meta.url);
+  const presentationURL = new URL("./session-presentation.mjs", import.meta.url);
   const version = new URL(import.meta.url).searchParams.get("v");
   if (version) {
     moduleURL.searchParams.set("v", version);
+    presentationURL.searchParams.set("v", version);
   }
-  void import(moduleURL.href);
+  void (moduleName === "today.js"
+    ? import(presentationURL.href).then((presentation) => {
+        globalThis.waffleSessionPresentation = presentation;
+        return import(moduleURL.href);
+      })
+    : import(moduleURL.href));
 }

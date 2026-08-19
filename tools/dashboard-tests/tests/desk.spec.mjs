@@ -1176,7 +1176,8 @@ test("compact Today opens at the top while preserving message focus", async ({ p
       message: rect("#desk-message"),
       actions: rect(".composer-actions"),
       setup: rect("#desk-setup-banner"),
-      context: rect(".task-context"),
+      context: rect("#desk-canvas-drawer"),
+      contextHidden: document.querySelector("#desk-canvas-drawer")?.hidden ?? true,
       viewportHeight: window.innerHeight,
     };
   });
@@ -1187,10 +1188,9 @@ test("compact Today opens at the top while preserving message focus", async ({ p
   expect(metrics.columns).not.toBeNull();
   expect(metrics.conversation).not.toBeNull();
   expect(metrics.transcript).not.toBeNull();
-  expect(metrics.context).not.toBeNull();
+  expect(metrics.contextHidden).toBe(true);
   expect(metrics.conversation.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
   expect(metrics.transcript.top).toBeGreaterThanOrEqual(metrics.conversation.top - 1);
-  expect(metrics.context.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
   expect(metrics.today.top).toBeGreaterThanOrEqual(metrics.main.top - 1);
   expect(metrics.today.bottom).toBeGreaterThan(metrics.columns.top);
   expect(metrics.columns.top).toBeGreaterThanOrEqual(0);
@@ -1370,6 +1370,8 @@ test("posture shows the prompt, each policy tier, and the rule behind a refusal"
 
   const dialog = page.locator("#desk-posture-dialog");
   await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: /Session and files/i }).click();
+  await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
   await page.locator("#desk-posture-open").click();
   await expect(dialog).toBeVisible();
 
@@ -1840,6 +1842,8 @@ test("owner can export the visible transcript with their live lease", async ({ p
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(page.locator(".waffle-message .message-body")).toHaveText("Fixture reply");
 
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
+  await expect(page.locator("#desk-canvas-tab-session")).toHaveAttribute("aria-selected", "true");
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export", exact: true }).click();
   const download = await downloadPromise;
@@ -1855,6 +1859,8 @@ test("temporary conversations are offered before the first message and marked li
   test.skip(test.info().project.name !== "desktop", "Run the temporary flow once.");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
+  await expect(page.locator("#desk-canvas-tab-session")).toHaveAttribute("aria-selected", "true");
   const toggle = page.locator("#desk-temporary");
   await expect(toggle).toBeVisible();
   // Switching the option before the first message reopens the empty session
@@ -1998,16 +2004,18 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   test.skip(test.info().project.name !== "desktop", "Run the visual system once.");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
   // The conversation is the strongest surface on Today.
   const tokens = await page.evaluate(() => {
     const root = getComputedStyle(document.documentElement);
     const conversation = getComputedStyle(document.querySelector(".conversation"));
-    const context = getComputedStyle(document.querySelector(".task-context"));
+    const context = getComputedStyle(document.querySelector("#desk-canvas-drawer"));
     const send = getComputedStyle(document.querySelector("#desk-send"));
     return {
       tokenRadius: root.getPropertyValue("--radius-card").trim(),
       conversationRadius: conversation.borderRadius,
-      contextShadow: context.boxShadow,
+      contextBackground: context.backgroundColor,
+      contextRadius: context.borderRadius,
       sendBackground: send.backgroundColor,
       focusRing: root.getPropertyValue("--focus-ring").trim(),
     };
@@ -2015,10 +2023,11 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   expect(tokens.tokenRadius).not.toBe("");
   expect(tokens.conversationRadius).not.toBe("0px");
   expect(tokens.focusRing).toContain("#9d421f");
-  // The primary send is the orange personality button; the side context is
-  // a quieter surface.
+  // The primary send is the orange personality button; the canvas is a
+  // quieter paper surface.
   expect(tokens.sendBackground).toBe("rgb(221, 113, 40)");
-  expect(tokens.contextShadow).toBe("none");
+  expect(tokens.contextBackground).toBe("rgb(255, 250, 240)");
+  expect(tokens.contextRadius).not.toBe("0px");
   // Keyboard focus is visibly ringed.
   await page.getByLabel("Message Waffle").focus();
   const ring = await page.evaluate(() =>
@@ -2506,9 +2515,9 @@ test("Today attaches project context from the open workspace in place", async ({
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 
-  const panel = page.locator(".context-panels details").filter({ hasText: "Project context" });
-  await panel.locator("summary").click();
-  await panel.getByRole("button", { name: "Load project context", exact: true }).click();
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
+  await page.getByRole("tab", { name: "Project", exact: true }).click();
+  const panel = page.locator("#desk-canvas-project");
   await expect(panel.locator(".context-panel-result")).toContainText(
     "No pinned resources",
   );
@@ -2554,17 +2563,20 @@ test("Today previews, downloads, and references a declared session artifact", as
   await expect(card.locator(".artifact-name")).toHaveText("release.md");
   await expect(card.locator(".artifact-meta")).toContainText("text/markdown");
 
-  await card.getByRole("button", { name: "Preview", exact: true }).click();
-  await expect(card.locator(".artifact-preview-body")).toContainText(
+  await card.getByRole("button", { name: "Open in canvas", exact: true }).click();
+  const canvas = page.locator("#desk-canvas-artifact");
+  await expect(canvas).toBeVisible();
+  await canvas.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(canvas.locator(".canvas-artifact-preview")).toContainText(
     "Ready for review",
   );
 
   const download = page.waitForEvent("download");
-  await card.getByRole("button", { name: "Download", exact: true }).click();
+  await canvas.getByRole("button", { name: "Download", exact: true }).click();
   const artifactDownload = await download;
   expect(artifactDownload.suggestedFilename()).toBe("release.md");
 
-  await card.getByRole("button", { name: "Copy reference", exact: true }).click();
+  await canvas.getByRole("button", { name: "Copy reference", exact: true }).click();
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
 });
 
@@ -2615,20 +2627,19 @@ test("Today exposes existing commands and resumes a recent session in place", as
     "The desk is ready. What are we working on?",
   );
 
-  await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
   await expect(page.getByRole("option", { name: /Release review/ })).toBeVisible();
   await page.getByRole("option", { name: /Release review/ }).click();
   await expect(page.locator("#desk-session-title")).toHaveText("Release review");
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
+  await page.getByRole("tab", { name: "Diagnostics", exact: true }).click();
   for (const [summary, button, result] of [
-    ["Usage", "Load usage", /3 requests · 120 in · 45 out · 10 reserved/],
-    ["Permissions", "Load permissions", /Sandbox: workspace-write/],
-    ["Working set", "Load working set", /Verify the Today experience/],
-    ["Commands", "Load commands", /\/new · Start a conversation/],
+    ["Usage", /3 requests · 120 in · 45 out · 10 reserved/],
+    ["Permissions", /Sandbox: workspace-write/],
+    ["Working set", /Verify the Today experience/],
+    ["Commands", /\/new · Start a conversation/],
   ]) {
     const panel = page.locator(".context-panels details").filter({ hasText: summary });
-    await panel.locator("summary").click();
-    await panel.getByRole("button", { name: button, exact: true }).click();
-    await expect(panel.locator(".context-panel-result")).toContainText(result);
+    await expect(panel.locator(".context-panel-result")).toContainText(button);
   }
   await expect(page.locator("#desk-sandbox")).toHaveText("workspace-write");
 });
@@ -2643,7 +2654,6 @@ test("conversation rows rename, pin, and delete with a named confirmation", asyn
   });
   await page.getByRole("button", { name: "New conversation", exact: true }).click();
   await expect(page.locator("#desk-session-title")).toHaveText("Fresh conversation");
-  await page.getByRole("button", { name: "Recent conversations", exact: true }).click();
   const freshChoice = page.getByRole("option", { name: /Fresh conversation/ });
   await expect(freshChoice).toBeVisible();
 
@@ -2755,7 +2765,7 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
         "This conversation is open in another window.",
       );
       await expect(second.locator("#desk-composer")).toBeHidden();
-      await expect(second.locator(".task-context")).toBeHidden();
+      await expect(second.locator("#desk-canvas-drawer")).toBeHidden();
       await expect(second.getByRole("button", { name: "Start new", exact: true })).toBeVisible();
       await expect(second.getByRole("button", { name: "Recent conversations", exact: true })).toBeVisible();
       await expect(second.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
@@ -2777,45 +2787,41 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
         temporary: true,
       });
       expect(recoveryOpen.reattach_client_id).toBeUndefined();
-      expect(commandBodies.map(({ command }) => command)).toEqual([
+      const newCommands = commandBodies.filter(({ command }) => command.name === "new");
+      expect(newCommands.map(({ command }) => command)).toEqual([
         { name: "new", args: "" },
         { name: "new", args: "confirm" },
       ]);
-      expect(commandBodies[0].client_id).toBe(commandBodies[1].client_id);
+      expect(newCommands[0].client_id).toBe(newCommands[1].client_id);
       await expect.poll(() => eventRequests.length).toBe(1);
       expect(eventRequests).toHaveLength(1);
       const owner = await second.evaluate(() =>
         JSON.parse(sessionStorage.getItem("waffle.desk.today.owner.v1")),
       );
       expect(owner.session_id).toBe("session-fresh");
-      await expect(second.locator("#desk-sessions")).toBeHidden();
-      await expect(
-        second.getByRole("button", { name: "Recent conversations", exact: true }),
-      ).toHaveAttribute("aria-expanded", "false");
+      await expect(second.locator("#desk-sessions")).toBeVisible();
+      await expect(second.locator("#desk-session-refresh")).toBeHidden();
       await expect(
         second.locator(".session-choice").filter({ hasText: "Release review" }),
-      ).toHaveCount(0);
-      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
+      ).toHaveCount(1);
       await expect(
         second.locator(".session-choice").filter({ hasText: "Fresh conversation" }),
       ).toHaveCount(1);
-      expect(commandBodies.at(-1)).toMatchObject({
+      expect(commandBodies.findLast(({ command }) => command.name === "sessions")).toMatchObject({
         client_id: owner.client_id,
         command: { name: "sessions", args: "" },
       });
-      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
       await page.request.post(`${baseURL}/api/v1/desk/test/lock-latest?on=0`);
       await second.reload();
       await expect(second.locator("#desk-phase")).toHaveText("Ready");
-      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
       await expect(second.locator("#desk-sessions")).toBeVisible();
+      await expect(second.locator("#desk-session-refresh")).toBeHidden();
       await expect(
         second.locator(".session-choice").filter({ hasText: "Fresh conversation" }),
       ).toHaveCount(1);
       await expect(
         second.locator(".session-choice").filter({ hasText: "Temporary conversation" }),
       ).toHaveCount(0);
-      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
       const message = second.getByLabel("Message Waffle");
       await expect(message).toBeEnabled();
       await message.fill("Usable after recovery");
@@ -3032,6 +3038,8 @@ test("posture dialog contains keyboard focus and restores the opener", async ({ 
   test.skip(test.info().project.name !== "desktop", "Run the posture focus flow once.");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByRole("button", { name: "Session and files", exact: true }).click();
+  await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
   const trigger = page.getByRole("button", { name: "View system prompt and policy" });
   await trigger.click();
   const dialog = page.locator("#desk-posture-dialog");
@@ -3696,3 +3704,242 @@ async function waitForFixtureExit(child, timeout) {
     child.on("exit", onExit);
   });
 }
+
+test("Task 4: Today Hearth auto-loads grouped history while other sections keep the shared rail", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the Task 4 history rail proof once.");
+  await page.setViewportSize({ width: 1470, height: 920 });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await expect(page.locator("#desk-session-rail")).toBeVisible();
+  await expect(page.locator("#desk-new")).toBeVisible();
+  await expect(page.locator("#desk-session-drawer-close")).toBeHidden();
+  for (const label of ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"]) {
+    await expect(page.locator("#desk-session-options")).toContainText(label);
+  }
+  const historyScroll = await page.locator("#desk-session-options").evaluate((element) => ({
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  expect(historyScroll.scrollHeight).toBeGreaterThan(historyScroll.clientHeight);
+  await page.locator("#desk-session-options").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(page.locator("#desk-session-options")).toContainText("Older archive");
+  const newConversation = await page.locator("#desk-new").evaluate((element) => {
+    const button = element.getBoundingClientRect();
+    const drawer = element.parentElement.getBoundingClientRect();
+    return {
+      button,
+      drawer,
+      background: getComputedStyle(element).backgroundColor,
+    };
+  });
+  expect(newConversation.button.width).toBeCloseTo(newConversation.drawer.width, 0);
+  expect(newConversation.background).toBe("rgb(221, 113, 40)");
+  await page.getByLabel("Theme").selectOption("dark");
+  const darkNewConversation = await page.locator("#desk-new").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { text: element.textContent.trim(), color: style.color, background: style.backgroundColor };
+  });
+  expect(darkNewConversation.text).toBe("New conversation");
+  expect(
+    contrastRatio(darkNewConversation.color, darkNewConversation.background),
+    "Evening New conversation label contrast",
+  ).toBeGreaterThanOrEqual(4.5);
+  await expect(page.locator(".task-context")).toHaveCount(0);
+  await page.goto(deskURL("tasks"));
+  await expect(page.locator("#desk-session-rail")).toHaveCount(0);
+  await expect(page.locator(".section-links")).toBeVisible();
+});
+
+test("Task 4: Split Kiln crosses the exact breakpoint with a true split and viewport overlay", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the Task 4 canvas proof once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  await page.setViewportSize({ width: 1470, height: 920 });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const toggle = page.getByRole("button", { name: /Session and files/i });
+  await toggle.click();
+  await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
+  await expect(page.locator("#desk-canvas-tab-artifact")).toBeHidden();
+  await expect(page.locator(".desk-shell")).toHaveAttribute("data-canvas", "open");
+  const split = await page.evaluate(() => {
+    const columns = document.querySelector(".today-columns").getBoundingClientRect();
+    const conversation = document.querySelector(".conversation").getBoundingClientRect();
+    const canvas = document.querySelector("#desk-canvas-drawer").getBoundingClientRect();
+    return { columns, conversation, canvas, viewport: window.innerWidth, role: document.querySelector("#desk-canvas-drawer").getAttribute("role") };
+  });
+  expect(split.canvas.left).toBeGreaterThan(split.conversation.left);
+  expect(split.canvas.width / split.columns.width).toBeGreaterThan(0.4);
+  expect(split.canvas.width / split.columns.width).toBeLessThan(0.5);
+  expect(split.role).toBe("complementary");
+
+  await page.setViewportSize({ width: 1100, height: 920 });
+  await expect(page.locator("#desk-canvas-drawer")).toHaveAttribute("role", "complementary");
+  const exactSplit = await page.locator("#desk-canvas-drawer").evaluate((element) => {
+    const columns = document.querySelector(".today-columns").getBoundingClientRect();
+    const canvas = element.getBoundingClientRect();
+    return {
+      ratio: canvas.width / columns.width,
+      role: element.getAttribute("role"),
+      modal: element.getAttribute("aria-modal"),
+      position: getComputedStyle(element).position,
+    };
+  });
+  expect(exactSplit.ratio).toBeGreaterThan(0.4);
+  expect(exactSplit.ratio).toBeLessThan(0.5);
+  expect(exactSplit.role).toBe("complementary");
+  expect(exactSplit.modal).toBeNull();
+  expect(exactSplit.position).not.toBe("fixed");
+
+  await page.setViewportSize({ width: 1099, height: 920 });
+  await expect(page.locator("#desk-canvas-drawer")).toHaveAttribute("role", "dialog");
+  const overlay = await page.locator("#desk-canvas-drawer").evaluate((element) => {
+    const canvas = element.getBoundingClientRect();
+    const rail = document.querySelector(".desk-navigation").getBoundingClientRect();
+    return {
+      canvas,
+      rail,
+      role: element.getAttribute("role"),
+      modal: element.getAttribute("aria-modal"),
+      position: getComputedStyle(element).position,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
+  });
+  expect(overlay.role).toBe("dialog");
+  expect(overlay.modal).toBe("true");
+  expect(overlay.position).toBe("fixed");
+  expect(overlay.canvas.left).toBeGreaterThanOrEqual(overlay.rail.right - 1);
+  expect(overlay.canvas.top).toBeGreaterThan(0);
+  expect(overlay.canvas.bottom).toBeLessThanOrEqual(overlay.viewport.height);
+
+  await page.getByRole("tab", { name: "Session" }).click();
+  await page.locator("#desk-posture-open").focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#desk-canvas-close")).toBeFocused();
+
+  await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await page.locator("#desk-canvas-close").focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("tab", { name: "Project" })).toBeFocused();
+
+  for (const viewport of [{ width: 768, height: 1000 }, { width: 375, height: 812 }]) {
+    await page.setViewportSize(viewport);
+    const compact = await page.locator("#desk-canvas-drawer").evaluate((element) => {
+      const canvas = element.getBoundingClientRect();
+      const navigation = document.querySelector(".desk-navigation").getBoundingClientRect();
+      return {
+        canvas,
+        navigation,
+        role: element.getAttribute("role"),
+        modal: element.getAttribute("aria-modal"),
+        position: getComputedStyle(element).position,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    });
+    expect(compact.role, `${viewport.width}px canvas role`).toBe("dialog");
+    expect(compact.modal, `${viewport.width}px canvas modal`).toBe("true");
+    expect(compact.position, `${viewport.width}px canvas positioning`).toBe("fixed");
+    expect(compact.canvas.left, `${viewport.width}px canvas left`).toBeGreaterThanOrEqual(0);
+    expect(compact.canvas.right, `${viewport.width}px canvas right`).toBeLessThanOrEqual(compact.viewport.width);
+    expect(compact.canvas.bottom, `${viewport.width}px canvas clears bottom nav`).toBeLessThanOrEqual(compact.navigation.top + 1);
+    await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
+    await expect(page.locator("#desk-canvas-close")).toBeVisible();
+  }
+
+  const canvas = page.locator("#desk-canvas-drawer");
+  await expect(canvas.getByRole("button", { name: /Close/i })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(canvas).toBeHidden();
+  await expect(page.getByRole("button", { name: /Session and files/i })).toBeFocused();
+  await expectNoHorizontalOverflow(page);
+});
+
+test("Task 4: palette Find a conversation reveals the compact drawer before focusing its filter", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.locator("#desk-context-toggle").click();
+  await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
+  await page.locator("#palette-open").click();
+  await page.locator("#palette-search").fill("Find a conversation");
+  const command = page.getByRole("option", { name: /Find a conversation/i });
+  await expect(command).toBeVisible();
+  await command.click();
+  await expect(page.locator("#command-palette")).toBeHidden();
+  await expect(page.locator("#desk-canvas-drawer")).toBeHidden();
+  await expect(page.locator("#desk-sessions")).toBeVisible();
+  const filter = page.locator("#desk-session-filter");
+  await expect(filter).toBeFocused();
+  await expect(filter).toBeInViewport();
+  expect(await filter.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const topmost = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return topmost === element || element.contains(topmost);
+  })).toBe(true);
+});
+
+test("Task 4: mobile Conversations drawer clears the composer, bottom tabs, and Escape focus", async ({ page }) => {
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  for (const width of [768, 375]) {
+    await page.setViewportSize({ width, height: 812 });
+    await page.goto(deskURL("today"));
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    const opener = page.getByRole("button", { name: "Conversations", exact: true });
+    await opener.click();
+    const drawer = page.locator("#desk-sessions");
+    await expect(drawer).toBeVisible();
+    await expect(page.locator("#desk-session-drawer-close")).toBeVisible();
+    const geometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const bounds = document.querySelector(selector).getBoundingClientRect();
+        return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right };
+      };
+      return {
+        drawer: rect("#desk-sessions"),
+        composer: rect("#desk-composer"),
+        send: rect("#desk-send"),
+        navigation: rect(".desk-navigation"),
+      };
+    });
+    expect(geometry.drawer.bottom, `${width}px drawer above composer`).toBeLessThanOrEqual(geometry.composer.top + 1);
+    expect(geometry.drawer.bottom, `${width}px drawer above bottom navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+    expect(geometry.composer.bottom, `${width}px composer above bottom navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+    expect(geometry.send.bottom, `${width}px send above bottom navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(opener).toBeFocused();
+  }
+});
+
+test("Task 4: Hearth and Split Kiln evidence covers Hearth and Evening closed, history-open, and canvas states", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Capture the reviewed Task 4 evidence once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  for (const theme of ["light", "dark"]) {
+    for (const width of [1470, 375]) {
+      await page.setViewportSize({ width, height: 920 });
+      await page.goto(deskURL("today"));
+      await page.getByLabel("Theme").selectOption(theme);
+      await expect(page.locator("#desk-phase")).toHaveText("Ready");
+      const name = (state) => path.join(
+        "test-results",
+        `task4-${theme}-${width}-${state}.png`,
+      );
+      await page.screenshot({ path: name("hearth-closed"), fullPage: false });
+      if (width <= 768) {
+        await page.getByRole("button", { name: "Conversations", exact: true }).click();
+        await expect(page.locator("#desk-sessions")).toBeVisible();
+      }
+      await page.screenshot({ path: name("hearth-history-open"), fullPage: false });
+      if (width <= 768) {
+        await page.keyboard.press("Escape");
+      }
+      await page.getByRole("button", { name: /Session and files/i }).click();
+      await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
+      await page.screenshot({ path: name("split-kiln"), fullPage: false });
+    }
+  }
+});

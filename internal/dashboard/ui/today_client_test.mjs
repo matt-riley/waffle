@@ -11,7 +11,15 @@ const dictateSource = await readFile(
   new URL("./assets/dictate.js", import.meta.url),
   "utf8",
 );
+const presentationSource = await readFile(
+  new URL("./assets/session-presentation.mjs", import.meta.url),
+  "utf8",
+);
 const source = await readFile(new URL("./assets/today.js", import.meta.url), "utf8");
+const presentationHarnessSource = presentationSource
+  .replace(/^export\s+/gm, "")
+  .replace(/^export\s*\{[^}]*\};?\s*$/m, "")
+  .concat("\nglobalThis.waffleSessionPresentation = Object.freeze({ filterSessions, presentSessions, normalizedText, sessionAccessibleLabel, sessionTitle });");
 
 class FakeElement {
   constructor(tagName = "div") {
@@ -27,6 +35,7 @@ class FakeElement {
     this.selected = false;
     this.attributes = new Map();
     this.style = {};
+    this.isConnected = true;
     this.scrollTop = 0;
     this.rect = { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 };
     this._scrollHeight = null;
@@ -79,7 +88,17 @@ class FakeElement {
 
   set textContent(value) {
     this._textContent = String(value);
+    for (const child of this.childNodes) {
+      child.setConnected(false);
+    }
     this.childNodes = [];
+  }
+
+  setConnected(connected) {
+    this.isConnected = connected;
+    for (const child of this.childNodes) {
+      child.setConnected(connected);
+    }
   }
 
   append(...children) {
@@ -93,6 +112,7 @@ class FakeElement {
       child.remove();
     }
     child.parentNode = this;
+    child.setConnected(this.isConnected);
     this.childNodes.push(child);
     return child;
   }
@@ -106,12 +126,14 @@ class FakeElement {
       return this.appendChild(child);
     }
     child.parentNode = this;
+    child.setConnected(this.isConnected);
     this.childNodes.splice(index, 0, child);
     return child;
   }
 
   remove() {
     if (!this.parentNode) {
+      this.setConnected(false);
       return;
     }
     const index = this.parentNode.childNodes.indexOf(this);
@@ -119,6 +141,7 @@ class FakeElement {
       this.parentNode.childNodes.splice(index, 1);
     }
     this.parentNode = null;
+    this.setConnected(false);
   }
 
   hasChildNodes() {
@@ -155,14 +178,15 @@ class FakeElement {
   }
 
   querySelectorAll(selector) {
+    const selectors = selector.split(",").map((value) => value.trim());
     const matches = [];
     const visit = (node) => {
       for (const child of node.childNodes) {
-        if (
-          (selector.startsWith(".") &&
-            child.className.split(/\s+/).includes(selector.slice(1))) ||
-          (!selector.startsWith(".") && child.tagName === selector.toUpperCase())
-        ) {
+        if (selectors.some((candidate) =>
+          (candidate.startsWith(".") &&
+            child.className.split(/\s+/).includes(candidate.slice(1))) ||
+          (!candidate.startsWith(".") && child.tagName === candidate.toUpperCase())
+        )) {
           matches.push(child);
         }
         visit(child);
@@ -286,12 +310,14 @@ function createHarness({
   clipboardWriteError = false,
   execCommandResult = true,
   mobileViewport = false,
+  viewportWidth = mobileViewport ? 375 : 1470,
 } = {}) {
   const selectors = [
     "main",
     ".today-columns",
     ".conversation",
     ".desk-shell",
+    "#desk-session-rail",
     "#desk-session-title",
     "#desk-connection",
     "#desk-connection-text",
@@ -306,7 +332,6 @@ function createHarness({
     "#desk-slash-menu",
     ".composer-actions",
     ".stale-actions",
-    ".task-context",
     "#desk-composer",
     "#desk-recovery-navigation",
     "#desk-message",
@@ -337,6 +362,8 @@ function createHarness({
     "#desk-fork",
     "#desk-new",
     "#desk-session-refresh",
+    "#desk-session-drawer-close",
+    "#desk-conversations-open",
     "#desk-temporary-row",
     "#desk-temporary",
     "#desk-temporary-badge",
@@ -345,9 +372,18 @@ function createHarness({
     "#desk-sessions",
     "#desk-session-filter",
     "#desk-session-options",
-    "#desk-usage-refresh",
+    "#desk-context-toggle",
+    "#desk-canvas-drawer",
+    "#desk-canvas-close",
+    "#desk-canvas-tab-artifact",
+    "#desk-canvas-tab-session",
+    "#desk-canvas-tab-diagnostics",
+    "#desk-canvas-tab-project",
+    "#desk-canvas-artifact",
+    "#desk-canvas-session",
+    "#desk-canvas-diagnostics",
+    "#desk-canvas-project",
     "#desk-usage",
-    "#desk-project-refresh",
     "#desk-project",
     "#desk-project-pin-form",
     "#desk-project-path",
@@ -356,25 +392,43 @@ function createHarness({
     "#desk-project-note-name",
     "#desk-project-note",
     "#desk-project-add-note",
-    "#desk-permissions-refresh",
     "#desk-permissions",
-    "#desk-workset-refresh",
     "#desk-workset",
-    "#desk-help-refresh",
     "#desk-help",
     "#desk-queue",
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
   elements["#desk-composer"].appendChild(elements["#desk-message"]);
-  elements[".task-context"].append(
-    elements["#desk-new"],
+  elements["#desk-session-rail"].append(
     elements["#desk-session-refresh"],
     elements["#desk-sessions"],
   );
+  elements["#desk-sessions"].append(
+    elements["#desk-session-drawer-close"],
+    elements["#desk-new"],
+    elements["#desk-session-filter"],
+    elements["#desk-session-options"],
+  );
+  elements["#desk-canvas-drawer"].append(
+    elements["#desk-canvas-close"],
+    elements["#desk-canvas-tab-artifact"],
+    elements["#desk-canvas-tab-session"],
+    elements["#desk-canvas-tab-diagnostics"],
+    elements["#desk-canvas-tab-project"],
+    elements["#desk-canvas-artifact"],
+    elements["#desk-canvas-session"],
+    elements["#desk-canvas-diagnostics"],
+    elements["#desk-canvas-project"],
+  );
+  elements["#desk-sessions"].hidden = true;
+  elements["#desk-canvas-drawer"].hidden = true;
+  elements["#desk-conversations-open"].hidden = true;
+  elements["#desk-session-refresh"].hidden = true;
   elements[".stale-actions"].append(elements["#desk-refresh"]);
   elements["#desk-recovery-navigation"].hidden = true;
   elements["#desk-composer-status"].hidden = true;
+  elements["#desk-queue"].hidden = true;
   elements["#desk-model-status"].textContent = "Changes this conversation only.";
   elements["#desk-skill-status"].textContent = "Changes this conversation only.";
 
@@ -410,6 +464,21 @@ function createHarness({
     execCommand: () => execCommandResult,
     querySelector: (selector) => elements[selector] || null,
     scrollingElement,
+    listeners: new Map(),
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) || [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    },
+    dispatchEvent(event) {
+      for (const listener of this.listeners.get(event.type) || []) {
+        listener(event);
+      }
+      return true;
+    },
+    listener(type) {
+      return this.listeners.get(type)?.[0];
+    },
   };
   // Track programmatic focus so listbox arrow navigation is observable.
   let activeElement = null;
@@ -640,6 +709,7 @@ function createHarness({
         setItem: (key, value) => storage.set(key, String(value)),
       };
   const lifecycleListeners = new Map();
+  let currentViewportWidth = viewportWidth;
   const clipboardWrites = [];
   const scrollCalls = [];
   const context = vm.createContext({
@@ -675,7 +745,13 @@ function createHarness({
     },
     URL,
     waffleDeskRail,
-    matchMedia: () => ({ matches: mobileViewport }),
+    matchMedia: (query) => ({
+      matches: query.includes("max-width: 768px")
+        ? currentViewportWidth <= 768
+        : query.includes("max-width: 1099px")
+          ? currentViewportWidth <= 1099
+          : mobileViewport,
+    }),
     requestAnimationFrame: (callback) => {
       callback();
       return 1;
@@ -694,11 +770,13 @@ function createHarness({
   });
   new vm.Script(readAloudSource, { filename: "read-aloud.js" }).runInContext(context);
   new vm.Script(dictateSource, { filename: "dictate.js" }).runInContext(context);
+  new vm.Script(presentationHarnessSource, { filename: "session-presentation.mjs" }).runInContext(context);
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
   return {
     body,
     calls,
+    document,
     clipboardWrites,
     fakeFilePayloads,
     speechCalls,
@@ -725,6 +803,12 @@ function createHarness({
         }
       }
       await flush();
+    },
+    resizeTo: (width) => {
+      currentViewportWidth = width;
+      for (const listener of lifecycleListeners.get("resize") || []) {
+        listener({ type: "resize" });
+      }
     },
   };
 }
@@ -832,7 +916,9 @@ test("session skill control attaches through the live chat command", async () =>
   await harness.elements["#desk-skill-toggle"].listener("click")();
   await flush();
 
-  const [command] = mutationCalls(harness, "/api/v1/desk/chat/command");
+  const command = mutationCalls(harness, "/api/v1/desk/chat/command").find((call) =>
+    JSON.parse(call.options.body).command.name === "skills",
+  );
   assert.deepEqual(
     JSON.parse(command.options.body),
     {
@@ -1721,7 +1807,7 @@ test("slash menu lists skills and attaches the selected one", async () => {
   const commandCalls = mutationCalls(harness, "/api/v1/desk/chat/command").map(
     (call) => JSON.parse(call.options.body).command,
   );
-  assert.deepEqual(commandCalls, [
+  assert.deepEqual(commandCalls.filter(({ name }) => name === "skills"), [
     { name: "skills", args: "attach review" },
   ]);
   assert.equal(message.value, "/", "selecting a skill leaves the composer text alone");
@@ -1857,7 +1943,7 @@ test("new conversation requires explicit confirmation then replaces canonical st
   const commands = mutationCalls(harness, "/api/v1/desk/chat/command").map(
     (call) => JSON.parse(call.options.body).command,
   );
-  assert.deepEqual(commands, [
+  assert.deepEqual(commands.filter(({ name }) => name === "new"), [
     { name: "new", args: "" },
     { name: "new", args: "confirm" },
   ]);
@@ -1945,13 +2031,17 @@ test("ownership conflict offers inline recovery instead of a fatal screen", asyn
   );
   assert.equal(harness.elements["#desk-transcript"].textContent, "This conversation is open in another window.");
   assert.equal(harness.elements["#desk-composer"].hidden, true);
-  assert.equal(harness.elements[".task-context"].hidden, true);
   assert.equal(harness.elements["#desk-stale-status"].focused, true);
   assert.equal(harness.elements["#desk-new"].disabled, false);
   assert.equal(harness.elements["#desk-new"].textContent, "Start new");
   assert.equal(harness.elements["#desk-refresh"].disabled, false);
   assert.equal(harness.elements["#desk-refresh"].textContent, "Refresh");
   assert.equal(harness.elements["#desk-session-refresh"].disabled, false);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].hidden,
+    false,
+    "Recovery Recent remains visibly reusable",
+  );
   assert.equal(harness.elements["#desk-recovery-navigation"].hidden, false);
   assert.equal(
     harness.elements["#desk-recovery-navigation"].contains(
@@ -1966,6 +2056,16 @@ test("ownership conflict offers inline recovery instead of a fatal screen", asyn
     false,
   );
 
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.equal(
+    harness.elements["#desk-session-refresh"].hidden,
+    false,
+    "closing recovery Recent keeps the reusable trigger visible",
+  );
   await harness.elements["#desk-session-refresh"].listener("click")();
   await flush();
   assert.equal(harness.elements["#desk-sessions"].hidden, false);
@@ -2105,36 +2205,24 @@ test("Refresh exits recovery Recent before normal Recent uses the owner session"
 
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   assert.equal(harness.elements["#desk-recovery-navigation"].hidden, true);
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
   );
   assert.equal(filter.value, "");
-  assert.equal(harness.elements["#desk-session-options"].textContent, "");
-  assert.equal(
-    harness.elements["#desk-session-options"].querySelector(".session-choice"),
-    null,
-  );
-  assert.equal(
-    harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
-    null,
-  );
+  assert.match(harness.elements["#desk-session-options"].textContent, /Fresh owner row/);
+  assert.ok(harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"));
   assert.equal(filter.focused, true, "openDesk does not steal focus from recovery navigation");
 
-  await harness.elements["#desk-session-refresh"].listener("click")();
-  await flush();
-  assert.deepEqual(
-    commands.at(-1),
-    {
-      client_id: "client-refresh-owner",
-      command: { name: "sessions", args: "" },
-    },
-  );
   assert.match(harness.elements["#desk-session-options"].textContent, /Fresh owner row/);
   assert.ok(
     harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
     "normal Recent renders action-capable rows",
+  );
+  assert.ok(
+    [...commands].reverse().find((body) => body.command?.name === "sessions"),
+    "normal Recent hydration is selected by command name",
   );
 });
 
@@ -2201,27 +2289,14 @@ test("selecting a recovery Recent row resets before normal Recent uses the new o
 
   assert.equal(openBodies[1].session_id, "session-recovery-selection");
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
   );
   assert.equal(filter.value, "");
-  assert.equal(harness.elements["#desk-session-options"].textContent, "");
-  assert.equal(
-    harness.elements["#desk-session-options"].querySelector(".session-choice"),
-    null,
-  );
+  assert.match(harness.elements["#desk-session-options"].textContent, /Fresh selected owner row/);
 
-  await harness.elements["#desk-session-refresh"].listener("click")();
-  await flush();
-  assert.deepEqual(
-    commands.at(-1),
-    {
-      client_id: "client-selection-owner",
-      command: { name: "sessions", args: "" },
-    },
-  );
   assert.match(
     harness.elements["#desk-session-options"].textContent,
     /Fresh selected owner row/,
@@ -2229,6 +2304,10 @@ test("selecting a recovery Recent row resets before normal Recent uses the new o
   assert.ok(
     harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
     "normal Recent renders action-capable rows",
+  );
+  assert.ok(
+    [...commands].reverse().find((body) => body.command?.name === "sessions"),
+    "normal Recent hydration is selected by command name",
   );
 });
 
@@ -2335,7 +2414,7 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   assert.equal(harness.EventSource.instances.length, 1);
   assert.equal(harness.elements["#desk-recovery-navigation"].hidden, true);
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
@@ -2344,7 +2423,6 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
     harness.elements["#desk-session-options"].textContent,
     /Stale recovery row/,
   );
-  assert.equal(harness.elements[".task-context"].hidden, false);
   assert.equal(harness.elements["#desk-composer"].hidden, false);
   assert.equal(harness.elements["#desk-new"].textContent, "New conversation");
   assert.deepEqual(JSON.parse(harness.storage.get("waffle.desk.today.owner.v1")), {
@@ -2353,15 +2431,13 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
     session_id: "session-final",
   });
 
-  await harness.elements["#desk-session-refresh"].listener("click")();
-  await flush();
-  const sessionCommand = mutationCalls(harness, "/api/v1/desk/chat/command")
-    .map((call) => JSON.parse(call.options.body).command)
-    .at(-1);
-  assert.deepEqual(sessionCommand, { name: "sessions", args: "" });
   assert.match(
     harness.elements["#desk-session-options"].textContent,
     /Fresh owned row/,
+  );
+  assert.ok(
+    [...commands].find((command) => command.name === "sessions"),
+    "post-promotion hydration is selected by command name",
   );
 });
 
@@ -2414,7 +2490,7 @@ test("deferred recovery recents cannot reopen after successful promotion", async
     choices: [{ id: "session-stale", label: "Promotion stale row" }],
   }));
   await flush();
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
@@ -2467,7 +2543,7 @@ test("deferred recovery recents cannot render after Refresh reopens an owned ses
     choices: [{ id: "session-stale-refresh", label: "Refresh stale row" }],
   }));
   await flush();
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
@@ -2828,7 +2904,13 @@ test("ownership recovery ignores duplicate starts and closes stale temporary wor
     session_id: "session-newer",
   });
   assert.equal(harness.EventSource.instances.length, 1);
-  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/command").length, 0);
+  assert.deepEqual(
+    mutationCalls(harness, "/api/v1/desk/chat/command")
+      .map((call) => JSON.parse(call.options.body).command.name)
+      .sort(),
+    ["help", "permissions", "sessions", "usage", "workset"],
+    "normal reopen hydrates panels after recovery without starting another user command",
+  );
   assert.equal(openBodies[1].temporary, true);
 });
 
@@ -2841,7 +2923,12 @@ test("declining new conversation confirmation preserves the current session", as
   const before = harness.elements["#desk-session-title"].textContent;
   await harness.elements["#desk-new"].listener("click")();
   await flush();
-  assert.equal(mutationCalls(harness, "/api/v1/desk/chat/command").length, 1);
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/command").filter((call) =>
+      JSON.parse(call.options.body).command.name === "new",
+    ).length,
+    1,
+  );
   assert.equal(harness.elements["#desk-session-title"].textContent, before);
 });
 
@@ -2910,7 +2997,7 @@ test("sessions list resumes selected history in place and failed resume leaves i
   // A second click on the trigger collapses the disclosure and restores focus.
   await harness.elements["#desk-session-refresh"].listener("click")();
   await flush();
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
   assert.equal(
     harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
     "false",
@@ -2954,15 +3041,6 @@ test("usage permissions workset and help commands render existing sanitized resu
     },
   });
   await flush();
-  for (const id of [
-    "#desk-usage-refresh",
-    "#desk-permissions-refresh",
-    "#desk-workset-refresh",
-    "#desk-help-refresh",
-  ]) {
-    await harness.elements[id].listener("click")();
-    await flush();
-  }
   assert.match(harness.elements["#desk-usage"].textContent, /2 requests.*30 in.*12 out.*4 reserved/i);
   assert.match(
     harness.elements["#desk-permissions"].textContent,
@@ -3682,6 +3760,7 @@ test("session list filters, disambiguates labels, arrows navigate, Escape closes
   const options = harness.elements["#desk-session-options"];
   const choices = () => options.querySelectorAll(".session-choice");
   assert.equal(choices().length, 3);
+  assert.equal(new Set([...choices()].map((choice) => choice.getAttribute("aria-label"))).size, 3);
   // Duplicate titles carry distinct recency context.
   assert.match(options.textContent, /16 Aug 2026 · kimi/);
   assert.match(options.textContent, /15 Aug 2026/);
@@ -3711,10 +3790,10 @@ test("session list filters, disambiguates labels, arrows navigate, Escape closes
   keydown({ key: "ArrowUp", preventDefault() {} });
   assert.equal(buttons[0].focused, true);
 
-  // Escape closes the disclosure and restores focus to the trigger.
+  // Desktop Escape leaves the permanent history rail rendered.
   keydown({ key: "Escape", preventDefault() {} });
-  assert.equal(harness.elements["#desk-sessions"].hidden, true);
-  assert.equal(refresh.focused, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
+  assert.equal(harness.document.activeElement, buttons[0]);
 });
 
 test("conversation action menu renames, pins, and deletes through the live command surface", async () => {
@@ -3859,6 +3938,107 @@ test("declined delete leaves the conversation intact", async () => {
     "declined delete never mutates",
   );
   assert.equal(harness.elements["#desk-session-title"].textContent, "Alpha");
+});
+
+test("row Export resumes the chosen conversation before using the existing export path", async () => {
+  let exported = 0;
+  let resumeID = "";
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({ session_id: "session-1", title: "First" }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            { id: "session-2", title: "Second", updated_at: "2026-08-19T12:00:00Z" },
+          ],
+        });
+      }
+      if (command.name === "resume") {
+        resumeID = command.args;
+        return jsonResponse({
+          state: defaultChatState({ session_id: command.args, title: "Second" }),
+        });
+      }
+      return jsonResponse({});
+    },
+    exportHandler: async () => {
+      exported += 1;
+      return { ok: true, async text() { return "# Conversation"; }, async json() { return {}; } };
+    },
+  });
+  await flush();
+  harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  row.querySelector(".session-menu-trigger").listener("click")();
+  row.querySelector(".session-menu-popover").querySelectorAll("button")
+    .find((button) => button.textContent === "Export").listener("click")();
+  await flush();
+  assert.equal(resumeID, "session-2");
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Second");
+  assert.equal(exported, 1, "export follows a verified canonical session switch");
+
+  let failedExported = 0;
+  const failed = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({ sessions: [{ id: "session-2", title: "Second", updated_at: "2026-08-19T12:00:00Z" }] });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({ code: "resume_failed", message: "Could not resume." }, false);
+      }
+      return jsonResponse({});
+    },
+    exportHandler: async () => {
+      failedExported += 1;
+      return { ok: true, async text() { return "# Conversation"; }, async json() { return {}; } };
+    },
+  });
+  await flush();
+  failed.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const failedRow = failed.elements["#desk-session-options"].querySelector(".session-row");
+  failedRow.querySelector(".session-menu-trigger").listener("click")();
+  failedRow.querySelector(".session-menu-popover").querySelectorAll("button")
+    .find((button) => button.textContent === "Export").listener("click")();
+  await flush();
+  assert.equal(failed.elements["#desk-session-title"].textContent, "Untitled conversation");
+  assert.equal(failedExported, 0, "failed resume never exports the current conversation");
+
+  let wrongExported = 0;
+  const wrong = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({ sessions: [{ id: "session-2", title: "Second", updated_at: "2026-08-19T12:00:00Z" }] });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({ state: defaultChatState({ session_id: "session-wrong", title: "Wrong session" }) });
+      }
+      return jsonResponse({});
+    },
+    exportHandler: async () => {
+      wrongExported += 1;
+      return { ok: true, async text() { return "# Conversation"; }, async json() { return {}; } };
+    },
+  });
+  await flush();
+  wrong.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const wrongRow = wrong.elements["#desk-session-options"].querySelector(".session-row");
+  wrongRow.querySelector(".session-menu-trigger").listener("click")();
+  wrongRow.querySelector(".session-menu-popover").querySelectorAll("button")
+    .find((button) => button.textContent === "Export").listener("click")();
+  await flush();
+  assert.equal(wrong.elements["#desk-session-title"].textContent, "Wrong session");
+  assert.equal(wrongExported, 0, "a wrong-session resume never exports another conversation");
 });
 
 test("edit and regenerate branch at exact boundaries and fail closed mid-turn", async () => {
@@ -4186,10 +4366,6 @@ test("project context panel lists workspace resources and attaches in place", as
     },
   });
   await flush();
-  const refresh = harness.elements["#desk-project-refresh"];
-  assert.equal(refresh.disabled, false, "project refresh enabled once idle");
-  await refresh.listener("click")();
-  await flush();
   const project = harness.elements["#desk-project"];
   assert.match(project.textContent, /Guidance/);
   assert.match(project.textContent, /README\.md/);
@@ -4231,9 +4407,6 @@ test("project panel pins a workspace file through the guarded mutation", async (
     },
   });
   await flush();
-  const refresh = harness.elements["#desk-project-refresh"];
-  await refresh.listener("click")();
-  await flush();
   harness.elements["#desk-project-path"].value = "docs/plan.md";
   const form = harness.elements["#desk-project-pin-form"];
   await form.listener("submit")({ preventDefault() {} });
@@ -4242,9 +4415,26 @@ test("project panel pins a workspace file through the guarded mutation", async (
   assert.equal(harness.elements["#desk-project-path"].value, "", "path cleared after pin");
 });
 
+test("project workspace request failures render an error instead of a false empty state", async () => {
+  const harness = createHarness({
+    workspacesHandler: async () => ({
+      ok: false,
+      status: 503,
+      async json() {
+        return { message: "workspace service unavailable" };
+      },
+    }),
+  });
+  await flush();
+  assert.match(harness.elements["#desk-project"].textContent, /Project context unavailable/);
+  assert.doesNotMatch(harness.elements["#desk-project"].textContent, /no open workspace/);
+  assert.equal(harness.elements["#desk-project"].classList.contains("is-error"), true);
+  assert.equal(harness.elements["#desk-message"].disabled, false);
+});
 
 
-test("restored history renders artifact cards with preview, download, and copy actions", async () => {
+
+test("restored history opens safe artifacts in the canvas, preserving preview, download, and copy there", async () => {
   const harness = createHarness({
     openHandler: async () =>
       jsonResponse({
@@ -4306,9 +4496,14 @@ test("restored history renders artifact cards with preview, download, and copy a
   assert.match(card.querySelector(".artifact-meta").textContent, /text\/markdown/);
   assert.match(card.querySelector(".artifact-meta").textContent, /1\.0 KiB/);
   const preview = card.querySelector(".artifact-preview-toggle");
+  assert.equal(card.querySelectorAll("button").length, 1);
   await preview.listener("click")();
   await flush();
-  assert.match(card.querySelector(".artifact-preview-body").textContent, /Findings/);
+  assert.equal(harness.elements["#desk-canvas-drawer"].hidden, false);
+  const canvasPreview = harness.elements["#desk-canvas-artifact"].querySelector("button");
+  await canvasPreview.listener("click")();
+  await flush();
+  assert.match(harness.elements["#desk-canvas-artifact"].textContent, /Findings/);
 });
 
 test("artifact preview falls back to download-only and stale cards are not served", async () => {
@@ -5098,4 +5293,536 @@ test("a successful retry clears the stale retry control", async () => {
   await flush();
   assert.equal(actions.querySelector(".retry-button"), null);
   assert.equal(turnCalls, 2);
+});
+
+test("Today auto-loads grouped history into the rail without changing the five-section shell", async () => {
+  let sessionsCalls = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        sessionsCalls += 1;
+        return jsonResponse({
+          sessions: [
+            { id: "pinned", title: "Pinned", updated_at: "2026-08-01T09:00:00Z", pinned: true },
+            { id: "today", title: "Today", updated_at: "2026-08-19T09:00:00Z" },
+          ],
+        });
+      }
+      return jsonResponse({ state: defaultChatState() });
+    },
+  });
+  await flush();
+
+  assert.equal(sessionsCalls, 1, "Today opens its existing sessions operation automatically");
+  const rail = harness.elements["#desk-session-rail"];
+  assert.ok(rail, "Today has a dedicated session rail");
+  assert.equal(rail.hidden, false);
+  assert.match(rail.textContent, /Pinned/);
+  assert.match(rail.textContent, /Today/);
+  assert.equal(harness.elements["#desk-session-refresh"].hidden, true);
+});
+
+test("ready sessions serialize auto-hydration and isolate one panel failure", async () => {
+  const failures = new Set(["permissions"]);
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise((resolve) => setImmediate(resolve));
+      try {
+        const { command } = JSON.parse(options.body);
+        if (failures.has(command.name)) {
+          return jsonResponse({ message: `${command.name} unavailable` }, false);
+        }
+        return jsonResponse({
+          usage: [{ period: "today", requests: 1 }],
+          permissions: { sandbox_mode: "workspace-write" },
+          workset: [{ id: "goal", text: "Keep the composer live" }],
+          commands: [{ name: "new", usage: "/new", description: "Start" }],
+          state: defaultChatState(),
+        });
+      } finally {
+        concurrent -= 1;
+      }
+    },
+  });
+  for (let index = 0; index < 8; index += 1) {
+    await flush();
+  }
+
+  for (const name of ["usage", "permissions", "workset", "help"]) {
+    assert.ok(
+      mutationCalls(harness, "/api/v1/desk/chat/command").some((call) =>
+        JSON.parse(call.options.body).command.name === name,
+      ),
+      `${name} hydrates on ready`,
+    );
+  }
+  assert.equal(maxConcurrent, 1, "hydration command mutations take turns on the owner lease");
+  assert.match(harness.elements["#desk-permissions"].textContent, /unavailable/i);
+  assert.equal(harness.elements["#desk-message"].disabled, false);
+  assert.equal(harness.elements[".desk-shell"].dataset.phase, "idle");
+});
+
+test("interactive send yields to slow hydration without a live-client collision", async () => {
+  const sessionsResponse = deferred();
+  let activeOwnerOperations = 0;
+  let maxOwnerOperations = 0;
+  let collisions = 0;
+  let turnCalls = 0;
+  let completedTurns = 0;
+  const enterOwnerOperation = () => {
+    activeOwnerOperations += 1;
+    maxOwnerOperations = Math.max(maxOwnerOperations, activeOwnerOperations);
+    if (activeOwnerOperations > 1) {
+      collisions += 1;
+    }
+  };
+  const leaveOwnerOperation = () => {
+    activeOwnerOperations -= 1;
+  };
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      enterOwnerOperation();
+      try {
+        const { command } = JSON.parse(options.body);
+        if (command.name === "sessions") {
+          return await sessionsResponse.promise;
+        }
+        return jsonResponse({ state: defaultChatState() });
+      } finally {
+        leaveOwnerOperation();
+      }
+    },
+    turnHandler: async () => {
+      turnCalls += 1;
+      enterOwnerOperation();
+      try {
+        return jsonResponse({});
+      } finally {
+        completedTurns += 1;
+        leaveOwnerOperation();
+      }
+    },
+  });
+  await flush();
+  harness.elements["#desk-message"].value = "Send while hydration is slow";
+  void harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.equal(turnCalls, 0, "interactive send waits for the active hydration operation");
+  sessionsResponse.resolve(jsonResponse({ sessions: [] }));
+  for (let index = 0; index < 8; index += 1) {
+    await flush();
+  }
+  assert.equal(turnCalls, 1, "interactive send starts after hydration settles");
+  assert.equal(completedTurns, 1, "interactive send completes exactly once");
+  assert.equal(maxOwnerOperations, 1, "interactive send never overlaps hydration");
+  assert.equal(collisions, 0, "no 409-producing owner operation collision");
+});
+
+test("double submit during slow hydration reserves one send without a duplicate queue", async () => {
+  const sessionsResponse = deferred();
+  let turnCalls = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return sessionsResponse.promise;
+      }
+      return jsonResponse({ state: defaultChatState() });
+    },
+    turnHandler: async () => {
+      turnCalls += 1;
+      return harness.turnResponse.promise;
+    },
+  });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = "first draft";
+  void harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.equal(message.disabled, true, "pending interactive send locks the draft before hydration settles");
+
+  message.value = "edited draft that cannot replace the reserved send";
+  void harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  sessionsResponse.resolve(jsonResponse({ sessions: [] }));
+  for (let index = 0; index < 8; index += 1) {
+    await flush();
+  }
+
+  assert.equal(turnCalls, 1, "double submit starts one turn");
+  assert.equal(harness.elements["#desk-queue"].hidden, true, "second submit does not create a duplicate follow-up");
+  assert.equal(
+    JSON.parse(mutationCalls(harness, "/api/v1/desk/chat/turn")[0].options.body).text,
+    "first draft",
+    "the reserved draft is the one sent",
+  );
+  harness.turnResponse.resolve(jsonResponse({}));
+  await flush();
+});
+
+test("panel hydration ignores a stale response after switching sessions", async () => {
+  const staleUsage = deferred();
+  let usageCalls = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [{ id: "session-2", title: "Second", updated_at: "2026-08-19T12:00:00Z" }],
+        });
+      }
+      if (command.name === "usage") {
+        usageCalls += 1;
+        if (usageCalls === 1) {
+          return staleUsage.promise;
+        }
+        return jsonResponse({ usage: [{ period: "new-session", requests: 2 }] });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-2", title: "Second" }),
+        });
+      }
+      return jsonResponse({
+        permissions: {},
+        workset: [],
+        commands: [],
+      });
+    },
+  });
+  await flush();
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  assert.ok(row, "the current session rail is ready before the switch");
+  row.querySelector(".session-choice").listener("click")();
+  await flush();
+  staleUsage.resolve(jsonResponse({ usage: [{ period: "stale-session", requests: 99 }] }));
+  for (let index = 0; index < 12; index += 1) {
+    await flush();
+  }
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Second");
+  assert.doesNotMatch(harness.elements["#desk-usage"].textContent, /stale-session/);
+  assert.match(harness.elements["#desk-usage"].textContent, /new-session/);
+});
+
+test("session switch synchronously clears every old canvas panel and project action", async () => {
+  const nextPanel = deferred();
+  const nextWorkspace = deferred();
+  let switched = false;
+  let workspaceCalls = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [{ id: "session-b", title: "Session B", updated_at: "2026-08-19T12:00:00Z" }],
+        });
+      }
+      if (command.name === "resume") {
+        switched = true;
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-b", title: "Session B" }),
+        });
+      }
+      if (switched) {
+        return command.name === "usage" ? nextPanel.promise : jsonResponse({});
+      }
+      if (command.name === "usage") {
+        return jsonResponse({ usage: [{ period: "session-a-usage", requests: 1 }] });
+      }
+      if (command.name === "permissions") {
+        return jsonResponse({ permissions: { sandbox_mode: "session-a-permissions" } });
+      }
+      if (command.name === "workset") {
+        return jsonResponse({ workset: [{ id: "session-a-workset", text: "old" }] });
+      }
+      if (command.name === "help") {
+        return jsonResponse({ commands: [{ name: "old", usage: "/session-a-help" }] });
+      }
+      return jsonResponse({});
+    },
+    workspacesHandler: async () => {
+      workspaceCalls += 1;
+      if (workspaceCalls === 1) {
+        return jsonResponse({
+          workspaces: [{ id: "workspace-a", session: "session-1", status: "open" }],
+        });
+      }
+      return nextWorkspace.promise;
+    },
+    projectHandler: async ({ path }) => {
+      if (path.includes("workspace-a") && path.includes("/resources")) {
+        return jsonResponse({
+          resources: [{ id: "resource-a", name: "Session A note", kind: "note", attached: false }],
+        });
+      }
+      return jsonResponse({ resources: [] });
+    },
+  });
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+  assert.match(harness.elements["#desk-project"].textContent, /Session A note/);
+  assert.equal(
+    harness.elements["#desk-project"].querySelectorAll("button").length,
+    1,
+    "Session A starts with an actionable resource",
+  );
+
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  row.querySelector(".session-choice").listener("click")();
+  await flush();
+
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Session B");
+  for (const [selector, marker] of [
+    ["#desk-usage", "session-a-usage"],
+    ["#desk-permissions", "session-a-permissions"],
+    ["#desk-workset", "session-a-workset"],
+    ["#desk-help", "session-a-help"],
+    ["#desk-project", "Session A note"],
+  ]) {
+    assert.doesNotMatch(
+      harness.elements[selector].textContent,
+      new RegExp(marker),
+      `${selector} is cleared before Session B hydration settles`,
+    );
+  }
+  assert.equal(
+    harness.elements["#desk-project"].querySelectorAll("button").length,
+    0,
+    "Session A resource actions are removed",
+  );
+  assert.equal(harness.elements["#desk-project-pin"].disabled, true);
+  assert.equal(harness.elements["#desk-project-add-note"].disabled, true);
+
+  nextPanel.resolve(jsonResponse({ usage: [] }));
+  nextWorkspace.resolve(jsonResponse({ workspaces: [] }));
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+});
+
+test("canvas opens as a named surface, selects safe artifacts, and restores focus without stealing higher-priority Escape", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{
+            role: "assistant",
+            blocks: [{
+              type: "tool_result",
+              tool_result: {
+                blocks: [{
+                  type: "artifact",
+                  artifact: {
+                    id: "art-1",
+                    name: "report.md",
+                    media_type: "text/markdown",
+                    size: 10,
+                    state: "available",
+                  },
+                }],
+              },
+            }],
+          }],
+        }),
+      }),
+  });
+  await flush();
+
+  const toggle = harness.elements["#desk-context-toggle"];
+  const canvas = harness.elements["#desk-canvas-drawer"];
+  for (const selector of [
+    "#desk-canvas-close",
+    "#desk-canvas-tab-artifact",
+    "#desk-canvas-tab-session",
+    "#desk-canvas-tab-diagnostics",
+    "#desk-canvas-tab-project",
+  ]) {
+    harness.elements[selector].tagName = "BUTTON";
+  }
+  assert.ok(toggle, "canvas toggle exists");
+  assert.ok(canvas, "canvas exists");
+  toggle.listener("click")();
+  assert.equal(canvas.hidden, false);
+  assert.equal(harness.elements[".desk-shell"].getAttribute("data-canvas"), "open");
+  assert.equal(canvas.getAttribute("role"), "complementary");
+  assert.equal(canvas.getAttribute("aria-modal"), null);
+  harness.resizeTo(1100);
+  assert.equal(canvas.getAttribute("role"), "complementary");
+  assert.equal(canvas.getAttribute("aria-modal"), null);
+  harness.resizeTo(1099);
+  assert.equal(canvas.getAttribute("role"), "dialog");
+  assert.equal(canvas.getAttribute("aria-modal"), "true");
+  harness.resizeTo(768);
+  assert.equal(canvas.getAttribute("role"), "dialog");
+  assert.equal(canvas.getAttribute("aria-modal"), "true");
+  const card = harness.elements["#desk-transcript"].querySelector(".artifact-card");
+  assert.ok(card.querySelector("button"), "artifact offers the existing safe action path");
+  assert.match(card.textContent, /Open in canvas/);
+
+  const hiddenProjectButton = new FakeElement("button");
+  harness.elements["#desk-canvas-project"].hidden = true;
+  harness.elements["#desk-canvas-project"].append(hiddenProjectButton);
+  harness.document.listener("keydown")({
+    key: "Tab",
+    shiftKey: true,
+    defaultPrevented: false,
+    preventDefault() {},
+  });
+  assert.equal(
+    harness.elements["#desk-canvas-tab-project"].focused,
+    true,
+    "hidden canvas panels are excluded from the focus trap",
+  );
+
+  const palette = new FakeElement("div");
+  palette.hidden = false;
+  harness.elements["#command-palette"] = palette;
+  const paletteEscape = {
+    key: "Escape",
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+  };
+  harness.document.listener("keydown")(paletteEscape);
+  assert.equal(canvas.hidden, false, "open palette keeps canvas open");
+  harness.document.listener("keydown")({
+    key: "Escape",
+    defaultPrevented: true,
+    preventDefault() {},
+  });
+  assert.equal(canvas.hidden, false, "already handled Escape does not close canvas");
+  palette.hidden = true;
+
+  harness.elements["#desk-canvas-close"].listener("click")();
+  assert.equal(canvas.hidden, true);
+  assert.equal(toggle.focused, true);
+});
+
+test("canvas modal Tab wraps after the Session posture control in DOM order", async () => {
+  const harness = createHarness({ viewportWidth: 1099 });
+  await flush();
+
+  const canvas = harness.elements["#desk-canvas-drawer"];
+  const close = harness.elements["#desk-canvas-close"];
+  const session = harness.elements["#desk-canvas-session"];
+  for (const selector of [
+    "#desk-canvas-close",
+    "#desk-canvas-tab-artifact",
+    "#desk-canvas-tab-session",
+    "#desk-canvas-tab-diagnostics",
+    "#desk-canvas-tab-project",
+  ]) {
+    harness.elements[selector].tagName = "BUTTON";
+  }
+  const exportFormat = new FakeElement("select");
+  const posture = new FakeElement("button");
+  session.append(exportFormat, posture);
+
+  harness.elements["#desk-context-toggle"].listener("click")();
+  posture.focus();
+  close.focused = false;
+  let prevented = false;
+  harness.document.listener("keydown")({
+    key: "Tab",
+    shiftKey: false,
+    defaultPrevented: false,
+    preventDefault() {
+      prevented = true;
+    },
+  });
+
+  assert.equal(canvas.getAttribute("aria-modal"), "true");
+  assert.equal(prevented, true, "Tab is trapped after the actual last visible control");
+  assert.equal(close.focused, true, "focus wraps to the first control in DOM order");
+});
+
+test("closing canvas falls back to the context toggle when an artifact opener was detached by a session switch", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{
+            role: "assistant",
+            blocks: [{
+              type: "tool_result",
+              tool_result: {
+                blocks: [{
+                  type: "artifact",
+                  artifact: {
+                    id: "artifact-a",
+                    name: "session-a.md",
+                    media_type: "text/markdown",
+                    size: 10,
+                    state: "available",
+                  },
+                }],
+              },
+            }],
+          }],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [{ id: "session-b", title: "Session B", updated_at: "2026-08-19T12:00:00Z" }],
+        });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-b", title: "Session B" }),
+        });
+      }
+      return jsonResponse({ permissions: {}, workset: [], commands: [], usage: [] });
+    },
+  });
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+
+  const opener = harness.elements["#desk-transcript"].querySelector(".artifact-open-canvas");
+  opener.listener("click")();
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  row.querySelector(".session-choice").listener("click")();
+  for (let index = 0; index < 4; index += 1) {
+    await flush();
+  }
+  assert.equal(opener.isConnected, false, "the old transcript action is detached");
+
+  const toggle = harness.elements["#desk-context-toggle"];
+  opener.focused = false;
+  toggle.focused = false;
+  harness.elements["#desk-canvas-close"].listener("click")();
+
+  assert.equal(opener.focused, false, "focus is not sent to a detached artifact action");
+  assert.equal(toggle.focused, true, "the stable canvas toggle receives restored focus");
+});
+
+test("Find conversation event closes the compact canvas before revealing and focusing history", async () => {
+  const harness = createHarness({ mobileViewport: true });
+  await flush();
+
+  const canvas = harness.elements["#desk-canvas-drawer"];
+  const sessions = harness.elements["#desk-sessions"];
+  const filter = harness.elements["#desk-session-filter"];
+  harness.elements["#desk-context-toggle"].listener("click")();
+  assert.equal(canvas.hidden, false);
+  assert.equal(sessions.hidden, true);
+
+  harness.document.dispatchEvent({ type: "waffle:find-conversation" });
+
+  assert.equal(canvas.hidden, true, "the higher canvas layer is closed first");
+  assert.equal(sessions.hidden, false, "compact history is revealed");
+  assert.equal(harness.document.activeElement, filter, "the now-visible filter receives focus");
 });

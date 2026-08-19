@@ -110,7 +110,7 @@ func assetContentType(name string) string {
 	switch {
 	case strings.HasSuffix(name, ".css"):
 		return "text/css; charset=utf-8"
-	case strings.HasSuffix(name, ".js"):
+	case strings.HasSuffix(name, ".js"), strings.HasSuffix(name, ".mjs"):
 		return "text/javascript; charset=utf-8"
 	case strings.HasSuffix(name, ".svg"):
 		return "image/svg+xml"

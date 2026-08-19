@@ -14,6 +14,8 @@ templ Today(view ShellView) {
 				<span class="connection-light" aria-hidden="true"></span>
 				<span id="desk-connection-text">{ view.Connection }</span>
 			</p>
+			<button type="button" id="desk-conversations-open" class="conversations-open" aria-controls="desk-sessions" aria-expanded="false" hidden>Conversations</button>
+			<button type="button" id="desk-context-toggle" class="context-toggle" aria-controls="desk-canvas-drawer" aria-expanded="false">Session and files</button>
 		</header>
 		@SetupBanner()
 		<div class="stale-banner" id="desk-stale-status" role="status" aria-live="polite" tabindex="-1" hidden>
@@ -96,30 +98,35 @@ templ Today(view ShellView) {
 					</form>
 				</div>
 			</section>
-			<aside class="task-context" aria-labelledby="context-title">
-				<h2 id="context-title" class="context-title">Session</h2>
-				<div class="conversation-actions">
-					<button type="button" id="desk-new" disabled>New conversation</button>
-					<button type="button" id="desk-session-refresh" disabled>Recent conversations</button>
-					<label id="desk-temporary-row" class="temporary-row" for="desk-temporary" hidden>
-						<input id="desk-temporary" type="checkbox"/>
-						<span>Temporary conversation</span>
-					</label>
-					<p id="desk-temporary-badge" class="temporary-badge" hidden>Temporary — nothing is saved</p>
-					<label class="visually-hidden" for="desk-export-format">Export format</label>
-					<select id="desk-export-format" disabled>
-						<option value="markdown">Markdown</option>
-						<option value="json">Versioned JSON</option>
-					</select>
-					<button type="button" id="desk-export" disabled>Export</button>
-				</div>
-				<div class="session-finder" id="desk-sessions" hidden>
-					<label class="visually-hidden" for="desk-session-filter">Find a conversation</label>
-					<input type="search" id="desk-session-filter" placeholder="Find a conversation…" autocomplete="off" />
-					<div class="session-list" id="desk-session-options" role="listbox" aria-label="Recent conversations" aria-live="polite">
-						<p>Load recent conversations to switch sessions.</p>
+			<aside class="desk-canvas" id="desk-canvas-drawer" aria-labelledby="canvas-title" hidden>
+				<div class="canvas-header">
+					<div>
+						<p class="eyebrow">Context</p>
+						<h2 id="canvas-title">Session and files</h2>
 					</div>
+					<button type="button" id="desk-canvas-close">Close canvas</button>
 				</div>
+				<div class="canvas-tabs" role="tablist" aria-label="Session context">
+					<button type="button" id="desk-canvas-tab-artifact" role="tab" aria-controls="desk-canvas-artifact" aria-selected="false" hidden>Artifact</button>
+					<button type="button" id="desk-canvas-tab-session" role="tab" aria-controls="desk-canvas-session" aria-selected="true">Session</button>
+					<button type="button" id="desk-canvas-tab-diagnostics" role="tab" aria-controls="desk-canvas-diagnostics" aria-selected="false">Diagnostics</button>
+					<button type="button" id="desk-canvas-tab-project" role="tab" aria-controls="desk-canvas-project" aria-selected="false">Project</button>
+				</div>
+				<section id="desk-canvas-artifact" class="canvas-panel" role="tabpanel" aria-labelledby="desk-canvas-tab-artifact" hidden></section>
+				<section id="desk-canvas-session" class="canvas-panel" role="tabpanel" aria-labelledby="desk-canvas-tab-session">
+					<div class="conversation-actions">
+						<label id="desk-temporary-row" class="temporary-row" for="desk-temporary" hidden>
+							<input id="desk-temporary" type="checkbox"/>
+							<span>Temporary conversation</span>
+						</label>
+						<p id="desk-temporary-badge" class="temporary-badge" hidden>Temporary — nothing is saved</p>
+						<label class="visually-hidden" for="desk-export-format">Export format</label>
+						<select id="desk-export-format" disabled>
+							<option value="markdown">Markdown</option>
+							<option value="json">Versioned JSON</option>
+						</select>
+						<button type="button" id="desk-export" disabled>Export</button>
+					</div>
 				<dl class="context-list">
 					<div class="visually-hidden">
 						<dt>Connection</dt>
@@ -155,50 +162,52 @@ templ Today(view ShellView) {
 						<dt>Branched from</dt>
 						<dd id="desk-fork"></dd>
 					</div>
-				</dl>
-				<div class="context-panels">
-					<details>
-						<summary>Usage</summary>
-						<button type="button" id="desk-usage-refresh" disabled>Load usage</button>
-						<div id="desk-usage" class="context-panel-result" aria-live="polite"></div>
-					</details>
-					<details>
-						<summary>Permissions</summary>
-						<button type="button" id="desk-permissions-refresh" disabled>Load permissions</button>
-						<div id="desk-permissions" class="context-panel-result" aria-live="polite"></div>
-					</details>
-					<details>
-						<summary>Working set</summary>
-						<button type="button" id="desk-workset-refresh" disabled>Load working set</button>
-						<div id="desk-workset" class="context-panel-result" aria-live="polite"></div>
-					</details>
-					<details>
-						<summary>Commands</summary>
-						<button type="button" id="desk-help-refresh" disabled>Load commands</button>
-						<div id="desk-help" class="context-panel-result" aria-live="polite"></div>
-					</details>
-					<details>
-						<summary>Project context</summary>
-						<p class="context-panel-hint">Reusable notes and workspace files for this conversation.</p>
-						<button type="button" id="desk-project-refresh" disabled>Load project context</button>
-						<div id="desk-project" class="context-panel-result" aria-live="polite"></div>
-						<form class="project-form" id="desk-project-pin-form">
-							<label for="desk-project-path">Pin workspace file</label>
-							<div class="project-form-row">
-								<input id="desk-project-path" name="path" type="text" placeholder="docs/plan.md" autocomplete="off">
-								<button type="submit" id="desk-project-pin" disabled>Pin file</button>
-							</div>
-						</form>
-						<form class="project-form" id="desk-project-note-form">
-							<label for="desk-project-note-name">Add owner note</label>
-							<div class="project-form-row">
-								<input id="desk-project-note-name" name="name" type="text" placeholder="Guidance" autocomplete="off">
-							</div>
-							<textarea id="desk-project-note" name="note" rows="2" placeholder="Note body…"></textarea>
-							<button type="submit" id="desk-project-add-note" disabled>Add note</button>
-						</form>
-					</details>
-				</div>
+					</dl>
+				</section>
+				<section id="desk-canvas-diagnostics" class="canvas-panel" role="tabpanel" aria-labelledby="desk-canvas-tab-diagnostics" hidden>
+					<div class="context-panels">
+						<details open>
+							<summary>Usage</summary>
+							<div id="desk-usage" class="context-panel-result" aria-live="polite"></div>
+						</details>
+						<details open>
+							<summary>Permissions</summary>
+							<div id="desk-permissions" class="context-panel-result" aria-live="polite"></div>
+						</details>
+						<details open>
+							<summary>Working set</summary>
+							<div id="desk-workset" class="context-panel-result" aria-live="polite"></div>
+						</details>
+						<details open>
+							<summary>Commands</summary>
+							<div id="desk-help" class="context-panel-result" aria-live="polite"></div>
+						</details>
+					</div>
+				</section>
+				<section id="desk-canvas-project" class="canvas-panel" role="tabpanel" aria-labelledby="desk-canvas-tab-project" hidden>
+					<div class="context-panels">
+						<div class="project-context-panel">
+							<h3>Project context</h3>
+							<p class="context-panel-hint">Reusable notes and workspace files for this conversation.</p>
+							<div id="desk-project" class="context-panel-result" aria-live="polite"></div>
+							<form class="project-form" id="desk-project-pin-form">
+								<label for="desk-project-path">Pin workspace file</label>
+								<div class="project-form-row">
+									<input id="desk-project-path" name="path" type="text" placeholder="docs/plan.md" autocomplete="off">
+									<button type="submit" id="desk-project-pin" disabled>Pin file</button>
+								</div>
+							</form>
+							<form class="project-form" id="desk-project-note-form">
+								<label for="desk-project-note-name">Add owner note</label>
+								<div class="project-form-row">
+									<input id="desk-project-note-name" name="name" type="text" placeholder="Guidance" autocomplete="off">
+								</div>
+								<textarea id="desk-project-note" name="note" rows="2" placeholder="Note body…"></textarea>
+								<button type="submit" id="desk-project-add-note" disabled>Add note</button>
+							</form>
+						</div>
+					</div>
+				</section>
 			</aside>
 		</div>
 		@PostureDialog()
