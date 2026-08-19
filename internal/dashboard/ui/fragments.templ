@@ -71,7 +71,14 @@ templ FragmentList(view FragmentView) {
 		</select>
 	}
 	for _, swap := range view.TextSwaps {
-		<p id={ swap.ID } class={ swap.Class } hx-swap-oob="outerHTML" data-waffle-skill-source={ swap.Source } data-waffle-source-available={ fragmentBool(swap.Available) }>{ swap.Text }</p>
+		<p id={ swap.ID } class={ swap.Class } { fragmentLiveAttributes(swap.Live)... } hx-swap-oob="outerHTML" data-waffle-skill-source={ swap.Source } data-waffle-source-available={ fragmentBool(swap.Available) }>{ swap.Text }</p>
+	}
+	if view.ID == "tasks-list" {
+		if view.TaskScheduleOpenPrimary {
+			<button id="task-schedule-open" class="action-primary" type="button" hx-swap-oob="outerHTML">New schedule</button>
+		} else {
+			<button id="task-schedule-open" type="button" hx-swap-oob="outerHTML">New schedule</button>
+		}
 	}
 	for _, filter := range view.Filters {
 		<button id={ filter.ID } class="task-filter" type="button" data-task-filter={ filter.Name } aria-pressed={ fragmentBool(filter.Pressed) } hx-get={ filter.URL } hx-target="#tasks-list" hx-swap="outerHTML" hx-swap-oob="outerHTML">{ filter.Label }</button>

@@ -612,7 +612,10 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 		ID:    "tasks-attention-count",
 		Class: attentionClass,
 		Text:  tasksAttentionLabel(snapshot.AttentionCount, attentionFailed),
+		Live:  true,
 	})
+	fragment.TaskScheduleOpenPrimary = len(snapshot.Errors) == 0 && len(snapshot.Tasks) == 0 &&
+		(snapshot.Filter == TaskFilterAll || snapshot.Filter == TaskFilterScheduled)
 	if len(snapshot.Tasks) == 0 {
 		state := tasksEmptyState(snapshot)
 		fragment.EmptyState = &state

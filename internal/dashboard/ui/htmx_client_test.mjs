@@ -42,8 +42,16 @@ test("skill-import disclosure is removed while imports are disabled", () => {
 });
 
 test("editing a schedule restores profile after options reload", () => {
-  assert.match(shim, /loadScheduleOptions\(form\)\.then/);
+  assert.match(shim, /loadScheduleOptions\(form,/);
   assert.match(shim, /profileSelect\.value = profile/);
+});
+
+test("schedule option loading is invalidated with the active editor context", () => {
+  assert.match(shim, /waffleScheduleOptionsGeneration/);
+  assert.match(shim, /waffleScheduleMode/);
+  assert.match(shim, /waffleScheduleEditID/);
+  assert.match(shim, /task-schedule-status/);
+  assert.match(shim, /generation.*mode|mode.*generation/s);
 });
 
 test("schedule dialog Escape and Cancel share an opener-aware dismissal contract", () => {

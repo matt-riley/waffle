@@ -213,8 +213,8 @@ func TestTaskEmptyFragmentsRenderTheExactFilterMatrixAndNoArtworkOnFailure(t *te
 					t.Errorf("empty %s fragment missing %q: %s", tc.filter, want, body)
 				}
 			}
-			if strings.Contains(body, "No tasks match this view.") || strings.Count(body, `id="task-schedule-open"`) != 0 {
-				t.Fatalf("empty %s fragment retained generic copy or duplicated schedule trigger: %s", tc.filter, body)
+			if strings.Contains(body, "No tasks match this view.") || strings.Count(body, `id="task-schedule-open"`) != 1 {
+				t.Fatalf("empty %s fragment retained generic copy or lost/duplicated schedule trigger: %s", tc.filter, body)
 			}
 			if tc.filter == TaskFilterAll || tc.filter == TaskFilterScheduled {
 				if !strings.Contains(body, "waffle-empty-curled.png") {

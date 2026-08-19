@@ -486,3 +486,64 @@ func fragmentHasAction(state *ui.EmptyStateView, label string) bool {
 	}
 	return false
 }
+
+func TestTasksFragmentOwnsScheduleHierarchyAndAttentionLiveRegion(t *testing.T) {
+	tests := []struct {
+		name           string
+		filter         TaskFilter
+		triggerPrimary bool
+		snapshot       TasksSnapshot
+	}{
+		{name: "all proven empty", filter: TaskFilterAll, triggerPrimary: true},
+		{name: "active filtered empty", filter: TaskFilterActive},
+		{name: "scheduled proven empty", filter: TaskFilterScheduled, triggerPrimary: true},
+		{name: "completed filtered empty", filter: TaskFilterCompleted},
+		{name: "attention filtered empty", filter: TaskFilterAttention},
+		{name: "populated", filter: TaskFilterAll, snapshot: TasksSnapshot{Tasks: []TaskView{{ID: "healthy", Kind: TaskKindSchedule, Name: "Healthy", EvidenceLabel: "Scheduled"}}}},
+		{name: "failure", filter: TaskFilterAll, snapshot: TasksSnapshot{Errors: []*SectionError{{Section: OperationsSectionJobs}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := tc.snapshot
+			snapshot.Filter = tc.filter
+			body := renderTasksFragment(t, tasksFragment(snapshot))
+			start := strings.Index(body, `id="task-schedule-open"`)
+			if start < 0 {
+				t.Fatalf("fragment did not update the stable schedule trigger: %s", body)
+			}
+			end := strings.Index(body[start:], ">")
+			if end < 0 {
+				t.Fatalf("schedule trigger has no closing tag: %s", body[start:])
+			}
+			trigger := body[start : start+end+1]
+			if got := strings.Contains(trigger, `class="action-primary"`); got != tc.triggerPrimary {
+				t.Fatalf("schedule trigger primary = %t, want %t: %s", got, tc.triggerPrimary, trigger)
+			}
+			if !strings.Contains(trigger, `hx-swap-oob="outerHTML"`) {
+				t.Fatalf("schedule trigger is not an OOB update: %s", trigger)
+			}
+			attentionStart := strings.Index(body, `id="tasks-attention-count"`)
+			attentionEnd := strings.Index(body[attentionStart:], ">")
+			if attentionStart < 0 || attentionEnd < 0 || !strings.Contains(body[attentionStart:attentionStart+attentionEnd], `aria-live="polite"`) {
+				t.Fatalf("Tasks attention swap lost its opt-in live region: %s", body)
+			}
+		})
+	}
+
+	generic := renderTasksFragment(t, ui.FragmentView{
+		ID:        "generic-fragment",
+		TextSwaps: []ui.FragmentTextSwap{{ID: "generic-status", Class: "generic-status", Text: "Changed"}},
+	})
+	if strings.Contains(generic, `id="generic-status" class="generic-status" aria-live=`) {
+		t.Fatalf("generic text swaps must not become live regions: %s", generic)
+	}
+}
+
+func renderTasksFragment(t *testing.T, fragment ui.FragmentView) string {
+	t.Helper()
+	var rendered strings.Builder
+	if err := ui.FragmentList(fragment).Render(context.Background(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	return rendered.String()
+}

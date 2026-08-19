@@ -302,7 +302,30 @@
 		input(form, "task-schedule-name")?.focus?.();
 	}
 
-	async function loadScheduleOptions(form) {
+	function setScheduleContext(form, mode, editID = "") {
+		form.dataset.waffleScheduleMode = mode;
+		form.dataset.waffleScheduleEditID = editID;
+	}
+
+	function invalidateScheduleOptions(form) {
+		form.dataset.waffleScheduleOptionsGeneration = String(
+			(Number(form.dataset.waffleScheduleOptionsGeneration) || 0) + 1,
+		);
+	}
+
+	function scheduleOptionsContextMatches(form, context) {
+		return form.dataset.waffleScheduleOptionsGeneration === context.generation &&
+			(form.dataset.waffleScheduleMode || "new") === context.mode &&
+			(form.dataset.waffleScheduleEditID || "") === context.editID;
+	}
+
+	async function loadScheduleOptions(form, { mode = form.dataset.waffleScheduleMode || "new", editID = "", restore } = {}) {
+		invalidateScheduleOptions(form);
+		const context = {
+			generation: form.dataset.waffleScheduleOptionsGeneration,
+			mode,
+			editID,
+		};
 		let options;
 		try {
 			const response = await fetch("/api/v1/desk/tasks/schedules/options", {
@@ -314,6 +337,7 @@
 		} catch {
 			options = {};
 		}
+		if (!scheduleOptionsContextMatches(form, context)) return false;
 		const profiles = Array.isArray(options.profiles) ? options.profiles : [];
 		const deliveries = Array.isArray(options.deliveries) ? options.deliveries : [];
 		const profileSelect = input(form, "task-schedule-profile");
@@ -344,6 +368,8 @@
 				? "No delivery channels are connected. Enroll one in Capabilities → Tools & connections."
 				: "";
 		}
+		if (restore && scheduleOptionsContextMatches(form, context)) restore();
+		return true;
 	}
 
 	function syncScheduleDeliverUI(form) {
@@ -353,6 +379,8 @@
 	}
 
 	function resetTaskSchedule(form) {
+		invalidateScheduleOptions(form);
+		setScheduleContext(form, "new");
 		form.dataset.waffleSchedulePreviewGeneration = String(
 			(Number(form.dataset.waffleSchedulePreviewGeneration) || 0) + 1,
 		);
@@ -380,6 +408,7 @@
 		const chatID = input(form, "task-schedule-chat-id");
 		const summary = input(form, "task-schedule-summary");
 		const errors = input(form, "task-schedule-field-errors");
+		const status = input(form, "task-schedule-status");
 		const advanced = input(form, "task-schedule-advanced");
 		if (cadence) cadence.value = "weekdays";
 		if (time) time.value = "09:00";
@@ -391,6 +420,7 @@
 			errors.hidden = true;
 			errors.replaceChildren();
 		}
+		if (status) status.replaceChildren();
 		if (advanced) advanced.open = false;
 		syncGuidedFromCron(form);
 		syncGuidedVisibility(form);
@@ -456,7 +486,8 @@
 		const id = input(form, "task-schedule-id");
 		const enabled = input(form, "task-schedule-enabled");
 		if (!id || !enabled) return;
-		id.value = card.dataset.taskId || "";
+		const editID = card.dataset.taskId || "";
+		id.value = editID;
 		id.disabled = false;
 		enabled.checked = card.dataset.taskEnabled === "true";
 		enabled.disabled = false;
@@ -465,6 +496,7 @@
 			.map((field) => field.trim())
 			.filter(Boolean);
 		form.dataset.waffleRedactedFields = redacted.join(",");
+		setScheduleContext(form, "edit", editID);
 		const values = {
 			name: card.dataset.taskName || "",
 			cron: card.dataset.taskCron || "",
@@ -494,7 +526,10 @@
 		}
 		if (chatIDInput) chatIDInput.value = redacted.includes("deliver") ? "" : chatID;
 		syncScheduleDeliverUI(form);
-		void loadScheduleOptions(form).then(() => {
+		void loadScheduleOptions(form, {
+			mode: "edit",
+			editID,
+			restore: () => {
 			if (deliverSelect && channel) deliverSelect.value = channel;
 			const profileSelect = input(form, "task-schedule-profile");
 			const profile = values.profile;
@@ -505,6 +540,7 @@
 				profileSelect.value = profile;
 			}
 			syncScheduleDeliverUI(form);
+			},
 		});
 		void schedulePreview(form);
 		for (const field of ["deliver", "profile"]) {

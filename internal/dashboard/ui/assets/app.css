@@ -1570,6 +1570,11 @@ h3 {
 	width: 100%;
 }
 
+.tasks-board .waffle-empty-state {
+	max-width: 64rem;
+	width: 100%;
+}
+
 #task-schedule-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
