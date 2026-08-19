@@ -33,6 +33,31 @@ func TestShellRendersApprovedFiveSectionNavigation(t *testing.T) {
 	}
 }
 
+func TestShellProvidesThemeBootAndSharedThemeControl(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newTestShellHandler(t, ui.ShellView{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/desk/", nil))
+	body := rec.Body.String()
+
+	boot := `/desk/assets/theme-boot.js?v=`
+	stylesheet := `/desk/assets/app.css?v=`
+	if !strings.Contains(body, boot) {
+		t.Fatalf("shell missing versioned theme boot asset: %q", body)
+	}
+	if strings.Index(body, boot) > strings.Index(body, stylesheet) {
+		t.Fatal("theme boot must load before app.css")
+	}
+	for _, required := range []string{
+		`<select id="desk-theme" aria-label="Theme">`,
+		`<option value="system">System</option>`,
+		`<option value="light">Light</option>`,
+		`<option value="dark">Dark</option>`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("shell missing theme control %q", required)
+		}
+	}
+}
+
 func TestShellMobileNavigationRemovesRedundantBrandFromTabOrder(t *testing.T) {
 	handler := newTestShellHandler(t, ui.ShellView{})
 	asset := httptest.NewRecorder()

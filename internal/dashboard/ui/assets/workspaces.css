@@ -18,9 +18,9 @@
 }
 
 .workspaces-errors {
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border: 1px solid var(--danger);
-  color: #6f302c;
+  color: var(--danger-text);
   margin-bottom: 1rem;
   padding: 0.75rem 0.9rem;
 }
@@ -165,7 +165,7 @@
 #workspace-close-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-height: calc(100vh - 2rem);
   max-width: min(34rem, calc(100vw - 2rem));
@@ -176,7 +176,7 @@
 
 #workspace-open-dialog::backdrop,
 #workspace-close-dialog::backdrop {
-  background: rgb(33 29 25 / 55%);
+  background: var(--overlay);
 }
 
 #workspace-open-form,
@@ -208,12 +208,12 @@
 
 .workspace-danger {
   background: var(--danger);
-  color: var(--paper);
+  color: var(--text-on-danger);
 }
 
 .workspaces :focus-visible {
-  outline: 3px solid var(--ginger);
-  outline-offset: 3px;
+  box-shadow: var(--focus-ring);
+  outline: 0;
 }
 
 @media (max-width: 900px) {
@@ -269,9 +269,9 @@
 }
 
 .workspace-card .waffle-fragment-actions .workspace-primary {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
+  background: var(--action-primary-surface);
+  border-color: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .workspace-card .waffle-fragment-actions .workspace-danger-action {

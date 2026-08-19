@@ -15,6 +15,7 @@ func TestStaticAssetsCachedAtInit(t *testing.T) {
 	required := []string{
 		"app.css",
 		"app.js",
+		"theme-boot.js",
 		"today.js",
 		"dictate.js",
 		"workspaces.css",

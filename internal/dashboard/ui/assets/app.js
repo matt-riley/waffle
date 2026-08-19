@@ -17,6 +17,70 @@ const modelScopes = Object.freeze({
   waffleWide: "waffle-wide",
 });
 
+const themePreferences = Object.freeze({
+  system: "system",
+  light: "light",
+  dark: "dark",
+});
+
+const themeStorageKey = "waffle.desk.theme";
+const themeRoot = document.documentElement;
+const themeControl = document.querySelector("#desk-theme");
+const themeMediaQuery =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+function normalizeThemePreference(preference) {
+  return Object.hasOwn(themePreferences, preference)
+    ? preference
+    : themePreferences.system;
+}
+
+function setThemeAttributes(preference, prefersDark) {
+  const normalized = normalizeThemePreference(preference);
+  const theme = normalized === themePreferences.system
+    ? (prefersDark ? themePreferences.dark : themePreferences.light)
+    : normalized;
+  themeRoot?.setAttribute("data-theme", theme);
+  themeRoot?.setAttribute("data-theme-preference", normalized);
+  if (themeControl) {
+    themeControl.value = normalized;
+  }
+}
+
+function persistThemePreference(preference) {
+  try {
+    localStorage.setItem(themeStorageKey, preference);
+  } catch {
+    // Theme selection still applies when storage is unavailable.
+  }
+}
+
+let themePreference = normalizeThemePreference(
+  themeRoot?.getAttribute("data-theme-preference") || themePreferences.system,
+);
+setThemeAttributes(themePreference, themeMediaQuery?.matches === true);
+
+themeControl?.addEventListener?.("change", (event) => {
+  themePreference = normalizeThemePreference(event.target.value);
+  persistThemePreference(themePreference);
+  setThemeAttributes(themePreference, themeMediaQuery?.matches === true);
+});
+
+if (themeMediaQuery) {
+  const handleThemeMediaChange = (event) => {
+    if (themePreference === themePreferences.system) {
+      setThemeAttributes(themePreference, event.matches === true);
+    }
+  };
+  if (typeof themeMediaQuery.addEventListener === "function") {
+    themeMediaQuery.addEventListener("change", handleThemeMediaChange);
+  } else if (typeof themeMediaQuery.addListener === "function") {
+    themeMediaQuery.addListener(handleThemeMediaChange);
+  }
+}
+
 const railElements = {
   status: document.querySelector("#rail-status"),
   dot: document.querySelector("#rail-status-dot"),

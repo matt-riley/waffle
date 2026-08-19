@@ -41,8 +41,8 @@
 }
 
 .capability-restart {
-  background: var(--ink);
-  color: var(--cream);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
   display: grid;
   gap: 0.3rem;
   margin-bottom: 1rem;
@@ -59,7 +59,7 @@
 .capability-tabs a {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 2px 2px 0 var(--ink);
+  box-shadow: var(--shadow-soft);
   padding: 0.55rem 0.75rem;
   text-decoration: none;
 }
@@ -79,8 +79,8 @@
 .capabilities:has(#capability-connections-panel:target) .capability-tabs a[href="#capability-connections-panel"],
 .capabilities:has(#profile-editor:target) .capability-tabs a[href="#profile-editor"],
 .capabilities:has(#setup-checklist:target) .capability-tabs a[href="#setup-checklist"] {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
 }
 
 .capability-grid {
@@ -109,13 +109,13 @@
 
 .capabilities:has(.capability-panel.is-active) .capability-tabs a[aria-current="true"],
 .capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) .capability-tabs a[href="#setup-checklist"] {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
 }
 
 .capabilities:not(:has(.capability-panel:target)):not(:has(.capability-panel.is-active)):has(#capability-tab-setup.is-needed) .capability-tabs a[href="#capability-models-panel"] {
   background: var(--paper);
-  color: inherit;
+  color: var(--text-primary);
 }
 
 #profile-editor:not(:target):not(.is-active) {
@@ -125,7 +125,7 @@
 .capability-panel {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-card);
   min-width: 0;
   padding: 1rem;
 }
@@ -347,21 +347,21 @@
 }
 
 .connection-card.is-healthy .waffle-fragment-kind {
-  background: #e2efd8;
-  border: 1px solid #5f7f46;
-  color: #3d5a26;
+  background: var(--success-surface);
+  border: 1px solid var(--success-border);
+  color: var(--success-text);
 }
 
 .connection-card.is-degraded .waffle-fragment-kind {
-  background: #f7ddbf;
-  border: 1px solid var(--ginger-dark);
-  color: #7a4b0e;
+  background: var(--warning-surface);
+  border: 1px solid var(--accent-text);
+  color: var(--warning-text);
 }
 
 .connection-card.is-failed .waffle-fragment-kind {
-  background: #f3d8cf;
+  background: var(--danger-surface);
   border: 1px solid var(--danger);
-  color: #6f302c;
+  color: var(--danger-text);
 }
 
 .connection-card.is-unchecked .waffle-fragment-kind {
@@ -388,8 +388,8 @@
 }
 
 .capability-tabs a[aria-current="true"] {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--surface-sidebar);
+  color: var(--text-sidebar);
 }
 
 .capability-card {

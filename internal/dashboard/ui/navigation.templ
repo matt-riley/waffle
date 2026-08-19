@@ -4,6 +4,14 @@ templ Navigation(view ShellView) {
 	<nav class="desk-navigation" aria-label="Waffle Desk sections">
 		<a class="brand" href="/desk/" aria-label="Waffle Desk home">Waffle Desk</a>
 		<button id="palette-open" class="palette-open" type="button" aria-haspopup="dialog" aria-controls="command-palette">Commands <kbd>Ctrl K</kbd></button>
+		<label class="theme-control">
+			<span>Theme</span>
+			<select id="desk-theme" aria-label="Theme">
+				<option value="system">System</option>
+				<option value="light">Light</option>
+				<option value="dark">Dark</option>
+			</select>
+		</label>
 		<ul class="section-links">
 			@NavigationItem("today", "Today", view.ActiveSection)
 			@NavigationItem("tasks", "Tasks", view.ActiveSection)

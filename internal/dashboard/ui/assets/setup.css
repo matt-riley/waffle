@@ -60,7 +60,7 @@
 }
 
 .setup-step[data-state="missing"] .setup-state {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }
 
 .setup-step[data-state="misconfigured"] .setup-state {

@@ -34,7 +34,7 @@
 .memory-conversation-link {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 2px 2px 0 var(--ink);
+  box-shadow: var(--shadow-soft);
   flex: none;
   min-height: 2.75rem;
   padding: 0.65rem 0.9rem;
@@ -131,11 +131,11 @@
 }
 
 .memory-source-chip {
-  background: #ffd8b9;
+  background: var(--surface-memory-source);
 }
 
 .memory-archive-chip {
-  background: #e4ddd4;
+  background: var(--surface-memory-archive);
 }
 
 .memory-source-id,
@@ -165,14 +165,14 @@
 .memory-forget-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-width: min(32rem, calc(100vw - 2rem));
   padding: 1.5rem;
 }
 
 .memory-forget-dialog::backdrop {
-  background: rgb(33 29 25 / 55%);
+  background: var(--overlay);
 }
 
 .memory-dialog-actions {
@@ -212,7 +212,7 @@
    markers stay visible but at a lower visual weight than the content (#458). */
 .memory-hit .waffle-fragment-kind {
   border: 1px solid var(--rule-dark);
-  background: #ffd8b9;
+  background: var(--surface-memory-source);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -286,5 +286,5 @@
 }
 
 .memory-session-hint a {
-  color: var(--ginger-dark);
+  color: var(--accent-text);
 }

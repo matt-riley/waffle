@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("./assets/app.js", import.meta.url), "utf8");
+const bootSource = await readFile(new URL("./assets/theme-boot.js", import.meta.url), "utf8").catch(() => "");
 
 class FakeElement {
   constructor() {
@@ -11,6 +12,8 @@ class FakeElement {
     this.className = "";
     this._textContent = "";
     this.attributes = new Map();
+    this.listeners = new Map();
+    this.value = "";
   }
 
   get textContent() {
@@ -27,6 +30,18 @@ class FakeElement {
 
   getAttribute(name) {
     return this.attributes.get(name);
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  dispatchEvent(type) {
+    for (const listener of this.listeners.get(type) || []) {
+      listener({ target: this });
+    }
   }
 }
 
@@ -62,16 +77,21 @@ function createHarness({
   bootstrapError = false,
   capabilitiesError = false,
   activeSection = "tasks",
+  storageSetError = false,
 } = {}) {
   const elements = {
     "#rail-status": new FakeElement(),
     "#rail-status-dot": new FakeElement(),
     "#rail-connection": new FakeElement(),
     "#rail-model": new FakeElement(),
+    "#desk-theme": Object.assign(new FakeElement(), { value: "system" }),
     ".desk-shell": Object.assign(new FakeElement(), {
       dataset: { activeSection },
     }),
   };
+  const documentElement = new FakeElement();
+  const stored = new Map();
+  const mediaListeners = [];
   elements["#rail-connection"].textContent = "Connecting…";
   elements["#rail-model"].textContent = "—";
   elements["#rail-status"].dataset.connectionState = "connecting";
@@ -102,6 +122,7 @@ function createHarness({
 
   const document = {
     querySelector: (selector) => elements[selector] || null,
+    documentElement,
   };
   const importMetaURL = "http://127.0.0.1/desk/assets/app.js?v=abc";
 
@@ -114,6 +135,25 @@ function createHarness({
     console,
     document,
     fetch,
+    localStorage: {
+      getItem: (key) => stored.get(key) ?? null,
+      setItem: (key, value) => {
+        if (storageSetError) {
+          throw new Error("storage denied");
+        }
+        stored.set(key, String(value));
+      },
+    },
+    window: {
+      matchMedia: () => ({
+        matches: false,
+        addEventListener: (type, listener) => {
+          if (type === "change") {
+            mediaListeners.push(listener);
+          }
+        },
+      }),
+    },
     URL,
   });
   new vm.Script(rewritten, { filename: "app.js" }).runInContext(context);
@@ -123,9 +163,102 @@ function createHarness({
     capabilitiesGate,
     calls,
     elements,
+    documentElement,
+    stored,
+    changeSystemTheme: (matches) => {
+      for (const listener of mediaListeners) {
+        listener({ matches });
+      }
+    },
     rail: () => context.waffleDeskRail,
   };
 }
+
+function runThemeBoot({ stored, prefersDark, storageGetError = false }) {
+  const attributes = new Map();
+  const storage = {
+    getItem: () => {
+      if (storageGetError) {
+        throw new Error("storage denied");
+      }
+      return stored;
+    },
+  };
+  const context = vm.createContext({
+    document: {
+      documentElement: {
+        setAttribute: (name, value) => attributes.set(name, value),
+      },
+    },
+    localStorage: storage,
+    window: {
+      matchMedia: () => ({ matches: prefersDark }),
+    },
+  });
+  new vm.Script(bootSource, { filename: "theme-boot.js" }).runInContext(context);
+  return Object.fromEntries(attributes);
+}
+
+test("theme boot resolves system and invalid preferences before paint", () => {
+  assert.deepEqual(runThemeBoot({ stored: "system", prefersDark: true }), {
+    "data-theme": "dark",
+    "data-theme-preference": "system",
+  });
+  assert.deepEqual(runThemeBoot({ stored: "dark", prefersDark: false }), {
+    "data-theme": "dark",
+    "data-theme-preference": "dark",
+  });
+  for (const stored of ["not-a-theme", "toString", "constructor", "__proto__"]) {
+    assert.deepEqual(runThemeBoot({ stored, prefersDark: true }), {
+      "data-theme": "dark",
+      "data-theme-preference": "system",
+    });
+  }
+});
+
+test("theme control persists the preference and updates document attributes", () => {
+  const harness = createHarness();
+
+  harness.elements["#desk-theme"].value = "dark";
+  harness.elements["#desk-theme"].dispatchEvent("change");
+
+  assert.equal(harness.stored.get("waffle.desk.theme"), "dark");
+  assert.equal(harness.documentElement.getAttribute("data-theme"), "dark");
+  assert.equal(harness.documentElement.getAttribute("data-theme-preference"), "dark");
+});
+
+test("theme boot falls back to system when storage reads throw", () => {
+  assert.deepEqual(runThemeBoot({ storageGetError: true, prefersDark: true }), {
+    "data-theme": "dark",
+    "data-theme-preference": "system",
+  });
+});
+
+test("theme control applies in memory when storage writes throw", () => {
+  const harness = createHarness({ storageSetError: true });
+
+  harness.elements["#desk-theme"].value = "dark";
+  harness.elements["#desk-theme"].dispatchEvent("change");
+
+  assert.equal(harness.stored.has("waffle.desk.theme"), false);
+  assert.equal(harness.documentElement.getAttribute("data-theme"), "dark");
+  assert.equal(harness.documentElement.getAttribute("data-theme-preference"), "dark");
+});
+
+test("system theme changes update the document only while system is selected", () => {
+  const harness = createHarness();
+  const theme = harness.elements["#desk-theme"];
+
+  theme.value = "system";
+  theme.dispatchEvent("change");
+  harness.changeSystemTheme(true);
+  assert.equal(harness.documentElement.getAttribute("data-theme"), "dark");
+
+  theme.value = "light";
+  theme.dispatchEvent("change");
+  harness.changeSystemTheme(true);
+  assert.equal(harness.documentElement.getAttribute("data-theme"), "light");
+});
 
 async function flush() {
   await new Promise((resolve) => setImmediate(resolve));

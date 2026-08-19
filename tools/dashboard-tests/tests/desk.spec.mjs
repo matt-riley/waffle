@@ -24,6 +24,36 @@ const canaries = [
 let server;
 let baseURL;
 
+function contrastRatio(foreground, background) {
+  const channels = (value) => {
+    const match = value.match(/rgba?\(([^)]+)\)/);
+    if (!match) {
+      throw new Error(`expected an RGB color, got ${value}`);
+    }
+    return match[1].split(",").slice(0, 3).map((part) => Number(part.trim())).map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.03928
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+  };
+  const luminance = (value) => {
+    const [red, green, blue] = channels(value);
+    return red * 0.2126 + green * 0.7152 + blue * 0.0722;
+  };
+  const light = Math.max(luminance(foreground), luminance(background));
+  const dark = Math.min(luminance(foreground), luminance(background));
+  return (light + 0.05) / (dark + 0.05);
+}
+
+function shadowColor(shadow) {
+  const match = shadow.match(/rgba?\([^)]*\)/);
+  if (!match) {
+    throw new Error(`expected an RGB focus ring, got ${shadow}`);
+  }
+  return match[0];
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({}, testInfo) => {
@@ -935,7 +965,7 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   });
   expect(tokens.tokenRadius).not.toBe("");
   expect(tokens.conversationRadius).not.toBe("0px");
-  expect(tokens.focusRing).toContain("221 113 40");
+  expect(tokens.focusRing).toContain("#9d421f");
   // The primary send is the orange personality button; the side context is
   // a quieter surface.
   expect(tokens.sendBackground).toBe("rgb(221, 113, 40)");
@@ -945,7 +975,233 @@ test("the shared visual system keeps hierarchy, density, and focus readable", as
   const ring = await page.evaluate(() =>
     getComputedStyle(document.querySelector("#desk-message")).boxShadow,
   );
-  expect(ring).toContain("rgba(221, 113, 40");
+  expect(ring).toMatch(/rgb\(157, 66, 31/);
+});
+
+test("theme boot paints each case before app.js can run", async ({ browser }) => {
+  const project = test.info().project.name;
+  test.skip(!["desktop", "mobile"].includes(project), "Run the theme contract at desktop and mobile sizes.");
+
+  const cases = [
+    { stored: "light", colorScheme: "light", theme: "light", canvas: "rgb(244, 237, 223)", rail: "rgb(33, 29, 25)" },
+    { stored: "system", colorScheme: "dark", theme: "dark", canvas: "rgb(23, 19, 15)", rail: "rgb(15, 13, 11)" },
+    { stored: "dark", colorScheme: "light", theme: "dark", canvas: "rgb(23, 19, 15)", rail: "rgb(15, 13, 11)" },
+  ];
+
+  for (const themeCase of cases) {
+    const context = await browser.newContext({
+      colorScheme: themeCase.colorScheme,
+      viewport: project === "desktop"
+        ? { width: 1414, height: 786 }
+        : { width: 375, height: 812 },
+    });
+    const casePage = await context.newPage();
+    const diagnostics = [];
+    const requests = [];
+    casePage.on("console", (message) => {
+      if (message.type() === "error" || message.type() === "warning") {
+        const text = message.text();
+        if (!text.includes("favicon") && !text.includes("net::ERR_ABORTED")) {
+          diagnostics.push(`${message.type()}: ${text}`);
+        }
+      }
+    });
+    casePage.on("pageerror", (error) => diagnostics.push(`pageerror: ${String(error)}`));
+    casePage.on("request", (request) => {
+      const url = request.url();
+      if (url.includes("theme-boot.js") || url.includes("app.css") || url.includes("app.js")) {
+        requests.push(url);
+      }
+    });
+    await casePage.route("**/desk/assets/app.js*", (route) => route.fulfill({
+      status: 200,
+      contentType: "text/javascript",
+      body: "",
+    }));
+    await casePage.addInitScript(({ stored }) => {
+      localStorage.setItem("waffle.desk.theme", stored);
+    }, { stored: themeCase.stored });
+    await casePage.goto(deskURL("tasks"));
+
+    const rendered = await casePage.evaluate(() => {
+      const html = getComputedStyle(document.documentElement);
+      const rail = getComputedStyle(document.querySelector(".desk-navigation"));
+      return {
+        theme: document.documentElement.dataset.theme,
+        preference: document.documentElement.dataset.themePreference,
+        canvas: html.backgroundColor,
+        rail: rail.backgroundColor,
+      };
+    });
+    expect(rendered).toEqual({
+      theme: themeCase.theme,
+      preference: themeCase.stored,
+      canvas: themeCase.canvas,
+      rail: themeCase.rail,
+    });
+    expect(requests.findIndex((url) => url.includes("theme-boot.js"))).toBeLessThan(
+      requests.findIndex((url) => url.includes("app.css")),
+    );
+    expect(requests.filter((url) => url.includes("app.js"))).toHaveLength(1);
+    expect(diagnostics).toEqual([]);
+    await context.close();
+  }
+});
+
+test("theme preference persists through reload and section navigation", async ({ page }) => {
+  const project = test.info().project.name;
+  test.skip(!["desktop", "mobile"].includes(project), "Run theme persistence at desktop and mobile sizes.");
+  await page.setViewportSize(
+    project === "desktop" ? { width: 1414, height: 786 } : { width: 375, height: 812 },
+  );
+  await page.goto(deskURL("tasks"));
+  await page.getByLabel("Theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-preference", "dark");
+  await page.reload();
+  await expect(page.getByLabel("Theme")).toHaveValue("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.goto(deskURL("memory"));
+  await expect(page.getByLabel("Theme")).toHaveValue("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByLabel("Theme").selectOption("light");
+  await page.goto(deskURL("workspaces"));
+  await expect(page.getByLabel("Theme")).toHaveValue("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("light code and dark destructive surfaces meet computed contrast", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the focused contrast regression once.");
+  await page.addInitScript(() => localStorage.setItem("waffle.desk.theme", "light"));
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByLabel("Message Waffle").fill("markdown");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const lightCode = await page.locator(".code-block pre").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  const lightCodeContrast = contrastRatio(lightCode.color, lightCode.background);
+
+  await page.goto(deskURL("workspaces"));
+  await page.getByLabel("Theme").selectOption("dark");
+  const clean = page.locator("[data-workspace-id='workspace-clean']");
+  await expect(clean).toBeVisible();
+  await clean.getByRole("button", { name: "Review close", exact: true }).click();
+  await expect(page.locator("#workspace-close-dialog")).toBeVisible();
+  const darkDanger = await page.locator("#workspace-close-confirm").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  const darkDangerContrast = contrastRatio(darkDanger.color, darkDanger.background);
+
+  expect.soft(lightCode).toEqual({ background: "rgb(234, 223, 206)", color: "rgb(33, 29, 25)" });
+  expect.soft(lightCodeContrast, `light code contrast: ${lightCodeContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  expect.soft(darkDanger).toEqual({ background: "rgb(243, 161, 153)", color: "rgb(33, 29, 25)" });
+  expect.soft(darkDangerContrast, `dark destructive contrast: ${darkDangerContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("Evening role tokens keep rail, code, actions, and accents readable", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run semantic Evening surface checks once.");
+  await page.addInitScript(() => localStorage.setItem("waffle.desk.theme", "dark"));
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.getByLabel("Message Waffle").fill("markdown");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".code-block pre")).toBeVisible();
+  const codeSurface = await page.locator(".code-block pre").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  expect(codeSurface).toEqual({ background: "rgb(16, 13, 11)", color: "rgb(242, 233, 220)" });
+
+  await page.goto(deskURL("workspaces"));
+  await expect(page.locator(".workspace-card .workspace-primary").first()).toBeVisible();
+  const focusWithKeyboard = async (locator) => {
+    await page.evaluate(() => document.activeElement?.blur());
+    for (let index = 0; index < 40; index += 1) {
+      if (await locator.evaluate((element) => element === document.activeElement)) {
+        return;
+      }
+      await page.keyboard.press("Tab");
+    }
+    throw new Error(`could not keyboard-focus ${await locator.getAttribute("id")}`);
+  };
+  const themeControl = page.locator("#desk-theme");
+  await themeControl.selectOption("light");
+  const lightRail = await page.evaluate(() => {
+    const rail = getComputedStyle(document.querySelector(".desk-navigation"));
+    const status = document.querySelector("#rail-status");
+    status.dataset.connectionState = "disconnected";
+    const danger = getComputedStyle(document.querySelector("#rail-connection"));
+    return {
+      background: rail.backgroundColor,
+      danger: danger.color,
+    };
+  });
+  await focusWithKeyboard(themeControl);
+  const lightRailFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
+  const lightRailFocusContrast = contrastRatio(shadowColor(lightRailFocusShadow), lightRail.background);
+  await themeControl.selectOption("dark");
+  await focusWithKeyboard(themeControl);
+  const railFocusShadow = await themeControl.evaluate((element) => getComputedStyle(element).boxShadow);
+  const selectedLink = page.locator('.section-links a[aria-current="page"]');
+  await focusWithKeyboard(selectedLink);
+  const selectedFocusShadow = await selectedLink.evaluate((element) => getComputedStyle(element).boxShadow);
+  const workspacePrimary = page.locator(".workspace-card .workspace-primary").first();
+  await focusWithKeyboard(workspacePrimary);
+  await expect.poll(() => workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow)).toContain("rgb(245, 197, 121)");
+  const workspaceFocusShadow = await workspacePrimary.evaluate((element) => getComputedStyle(element).boxShadow);
+  const surfaces = await page.evaluate(({ railFocusShadow, selectedFocusShadow, workspaceFocusShadow }) => {
+    const nav = document.querySelector(".desk-navigation");
+    const railStatus = document.querySelector("#rail-status");
+    railStatus.dataset.connectionState = "disconnected";
+    const selected = document.querySelector('.section-links a[aria-current="page"]');
+    const workspacePrimary = document.querySelector(".workspace-card .workspace-primary");
+    const navStyle = getComputedStyle(nav);
+    const dangerStyle = getComputedStyle(document.querySelector("#rail-connection"));
+    const workspaceStyle = getComputedStyle(workspacePrimary);
+    const workspaceCard = getComputedStyle(workspacePrimary.closest(".workspace-card"));
+    return {
+      railBackground: navStyle.backgroundColor,
+      dangerColor: dangerStyle.color,
+      railFocusShadow,
+      selectedBackground: getComputedStyle(selected).backgroundColor,
+      selectedFocusShadow,
+      primaryBackground: workspaceStyle.backgroundColor,
+      primaryColor: workspaceStyle.color,
+      workspaceFocusShadow,
+      workspaceCardBackground: workspaceCard.backgroundColor,
+      brandColor: getComputedStyle(document.querySelector(".brand")).color,
+      paletteColor: getComputedStyle(document.querySelector("#palette-open")).color,
+      paletteKbdColor: getComputedStyle(document.querySelector("#palette-open kbd")).color,
+    };
+  }, { railFocusShadow, selectedFocusShadow, workspaceFocusShadow });
+  const lightRailDangerContrast = contrastRatio(lightRail.danger, lightRail.background);
+  const darkRailDangerContrast = contrastRatio(surfaces.dangerColor, surfaces.railBackground);
+  const darkRailFocusContrast = contrastRatio(shadowColor(surfaces.railFocusShadow), surfaces.railBackground);
+  const workspaceFocusContrast = contrastRatio(shadowColor(surfaces.workspaceFocusShadow), surfaces.workspaceCardBackground);
+  expect(lightRail.background).toBe("rgb(33, 29, 25)");
+  expect(lightRail.danger).toBe("rgb(243, 161, 153)");
+  expect(lightRailDangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(lightRailFocusShadow).toContain("rgb(221, 113, 40)");
+  expect(lightRailFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(surfaces.railBackground).toBe("rgb(15, 13, 11)");
+  expect(darkRailDangerContrast).toBeGreaterThanOrEqual(4.5);
+  expect(darkRailFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(workspaceFocusContrast).toBeGreaterThanOrEqual(3);
+  expect(surfaces.selectedBackground).toBe("rgb(221, 113, 40)");
+  expect(surfaces.primaryBackground).toBe("rgb(15, 13, 11)");
+  expect(surfaces.primaryColor).toBe("rgb(242, 233, 220)");
+  expect(surfaces.brandColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.paletteColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.paletteKbdColor).toBe("rgb(245, 197, 121)");
+  expect(surfaces.railFocusShadow).toContain("rgb(245, 197, 121)");
+  expect(surfaces.selectedFocusShadow).toContain("rgb(245, 197, 121)");
+  expect(surfaces.workspaceFocusShadow).toContain("rgb(245, 197, 121)");
 });
 
 test("Today retries a rejected turn with the same idempotency key", async ({ page }) => {

@@ -72,7 +72,7 @@
 
 .profile-form [aria-invalid="true"] {
   border-width: 2px;
-  outline: 2px solid var(--ginger);
+  outline: 2px solid var(--focus-ring-color);
 }
 
 .profile-form-status {
@@ -83,7 +83,7 @@
 #profile-review-dialog {
   background: var(--paper);
   border: 1px solid var(--ink);
-  box-shadow: 5px 5px 0 var(--ink);
+  box-shadow: var(--shadow-card);
   color: var(--ink);
   max-height: calc(100vh - 2rem);
   max-width: min(46rem, calc(100vw - 2rem));
@@ -93,7 +93,7 @@
 }
 
 #profile-review-dialog::backdrop {
-  background: rgb(0 0 0 / 45%);
+  background: var(--overlay-black);
 }
 
 /* Before and after sit side by side on a wide desk and stack on a narrow one,
@@ -147,9 +147,9 @@
 /* Card actions: Edit is the primary continuation, Copy stays secondary, and
    Delete is a separated destructive path (#465). */
 .profile-actions [data-action="edit"] {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
+  background: var(--action-primary-surface);
+  border-color: var(--action-primary-surface);
+  color: var(--action-primary-text);
 }
 
 .profile-actions [data-action="copy"] {
@@ -172,7 +172,7 @@
 }
 
 .policy-change.is-narrowed dt {
-  color: #3d5a26;
+  color: var(--success-text);
 }
 
 .policy-change.is-widened dt {
@@ -185,6 +185,6 @@
 }
 
 .posture-note.is-narrowing {
-  color: #3d5a26;
+  color: var(--success-text);
   font-weight: 700;
 }
