@@ -844,6 +844,37 @@ test("assistant inline markdown renders bold, italic, strike, and safe links; un
   assert.equal(harness.forbiddenMarkupAssignments.length, 0);
 });
 
+test("markdown links whose scheme hides behind control characters stay literal", async () => {
+  // The inline link pattern excludes \s from the target, but C0 controls like
+  // \u0001 are not \s — and the URL parser strips them before reading the
+  // scheme, so "\u0001javascript:alert(1)" navigates as javascript:. Scheme
+  // detection must normalise the same way the browser does.
+  const hostile = [
+    "\u0001javascript:alert(1)",
+    "\u000Ejavascript:alert(1)",
+    "java\u0009script:alert(1)",
+    "java\u000Ascript:alert(1)",
+  ];
+  const markdown = hostile
+    .map((href, index) => `Link ${index}: [label](${href}) end.`)
+    .join("\n\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{ role: "assistant", blocks: [{ type: "text", text: markdown }] }],
+        }),
+      }),
+  });
+  await flush();
+
+  const transcript = harness.elements["#desk-transcript"];
+  assert.equal(transcript.querySelectorAll("a").length, 0);
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
 test("assistant markdown renders tables as semantic responsive tables", async () => {
   const markdown = [
     "| Name | Cost | Fit |",
