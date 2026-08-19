@@ -54,49 +54,41 @@ function sessionChoices(field) {
 }
 
 function keepPickerClearOfNavigation(field, popover) {
-  const options = popover.querySelector("#memory-session-options");
-  if (!window.matchMedia?.("(max-width: 768px)").matches) {
-    options?.style.removeProperty("max-height");
-    return;
-  }
+  if (!window.matchMedia?.("(max-width: 768px)").matches) return true;
   field.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
   const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
   const scrollOwner = field.closest("main");
-  if (!navigation || !scrollOwner) return;
+  if (!navigation || !scrollOwner) return true;
   const panel = popover.getBoundingClientRect();
   if (panel.bottom > navigation.top) {
     scrollOwner.scrollTop += panel.bottom - navigation.top + 8;
   }
-  const adjustedPanel = popover.getBoundingClientRect();
-  if (adjustedPanel.bottom > navigation.top && options) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const currentPanel = popover.getBoundingClientRect();
-      if (currentPanel.bottom <= navigation.top) break;
-      const currentOptions = options.getBoundingClientRect();
-      options.style.maxHeight = `${Math.max(0, currentOptions.height - (currentPanel.bottom - navigation.top) - 8)}px`;
-    }
-  } else {
-    options?.style.removeProperty("max-height");
-  }
+  return popover.getBoundingClientRect().bottom <= navigation.top;
 }
 
 let pickerClearanceFrame = null;
 
 function scheduleOpenPickerClearOfNavigation() {
-  if (pickerClearanceFrame !== null) return;
-  pickerClearanceFrame = window.requestAnimationFrame(() => {
-    pickerClearanceFrame = window.requestAnimationFrame(() => {
+  if (pickerClearanceFrame !== null) window.cancelAnimationFrame(pickerClearanceFrame);
+  let attempts = 0;
+  let clearFrames = 0;
+  const settle = () => {
+    clearFrames = keepOpenPickerClearOfNavigation() ? clearFrames + 1 : 0;
+    attempts += 1;
+    if (attempts < 8 && clearFrames < 2) {
+      pickerClearanceFrame = window.requestAnimationFrame(settle);
+    } else {
       pickerClearanceFrame = null;
-      keepOpenPickerClearOfNavigation();
-    });
-  });
+    }
+  };
+  pickerClearanceFrame = window.requestAnimationFrame(settle);
 }
 
 function keepOpenPickerClearOfNavigation() {
   const field = document.querySelector("#memory-session-field");
   const popover = field?.querySelector("#memory-session-popover");
-  if (!field || !popover || popover.hidden) return;
-  keepPickerClearOfNavigation(field, popover);
+  if (!field || !popover || popover.hidden) return true;
+  return keepPickerClearOfNavigation(field, popover);
 }
 
 export function sessionAccessibleLabels(sessions) {

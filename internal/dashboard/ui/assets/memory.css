@@ -424,3 +424,17 @@
 .memory-session-hint a {
   color: var(--accent-text);
 }
+
+@media (max-width: 768px) {
+  .memory-session-popover {
+    box-sizing: border-box;
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    max-height: calc(100dvh - var(--desk-top-clearance) - var(--desk-navigation-clearance) - 5rem);
+    overflow: hidden;
+  }
+
+  #memory-session-options {
+    min-height: 0;
+  }
+}
