@@ -213,7 +213,6 @@
 
 .workspaces :focus-visible {
   box-shadow: var(--focus-ring);
-  outline-offset: 3px;
   outline: 0;
 }
 
