@@ -327,8 +327,10 @@ const state = {
   activeOperation: null,
   turnSequence: 0,
   generation: 0,
+  recoveryNewInFlight: false,
   sessionID: "",
   temporary: false,
+  temporaryLease: null,
   attachments: [],
   skills: [],
   modelAlias: "",
@@ -453,6 +455,7 @@ function setPhase(next) {
 function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
   const recovering = state.currentPhase === phase.recovering;
+  const recoveryBusy = recovering && state.recoveryNewInFlight;
   if (!idle) {
     closeSlashMenu();
   }
@@ -506,7 +509,8 @@ function updateControls() {
   }
   elements.refresh.disabled =
     state.currentPhase !== phase.disconnected &&
-    state.currentPhase !== phase.recovering;
+    state.currentPhase !== phase.recovering ||
+    recoveryBusy;
   if (elements.temporaryRow) {
     elements.temporaryRow.hidden = state.historyLength > 0;
   }
@@ -517,10 +521,10 @@ function updateControls() {
     elements.temporaryBadge.hidden = !state.temporary;
   }
   if (elements.newConversation) {
-    elements.newConversation.disabled = !idle && !recovering;
+    elements.newConversation.disabled = (!idle && !recovering) || recoveryBusy;
   }
   if (elements.sessionRefresh) {
-    elements.sessionRefresh.disabled = !idle && !recovering;
+    elements.sessionRefresh.disabled = (!idle && !recovering) || recoveryBusy;
   }
   for (const control of [
     elements.usageRefresh,
@@ -2152,6 +2156,37 @@ async function postMutation(path, body, options = {}) {
   return readJSON(response);
 }
 
+function sameLease(left, right) {
+  return Boolean(
+    left?.client_id &&
+      left.client_id === right?.client_id &&
+      left.reattach_token &&
+      left.reattach_token === right?.reattach_token,
+  );
+}
+
+function closeTemporaryLease(lease) {
+  if (!lease?.client_id || !lease.reattach_token || !state.requestToken) {
+    return Promise.resolve();
+  }
+  return postMutation(
+    "/api/v1/desk/chat/close",
+    {
+      client_id: lease.client_id,
+      reattach_token: lease.reattach_token,
+    },
+    { keepalive: true },
+  ).catch(() => {});
+}
+
+function releaseTemporaryLease(lease) {
+  if (!lease || !sameLease(state.temporaryLease, lease)) {
+    return Promise.resolve();
+  }
+  state.temporaryLease = null;
+  return closeTemporaryLease(lease);
+}
+
 function clearReconnectTimer() {
   if (state.reconnectTimer !== null) {
     clearTimeout(state.reconnectTimer);
@@ -2373,7 +2408,13 @@ function openEventStream() {
   });
 }
 
-async function openDesk({ forceNewSession = false } = {}) {
+async function openDesk() {
+  const previousTemporaryLease = state.temporaryLease;
+  state.temporaryLease = null;
+  if (previousTemporaryLease) {
+    void closeTemporaryLease(previousTemporaryLease);
+  }
+  state.recoveryNewInFlight = false;
   clearReconnectTimer();
   state.generation += 1;
   state.streamGeneration += 1;
@@ -2435,13 +2476,13 @@ async function openDesk({ forceNewSession = false } = {}) {
       owner = null;
     }
     const openBody = {
-      continue: requested === "" && !forceNewSession,
-      session_id: forceNewSession ? "" : requested,
+      continue: requested === "",
+      session_id: requested,
       profile: "",
       capabilities: [],
       temporary: Boolean(elements.temporary?.checked),
     };
-    if (owner && !forceNewSession) {
+    if (owner) {
       openBody.reattach_client_id = owner.client_id;
       openBody.reattach_token = owner.reattach_token;
     }
@@ -2479,6 +2520,32 @@ async function openDesk({ forceNewSession = false } = {}) {
     }
     disconnect(error.safeMessage || "Waffle Desk could not open. Refresh to try again.");
   }
+}
+
+async function openTemporaryRecoveryLease(generation) {
+  if (generation !== state.generation) {
+    return null;
+  }
+  const opened = await postMutation("/api/v1/desk/chat/open", {
+    continue: false,
+    session_id: "",
+    profile: "",
+    capabilities: [],
+    temporary: true,
+  });
+  const lease = {
+    client_id: opened.client_id || "",
+    reattach_token: opened.reattach_token || "",
+  };
+  if (!lease.client_id || !lease.reattach_token) {
+    throw new Error("missing_client_lease");
+  }
+  if (generation !== state.generation) {
+    void closeTemporaryLease(lease);
+    return null;
+  }
+  state.temporaryLease = lease;
+  return { generation, lease };
 }
 
 // openChatWithRecovery opens (or reattaches to) the desk chat. A reaped
@@ -3034,34 +3101,91 @@ async function runCommandOperation(label, operation) {
   }
 }
 
-function commandMutation(name, args = "") {
+function commandMutation(name, args = "", clientID = state.clientID) {
   return postMutation("/api/v1/desk/chat/command", {
-    client_id: state.clientID,
+    client_id: clientID,
     command: { name, args },
   });
+}
+
+async function runNewConversation(clientID, renderState) {
+  const preview = await commandMutation("new", "", clientID);
+  if (preview.confirm) {
+    const confirmed = globalThis.confirm?.(
+      preview.text || "Start a new conversation?",
+    );
+    if (!confirmed) {
+      return preview;
+    }
+  }
+  const result = preview.confirm
+    ? await commandMutation("new", "confirm", clientID)
+    : preview;
+  if (renderState && result.state) {
+    renderCanonicalState(result.state, true);
+  }
+  return result;
+}
+
+async function recoverWithNewConversation() {
+  if (state.currentPhase !== phase.recovering || state.recoveryNewInFlight) {
+    return;
+  }
+  state.recoveryNewInFlight = true;
+  updateControls();
+  let opened = null;
+  let promoted = false;
+  const operationGeneration = state.generation;
+  try {
+    opened = await openTemporaryRecoveryLease(operationGeneration);
+    if (!opened) {
+      return;
+    }
+    const { generation, lease } = opened;
+    const result = await runNewConversation(lease.client_id, false);
+    if (generation !== state.generation) {
+      await releaseTemporaryLease(lease);
+      return;
+    }
+    if (!result?.state || !sameLease(state.temporaryLease, lease)) {
+      await releaseTemporaryLease(lease);
+      return;
+    }
+    state.temporaryLease = null;
+    state.clientID = lease.client_id;
+    state.reattachToken = lease.reattach_token;
+    resetOwnershipConflict();
+    renderCanonicalState(result.state, true);
+    promoted = true;
+    openEventStream();
+    setPhase(phase.idle);
+    const active = document.activeElement;
+    if (
+      !active ||
+      active === document.body ||
+      active === document.documentElement ||
+      active === elements.message
+    ) {
+      elements.message.focus({ preventScroll: true });
+    }
+  } catch {
+    if (opened && !promoted) {
+      await releaseTemporaryLease(opened.lease);
+    }
+  } finally {
+    if (operationGeneration === state.generation) {
+      state.recoveryNewInFlight = false;
+      updateControls();
+    }
+  }
 }
 
 async function newConversation() {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
-  await runCommandOperation("Starting conversation", async () => {
-    const preview = await commandMutation("new");
-    if (preview.confirm) {
-      const confirmed = globalThis.confirm?.(
-        preview.text || "Start a new conversation?",
-      );
-      if (!confirmed) {
-        return preview;
-      }
-    }
-    const result = preview.confirm
-      ? await commandMutation("new", "confirm")
-      : preview;
-    if (result.state) {
-      renderCanonicalState(result.state, true);
-    }
-    return result;
-  });
+  await runCommandOperation("Starting conversation", () =>
+    runNewConversation(state.clientID, true),
+  );
 }
 
 // exportConversation downloads the owner-local transcript in the chosen
@@ -4219,19 +4343,20 @@ function handleComposerKeydown(event) {
 function closeOwnerOnPageHide() {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
-  if (!state.clientID || !state.reattachToken || !state.requestToken) {
+  const lease = state.temporaryLease ||
+    (state.clientID && state.reattachToken
+      ? {
+          client_id: state.clientID,
+          reattach_token: state.reattachToken,
+        }
+      : null);
+  if (!lease || !state.requestToken) {
     return;
   }
-  const lease = {
-    client_id: state.clientID,
-    reattach_token: state.reattachToken,
-  };
-  void postMutation("/api/v1/desk/chat/close", lease, { keepalive: true }).catch(
-    () => {
-      // Navigation cleanup is best effort. The rotated lease and idle reaper
-      // remain the recovery paths after a dropped keepalive request.
-    },
-  );
+  if (state.temporaryLease && sameLease(state.temporaryLease, lease)) {
+    state.temporaryLease = null;
+  }
+  void closeTemporaryLease(lease);
 }
 
 if (elements.form) {
@@ -4305,11 +4430,7 @@ if (elements.form) {
   elements.refresh.addEventListener("click", openDesk);
   elements.newConversation?.addEventListener("click", () => {
     if (state.currentPhase === phase.recovering) {
-      void openDesk({ forceNewSession: true }).then(() => {
-        if (state.currentPhase === phase.idle) {
-          void newConversation();
-        }
-      });
+      void recoverWithNewConversation();
       return;
     }
     void newConversation();

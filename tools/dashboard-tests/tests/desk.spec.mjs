@@ -2724,6 +2724,22 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
     const context = await browser.newContext();
     try {
       const second = await context.newPage();
+      second.on("dialog", (dialog) => dialog.accept());
+      const openBodies = [];
+      const commandBodies = [];
+      const eventRequests = [];
+      second.on("request", (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === "/api/v1/desk/chat/open" && request.method() === "POST") {
+          openBodies.push(JSON.parse(request.postData() || "{}"));
+        }
+        if (url.pathname === "/api/v1/desk/chat/command" && request.method() === "POST") {
+          commandBodies.push(JSON.parse(request.postData() || "{}"));
+        }
+        if (url.pathname === "/api/v1/desk/events") {
+          eventRequests.push(request);
+        }
+      });
       await second.goto(deskURL("today"));
 
       // Bounded retries fail, then inline recovery appears; the fatal
@@ -2755,6 +2771,35 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
       // usable state.
       await second.getByRole("button", { name: "Start new", exact: true }).click();
       await expect(second.locator("#desk-phase")).toHaveText("Ready");
+      const recoveryOpen = openBodies.at(-1);
+      expect(recoveryOpen).toMatchObject({
+        continue: false,
+        session_id: "",
+        temporary: true,
+      });
+      expect(recoveryOpen.reattach_client_id).toBeUndefined();
+      expect(commandBodies.map(({ command }) => command)).toEqual([
+        { name: "new", args: "" },
+        { name: "new", args: "confirm" },
+      ]);
+      expect(commandBodies[0].client_id).toBe(commandBodies[1].client_id);
+      expect(eventRequests).toHaveLength(1);
+      const owner = await second.evaluate(() =>
+        JSON.parse(sessionStorage.getItem("waffle.desk.today.owner.v1")),
+      );
+      expect(owner.session_id).toBe("session-fresh");
+      await page.request.post(`${baseURL}/api/v1/desk/test/lock-latest?on=0`);
+      await second.reload();
+      await expect(second.locator("#desk-phase")).toHaveText("Ready");
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
+      await expect(second.locator("#desk-sessions")).toBeVisible();
+      await expect(
+        second.locator(".session-choice").filter({ hasText: "Fresh conversation" }),
+      ).toHaveCount(1);
+      await expect(
+        second.locator(".session-choice").filter({ hasText: "Temporary conversation" }),
+      ).toHaveCount(0);
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
       const message = second.getByLabel("Message Waffle");
       await expect(message).toBeEnabled();
       await message.fill("Usable after recovery");

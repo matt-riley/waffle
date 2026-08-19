@@ -3159,6 +3159,46 @@ func TestTemporaryConversationNeverPersistsTurns(t *testing.T) {
 	}
 }
 
+func TestTemporaryRecoveryNewPromotesExactlyOneDurableSession(t *testing.T) {
+
+	ctx := context.Background()
+	runtime, sessions := newRuntimeFixture(t, configuredChatModels())
+	temporary, err := runtime.Open(ctx, chatpkg.OpenOptions{Temporary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := runtime.Command(ctx, chatpkg.ParsedCommand{Name: chatpkg.CommandNew}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Confirm || preview.Text != "Start a new session?" {
+		t.Fatalf("preview = %+v, want the existing /new confirmation", preview)
+	}
+	created, err := runtime.Command(ctx, chatpkg.ParsedCommand{
+		Name: chatpkg.CommandNew,
+		Args: chatNewConfirmArg,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State == nil {
+		t.Fatalf("confirmed /new returned no state: %+v", created)
+	}
+	if created.State.SessionID == temporary.SessionID {
+		t.Fatalf("confirmed /new reused temporary session %q", temporary.SessionID)
+	}
+	if _, err := sessions.Get(ctx, temporary.SessionID); err == nil {
+		t.Fatalf("temporary session %q was persisted", temporary.SessionID)
+	}
+	list, err := sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != created.State.SessionID {
+		t.Fatalf("durable sessions = %+v, want exactly final %q", list, created.State.SessionID)
+	}
+}
+
 func TestTemporaryConversationNeverReflectsOrWritesMemory(t *testing.T) {
 	ctx := context.Background()
 	runtime, sessions := newRuntimeFixture(t, configuredChatModels())

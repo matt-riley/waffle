@@ -1288,6 +1288,7 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 		}
 		b.sessions.mu.Unlock()
 		b.session = "session-fresh"
+		b.temporary = false
 		// Match the real backend: a brand-new session has no history, which
 		// serializes as a missing/null history so the browser must treat an
 		// authoritative empty state as an empty transcript (#455).
