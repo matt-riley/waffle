@@ -19,7 +19,7 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 		`id="tasks-attention-count"`,
 		`id="tasks-list"`,
 		`id="tasks-errors"`,
-		`id="tasks-empty"`,
+		`id="task-schedule-open"`,
 		`id="task-schedule-form"`,
 		`data-waffle-json-kind="task-schedule"`,
 		`id="task-schedule-id" name="id" type="hidden" disabled`,
@@ -46,6 +46,12 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 			t.Errorf("Tasks view missing %q", required)
 		}
 	}
+	if strings.Count(body, `id="task-schedule-open"`) != 1 {
+		t.Fatalf("Tasks must render exactly one schedule trigger: %s", body)
+	}
+	if strings.Contains(body, `id="tasks-empty"`) {
+		t.Fatalf("Tasks must not render a competing loading owner: %s", body)
+	}
 	// List container must not announce full re-renders; status regions keep aria-live.
 	listIdx := strings.Index(body, `id="tasks-list"`)
 	if listIdx < 0 {
@@ -55,6 +61,13 @@ func TestTasksRendersFiltersSummaryEvidenceAndScheduleForm(t *testing.T) {
 	openTag := body[listIdx : listIdx+end+1]
 	if strings.Contains(openTag, `aria-live`) {
 		t.Errorf("tasks-list must not carry aria-live: %s", openTag)
+	}
+	listEnd := strings.Index(body[listIdx:], `</div>`)
+	if listEnd < 0 || !strings.Contains(body[listIdx:listIdx+listEnd], `role="status">Loading tasks…</p>`) {
+		t.Errorf("initial loading status must live inside tasks-list: %s", body[listIdx:])
+	}
+	if !strings.Contains(openTag, `aria-busy="true"`) {
+		t.Errorf("initial tasks-list must be busy: %s", openTag)
 	}
 }
 

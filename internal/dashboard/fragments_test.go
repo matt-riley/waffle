@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -179,6 +180,63 @@ func TestTaskFragmentCarriesEditStateAndFilterButtonsAsOOBSwaps(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("task fragment missing %q: %s", want, body)
 		}
+	}
+}
+
+func TestTaskEmptyFragmentsRenderTheExactFilterMatrixAndNoArtworkOnFailure(t *testing.T) {
+	cases := []struct {
+		filter TaskFilter
+		title  string
+		body   string
+		action string
+	}{
+		{filter: TaskFilterAll, title: "Nothing on Waffle's plate", body: "Scheduled runs and completed work will appear here.", action: "Start a conversation"},
+		{filter: TaskFilterActive, title: "No active runs", body: "Nothing is running right now.", action: "View all tasks"},
+		{filter: TaskFilterScheduled, title: "No schedules yet", body: "Create a schedule and Waffle can pick this up later.", action: "View all tasks"},
+		{filter: TaskFilterCompleted, title: "No completed runs", body: "Finished runs will appear here.", action: "View all tasks"},
+		{filter: TaskFilterAttention, title: "Nothing needs attention", body: "Waffle has no blocked or failed work to review.", action: "View all tasks"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.filter), func(t *testing.T) {
+			component := fragmentComponent(nil, http.StatusOK, TasksSnapshot{Filter: tc.filter})
+			var rendered bytes.Buffer
+			if err := component.Render(t.Context(), &rendered); err != nil {
+				t.Fatal(err)
+			}
+			body := rendered.String()
+			for _, want := range []string{tc.title, tc.body, tc.action, `data-waffle-fragment="true"`} {
+				expected := html.EscapeString(want)
+				if want == `data-waffle-fragment="true"` {
+					expected = want
+				}
+				if !strings.Contains(body, expected) {
+					t.Errorf("empty %s fragment missing %q: %s", tc.filter, want, body)
+				}
+			}
+			if strings.Contains(body, "No tasks match this view.") || strings.Count(body, `id="task-schedule-open"`) != 1 {
+				t.Fatalf("empty %s fragment retained generic copy or lost/duplicated schedule trigger: %s", tc.filter, body)
+			}
+			if tc.filter == TaskFilterAll || tc.filter == TaskFilterScheduled {
+				if !strings.Contains(body, "waffle-empty-curled.png") {
+					t.Errorf("proven empty %s fragment lost the curled Waffle", tc.filter)
+				}
+			}
+		})
+	}
+
+	component := fragmentComponent(nil, http.StatusOK, TasksSnapshot{Filter: TaskFilterAll, Errors: []*SectionError{{Section: OperationsSectionJobs}}})
+	var rendered bytes.Buffer
+	if err := component.Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, want := range []string{"Some task evidence is unavailable", "Try again", "Waffle could not check every task source"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("failure fragment missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "waffle-empty-curled.png") {
+		t.Fatalf("failure fragment rendered empty artwork: %s", body)
 	}
 }
 

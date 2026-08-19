@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/matt-riley/waffle/internal/dashboard/ui"
 	"github.com/matt-riley/waffle/internal/observability"
 	"github.com/matt-riley/waffle/internal/schedule"
 	"github.com/matt-riley/waffle/internal/session"
@@ -428,4 +429,121 @@ func TestTasksAttentionLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTasksEmptyPresentationUsesTheFilterAndFailureStateMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		filter     TaskFilter
+		wantTitle  string
+		wantBody   string
+		wantAction string
+	}{
+		{name: "all", filter: TaskFilterAll, wantTitle: "Nothing on Waffle's plate", wantBody: "Scheduled runs and completed work will appear here.", wantAction: "Start a conversation"},
+		{name: "active", filter: TaskFilterActive, wantTitle: "No active runs", wantBody: "Nothing is running right now.", wantAction: "View all tasks"},
+		{name: "scheduled", filter: TaskFilterScheduled, wantTitle: "No schedules yet", wantBody: "Create a schedule and Waffle can pick this up later.", wantAction: "View all tasks"},
+		{name: "completed", filter: TaskFilterCompleted, wantTitle: "No completed runs", wantBody: "Finished runs will appear here.", wantAction: "View all tasks"},
+		{name: "attention", filter: TaskFilterAttention, wantTitle: "Nothing needs attention", wantBody: "Waffle has no blocked or failed work to review.", wantAction: "View all tasks"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fragment := tasksFragment(TasksSnapshot{Filter: tc.filter})
+			if fragment.EmptyState == nil {
+				t.Fatal("empty state is nil")
+			}
+			if fragment.EmptyState.Title != tc.wantTitle || fragment.EmptyState.Body != tc.wantBody {
+				t.Fatalf("copy = %q / %q, want %q / %q", fragment.EmptyState.Title, fragment.EmptyState.Body, tc.wantTitle, tc.wantBody)
+			}
+			if !fragmentHasAction(fragment.EmptyState, tc.wantAction) {
+				t.Fatalf("missing action %q: %#v", tc.wantAction, fragment.EmptyState)
+			}
+		})
+	}
+
+	partial := tasksFragment(TasksSnapshot{
+		Filter: TaskFilterAll,
+		Tasks:  []TaskView{{ID: "healthy", Kind: TaskKindSchedule, Name: "Healthy", EvidenceLabel: "Scheduled"}},
+		Errors: []*SectionError{{Section: OperationsSectionRuns}},
+	})
+	if partial.EmptyState != nil || partial.Status != "Some task evidence is temporarily unavailable." || len(partial.Items) != 1 {
+		t.Fatalf("partial failure presentation = %#v", partial)
+	}
+
+	failure := tasksFragment(TasksSnapshot{Filter: TaskFilterAll, Errors: []*SectionError{{Section: OperationsSectionJobs}}})
+	if failure.EmptyState == nil || !failure.EmptyState.NoArtwork || failure.EmptyState.Title != "Some task evidence is unavailable" || failure.EmptyState.Body != "Waffle could not check every task source. Try again before assuming the queue is empty." || !fragmentHasAction(failure.EmptyState, "Try again") {
+		t.Fatalf("failure presentation = %#v", failure.EmptyState)
+	}
+}
+
+func fragmentHasAction(state *ui.EmptyStateView, label string) bool {
+	if state == nil {
+		return false
+	}
+	for _, action := range []*ui.FragmentAction{state.PrimaryAction, state.SecondaryAction} {
+		if action != nil && action.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTasksFragmentOwnsScheduleHierarchyAndAttentionLiveRegion(t *testing.T) {
+	tests := []struct {
+		name           string
+		filter         TaskFilter
+		triggerPrimary bool
+		snapshot       TasksSnapshot
+	}{
+		{name: "all proven empty", filter: TaskFilterAll, triggerPrimary: true},
+		{name: "active filtered empty", filter: TaskFilterActive},
+		{name: "scheduled proven empty", filter: TaskFilterScheduled, triggerPrimary: true},
+		{name: "completed filtered empty", filter: TaskFilterCompleted},
+		{name: "attention filtered empty", filter: TaskFilterAttention},
+		{name: "populated", filter: TaskFilterAll, snapshot: TasksSnapshot{Tasks: []TaskView{{ID: "healthy", Kind: TaskKindSchedule, Name: "Healthy", EvidenceLabel: "Scheduled"}}}},
+		{name: "failure", filter: TaskFilterAll, snapshot: TasksSnapshot{Errors: []*SectionError{{Section: OperationsSectionJobs}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := tc.snapshot
+			snapshot.Filter = tc.filter
+			body := renderTasksFragment(t, tasksFragment(snapshot))
+			start := strings.Index(body, `id="task-schedule-open"`)
+			if start < 0 {
+				t.Fatalf("fragment did not update the stable schedule trigger: %s", body)
+			}
+			end := strings.Index(body[start:], ">")
+			if end < 0 {
+				t.Fatalf("schedule trigger has no closing tag: %s", body[start:])
+			}
+			trigger := body[start : start+end+1]
+			if got := strings.Contains(trigger, `class="action-primary"`); got != tc.triggerPrimary {
+				t.Fatalf("schedule trigger primary = %t, want %t: %s", got, tc.triggerPrimary, trigger)
+			}
+			if !strings.Contains(trigger, `hx-swap-oob="outerHTML"`) {
+				t.Fatalf("schedule trigger is not an OOB update: %s", trigger)
+			}
+			attentionStart := strings.Index(body, `id="tasks-attention-count"`)
+			attentionEnd := strings.Index(body[attentionStart:], ">")
+			if attentionStart < 0 || attentionEnd < 0 || !strings.Contains(body[attentionStart:attentionStart+attentionEnd], `aria-live="polite"`) {
+				t.Fatalf("Tasks attention swap lost its opt-in live region: %s", body)
+			}
+		})
+	}
+
+	generic := renderTasksFragment(t, ui.FragmentView{
+		ID:        "generic-fragment",
+		TextSwaps: []ui.FragmentTextSwap{{ID: "generic-status", Class: "generic-status", Text: "Changed"}},
+	})
+	if strings.Contains(generic, `id="generic-status" class="generic-status" aria-live=`) {
+		t.Fatalf("generic text swaps must not become live regions: %s", generic)
+	}
+}
+
+func renderTasksFragment(t *testing.T, fragment ui.FragmentView) string {
+	t.Helper()
+	var rendered strings.Builder
+	if err := ui.FragmentList(fragment).Render(context.Background(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	return rendered.String()
 }

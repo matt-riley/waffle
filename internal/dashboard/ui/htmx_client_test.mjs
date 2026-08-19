@@ -42,8 +42,30 @@ test("skill-import disclosure is removed while imports are disabled", () => {
 });
 
 test("editing a schedule restores profile after options reload", () => {
-  assert.match(shim, /loadScheduleOptions\(form\)\.then/);
+  assert.match(shim, /loadScheduleOptions\(form,/);
   assert.match(shim, /profileSelect\.value = profile/);
+});
+
+test("schedule option loading is invalidated with the active editor context", () => {
+  assert.match(shim, /waffleScheduleOptionsGeneration/);
+  assert.match(shim, /waffleScheduleMode/);
+  assert.match(shim, /waffleScheduleEditID/);
+  assert.match(shim, /task-schedule-status/);
+  assert.match(shim, /generation.*mode|mode.*generation/s);
+});
+
+test("schedule dialog Escape and Cancel share an opener-aware dismissal contract", () => {
+  assert.match(shim, /function dismissTaskScheduleDialog\(/);
+  assert.match(shim, /addEventListener\(\s*["']cancel["']/);
+  assert.match(shim, /event\.preventDefault\(\)/);
+  assert.match(shim, /taskScheduleOpener/);
+  assert.match(shim, /\.isConnected/);
+  assert.match(shim, /queueMicrotask\(/);
+  assert.match(shim, /taskScheduleAdvanced|task-schedule-advanced/);
+  assert.match(shim, /advanced\.open\s*=\s*false/);
+  assert.match(shim, /openTaskScheduleDialog\(scheduleOpen\)/);
+  assert.match(shim, /openTaskScheduleDialog\(button\)/);
+  assert.doesNotMatch(shim, /hx-on:|oncancel\s*=/);
 });
 
 test("guided time and cadence write cron and reveal day controls", () => {

@@ -1539,6 +1539,7 @@ test("form-and-list sections swap real embedded htmx fragments", async ({ page }
 
 test("Tasks guided schedule form creates, edits, and reports filter state", async ({ page }) => {
   await page.goto(deskURL("tasks"));
+  const dialog = page.locator("#task-schedule-dialog");
   await page.getByRole("button", { name: "New schedule", exact: true }).click();
   const form = page.locator("#task-schedule-form");
   await expect(form.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
@@ -1577,6 +1578,28 @@ test("Tasks guided schedule form creates, edits, and reports filter state", asyn
   await expect(form.getByLabel("Cadence")).toHaveValue("weekdays");
   await expect(form.getByLabel("Time")).toHaveValue("09:00");
   await expect(form.locator("#task-schedule-profile")).toHaveValue("reviewer");
+
+  await form.locator("#task-schedule-advanced summary").click();
+  await form.getByLabel("Cron schedule").fill("not-a-cron");
+  await expect(form.locator("#task-schedule-field-errors")).toContainText("cron", { timeout: 10_000 });
+  const invalidSave = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/v1/desk/tasks/schedules") &&
+      response.request().method() === "POST" &&
+      !response.url().endsWith("/preview"),
+  );
+  await form.getByRole("button", { name: "Save schedule", exact: true }).click();
+  const invalidSaveResponse = await invalidSave;
+  expect(invalidSaveResponse.status()).toBe(422);
+  allowDiagnostics("422", "Response Status Error Code 422");
+  await expect(dialog).toBeVisible();
+  await expect(form.getByLabel("Name")).toHaveValue("Fixture schedule");
+  await expect(form.getByLabel("Cron schedule")).toHaveValue("not-a-cron");
+  await expect(form.locator("#task-schedule-status")).toContainText("schedule definition is invalid");
+  await form.getByRole("button", { name: "Cancel edit", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await card.getByRole("button", { name: "Edit schedule", exact: true }).click();
   await form.getByLabel("Prompt").fill("Edited fixture queue");
   const updated = page.waitForResponse(
     (response) =>
@@ -1587,6 +1610,12 @@ test("Tasks guided schedule form creates, edits, and reports filter state", asyn
   await form.getByRole("button", { name: "Save schedule", exact: true }).click();
   await updated;
   await expect(page.locator("[data-task-id='job-added']")).toContainText("Fixture schedule");
+
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
+  await expect(dialog).toBeVisible();
+  await expect(form.locator("#task-schedule-status")).toHaveText("");
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
 
   await page.getByRole("button", { name: "Scheduled", exact: true }).click();
   await expect(page.locator("#task-filter-scheduled")).toHaveAttribute("aria-pressed", "true");
@@ -1617,6 +1646,15 @@ test("Tasks schedule advanced cron validates inline and rejects bad expressions"
   await invalid;
   allowDiagnostics("422", "Response Status Error Code 422");
   await expect(form.locator("[data-waffle-error='true']")).toContainText("schedule definition is invalid");
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.locator("#task-schedule-dialog")).toBeHidden();
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
+  await expect(form.locator("#task-schedule-status")).toHaveText("");
+  await expect(form.getByLabel("Name")).toHaveValue("");
+  // Opening a fresh guided editor derives its visible weekday default again;
+  // the invalid raw value must not survive the reset.
+  await expect(form.getByLabel("Cron schedule")).toHaveValue("00 09 * * 1-5");
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
 });
 
 test("Tasks attention chip settles to a truthful count instead of Checking forever", async ({ page }) => {
@@ -1633,6 +1671,385 @@ test("Tasks attention chip settles to a truthful count instead of Checking forev
   await page.getByRole("button", { name: "Attention", exact: true }).click();
   await expect(page.locator("#task-filter-attention")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#tasks-attention-count")).toHaveText("1 task needs attention");
+});
+
+test("Tasks empty and evidence states keep one bounded owner with direct recovery", async ({ page }) => {
+  test.skip(
+    !["desktop", "mobile", "narrow"].includes(test.info().project.name),
+    "Run the Tasks state geometry matrix at desktop, 375px, and 320px.",
+  );
+  const project = test.info().project.name;
+  const capture = async (name) => {
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({
+      path: path.join(test.info().outputDir, `task5-tasks-${project}-${name}.png`),
+      fullPage: true,
+      animations: "disabled",
+    });
+  };
+  const setState = async (state) => {
+    await page.request.post(`${baseURL}/api/v1/desk/test/tasks?state=${state}`);
+    await page.goto(deskURL("tasks"));
+    await expect(page.locator(".tasks-board")).toBeVisible();
+  };
+
+  try {
+    await setState("empty");
+    await expect(page.getByRole("heading", { name: "Nothing on Waffle's plate", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText(
+      "Scheduled runs and completed work will appear here.",
+    );
+    await expect(page.getByRole("link", { name: "Start a conversation", exact: true })).toHaveAttribute(
+      "href",
+      "/desk/?section=today",
+    );
+    await expect(page.locator("#tasks-empty")).toHaveCount(0);
+    await expect(page.locator("#tasks-list .waffle-fragment-status")).toHaveCount(0);
+    await expect(page.locator("#task-schedule-open")).toHaveCount(1);
+    await expect(page.locator("#task-schedule-open")).toHaveClass(/action-primary/);
+    await expect(page.locator("#tasks-attention-count")).toHaveAttribute("aria-live", "polite");
+    const assertPressed = async (active) => {
+      for (const name of ["all", "active", "scheduled", "completed", "attention"]) {
+        await expect(page.locator(`#task-filter-${name}`)).toHaveAttribute("aria-pressed", String(name === active));
+      }
+    };
+    await assertPressed("all");
+    const emptyStateWidths = {};
+    const measureEmptyState = async (name) => {
+      emptyStateWidths[name] = await page
+        .locator(".tasks-board .waffle-empty-state")
+        .evaluate((element) => element.getBoundingClientRect().width);
+    };
+    await measureEmptyState("all");
+    await capture("empty-all");
+
+    await page.getByRole("button", { name: "Active", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "No active runs", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toBeVisible();
+    await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("active");
+    await assertPressed("active");
+    await page.getByRole("button", { name: "View all tasks", exact: true }).click();
+    await assertPressed("all");
+
+    await page.getByRole("button", { name: "Scheduled", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "No schedules yet", exact: true })).toBeVisible();
+    await expect(page.locator("#task-schedule-open")).toHaveClass(/action-primary/);
+    await measureEmptyState("scheduled");
+    await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-quiet/);
+    await assertPressed("scheduled");
+
+    await page.getByRole("button", { name: "Completed", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "No completed runs", exact: true })).toBeVisible();
+    await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("completed");
+    await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-primary/);
+    await assertPressed("completed");
+
+    await page.getByRole("button", { name: "Attention", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Nothing needs attention", exact: true })).toBeVisible();
+    await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("attention");
+    await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-primary/);
+    await assertPressed("attention");
+
+    await page.getByRole("button", { name: "View all tasks", exact: true }).click();
+    await assertPressed("all");
+    await page.locator("#task-schedule-open").click();
+    await expect(page.locator("#task-schedule-dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.locator("#task-schedule-dialog")).toBeHidden();
+
+    await setState("partial");
+    await expect(page.locator("#tasks-list")).toContainText("Some task evidence is temporarily unavailable.");
+    expect(await page.locator("#tasks-list .task-card").count()).toBeGreaterThan(0);
+    await expect(page.locator("#tasks-list .waffle-empty-state-art")).toHaveCount(0);
+    await capture("partial-with-card");
+
+    await setState("error");
+    await expect(page.getByRole("heading", { name: "Some task evidence is unavailable", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText(
+      "Try again before assuming the queue is empty.",
+    );
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+    await expect(page.locator("#tasks-list .waffle-empty-state-art")).toHaveCount(0);
+    await measureEmptyState("error");
+    await capture("error");
+
+    await setState("normal");
+    const card = page.locator("#tasks-list .task-card").first();
+    expect(await page.locator("#tasks-list .task-card").count()).toBeGreaterThan(0);
+    const cardWidth = await card.evaluate((element) => element.getBoundingClientRect().width);
+    for (const [state, width] of Object.entries(emptyStateWidths)) {
+      expect(Math.abs(width - cardWidth), `${state} empty state width ${width}, card width ${cardWidth}`).toBeLessThanOrEqual(1);
+    }
+    await expect(page.locator("#tasks-list .waffle-empty-state")).toHaveCount(0);
+    if (["mobile", "narrow"].includes(project)) {
+      const separation = await page.evaluate(() => {
+        const strip = document.querySelector(".task-filters");
+        const nav = document.querySelector(".desk-nav");
+        const stripRect = strip?.getBoundingClientRect();
+        const navRect = nav?.getBoundingClientRect();
+        return {
+          documentWidth: document.documentElement.scrollWidth,
+          viewportWidth: document.documentElement.clientWidth,
+          stripBottom: stripRect?.bottom ?? 0,
+          navTop: navRect?.top ?? Number.POSITIVE_INFINITY,
+        };
+      });
+      expect(separation.documentWidth).toBeLessThanOrEqual(separation.viewportWidth);
+      expect(separation.stripBottom).toBeLessThanOrEqual(separation.navTop + 1);
+    }
+    await capture("populated");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/tasks`);
+  }
+});
+
+test("schedule dialog Escape cancels without validation and restores its opener", async ({ page }) => {
+  await page.goto(deskURL("tasks"));
+  const dialog = page.locator("#task-schedule-dialog");
+  const form = page.locator("#task-schedule-form");
+  const newSchedule = page.locator("#task-schedule-open");
+  const mutationRequests = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      request.method() === "POST" &&
+      url.pathname.startsWith("/api/v1/desk/tasks/schedules") &&
+      !url.pathname.endsWith("/preview")
+    ) {
+      mutationRequests.push(url.pathname);
+    }
+  });
+
+  await page.evaluate(() => {
+    globalThis.__task5ValidationCalls = [];
+    const form = document.querySelector("#task-schedule-form");
+    for (const method of ["checkValidity", "reportValidity", "requestSubmit"]) {
+      Object.defineProperty(form, method, {
+        configurable: true,
+        value: () => globalThis.__task5ValidationCalls.push(method),
+      });
+    }
+  });
+
+  const assertNewScheduleDefaults = async () => {
+    await expect(form.locator("#task-schedule-id")).toHaveValue("");
+    await expect(form.locator("#task-schedule-id")).toBeDisabled();
+    await expect(form.locator("#task-schedule-enabled")).toBeChecked();
+    await expect(form.locator("#task-schedule-enabled")).toBeDisabled();
+    await expect(form.getByLabel("Name")).toHaveValue("");
+    await expect(form.getByLabel("Prompt")).toHaveValue("");
+    await expect(form.getByLabel("Cadence")).toHaveValue("weekdays");
+    await expect(form.getByLabel("Time")).toHaveValue("09:00");
+    await expect(form.getByLabel("Day of week")).toHaveValue("1");
+    await expect(form.getByLabel("Day of month")).toHaveValue("1");
+    await expect(form.getByLabel("Cron schedule")).toHaveValue("");
+    await expect(form.getByLabel("Delivery destination")).toHaveValue("");
+    await expect(form.getByLabel("Profile (optional)", { exact: true })).toHaveValue("");
+    await expect(form.locator("#task-schedule-chat-id")).toHaveValue("");
+    await expect(form.locator("#task-schedule-chat-id")).toBeHidden();
+    await expect(form.locator("#task-schedule-dow")).toBeHidden();
+    await expect(form.locator("#task-schedule-dom")).toBeHidden();
+    await expect(form.locator("#task-schedule-advanced")).not.toHaveAttribute("open", "");
+    await expect(form.locator("#task-schedule-deliver-clear-row")).toBeHidden();
+    await expect(form.locator("#task-schedule-profile-clear-row")).toBeHidden();
+    await expect(form.locator("#task-schedule-enabled-row")).toBeHidden();
+    await expect(form.locator("#task-schedule-field-errors")).toBeHidden();
+    await expect(form.locator("#task-schedule-field-errors")).toHaveText("");
+    await expect(form.locator("#task-schedule-status")).toHaveText("");
+    await expect(form.locator("#task-schedule-cancel")).toHaveText("Cancel");
+    await expect(form.locator("#task-schedule-submit")).toHaveText("Create schedule");
+    expect(await form.evaluate((element) => element.dataset.waffleRedactedFields || "")).toBe("");
+  };
+
+  const setDialogScrollPosition = async (position) => {
+    const scrollState = await dialog.evaluate((element, requestedPosition) => {
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      const targetScrollTop = {
+        top: 0,
+        middle: Math.round(maxScrollTop / 2),
+        bottom: maxScrollTop,
+      }[requestedPosition];
+      element.scrollTop = targetScrollTop;
+      return {
+        maxScrollTop,
+        targetScrollTop,
+        actualScrollTop: element.scrollTop,
+      };
+    }, position);
+    if (scrollState.maxScrollTop > 0) {
+      expect(scrollState.actualScrollTop, `${position} scroll position was not applied`).toBe(scrollState.targetScrollTop);
+    } else {
+      expect(scrollState.actualScrollTop).toBe(0);
+    }
+  };
+
+  const escapeFrom = async (selector, { scrollPosition, prepare } = {}) => {
+    await newSchedule.click();
+    await expect(dialog).toBeVisible();
+    if (prepare) await prepare();
+    const control = form.locator(selector);
+    await control.focus();
+    await expect(control).toBeFocused();
+    if (scrollPosition) await setDialogScrollPosition(scrollPosition);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(newSchedule).toBeFocused();
+    await assertNewScheduleDefaults();
+  };
+
+  await escapeFrom("#task-schedule-name", { scrollPosition: "top" });
+  await escapeFrom("#task-schedule-prompt", { scrollPosition: "middle" });
+  await escapeFrom("#task-schedule-cadence", { scrollPosition: "bottom" });
+  await escapeFrom("#task-schedule-time");
+  await escapeFrom("#task-schedule-deliver");
+  await escapeFrom("#task-schedule-chat-id", {
+    prepare: async () => {
+      await form.locator("#task-schedule-deliver").selectOption("telegram");
+      await expect(form.locator("#task-schedule-chat-id")).toBeVisible();
+    },
+  });
+  await escapeFrom("#task-schedule-profile");
+  await escapeFrom("#task-schedule-cron", {
+    prepare: async () => form.locator("#task-schedule-advanced summary").click(),
+  });
+  await escapeFrom("#task-schedule-dow", {
+    prepare: async () => form.locator("#task-schedule-cadence").selectOption("weekly"),
+  });
+  await escapeFrom("#task-schedule-dom", {
+    prepare: async () => form.locator("#task-schedule-cadence").selectOption("monthly"),
+  });
+
+  await newSchedule.click();
+  await form.getByLabel("Name").fill("Discard this schedule");
+  await form.locator("#task-schedule-advanced summary").click();
+  await form.getByLabel("Cron schedule").fill("not-a-cron");
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(newSchedule).toBeFocused();
+  await assertNewScheduleDefaults();
+
+  const editCard = page.locator("[data-task-id='job-daily']");
+  const edit = editCard.getByRole("button", { name: "Edit schedule", exact: true });
+  await edit.click();
+  await expect(dialog).toBeVisible();
+  await form.getByLabel("Name").fill("Discard this edit");
+  await form.getByLabel("Prompt").fill("Discard this prompt");
+  await form.locator("#task-schedule-cadence").selectOption("monthly");
+  await form.locator("#task-schedule-advanced summary").click();
+  await form.getByLabel("Cron schedule").fill("0 8 15 * *");
+  await form.locator("#task-schedule-deliver").selectOption("telegram");
+  await form.locator("#task-schedule-chat-id").fill("discarded-chat");
+  await expect(form.locator("#task-schedule-profile")).toContainText("reviewer", { timeout: 10_000 });
+  await form.locator("#task-schedule-profile").selectOption("reviewer");
+  await expect(form.locator("#task-schedule-cancel")).toHaveText("Cancel edit");
+  await expect(form.locator("#task-schedule-submit")).toHaveText("Save schedule");
+  await form.locator("#task-schedule-enabled").focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(edit).toBeFocused();
+  await assertNewScheduleDefaults();
+
+  await edit.click();
+  await page.evaluate(() => document.querySelector("[data-task-id='job-daily'] [data-waffle-task-edit]")?.remove());
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(newSchedule).toBeFocused();
+  await assertNewScheduleDefaults();
+
+  await page.screenshot({
+    path: path.join(test.info().outputDir, `task5-schedule-dialog-${test.info().project.name}.png`),
+    fullPage: true,
+    animations: "disabled",
+  });
+  expect(mutationRequests).toEqual([]);
+  expect(await page.evaluate(() => globalThis.__task5ValidationCalls)).toEqual([]);
+
+  await page.evaluate(() => {
+    sessionStorage.setItem(
+      "waffle.desk.schedule.draft.v1",
+      JSON.stringify({ text: "Review this handoff" }),
+    );
+  });
+  await page.goto(deskURL("tasks"));
+  await expect(dialog).toBeVisible();
+  await expect(form.getByLabel("Prompt")).toHaveValue("Review this handoff");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(newSchedule).toBeFocused();
+  await newSchedule.click();
+  await expect(form.getByLabel("Prompt")).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await assertNewScheduleDefaults();
+  await expect(mutationRequests).toEqual([]);
+});
+
+test("delayed schedule options cannot restore a dismissed edit into a new schedule", async ({ page }) => {
+  await page.request.post(`${baseURL}/api/v1/desk/test/tasks`);
+  await page.goto(deskURL("tasks"));
+  const dialog = page.locator("#task-schedule-dialog");
+  const form = page.locator("#task-schedule-form");
+  const newSchedule = page.locator("#task-schedule-open");
+  const edit = page.locator("[data-task-id='job-daily'] [data-waffle-task-edit]");
+  let releaseFirst;
+  const firstResponse = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstRequestContinued;
+  const firstRequestFinished = new Promise((resolve) => {
+    firstRequestContinued = resolve;
+  });
+  let optionRequests = 0;
+  await page.route("**/api/v1/desk/tasks/schedules/options", async (route) => {
+    const requestNumber = ++optionRequests;
+    if (requestNumber === 1) await firstResponse;
+    await route.continue();
+    if (requestNumber === 1) firstRequestContinued();
+  });
+
+  try {
+    await page.locator("[data-task-id='job-daily']").evaluate((card) => {
+      card.dataset.taskProfile = "reviewer";
+      card.dataset.taskDeliver = "telegram:stale-chat";
+    });
+    await edit.click();
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    await newSchedule.click();
+    await expect(dialog).toBeVisible();
+    await expect.poll(() => optionRequests).toBe(2);
+    await expect(form.locator("#task-schedule-profile option[value='reviewer']")).toHaveCount(1);
+    await expect(form.locator("#task-schedule-deliver option[value='telegram']")).toHaveCount(1);
+    await expect(form.locator("#task-schedule-profile")).toHaveValue("");
+    await expect(form.locator("#task-schedule-deliver")).toHaveValue("");
+
+    const firstOptionsResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/desk/tasks/schedules/options") &&
+        response.request().method() === "GET",
+    );
+    releaseFirst();
+    await firstRequestFinished;
+    const response = await firstOptionsResponse;
+    expect(response.status()).toBe(200);
+    // The response event precedes the fetch continuation; yield a task turn so
+    // the stale edit callback has definitely run before checking the new form.
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    await expect(form.locator("#task-schedule-profile")).toHaveValue("");
+    await expect(form.locator("#task-schedule-deliver")).toHaveValue("");
+    await expect(form.locator("#task-schedule-chat-id")).toHaveValue("");
+  } finally {
+    releaseFirst?.();
+    await page.unroute("**/api/v1/desk/tasks/schedules/options");
+    if (await dialog.isVisible()) {
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    }
+  }
 });
 
 test("Capabilities htmx catalogue add, search, and prospective test use fragments", async ({ page }) => {

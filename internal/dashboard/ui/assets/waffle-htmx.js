@@ -20,6 +20,7 @@
 
 	const intents = new Map();
 	const inFlight = new Set();
+	let taskScheduleOpener = null;
 	let processGeneration = "";
 	let restartPolling = false;
 	let restartPollStartedAt = 0;
@@ -167,6 +168,8 @@
 	}
 
 	async function schedulePreview(form) {
+		const previewGeneration = String((Number(form.dataset.waffleSchedulePreviewGeneration) || 0) + 1);
+		form.dataset.waffleSchedulePreviewGeneration = previewGeneration;
 		const name = input(form, "task-schedule-name")?.value || "";
 		const prompt = input(form, "task-schedule-prompt")?.value || "";
 		const cron = input(form, "task-schedule-cron")?.value || "";
@@ -196,6 +199,7 @@
 			return;
 		}
 		const preview = await response.json().catch(() => ({}));
+		if (form.dataset.waffleSchedulePreviewGeneration !== previewGeneration) return;
 
 		const summary = input(form, "task-schedule-summary");
 		if (summary) {
@@ -298,7 +302,30 @@
 		input(form, "task-schedule-name")?.focus?.();
 	}
 
-	async function loadScheduleOptions(form) {
+	function setScheduleContext(form, mode, editID = "") {
+		form.dataset.waffleScheduleMode = mode;
+		form.dataset.waffleScheduleEditID = editID;
+	}
+
+	function invalidateScheduleOptions(form) {
+		form.dataset.waffleScheduleOptionsGeneration = String(
+			(Number(form.dataset.waffleScheduleOptionsGeneration) || 0) + 1,
+		);
+	}
+
+	function scheduleOptionsContextMatches(form, context) {
+		return form.dataset.waffleScheduleOptionsGeneration === context.generation &&
+			(form.dataset.waffleScheduleMode || "new") === context.mode &&
+			(form.dataset.waffleScheduleEditID || "") === context.editID;
+	}
+
+	async function loadScheduleOptions(form, { mode = form.dataset.waffleScheduleMode || "new", editID = "", restore } = {}) {
+		invalidateScheduleOptions(form);
+		const context = {
+			generation: form.dataset.waffleScheduleOptionsGeneration,
+			mode,
+			editID,
+		};
 		let options;
 		try {
 			const response = await fetch("/api/v1/desk/tasks/schedules/options", {
@@ -310,6 +337,7 @@
 		} catch {
 			options = {};
 		}
+		if (!scheduleOptionsContextMatches(form, context)) return false;
 		const profiles = Array.isArray(options.profiles) ? options.profiles : [];
 		const deliveries = Array.isArray(options.deliveries) ? options.deliveries : [];
 		const profileSelect = input(form, "task-schedule-profile");
@@ -340,6 +368,8 @@
 				? "No delivery channels are connected. Enroll one in Capabilities → Tools & connections."
 				: "";
 		}
+		if (restore && scheduleOptionsContextMatches(form, context)) restore();
+		return true;
 	}
 
 	function syncScheduleDeliverUI(form) {
@@ -349,6 +379,11 @@
 	}
 
 	function resetTaskSchedule(form) {
+		invalidateScheduleOptions(form);
+		setScheduleContext(form, "new");
+		form.dataset.waffleSchedulePreviewGeneration = String(
+			(Number(form.dataset.waffleSchedulePreviewGeneration) || 0) + 1,
+		);
 		const id = input(form, "task-schedule-id");
 		const enabled = input(form, "task-schedule-enabled");
 		if (id) {
@@ -368,18 +403,27 @@
 		}
 		const cadence = input(form, "task-schedule-cadence");
 		const time = input(form, "task-schedule-time");
+		const dow = input(form, "task-schedule-dow");
+		const dom = input(form, "task-schedule-dom");
 		const chatID = input(form, "task-schedule-chat-id");
 		const summary = input(form, "task-schedule-summary");
 		const errors = input(form, "task-schedule-field-errors");
+		const status = input(form, "task-schedule-status");
+		const advanced = input(form, "task-schedule-advanced");
 		if (cadence) cadence.value = "weekdays";
 		if (time) time.value = "09:00";
+		if (dow) dow.value = "1";
+		if (dom) dom.value = "1";
 		if (chatID) chatID.value = "";
 		if (summary) summary.textContent = "";
 		if (errors) {
 			errors.hidden = true;
 			errors.replaceChildren();
 		}
+		if (status) status.replaceChildren();
+		if (advanced) advanced.open = false;
 		syncGuidedFromCron(form);
+		syncGuidedVisibility(form);
 		syncScheduleDeliverUI(form);
 		for (const field of ["deliver", "profile"]) {
 			const clear = input(form, `task-schedule-${field}-clear`);
@@ -399,12 +443,40 @@
 		delete form.dataset.waffleRedactedFields;
 	}
 
-	function openTaskScheduleDialog() {
+	function openTaskScheduleDialog(opener = null) {
+		taskScheduleOpener = opener?.isConnected ? opener : null;
 		document.querySelector("#task-schedule-dialog")?.showModal?.();
 	}
 
 	function closeTaskScheduleDialog() {
+		taskScheduleOpener = null;
 		document.querySelector("#task-schedule-dialog")?.close?.();
+	}
+
+	function dismissTaskScheduleDialog({ reset = true } = {}) {
+		const dialog = document.querySelector("#task-schedule-dialog");
+		const form = document.querySelector("#task-schedule-form");
+		if (!dialog?.open) {
+			taskScheduleOpener = null;
+			return;
+		}
+		if (reset && form) resetTaskSchedule(form);
+		dialog.close("cancel");
+		const target = taskScheduleOpener?.isConnected
+			? taskScheduleOpener
+			: document.querySelector("#task-schedule-open");
+		taskScheduleOpener = null;
+		queueMicrotask(() => target?.focus?.());
+	}
+
+	function bindTaskScheduleDialog() {
+		const dialog = document.querySelector("#task-schedule-dialog");
+		if (!dialog || dialog.dataset.waffleCancelBound === "true") return;
+		dialog.addEventListener("cancel", (event) => {
+			event.preventDefault();
+			dismissTaskScheduleDialog({ reset: true });
+		});
+		dialog.dataset.waffleCancelBound = "true";
 	}
 
 	function beginTaskEdit(button) {
@@ -414,7 +486,8 @@
 		const id = input(form, "task-schedule-id");
 		const enabled = input(form, "task-schedule-enabled");
 		if (!id || !enabled) return;
-		id.value = card.dataset.taskId || "";
+		const editID = card.dataset.taskId || "";
+		id.value = editID;
 		id.disabled = false;
 		enabled.checked = card.dataset.taskEnabled === "true";
 		enabled.disabled = false;
@@ -423,6 +496,7 @@
 			.map((field) => field.trim())
 			.filter(Boolean);
 		form.dataset.waffleRedactedFields = redacted.join(",");
+		setScheduleContext(form, "edit", editID);
 		const values = {
 			name: card.dataset.taskName || "",
 			cron: card.dataset.taskCron || "",
@@ -452,7 +526,10 @@
 		}
 		if (chatIDInput) chatIDInput.value = redacted.includes("deliver") ? "" : chatID;
 		syncScheduleDeliverUI(form);
-		void loadScheduleOptions(form).then(() => {
+		void loadScheduleOptions(form, {
+			mode: "edit",
+			editID,
+			restore: () => {
 			if (deliverSelect && channel) deliverSelect.value = channel;
 			const profileSelect = input(form, "task-schedule-profile");
 			const profile = values.profile;
@@ -463,6 +540,7 @@
 				profileSelect.value = profile;
 			}
 			syncScheduleDeliverUI(form);
+			},
 		});
 		void schedulePreview(form);
 		for (const field of ["deliver", "profile"]) {
@@ -478,7 +556,7 @@
 			cancel.textContent = "Cancel edit";
 		}
 		if (submit) submit.textContent = "Save schedule";
-		openTaskScheduleDialog();
+		openTaskScheduleDialog(button);
 		form.querySelector?.("#task-schedule-name")?.focus?.();
 	}
 
@@ -835,17 +913,14 @@
 				void loadScheduleOptions(form);
 				updateScheduleGuide(form);
 			}
-			openTaskScheduleDialog();
+			openTaskScheduleDialog(scheduleOpen);
 			document.querySelector("#task-schedule-name")?.focus?.();
 			return;
 		}
 		const scheduleCancel = event.target?.closest?.("#task-schedule-cancel");
 		if (scheduleCancel) {
 			event.preventDefault();
-			const form = document.querySelector("#task-schedule-form");
-			if (form) resetTaskSchedule(form);
-			closeTaskScheduleDialog();
-			document.querySelector("#task-schedule-open")?.focus?.();
+			dismissTaskScheduleDialog({ reset: true });
 			return;
 		}
     const open = event.target?.closest?.("#workspace-open-button");
@@ -872,6 +947,7 @@
 		if (event.target?.id === "capability-catalogue-search") filterCatalogue();
 	});
 
+	bindTaskScheduleDialog();
 	consumeScheduleHandoff();
 
 	void readBootstrap().then((bootstrap) => {

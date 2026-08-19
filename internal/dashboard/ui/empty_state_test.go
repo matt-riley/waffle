@@ -138,6 +138,31 @@ func TestWaffleEmptyStateActionTiersAreExplicit(t *testing.T) {
 	}
 }
 
+func TestWaffleEmptyStateCanOmitArtworkWithoutChangingTheSemanticView(t *testing.T) {
+	view, ok := NewWaffleEmptyStateView(EmptyStateTasks, "No tasks", "Nothing is queued", "tasks-title", nil, nil)
+	if !ok {
+		t.Fatal("failed to construct task empty state")
+	}
+	view.NoArtwork = true
+
+	var rendered bytes.Buffer
+	if err := WaffleEmptyState(view).Render(t.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	if !strings.Contains(body, `class="waffle-empty-state is-no-artwork"`) {
+		t.Fatalf("artwork-free empty state lost its explicit class: %s", body)
+	}
+	if strings.Contains(body, `<img `) {
+		t.Fatalf("artwork-free empty state rendered an image: %s", body)
+	}
+	for _, want := range []string{`<h2`, `No tasks`, `Nothing is queued`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("artwork-free empty state missing %q: %s", want, body)
+		}
+	}
+}
+
 func TestFragmentActionFormClassOnlyVisibleInputs(t *testing.T) {
 	fieldsOnly := FragmentAction{Fields: []FragmentField{{Label: "fixture", Value: "fields-only"}}}
 	if got := fragmentActionFormClass(fieldsOnly); got != "" {

@@ -1,5 +1,7 @@
 package ui
 
+import "github.com/a-h/templ"
+
 // ShellView is the complete, presentation-only state for the Waffle Desk shell.
 type ShellView struct {
 	Title         string
@@ -28,6 +30,16 @@ type FragmentView struct {
 	TextSwaps   []FragmentTextSwap
 	Footers     []FragmentTextSwap
 	Filters     []FragmentFilter
+	// TaskScheduleOpenPrimary lets the Tasks fragment update the one stable
+	// schedule trigger without duplicating it inside an empty state.
+	TaskScheduleOpenPrimary bool
+}
+
+func fragmentLiveAttributes(live bool) templ.Attributes {
+	if !live {
+		return nil
+	}
+	return templ.Attributes{"aria-live": "polite"}
 }
 
 // EmptyStateKey names the small set of approved Waffle Desk illustrations.
@@ -53,6 +65,7 @@ type EmptyStateView struct {
 	TitleID         string
 	PrimaryAction   *FragmentAction
 	SecondaryAction *FragmentAction
+	NoArtwork       bool
 	artwork         emptyStateArtwork
 }
 
@@ -143,6 +156,7 @@ type FragmentTextSwap struct {
 	Class     string
 	Source    string
 	Available bool
+	Live      bool
 }
 
 // MemorySessionOption is one eligible persisted session choice for the
@@ -255,5 +269,15 @@ func fragmentActionFormClass(action FragmentAction) string {
 }
 
 func emptyStateArtworkClass(view EmptyStateView) string {
+	if view.NoArtwork {
+		return "waffle-empty-state-art is-hidden"
+	}
 	return "waffle-empty-state-art " + view.artwork.Class
+}
+
+func emptyStateClass(view EmptyStateView) string {
+	if view.NoArtwork {
+		return "waffle-empty-state is-no-artwork"
+	}
+	return "waffle-empty-state"
 }
