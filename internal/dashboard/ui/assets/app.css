@@ -2756,6 +2756,12 @@ a:focus-visible {
   white-space: pre-wrap;
 }
 
+.message-reasoning-withheld {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  margin: 0 0 var(--space-sm);
+}
+
 .code-block {
   background: var(--surface-sidebar);
   border-radius: var(--radius-card);

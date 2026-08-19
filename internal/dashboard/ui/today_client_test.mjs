@@ -986,7 +986,9 @@ test("restored thinking is closed above the answer and private reasoning fields 
               role: "assistant",
               blocks: [
                 { type: "thinking", text: "Check the release evidence.", signature: signatureCanary },
+                { type: "redacted_thinking", data: dataCanary },
                 { type: "thinking", text: taskGuidance, signature: signatureCanary },
+                { type: "thinking", text: "Cross-check the release evidence.", signature: signatureCanary },
                 { type: "redacted_thinking", data: dataCanary },
                 { type: "text", text: "The release is ready." },
               ],
@@ -1002,8 +1004,20 @@ test("restored thinking is closed above the answer and private reasoning fields 
   assert.ok(details, "restored reasoning disclosure is rendered");
   assert.notEqual(details.open, true, "reasoning starts closed");
   assert.equal(details.querySelector("summary").textContent, "Reasoning");
-  assert.match(details.textContent, /Check the release evidence\./);
-  assert.match(details.textContent, /Reasoning withheld/);
+  assert.deepEqual(
+    details.querySelectorAll("p").map((node) => node.textContent),
+    [
+      "Check the release evidence.",
+      "Reasoning withheld",
+      "Cross-check the release evidence.",
+      "Reasoning withheld",
+    ],
+  );
+  assert.doesNotMatch(details.textContent, new RegExp(taskGuidance));
+  assert.deepEqual(
+    details.querySelectorAll(".message-reasoning-withheld").map((node) => node.textContent),
+    ["Reasoning withheld", "Reasoning withheld"],
+  );
   assert.match(article.querySelector(".message-body").textContent, /The release is ready\./);
   for (const privateValue of [signatureCanary, dataCanary, taskGuidance]) {
     assert.doesNotMatch(article.textContent, new RegExp(privateValue));
@@ -1052,10 +1066,11 @@ test("redacted-only reasoning remains visible without exposing its private paylo
 
   const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
   assert.ok(article, "reasoning-only history entry remains in the transcript");
-  const details = article.querySelector(".message-reasoning");
-  assert.ok(details, "withheld reasoning disclosure is rendered");
-  assert.equal(details.querySelector("summary").textContent, "Reasoning withheld");
-  assert.notEqual(details.open, true, "withheld reasoning starts closed");
+  assert.equal(article.querySelector(".message-reasoning"), null);
+  assert.deepEqual(
+    article.querySelectorAll(".message-reasoning-withheld").map((node) => node.textContent),
+    ["Reasoning withheld"],
+  );
   assert.doesNotMatch(article.textContent, new RegExp(dataCanary));
 });
 
@@ -1522,6 +1537,19 @@ test("slash menu filters commands and skills and inserts a command on Enter", as
   assert.equal(menu.hidden, true, "menu closes after insertion");
 });
 
+test("slash menu keeps a long draft internally scrollable within its compact viewport", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = Array.from({ length: 12 }, (_, index) => index === 0 ? "/" : `line ${index + 1}`).join("\n");
+  message.selectionStart = 1;
+  message.listener("input")();
+
+  assert.equal(harness.elements["#desk-slash-menu"].hidden, false);
+  assert.equal(message.style.height, "96px");
+  assert.equal(message.style.overflowY, "auto");
+});
+
 test("slash menu lists skills and attaches the selected one", async () => {
   const harness = createHarness();
   await flush();
@@ -1878,7 +1906,24 @@ test("ownership recovery loads read-only recents and opens a selected session", 
 test("Start a new conversation recovery opens a fresh session", async () => {
   let openAttempts = 0;
   const openBodies = [];
+  const commands = [];
   const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      commands.push(command);
+      if (command.name === "new" && command.args === "") {
+        return jsonResponse({ confirm: true, text: "Start over?" });
+      }
+      if (command.name === "new" && command.args === "confirm") {
+        return jsonResponse({
+          state: defaultChatState({
+            session_id: "session-3",
+            title: "Confirmed fresh recovery",
+          }),
+        });
+      }
+      return jsonResponse({}, false);
+    },
     openHandler: async ({ options }) => {
       openAttempts += 1;
       openBodies.push(JSON.parse(options.body));
@@ -1902,13 +1947,17 @@ test("Start a new conversation recovery opens a fresh session", async () => {
   assert.equal(harness.elements["#desk-new"].textContent, "Start new");
   await harness.elements["#desk-new"].listener("click")();
   await flush();
-  assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh recovery");
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Confirmed fresh recovery");
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   const recoveryOpen = openBodies[openBodies.length - 1];
   assert.equal(openAttempts, 2);
   assert.equal(recoveryOpen.continue, false);
   assert.equal(recoveryOpen.session_id, "");
   assert.equal(recoveryOpen.reattach_client_id, undefined);
+  assert.deepEqual(commands, [
+    { name: "new", args: "" },
+    { name: "new", args: "confirm" },
+  ]);
 });
 
 test("declining new conversation confirmation preserves the current session", async () => {

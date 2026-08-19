@@ -595,7 +595,7 @@ function adjustComposerHeight(element) {
     return;
   }
   element.style.height = "auto";
-  const cap = 15 * 16;
+  const cap = state.slash.open ? 6 * 16 : 15 * 16;
   const next = Math.min(element.scrollHeight, cap);
   element.style.height = `${next}px`;
   element.style.overflowY = element.scrollHeight > cap ? "auto" : "hidden";
@@ -1173,7 +1173,8 @@ function renderReasoning(message) {
     return null;
   }
   const visible = [];
-  let withheld = false;
+  const ordered = [];
+  const withheld = [];
   for (const block of message.blocks) {
     if (!block) {
       continue;
@@ -1182,30 +1183,34 @@ function renderReasoning(message) {
       const text = String(block.text || "");
       if (text && !isTaskModeGuidance(text)) {
         visible.push(text);
+        ordered.push({ type: "thinking", text });
       }
     } else if (block.type === "redacted_thinking") {
-      withheld = true;
+      ordered.push({ type: "withheld", text: "Reasoning withheld" });
+      withheld.push("Reasoning withheld");
     }
   }
-  if (visible.length === 0 && !withheld) {
+  if (visible.length === 0 && withheld.length === 0) {
     return null;
   }
-  const details = document.createElement("details");
-  details.className = "message-reasoning";
-  const summary = document.createElement("summary");
-  summary.textContent = visible.length > 0 ? "Reasoning" : "Reasoning withheld";
-  details.appendChild(summary);
-  for (const text of visible) {
-    const paragraph = document.createElement("p");
-    paragraph.textContent = text;
-    details.appendChild(paragraph);
+  let details = null;
+  if (visible.length > 0) {
+    details = document.createElement("details");
+    details.className = "message-reasoning";
+    const summary = document.createElement("summary");
+    summary.textContent = "Reasoning";
+    details.appendChild(summary);
+    for (const item of ordered) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = item.text;
+      if (item.type === "withheld") {
+        paragraph.className = "message-reasoning-withheld";
+      }
+      details.appendChild(paragraph);
+    }
+    return { details, withheld: [] };
   }
-  if (withheld && visible.length > 0) {
-    const paragraph = document.createElement("p");
-    paragraph.textContent = "Reasoning withheld";
-    details.appendChild(paragraph);
-  }
-  return details;
+  return { details, withheld };
 }
 
 function renderHistory(history) {
@@ -1243,7 +1248,15 @@ function renderHistory(history) {
     }
     if (reasoning) {
       const body = article.querySelector(".message-body");
-      article.insertBefore(reasoning, body);
+      if (reasoning.details) {
+        article.insertBefore(reasoning.details, body);
+      }
+      for (const text of reasoning.withheld) {
+        const paragraph = document.createElement("p");
+        paragraph.className = "message-reasoning-withheld";
+        paragraph.textContent = text;
+        article.insertBefore(paragraph, body);
+      }
       if (text === "" && media.length === 0) {
         body?.remove();
       }
@@ -4162,9 +4175,9 @@ async function fetchCommands() {
 
 function onComposerInput() {
   setDraft(state.sessionID, elements.message.value);
+  syncSlashMenu();
   adjustComposerHeight(elements.message);
   updateControls();
-  syncSlashMenu();
 }
 
 function handleComposerKeydown(event) {
@@ -4292,7 +4305,11 @@ if (elements.form) {
   elements.refresh.addEventListener("click", openDesk);
   elements.newConversation?.addEventListener("click", () => {
     if (state.currentPhase === phase.recovering) {
-      void openDesk({ forceNewSession: true });
+      void openDesk({ forceNewSession: true }).then(() => {
+        if (state.currentPhase === phase.idle) {
+          void newConversation();
+        }
+      });
       return;
     }
     void newConversation();
