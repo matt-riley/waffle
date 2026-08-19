@@ -2,9 +2,11 @@ package ui
 
 import (
 	"bytes"
+	"image/png"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -195,6 +197,109 @@ func TestAssetVersionStableAndNonEmpty(t *testing.T) {
 	if CapabilitiesAssetVersion() == "" {
 		t.Fatal("CapabilitiesAssetVersion empty")
 	}
+}
+
+func TestWaffleDeskDerivativesAreEmbeddedServedAndSanitized(t *testing.T) {
+	want := map[string][2]int{
+		"waffle-mark-sitting.png":  {128, 128},
+		"waffle-empty-curled.png":  {480, 320},
+		"waffle-empty-sitting.png": {320, 320},
+		"waffle-empty-curious.png": {256, 256},
+	}
+	approvedSources := map[string]string{
+		"waffle-mark-sitting.png":  "assets/brand/waffle/poses/sitting.png",
+		"waffle-empty-curled.png":  "assets/brand/waffle/poses/curled.png",
+		"waffle-empty-sitting.png": "assets/brand/waffle/poses/sitting.png",
+		"waffle-empty-curious.png": "assets/brand/waffle/canon/expressions/curious.png",
+	}
+	var total int
+	for name, dimensions := range want {
+		source := path.Join("..", "..", "..", approvedSources[name])
+		if _, err := os.Stat(source); err != nil {
+			t.Fatalf("approved source master for %s missing at %s: %v", name, source, err)
+		}
+		asset, ok := staticAssets[name]
+		if !ok {
+			t.Fatalf("Desk derivative %q is not embedded", name)
+		}
+		if asset.contentType != "image/png" {
+			t.Errorf("%s content type = %q, want image/png", name, asset.contentType)
+		}
+		response := httptest.NewRecorder()
+		if !ServeAsset(response, httptest.NewRequest(http.MethodGet, AssetURL(name, AssetVersion()), nil), name) {
+			t.Fatalf("ServeAsset(%q) returned false", name)
+		}
+		if response.Header().Get("Content-Type") != "image/png" {
+			t.Errorf("served %s Content-Type = %q", name, response.Header().Get("Content-Type"))
+		}
+		if response.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+			t.Errorf("served %s Cache-Control = %q", name, response.Header().Get("Cache-Control"))
+		}
+		config, err := png.DecodeConfig(bytes.NewReader(response.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		if config.Width != dimensions[0] || config.Height != dimensions[1] {
+			t.Errorf("%s dimensions = %dx%d, want %dx%d", name, config.Width, config.Height, dimensions[0], dimensions[1])
+		}
+		decoded, err := png.Decode(bytes.NewReader(response.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("decode pixels %s: %v", name, err)
+		}
+		corners := [][2]int{{0, 0}, {config.Width - 1, 0}, {0, config.Height - 1}, {config.Width - 1, config.Height - 1}}
+		for _, corner := range corners {
+			_, _, _, alpha := decoded.At(corner[0], corner[1]).RGBA()
+			if alpha != 0 {
+				t.Errorf("%s lost transparent corner alpha at %v", name, corner)
+			}
+		}
+		chunks, err := pngChunkTypes(response.Body.Bytes())
+		if err != nil {
+			t.Fatalf("parse PNG chunks %s: %v", name, err)
+		}
+		for _, chunk := range chunks {
+			switch chunk {
+			case "tEXt", "zTXt", "iTXt", "eXIf", "iCCP":
+				t.Errorf("%s contains private PNG metadata chunk %s", name, chunk)
+			}
+		}
+		mutated := make(map[string]staticAsset, len(staticAssets))
+		for assetName, cached := range staticAssets {
+			body := append([]byte(nil), cached.body...)
+			mutated[assetName] = staticAsset{body: body, contentType: cached.contentType}
+		}
+		mutatedBody := append([]byte(nil), asset.body...)
+		mutatedBody[len(mutatedBody)-1] ^= 1
+		mutated[name] = staticAsset{body: mutatedBody, contentType: asset.contentType}
+		if hashCachedAssets(mutated) == AssetVersion() {
+			t.Errorf("AssetVersion did not change when derivative %s changed", name)
+		}
+		total += len(asset.body)
+	}
+	if total > 350*1024 {
+		t.Fatalf("Desk derivatives total %d bytes, want <= 358400", total)
+	}
+}
+
+func pngChunkTypes(data []byte) ([]string, error) {
+	const signatureLength = 8
+	if len(data) < signatureLength || !bytes.Equal(data[:signatureLength], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
+		return nil, errString("invalid PNG signature")
+	}
+	chunks := make([]string, 0, 4)
+	for offset := signatureLength; offset < len(data); {
+		if len(data)-offset < 12 {
+			return nil, errString("truncated PNG chunk")
+		}
+		length := int(data[offset])<<24 | int(data[offset+1])<<16 | int(data[offset+2])<<8 | int(data[offset+3])
+		end := offset + 12 + length
+		if length < 0 || end > len(data) {
+			return nil, errString("PNG chunk exceeds file")
+		}
+		chunks = append(chunks, string(data[offset+4:offset+8]))
+		offset = end
+	}
+	return chunks, nil
 }
 
 func TestHtmxRuntimeIsPinnedAndEmbedded(t *testing.T) {

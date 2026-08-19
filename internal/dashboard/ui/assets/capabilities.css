@@ -408,14 +408,25 @@
 }
 
 .capability-card .waffle-fragment-actions {
+  align-items: center;
+  display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: 0.35rem;
 }
 
+.capability-card .waffle-fragment-actions form {
+  display: block;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
 .capability-card .waffle-fragment-actions button {
+  flex: 0 0 auto;
   font-size: 0.74rem;
+  min-height: 2.75rem;
   padding: 0.3rem 0.5rem;
+  width: auto;
 }
 
 @media (max-width: 48rem) {

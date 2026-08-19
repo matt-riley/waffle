@@ -24,6 +24,16 @@ const canaries = [
 let server;
 let baseURL;
 
+function hasVisualBaseline(snapshotName) {
+  const parsed = path.parse(snapshotName);
+  const baselinePath = path.join(
+    testsDir,
+    "desk.spec.mjs-snapshots",
+    `${parsed.name}-${process.platform}${parsed.ext}`,
+  );
+  return existsSync(baselinePath) || process.env.WAFFLE_VISUAL_BASELINES === "1";
+}
+
 function contrastRatio(foreground, background) {
   const channels = (value) => {
     const match = value.match(/rgba?\(([^)]+)\)/);
@@ -77,6 +87,13 @@ function allowDiagnostics(...patterns) {
   allowedDiagnostics.push(...patterns);
 }
 
+function allowExpectedResponse(status, path) {
+  allowDiagnostics(
+    `response ${status} ${baseURL}${path}`,
+    `Response Status Error Code ${status} from ${path}`,
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   allowedDiagnostics = [];
 
@@ -91,6 +108,7 @@ test.beforeEach(async ({ page }) => {
     const text = message.text();
     if (
       text.includes("favicon") ||
+      (text.includes("Failed to load resource") && text.includes("404")) ||
       text.includes("net::ERR_ABORTED") ||
       text.includes("SpeechSynthesis") ||
       text.includes("speechSynthesis")
@@ -101,6 +119,11 @@ test.beforeEach(async ({ page }) => {
   });
   page.on("pageerror", (error) => {
     pageerrorFailures.push(String(error));
+  });
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      consoleFailures.push(`response ${response.status()} ${response.url()}`);
+    }
   });
 });
 
@@ -124,7 +147,7 @@ async function expectSectionObstructionFree(page, section, lastSelector) {
   await page.goto(deskURL(section));
   const metrics = await page.evaluate(
     ({ lastSelector }) => {
-      const nav = document.querySelector(".desk-nav");
+      const nav = document.querySelector(".desk-navigation");
       const last = document.querySelector(lastSelector);
       const navRect = nav ? nav.getBoundingClientRect() : null;
       const lastRect = last ? last.getBoundingClientRect() : null;
@@ -147,6 +170,754 @@ async function expectSectionObstructionFree(page, section, lastSelector) {
   // possible to reach the bottom of the content.
   expect(metrics.scrollHeight).toBeGreaterThanOrEqual(metrics.viewport);
 }
+
+function rectIntersects(first, second) {
+  return first.left < second.right && first.right > second.left && first.top < second.bottom && first.bottom > second.top;
+}
+
+async function expectControlsClearOfNavigation(page, selectors) {
+  const metrics = [];
+  for (const selector of selectors) {
+    const targets = page.locator(selector);
+    const count = await targets.count();
+    expect(count, `${selector} is missing`).toBeGreaterThan(0);
+    for (let index = 0; index < count; index += 1) {
+      const target = targets.nth(index);
+      await expect(target).toBeVisible();
+      if (await target.isEnabled().catch(() => false)) {
+        await target.focus();
+        await expect(target).toBeFocused();
+      }
+      await target.evaluate((element) => element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }));
+      metrics.push(await target.evaluate((element, identity) => {
+        const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        return {
+          nav: nav && { left: nav.left, right: nav.right, top: nav.top, bottom: nav.bottom },
+          rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          navigationHeight: nav?.height ?? 0,
+          measuredHeight: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--desk-navigation-height")) || 0,
+          topClearance: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--desk-top-clearance")) || 0,
+          selector: identity.selector,
+          index: identity.index,
+        };
+      }, { selector, index }));
+    }
+  }
+  for (const metric of metrics) {
+    expect(metric.nav).not.toBeNull();
+    expect(metric.rect).not.toBeNull();
+    expect(metric.navigationHeight).toBeGreaterThan(0);
+    expect(metric.measuredHeight).toBeCloseTo(metric.navigationHeight, 0);
+    expect(metric.rect.top, `${metric.selector}[${metric.index}] top`).toBeGreaterThanOrEqual(metric.topClearance - 1);
+    expect(metric.rect.bottom, `${metric.selector}[${metric.index}] bottom`).toBeLessThanOrEqual(metric.viewport.height + 1);
+    expect(metric.rect.bottom, `${metric.selector}[${metric.index}] above navigation`).toBeLessThanOrEqual(metric.nav.top + 1);
+    expect(rectIntersects(metric.rect, metric.nav), `${metric.selector}[${metric.index}] intersects fixed navigation`).toBe(false);
+  }
+}
+
+async function expectTodayComposerClearance(page) {
+  // Textarea field-sizing and ResizeObserver delivery happen on separate
+  // render steps. Wait for the measured CSS contract to catch up with the
+  // rendered boxes before asserting the settled geometry.
+  await expect.poll(() => page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const composer = document.querySelector("#desk-composer")?.getBoundingClientRect();
+    const actions = document.querySelector(".composer-actions")?.getBoundingClientRect();
+    const composerVariable = parseFloat(root.getPropertyValue("--desk-composer-height")) || 0;
+    const actionVariable = parseFloat(root.getPropertyValue("--desk-action-height")) || 0;
+    return Math.max(
+      Math.abs(composerVariable - (composer?.height ?? 0)),
+      Math.abs(actionVariable - (actions?.height ?? 0)),
+    );
+  }), "measured composer clearance catches up to rendered geometry").toBeLessThan(0.5);
+  const layout = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+    const composer = document.querySelector("#desk-composer")?.getBoundingClientRect();
+    const actions = document.querySelector(".composer-actions")?.getBoundingClientRect();
+    const transcript = document.querySelector("#desk-transcript");
+    const transcriptStyle = transcript ? getComputedStyle(transcript) : null;
+    return {
+      navTop: nav?.top ?? null,
+      navHeight: nav?.height ?? 0,
+      composerHeight: composer?.height ?? 0,
+      actionHeight: actions?.height ?? 0,
+      actionBottom: actions?.bottom ?? null,
+      transcriptOverflowY: transcriptStyle?.overflowY ?? "",
+      transcriptClientHeight: transcript?.clientHeight ?? 0,
+      transcriptScrollHeight: transcript?.scrollHeight ?? 0,
+      navigationVariable: parseFloat(root.getPropertyValue("--desk-navigation-height")) || 0,
+      composerVariable: parseFloat(root.getPropertyValue("--desk-composer-height")) || 0,
+      actionVariable: parseFloat(root.getPropertyValue("--desk-action-height")) || 0,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(layout.navTop).not.toBeNull();
+  expect(layout.actionBottom).not.toBeNull();
+  expect(layout.navigationVariable).toBeCloseTo(layout.navHeight, 0);
+  expect(layout.composerVariable).toBeCloseTo(layout.composerHeight, 0);
+  expect(layout.actionVariable).toBeCloseTo(layout.actionHeight, 0);
+  expect(layout.transcriptOverflowY).toBe("auto");
+  expect(layout.actionBottom).toBeLessThanOrEqual(layout.navTop + 1);
+  if (layout.composerHeight + layout.navHeight > layout.viewportHeight && layout.transcriptScrollHeight > layout.transcriptClientHeight) {
+    // A tall composer keeps a real transcript scroll container; the action
+    // row remains a sibling above the fixed navigation instead of becoming
+    // the hidden scroll target beneath it.
+    expect(layout.transcriptClientHeight).toBeGreaterThan(0);
+    const scrollState = await page.locator("#desk-transcript").evaluate((element) => {
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+      return { scrollTop: element.scrollTop, scrollable: element.scrollHeight > element.clientHeight };
+    });
+    expect(scrollState.scrollable).toBe(true);
+    expect(scrollState.scrollTop).toBeGreaterThan(0);
+    const actionBottom = await page.locator(".composer-actions").evaluate((element) => element.getBoundingClientRect().bottom);
+    const navTop = await page.locator(".desk-navigation").evaluate((element) => element.getBoundingClientRect().top);
+    expect(actionBottom).toBeLessThanOrEqual(navTop + 1);
+  }
+}
+
+async function expectMobileUtilityHeaderClearance(page) {
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    document.querySelector("main")?.scrollTo(0, 0);
+  });
+  const metrics = await page.evaluate(() => {
+    const brand = document.querySelector(".brand")?.getBoundingClientRect();
+    const palette = document.querySelector("#palette-open")?.getBoundingClientRect();
+    const header = document.querySelector(".today-header")?.getBoundingClientRect();
+    return {
+      brand: brand && { left: brand.left, right: brand.right, top: brand.top, bottom: brand.bottom },
+      palette: palette && { left: palette.left, right: palette.right, top: palette.top, bottom: palette.bottom },
+      header: header && { top: header.top, bottom: header.bottom },
+    };
+  });
+  expect(metrics.brand).not.toBeNull();
+  expect(metrics.palette).not.toBeNull();
+  expect(metrics.header).not.toBeNull();
+  expect(metrics.brand.bottom).toBeLessThanOrEqual(metrics.header.top + 1);
+  expect(metrics.palette.bottom).toBeLessThanOrEqual(metrics.header.top + 1);
+  expect(metrics.brand.right).toBeLessThanOrEqual(metrics.palette.left);
+  expect(Math.max(metrics.brand.bottom, metrics.palette.bottom) - Math.min(metrics.brand.top, metrics.palette.top)).toBeLessThanOrEqual(64);
+}
+
+async function expectLastFocusableClear(page, sectionSelector) {
+  const last = page.locator(`${sectionSelector} a[href]:visible, ${sectionSelector} button:not([disabled]):visible, ${sectionSelector} input:not([disabled]):visible, ${sectionSelector} select:not([disabled]):visible, ${sectionSelector} textarea:not([disabled]):visible`).last();
+  await expect(last).toBeVisible();
+  await last.focus();
+  await expect(last).toBeFocused();
+  await last.scrollIntoViewIfNeeded();
+  const metrics = await last.evaluate((element) => {
+    const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    return {
+      nav: nav && { left: nav.left, right: nav.right, top: nav.top, bottom: nav.bottom },
+      rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
+  });
+  expect(metrics.nav).not.toBeNull();
+  expect(metrics.rect.top, `${sectionSelector} last focusable top`).toBeGreaterThanOrEqual(0);
+  expect(metrics.rect.bottom, `${sectionSelector} last focusable bottom`).toBeLessThanOrEqual(metrics.viewport.height + 1);
+  expect(metrics.rect.bottom, `${sectionSelector} last focusable above navigation`).toBeLessThanOrEqual(metrics.nav.top + 1);
+  expect(rectIntersects(metrics.rect, metrics.nav), `${sectionSelector} last focusable intersects navigation`).toBe(false);
+}
+
+test("Capabilities actions are compact, touch-sized, and honest at desktop and mobile widths", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit Capabilities geometry contract once.");
+  for (const viewport of [{ width: 1470, height: 1000 }, { width: 375, height: 812 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("capabilities"));
+    await openCapabilityTab(page, "Models");
+    const cards = page.locator("#capability-models .capability-card");
+    await expect(cards.first()).toBeVisible();
+    const geometry = await cards.first().evaluate((card) => {
+      const row = card.querySelector(".waffle-fragment-actions");
+      const cardRect = card.getBoundingClientRect();
+      const buttons = [...card.querySelectorAll(".waffle-fragment-actions button")].map((button) => {
+        const rect = button.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, top: rect.top, left: rect.left, right: rect.right };
+      });
+      return {
+        rowDisplay: row && getComputedStyle(row).display,
+        cardWidth: cardRect.width,
+        buttons,
+      };
+    });
+    expect(geometry.rowDisplay).toBe("flex");
+    expect(geometry.buttons).toHaveLength(2);
+    for (const button of geometry.buttons) {
+      expect(button.height).toBeGreaterThanOrEqual(44);
+      expect(button.width).toBeLessThan(geometry.cardWidth * 0.9);
+    }
+    if (viewport.width === 1470) {
+      expect(Math.abs(geometry.buttons[0].top - geometry.buttons[1].top)).toBeLessThanOrEqual(1);
+    }
+
+    const defaultCard = cards.filter({ hasText: "Waffle-wide default" }).first();
+    await expect(defaultCard.getByRole("button", { name: "Default", exact: true })).toBeDisabled();
+    await expect(defaultCard.getByRole("button", { name: "Default", exact: true })).toHaveAttribute("aria-pressed", "true");
+    const utilityCard = cards.filter({ hasText: "Utility model" }).first();
+    await expect(utilityCard.getByRole("button", { name: "Utility model", exact: true })).toBeDisabled();
+    await expect(utilityCard.getByRole("button", { name: "Utility model", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+    for (const [tab, listID] of [["Skills", "#capability-skills"], ["Tools & connections", "#capability-connections"]]) {
+      await page.goto(deskURL("capabilities"));
+      await openCapabilityTab(page, tab);
+      const actionRow = page.locator(`${listID} .capability-card .waffle-fragment-actions`).first();
+      if (await actionRow.count() === 0) {
+        continue;
+      }
+      await expect(actionRow).toBeVisible();
+      const rowMetrics = await actionRow.evaluate((row) => {
+        const button = row.querySelector("button");
+        const rect = button?.getBoundingClientRect();
+        return { display: getComputedStyle(row).display, height: rect?.height ?? 0, width: rect?.width ?? 0 };
+      });
+      expect(rowMetrics.display).toBe("flex");
+      expect(rowMetrics.height).toBeGreaterThanOrEqual(44);
+      expect(rowMetrics.width).toBeLessThan(geometry.cardWidth * 0.9);
+    }
+  }
+});
+
+test("shared navigation reserves its measured bar and clears every section at required widths", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit fixed-navigation contract once.");
+  // The fixture closes Today ownership when navigating sections; its next
+  // attach reports the expected recovery 404 before opening a fresh turn.
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  const widths = [
+    { width: 320, height: 812 },
+    { width: 375, height: 812 },
+    { width: 768, height: 1000 },
+  ];
+  for (const viewport of widths) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("today"));
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    await expectMobileUtilityHeaderClearance(page);
+    await expectControlsClearOfNavigation(page, ["#desk-message", "#desk-send", "#desk-cancel"]);
+    await expectTodayComposerClearance(page);
+    await expect(page.locator("#palette-open")).toBeVisible();
+    await page.locator("#palette-open").click();
+    await expect(page.locator("#command-palette")).toBeVisible();
+    expect(await page.locator("#command-palette").evaluate((element) => Number.parseInt(getComputedStyle(element).zIndex, 10))).toBeGreaterThan(
+      await page.locator(".desk-navigation").evaluate((element) => Number.parseInt(getComputedStyle(element).zIndex, 10)),
+    );
+    await page.keyboard.press("Escape");
+
+    for (const [section, selector] of [
+      ["today", ".today"],
+      ["tasks", ".tasks"],
+      ["workspaces", ".workspaces"],
+      ["memory", ".memory"],
+      ["capabilities", "#desk-capabilities"],
+    ]) {
+      await page.goto(deskURL(section));
+      if (section === "today") {
+        await expect(page.locator("#desk-phase")).toHaveText("Ready");
+      } else if (section === "capabilities") {
+        await openCapabilityTab(page, "Models");
+        await expect(page.locator("#capability-models .capability-card").first()).toBeVisible();
+        await expectControlsClearOfNavigation(page, ["#capability-models .capability-card .waffle-fragment-actions button"]);
+      } else if (section === "tasks") {
+        await expect(page.locator("#tasks-list")).toHaveAttribute("data-waffle-fragment", "true");
+        const scheduleDialog = page.locator("#task-schedule-dialog");
+        await page.locator("#task-schedule-open").click();
+        await expect(scheduleDialog).toBeVisible();
+        await expect.poll(() => scheduleDialog.evaluate((element) => element.matches(":modal"))).toBe(true);
+        await scheduleDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+        await expect(scheduleDialog).toBeHidden();
+      } else if (section === "workspaces") {
+        await expect(page.locator("#workspaces-list")).toHaveAttribute("data-waffle-fragment", "true");
+      }
+      await expectLastFocusableClear(page, selector);
+    }
+  }
+});
+
+test("Today keeps a long transcript scrollable while the real composer remains above navigation", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit dynamic composer contract once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  const widths = [
+    { width: 320, height: 812 },
+    { width: 375, height: 812 },
+    { width: 768, height: 1000 },
+  ];
+  for (const viewport of widths) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("today"));
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    await page.locator("#desk-message").fill("/");
+    await expect(page.locator("#desk-slash-menu")).toBeVisible();
+    const initialTextareaHeight = await page.locator("#desk-message").evaluate((element) => element.getBoundingClientRect().height);
+    await page.locator("#desk-message").fill(`${"A deliberately long composer draft ".repeat(160)}/`);
+    const grownTextareaHeight = await page.locator("#desk-message").evaluate((element) => element.getBoundingClientRect().height);
+    expect(grownTextareaHeight).toBeGreaterThan(initialTextareaHeight);
+    await expect(page.locator("#desk-slash-menu")).toBeVisible();
+    await page.locator("#desk-transcript").evaluate((transcript) => {
+      transcript.replaceChildren(...Array.from({ length: 30 }, (_, index) => {
+        const row = document.createElement("p");
+        row.className = "waffle-message assistant-message";
+        row.textContent = `Injected long transcript row ${index}: ${"A settled response that must remain inside the shrinking transcript. ".repeat(16)}`;
+        return row;
+      }));
+    });
+    await expect.poll(() => page.locator("#desk-transcript").evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))).toEqual(expect.objectContaining({ clientHeight: expect.any(Number) }));
+    const transcriptState = await page.locator("#desk-transcript").evaluate((element) => {
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(transcriptState.scrollHeight).toBeGreaterThan(transcriptState.clientHeight);
+    expect(transcriptState.scrollTop).toBeGreaterThan(0);
+    const geometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) {
+          return null;
+        }
+        const bounds = element.getBoundingClientRect();
+        return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+      };
+      const root = getComputedStyle(document.documentElement);
+      const slashMenu = document.querySelector("#desk-slash-menu");
+      const slashBounds = slashMenu?.getBoundingClientRect();
+      const conversationBounds = document.querySelector(".conversation")?.getBoundingClientRect();
+      const columnsBounds = document.querySelector(".today-columns")?.getBoundingClientRect();
+      const slashVisibleTop = Math.max(slashBounds?.top ?? 0, conversationBounds?.top ?? 0, columnsBounds?.top ?? 0, 0);
+      const slashVisibleBottom = Math.min(
+        slashBounds?.bottom ?? 0,
+        conversationBounds?.bottom ?? 0,
+        columnsBounds?.bottom ?? 0,
+        window.innerHeight,
+      );
+      return {
+        message: rect("#desk-message"),
+        composer: rect("#desk-composer"),
+        actions: rect(".composer-actions"),
+        send: rect("#desk-send"),
+        cancel: rect("#desk-cancel"),
+        transcript: rect("#desk-transcript"),
+        slashMenu: rect("#desk-slash-menu"),
+        conversation: rect(".conversation"),
+        todayColumns: rect(".today-columns"),
+        navigation: rect(".desk-navigation"),
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        topClearance: parseFloat(root.getPropertyValue("--desk-top-clearance")) || 0,
+        slashMenuStickyTop: slashMenu ? parseFloat(getComputedStyle(slashMenu).top) || 0 : 0,
+        slashMenuVisibleHeight: Math.max(0, slashVisibleBottom - slashVisibleTop),
+        slashMenuPainted: slashBounds && slashVisibleBottom > slashVisibleTop
+          ? slashMenu.contains(document.elementFromPoint(
+              slashBounds.left + slashBounds.width / 2,
+              slashVisibleTop + (slashVisibleBottom - slashVisibleTop) / 2,
+            ))
+          : false,
+      };
+    });
+    expect(geometry.slashMenu).not.toBeNull();
+    expect(geometry.conversation).not.toBeNull();
+    expect(geometry.navigation).not.toBeNull();
+    expect(geometry.slashMenuStickyTop, `${viewport.width}px slash menu keeps a positive sticky inset`).toBeGreaterThan(0);
+    expect(geometry.slashMenuVisibleHeight, `${viewport.width}px slash menu retains a painted touch row`).toBeGreaterThanOrEqual(44);
+    expect(geometry.slashMenuPainted, `${viewport.width}px slash menu is painted inside the compact scrollport`).toBe(true);
+    expect(geometry.slashMenu.top, `${viewport.width}px slash menu stays inside the clipped conversation top`).toBeGreaterThanOrEqual(
+      geometry.conversation.top - 1,
+    );
+    expect(geometry.slashMenu.bottom, `${viewport.width}px slash menu stays inside the clipped conversation bottom`).toBeLessThanOrEqual(
+      geometry.conversation.bottom + 1,
+    );
+    const simultaneousTargets = ["message", "actions", "send", "cancel", "slashMenu"];
+    for (const target of simultaneousTargets) {
+      expect(geometry[target], `${target} is visible in the settled geometry`).not.toBeNull();
+      expect(geometry[target].top, `${target} top`).toBeGreaterThanOrEqual(geometry.topClearance - 1);
+      expect(geometry[target].top, `${target} viewport top`).toBeGreaterThanOrEqual(-1);
+      expect(geometry[target].bottom, `${target} viewport bottom`).toBeLessThanOrEqual(geometry.viewport.height + 1);
+      expect(geometry[target].bottom, `${target} above navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+      expect(rectIntersects(geometry[target], geometry.navigation), `${target} intersects navigation`).toBe(false);
+    }
+    expect(geometry.composer).not.toBeNull();
+    expect(geometry.transcript).not.toBeNull();
+    await expectTodayComposerClearance(page);
+    await expectMobileUtilityHeaderClearance(page);
+    await page.locator("#palette-open").click();
+    await expect(page.locator("#command-palette")).toBeVisible();
+    await page.keyboard.press("Escape");
+    const trailing = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const shell = document.querySelector(".desk-shell");
+      const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+      return {
+        documentHeight: document.documentElement.scrollHeight,
+        bodyHeight: document.body.scrollHeight,
+        mainHeight: main?.scrollHeight ?? 0,
+        mainRect: main ? (() => { const rect = main.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, height: rect.height }; })() : null,
+        shellHeight: shell?.scrollHeight ?? 0,
+        shellRect: shell ? (() => { const rect = shell.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, height: rect.height }; })() : null,
+        todayRect: (() => { const rect = document.querySelector(".today")?.getBoundingClientRect(); return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height } : null; })(),
+        columnsRect: (() => { const rect = document.querySelector(".today-columns")?.getBoundingClientRect(); return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height } : null; })(),
+        navHeight: nav?.height ?? 0,
+        viewportHeight: window.innerHeight,
+      };
+    });
+    expect(trailing.bodyHeight - trailing.viewportHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(24);
+    expect(trailing.shellHeight - trailing.mainHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(trailing.navHeight + 24);
+  }
+});
+
+test("approved Waffle identity stays visible in Hearth and Evening at desktop and mobile sizes", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the shared identity render contract once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  for (const theme of ["light", "dark"]) {
+    for (const viewport of [{ width: 1414, height: 786 }, { width: 375, height: 812 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto(deskURL("today"));
+      if (theme === "dark") {
+        await page.getByLabel("Theme").selectOption("dark");
+      }
+      const mark = page.locator(".brand-waffle");
+      await expect(mark).toBeVisible();
+      await expect(mark).toHaveAttribute("alt", "");
+      await expect(mark).toHaveAttribute("aria-hidden", "true");
+      const rendered = await mark.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, naturalWidth: element.naturalWidth, src: element.getAttribute("src") };
+      });
+      expect(rendered.width).toBe(28);
+      expect(rendered.height).toBe(28);
+      expect(rendered.naturalWidth).toBe(128);
+      expect(rendered.src).toContain("/desk/assets/waffle-mark-sitting.png?v=");
+      await expect(page.getByRole("link", { name: "Waffle Desk home", exact: true })).toHaveCount(1);
+    }
+  }
+});
+
+test("structured empty state stays bounded and quiet in the shared Hearth and Evening shell", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the structured empty-state render contract once.");
+  const viewports = [
+    { width: 1414, height: 786 },
+    { width: 375, height: 812 },
+    { width: 320, height: 812 },
+  ];
+  for (const theme of ["light", "dark"]) {
+    for (const viewport of viewports) {
+      await page.setViewportSize(viewport);
+      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=0&shell=1`);
+      await expect(page.locator(".desk-shell")).toBeVisible();
+      await expect(page.locator(".desk-navigation")).toBeVisible();
+      const empty = page.locator(".waffle-empty-state");
+      await expect(empty).toBeVisible();
+      const rendered = await empty.evaluate((element) => {
+        const image = element.querySelector("img");
+        const rect = element.getBoundingClientRect();
+        const imageRect = image.getBoundingClientRect();
+        const rootStyle = getComputedStyle(document.documentElement);
+        return {
+          role: element.getAttribute("role"),
+          live: element.getAttribute("aria-live"),
+          labelledBy: element.getAttribute("aria-labelledby"),
+          width: rect.width,
+          imageWidth: imageRect.width,
+          imageHeight: imageRect.height,
+          imageLoading: image.getAttribute("loading"),
+          imageDecoding: image.getAttribute("decoding"),
+          imageAlt: image.getAttribute("alt"),
+          imageHidden: image.getAttribute("aria-hidden"),
+          canvas: rootStyle.getPropertyValue("--surface-canvas").trim(),
+          scrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(rendered.role).toBe("region");
+      expect(rendered.role).not.toBe("status");
+      expect(rendered.live).toBeNull();
+      expect(rendered.labelledBy).toBe("fixture-empty-state-title");
+      expect(rendered.imageLoading).toBe("lazy");
+      expect(rendered.imageDecoding).toBe("async");
+      expect(rendered.imageAlt).toBe("");
+      expect(rendered.imageHidden).toBe("true");
+      expect(rendered.imageWidth).toBeGreaterThanOrEqual(120);
+      expect(rendered.imageWidth).toBeLessThanOrEqual(160);
+      expect(rendered.scrollWidth).toBeLessThanOrEqual(rendered.viewportWidth);
+      await expectNoHorizontalOverflow(page);
+      await expect(empty.locator(".action-primary")).toBeVisible();
+      await expect(empty.locator(".action-quiet")).toBeVisible();
+      const actionForm = empty.locator("form").first();
+      const actionGeometry = await empty.evaluate((element) => {
+        const rect = (selector) => {
+          const node = element.querySelector(selector);
+          const bounds = node.getBoundingClientRect();
+          return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+        };
+        const region = element.getBoundingClientRect();
+        const copy = element.querySelector(".waffle-empty-state-copy").getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+        const paddingRight = Number.parseFloat(style.paddingRight) || 0;
+        const forms = [...element.querySelectorAll(".waffle-empty-state-actions form")].map((form) => {
+          const bounds = form.getBoundingClientRect();
+          const button = form.querySelector("button").getBoundingClientRect();
+          return {
+            className: form.className,
+            left: bounds.left,
+            right: bounds.right,
+            width: bounds.width,
+            buttonWidth: button.width,
+          };
+        });
+        return {
+          region: { left: region.left, right: region.right, top: region.top, bottom: region.bottom },
+          content: { left: region.left + paddingLeft, right: region.right - paddingRight },
+          copy: { left: copy.left, right: copy.right, top: copy.top, bottom: copy.bottom },
+          forms,
+          inputs: [...element.querySelectorAll("form input:not([type=hidden])")].map((input) => {
+            const bounds = input.getBoundingClientRect();
+            return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+          }),
+          viewportWidth: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      });
+      expect(actionGeometry.forms).toHaveLength(2);
+      const inputForm = actionGeometry.forms[0];
+      const fieldsOnlyForm = actionGeometry.forms[1];
+      expect(inputForm.className).toContain("waffle-action-form-with-inputs");
+      expect(fieldsOnlyForm.className).not.toContain("waffle-action-form-with-inputs");
+      expect(inputForm.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+      expect(inputForm.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      expect(actionGeometry.copy.left).toBeGreaterThanOrEqual(actionGeometry.content.left - 1);
+      expect(actionGeometry.copy.right).toBeLessThanOrEqual(actionGeometry.content.right + 1);
+      expect(inputForm.left).toBeGreaterThanOrEqual(actionGeometry.content.left - 1);
+      expect(inputForm.right).toBeLessThanOrEqual(actionGeometry.content.right + 1);
+      expect(fieldsOnlyForm.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+      expect(fieldsOnlyForm.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      expect(fieldsOnlyForm.width).toBeLessThan(actionGeometry.copy.right - actionGeometry.copy.left);
+      for (const input of actionGeometry.inputs) {
+        expect(input.left).toBeGreaterThanOrEqual(actionGeometry.copy.left - 1);
+        expect(input.right).toBeLessThanOrEqual(actionGeometry.copy.right + 1);
+      }
+      expect(actionGeometry.scrollWidth).toBeLessThanOrEqual(actionGeometry.viewportWidth);
+      await actionForm.getByLabel("Note", { exact: true }).fill("review payload");
+      const filledInputGeometry = await empty.evaluate((element) => {
+        const style = getComputedStyle(element);
+        const region = element.getBoundingClientRect();
+        const contentLeft = region.left + (Number.parseFloat(style.paddingLeft) || 0);
+        const contentRight = region.right - (Number.parseFloat(style.paddingRight) || 0);
+        const form = element.querySelector("form").getBoundingClientRect();
+        const input = element.querySelector("form input:not([type=hidden])").getBoundingClientRect();
+        return {
+          form: { left: form.left, right: form.right },
+          input: { left: input.left, right: input.right },
+          content: { left: contentLeft, right: contentRight },
+          scrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(filledInputGeometry.form.left).toBeGreaterThanOrEqual(filledInputGeometry.content.left - 1);
+      expect(filledInputGeometry.form.right).toBeLessThanOrEqual(filledInputGeometry.content.right + 1);
+      expect(filledInputGeometry.input.left).toBeGreaterThanOrEqual(filledInputGeometry.content.left - 1);
+      expect(filledInputGeometry.input.right).toBeLessThanOrEqual(filledInputGeometry.content.right + 1);
+      expect(filledInputGeometry.scrollWidth).toBeLessThanOrEqual(filledInputGeometry.viewportWidth);
+      const actionRequest = page.waitForRequest((request) => request.url().endsWith("/api/v1/desk/test/empty-action"));
+      await actionForm.getByRole("button", { name: "Start with Tasks", exact: true }).click();
+      const submitted = await actionRequest;
+      expect(submitted.method()).toBe("POST");
+      expect(submitted.headers()["content-type"]).toContain("application/json");
+      expect(JSON.parse(submitted.postData())).toMatchObject({ fixture: "empty-state", note: "review payload" });
+      const secondaryRequest = page.waitForRequest((request) => request.url().endsWith("/api/v1/desk/test/empty-action") && request !== submitted);
+      await empty.locator("form").nth(1).getByRole("button", { name: "Review later", exact: true }).click();
+      const secondarySubmitted = await secondaryRequest;
+      expect(secondarySubmitted.method()).toBe("POST");
+      expect(secondarySubmitted.headers()["content-type"]).toContain("application/json");
+      expect(JSON.parse(secondarySubmitted.postData())).toMatchObject({ fixture: "empty-state-secondary" });
+      const emptySnapshot = `desk-empty-state-${theme}-${viewport.width}.png`;
+      if (viewport.width !== 320 && hasVisualBaseline(emptySnapshot)) {
+        await expect(page).toHaveScreenshot(emptySnapshot, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      }
+
+      await page.goto(`${baseURL}/test/empty-state?theme=${theme}&populated=1&shell=1`);
+      await expect(page.locator(".desk-shell")).toBeVisible();
+      await expect(page.locator(".fixture-populated-state")).toBeVisible();
+      await expect(page.locator(".waffle-empty-state")).toHaveCount(0);
+      await expectNoHorizontalOverflow(page);
+      const populatedSnapshot = `desk-populated-state-${theme}-${viewport.width}.png`;
+      if (viewport.width !== 320 && hasVisualBaseline(populatedSnapshot)) {
+        await expect(page).toHaveScreenshot(populatedSnapshot, { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.005 });
+      }
+    }
+  }
+  await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0&shell=1`);
+  const lightCanvas = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--surface-canvas").trim());
+  await page.goto(`${baseURL}/test/empty-state?theme=dark&populated=0&shell=1`);
+  const darkCanvas = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--surface-canvas").trim());
+  expect(darkCanvas).not.toBe(lightCanvas);
+});
+
+test("structured empty state reflows at an honest 200 percent zoom equivalent", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit zoom contract once.");
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto(`${baseURL}/test/empty-state?theme=light&populated=0&shell=1`);
+  const before = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    clientWidth: document.documentElement.clientWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+    maxWidth200: window.matchMedia("(max-width: 200px)").matches,
+  }));
+  const cdp = await page.context().newCDPSession(page);
+  // A 200% browser zoom gives a 375px physical viewport roughly 188 CSS px
+  // wide. Device metrics emulation applies that layout viewport directly;
+  // page-scale-factor alone changes compositor scale without reflowing CSS.
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 188,
+    height: 406,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 375,
+    screenHeight: 812,
+  });
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
+  const after = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    clientWidth: document.documentElement.clientWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+    maxWidth200: window.matchMedia("(max-width: 200px)").matches,
+  }));
+  expect(after.innerWidth).toBeLessThan(before.innerWidth);
+  expect(after.innerHeight).toBeLessThan(before.innerHeight);
+  expect(after.clientWidth).toBe(after.innerWidth);
+  expect(after.visualViewportWidth).toBe(after.innerWidth);
+  expect(after.maxWidth200).toBe(true);
+  expect(before.maxWidth200).toBe(false);
+  const overflow = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    clientWidth: document.documentElement.clientWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+  }));
+  expect(overflow.documentScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
+  expect(overflow.bodyScrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.innerWidth);
+  const initial = await page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        bottom: bounds.bottom,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const main = document.querySelector("main");
+    const scrollingElement = document.scrollingElement;
+    return {
+      mainScrollTop: main?.scrollTop ?? 0,
+      documentScrollTop: scrollingElement?.scrollTop ?? 0,
+      windowScrollY: window.scrollY,
+      empty: rect(".waffle-empty-state"),
+      image: rect(".waffle-empty-state img"),
+      primary: rect(".waffle-empty-state .action-primary"),
+      navigation: rect(".desk-navigation"),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    };
+  });
+  expect(initial.mainScrollTop).toBe(0);
+  expect(initial.documentScrollTop).toBe(0);
+  expect(initial.windowScrollY).toBe(0);
+  expect(initial.empty).not.toBeNull();
+  expect(initial.primary).not.toBeNull();
+  expect(initial.navigation).not.toBeNull();
+  expect(initial.primary.left).toBeGreaterThanOrEqual(0);
+  expect(initial.primary.right).toBeLessThanOrEqual(initial.viewport.width);
+  expect(initial.primary.top).toBeGreaterThanOrEqual(0);
+  expect(initial.primary.bottom, JSON.stringify(initial)).toBeLessThanOrEqual(initial.navigation.top + 1);
+  expect(initial.image).not.toBeNull();
+  expect(initial.image.width, JSON.stringify(initial)).toBeGreaterThan(0);
+  expect(initial.image.height, JSON.stringify(initial)).toBeGreaterThan(0);
+  expect(initial.image.left, JSON.stringify(initial)).toBeGreaterThanOrEqual(0);
+  expect(initial.image.right, JSON.stringify(initial)).toBeLessThanOrEqual(initial.viewport.width);
+  const metrics = await page.locator(".waffle-empty-state").evaluate((empty) => {
+    const region = empty.getBoundingClientRect();
+    const image = empty.querySelector("img").getBoundingClientRect();
+    const primary = empty.querySelector(".action-primary").getBoundingClientRect();
+    const nav = document.querySelector(".desk-navigation").getBoundingClientRect();
+    return {
+      region: { left: region.left, right: region.right },
+      image: { width: image.width, height: image.height, right: image.right },
+      primary: { left: primary.left, top: primary.top, bottom: primary.bottom, right: primary.right },
+      nav: { top: nav.top, bottom: nav.bottom },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      scrollWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(metrics.image.width).toBeLessThanOrEqual(320);
+  expect(metrics.image.height).toBeLessThanOrEqual(320);
+  expect(metrics.region.left).toBeGreaterThanOrEqual(0);
+  expect(metrics.region.right).toBeLessThanOrEqual(metrics.viewport.width);
+  expect(metrics.primary.left).toBeGreaterThanOrEqual(0);
+  expect(metrics.primary.right).toBeLessThanOrEqual(metrics.viewport.width);
+  expect(metrics.primary.top).toBeGreaterThanOrEqual(0);
+  expect(metrics.primary.bottom).toBeLessThanOrEqual(metrics.nav.top + 1);
+  expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewport.width);
+});
+
+test("compact Today opens at the top while preserving message focus", async ({ page }) => {
+  test.skip(!["tablet", "mobile", "narrow"].includes(test.info().project.name), "Run the compact initial-state contract on tablet and mobile widths.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  await page.goto(deskURL("today"));
+  await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  const metrics = await page.evaluate(() => {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+      const bounds = element.getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right };
+    };
+    const main = document.querySelector("main");
+    const columns = document.querySelector(".today-columns");
+    return {
+      activeElement: document.activeElement?.id || "",
+      mainScrollTop: main?.scrollTop ?? 0,
+      columnsScrollTop: columns?.scrollTop ?? 0,
+      main: rect("main"),
+      today: rect(".today"),
+      columns: rect(".today-columns"),
+      conversation: rect(".conversation"),
+      transcript: rect("#desk-transcript"),
+      context: rect(".task-context"),
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(metrics.activeElement).toBe("desk-message");
+  expect(metrics.mainScrollTop).toBe(0);
+  expect(metrics.columnsScrollTop).toBe(0);
+  expect(metrics.columns).not.toBeNull();
+  expect(metrics.conversation).not.toBeNull();
+  expect(metrics.transcript).not.toBeNull();
+  expect(metrics.context).not.toBeNull();
+  expect(metrics.conversation.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
+  expect(metrics.transcript.top).toBeGreaterThanOrEqual(metrics.conversation.top - 1);
+  expect(metrics.context.top).toBeGreaterThanOrEqual(metrics.columns.top - 1);
+  expect(metrics.today.top).toBeGreaterThanOrEqual(metrics.main.top - 1);
+  expect(metrics.today.bottom).toBeGreaterThan(metrics.columns.top);
+  expect(metrics.columns.top).toBeGreaterThanOrEqual(0);
+  expect(metrics.columns.bottom).toBeGreaterThan(metrics.columns.top);
+});
 
 // Visual baselines (#469): the five destinations at every configured width,
 // captured on a fresh fixture so the renders are deterministic. Baselines are
@@ -865,7 +1636,7 @@ test("command palette opens everywhere, searches, and invokes existing actions",
   // Navigating between sections closes the chat owner on pagehide; the next
   // Today load reattaches, finds the closed client, and silently opens fresh.
   // The resulting 404 is the expected recovery path, not a regression.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const palette = page.locator("#command-palette");
@@ -1636,7 +2407,7 @@ test("Today reload and navigate-away recovery returns to a usable single desk", 
   test.skip(test.info().project.name !== "desktop", "Run the ownership lifecycle once.");
   // The navigate-away step closes the owner on pagehide; returning to Today
   // reattaches, finds the closed client, and silently opens fresh (#454).
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   const before = await page.evaluate(() =>
@@ -1747,7 +2518,7 @@ test("session model remains scoped away from the Waffle-wide default", async ({ 
   test.skip(test.info().project.name !== "desktop", "Run the stateful scope flow once.");
   // The reload races the keepalive close fired on pagehide; the reattach
   // finds the retiring client and silently opens fresh.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   await page.goto(deskURL("today"));
   const sessionModel = page.getByLabel("Session model");
   await expect(sessionModel).toBeEnabled();
@@ -1953,7 +2724,7 @@ test("memory attach uses a session picker with stale-selection recovery", async 
   // drops the invalid option instead of leaving it resubmittable.
   await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?empty=1`);
   try {
-    allowDiagnostics("404", "Response Status Error Code 404");
+    allowExpectedResponse(404, "/api/v1/desk/memory/attach");
     await picker.selectOption("session-primary");
     await attach.click();
     await expect(page.locator("#memory-attach-status")).toContainText(
@@ -2071,7 +2842,7 @@ test("keyboard navigation reaches every destination and dialog returns focus", a
   test.skip(test.info().project.name !== "desktop", "Run the keyboard flow once.");
   // Each destination hop closes the chat owner on pagehide; the next Today
   // visit reattaches, finds the closed client, and silently opens fresh.
-  allowDiagnostics("404", "Response Status Error Code 404");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
   const destinations = [
     ["Today", "today", ".today"],
     ["Tasks", "tasks", ".tasks"],
@@ -2358,8 +3129,25 @@ test("200 percent zoom preserves keyboard-discoverable content", async ({ page }
   test.skip(test.info().project.name !== "desktop", "Run the explicit zoom gate once.");
   await page.setViewportSize({ width: 735, height: 500 });
   await page.goto(deskURL("today"));
+  const before = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+  }));
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 368,
+    height: 250,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 735,
+    screenHeight: 500,
+  });
+  const after = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    visualViewportWidth: window.visualViewport?.width ?? 0,
+  }));
+  expect(after.innerWidth).toBeLessThan(before.innerWidth);
+  expect(after.visualViewportWidth).toBe(after.innerWidth);
 
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeAttached();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();

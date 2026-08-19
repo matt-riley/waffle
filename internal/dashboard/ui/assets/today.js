@@ -2262,7 +2262,7 @@ async function openDesk({ forceNewSession = false } = {}) {
       active === document.documentElement ||
       active === elements.message
     ) {
-      elements.message.focus();
+      elements.message.focus({ preventScroll: true });
     }
   } catch (error) {
     if (generation !== state.generation) {
