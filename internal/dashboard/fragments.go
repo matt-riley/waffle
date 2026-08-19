@@ -140,7 +140,12 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 		fragment.Trigger = "waffle:refresh from:body"
 		return ui.FragmentList(fragment)
 	case WorkspaceFragmentSnapshot:
-		fragment := workspacesFragment(typed.Snapshot, typed.Git)
+		fragment := workspacesFragment(typed.Snapshot, typed.Git, typed.Partial)
+		fragment.GetURL = "/api/v1/desk/workspaces"
+		fragment.Trigger = "waffle:refresh from:body"
+		return ui.FragmentList(fragment)
+	case workspacesUnavailable:
+		fragment := workspacesFailureFragment()
 		fragment.GetURL = "/api/v1/desk/workspaces"
 		fragment.Trigger = "waffle:refresh from:body"
 		return ui.FragmentList(fragment)
@@ -152,7 +157,7 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 			PreviewURL:   "/api/v1/desk/workspaces/" + url.PathEscape(typed.Workspace.ID) + "/close",
 			PreviewToken: typed.PreviewToken,
 			Eligible:     typed.Eligible,
-			FocusID:      "workspace-close-" + typed.Workspace.ID,
+			FocusID:      "workspace-more-" + typed.Workspace.ID,
 		})
 	case WorkspaceGitView:
 		return ui.FragmentList(workspaceGitFragment(typed))
@@ -725,8 +730,11 @@ func taskFilterFragments(active TaskFilter) []ui.FragmentFilter {
 	return result
 }
 
-func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitView) ui.FragmentView {
+func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitView, partial ...bool) ui.FragmentView {
 	fragment := ui.FragmentView{ID: "workspaces-list", Class: "workspaces-grid", Empty: "No guarded workspaces are open."}
+	if len(partial) > 0 && partial[0] {
+		fragment.Status = "Some workspace evidence is temporarily unavailable."
+	}
 	summary := map[string]int{}
 	for _, workspace := range snapshot.Workspaces {
 		summary[workspace.Status]++
@@ -736,41 +744,85 @@ func workspacesFragment(snapshot WorkspaceSnapshot, git map[string]WorkspaceGitV
 		Class: "workspaces-summary",
 		Text:  workspaceSummaryLabel(summary),
 	})
+	if len(snapshot.Workspaces) == 0 {
+		state, _ := ui.NewWaffleEmptyStateView(
+			ui.EmptyStateWorkspaces,
+			"No guarded workspaces yet",
+			"Open a repository to give Waffle a bounded place to work.",
+			"workspaces-empty-title",
+			nil,
+			nil,
+		)
+		fragment.EmptyState = &state
+	}
 	for _, workspace := range snapshot.Workspaces {
 		// Truthful human empty states: never a blank definition row (#462).
 		fields := []ui.FragmentField{
 			{Label: "Profile", Value: emptyValue(workspace.Profile, "No profile")},
 			{Label: "Network", Value: emptyValue(workspace.Egress, "No network")},
 		}
-		item := ui.FragmentItem{ID: workspace.ID, DataWorkspaceID: workspace.ID, Class: "workspace-card", Kind: workspace.Status, Title: workspace.Repository, Fields: fields}
+		item := ui.FragmentItem{
+			ID: workspace.ID, DataWorkspaceID: workspace.ID, Class: "workspace-card",
+			Kind: workspaceLifecycleDisplayStatus(workspace.Status), KindClass: "workspace-status waffle-fragment-kind", KindAfterTitle: true,
+			Title: workspace.Repository, DetailAfterFields: true, Fields: fields,
+		}
 		if status, ok := git[workspace.ID]; ok && workspace.Status != "closed" {
 			item.DetailClass = "workspace-git"
 			item.Detail = workspaceGitDetail(status)
 		}
 		if workspace.Status == "open" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
-			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Idle", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/idle", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.PrimaryActions = append(item.PrimaryActions, ui.FragmentAction{ID: "workspace-open-" + workspace.ID, Class: "workspace-primary", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.SecondaryActions = append(item.SecondaryActions, ui.FragmentAction{ID: "workspace-idle-" + workspace.ID, Class: "workspace-secondary-action", Label: "Idle", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/idle", Target: "#workspaces-list", Swap: "innerHTML"})
 		}
 		if workspace.Status == "idle" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
-			item.Actions = append(item.Actions, ui.FragmentAction{Class: "workspace-primary", Label: "Resume", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/resume", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.PrimaryActions = append(item.PrimaryActions, ui.FragmentAction{ID: "workspace-resume-" + workspace.ID, Class: "workspace-primary", Label: "Resume", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/resume", Target: "#workspaces-list", Swap: "innerHTML"})
+			item.SecondaryActions = append(item.SecondaryActions, ui.FragmentAction{ID: "workspace-open-" + workspace.ID, Class: "workspace-secondary-action", Label: "Open at Desk", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/select", Target: "#workspaces-list", Swap: "innerHTML"})
 		}
-		if workspace.SessionID != "" {
-			item.Actions = append(item.Actions, ui.FragmentAction{Method: "copy", Value: workspace.SessionID, Label: "Copy session ID"})
+		if workspace.SessionID != "" && workspace.Status != "closed" {
+			item.MoreActions = append(item.MoreActions, ui.FragmentAction{ID: "workspace-copy-" + workspace.ID, Class: "workspace-tertiary-action", Method: "copy", Value: workspace.SessionID, Label: "Copy session ID"})
 		}
 		if workspace.Status != "closed" {
-			item.Actions = append(item.Actions, ui.FragmentAction{ID: "workspace-close-" + workspace.ID, Class: "workspace-danger-action", Label: "Review close", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/close-preview", Target: "#workspace-close-dialog", Swap: "outerHTML"})
+			item.MoreActions = append(item.MoreActions, ui.FragmentAction{ID: "workspace-close-" + workspace.ID, Class: "workspace-danger-action", Label: "Review close", URL: "/api/v1/desk/workspaces/" + url.PathEscape(workspace.ID) + "/close-preview", Target: "#workspace-close-dialog", Swap: "outerHTML"})
+		}
+		if len(item.MoreActions) > 0 {
+			item.MoreActionsID = "workspace-more-" + workspace.ID
+			item.MoreActionsLabel = "More actions for " + workspace.Repository
 		}
 		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
 }
 
+func workspacesFailureFragment() ui.FragmentView {
+	tryAgain := ui.FragmentAction{
+		ID: "workspace-list-try-again", Label: "Try again", Method: "filter",
+		URL: "/api/v1/desk/workspaces", Target: "#workspaces-list", Swap: "outerHTML",
+	}
+	state, _ := ui.NewWaffleEmptyStateView(
+		ui.EmptyStateWorkspaces,
+		"Workspaces are unavailable",
+		"Waffle could not read guarded workspace state. No lifecycle action was taken.",
+		"workspaces-error-title",
+		&tryAgain,
+		nil,
+	)
+	state.NoArtwork = true
+	return ui.FragmentView{
+		ID: "workspaces-list", Class: "workspaces-grid", EmptyState: &state,
+		TextSwaps: []ui.FragmentTextSwap{{ID: "workspaces-summary", Class: "workspaces-summary"}},
+	}
+}
+
 func workspaceSummaryLabel(summary map[string]int) string {
-	order := []string{"open", "idle", "failed", "closed"}
+	normalized := make(map[string]int, len(summary))
+	for status, count := range summary {
+		bucket := workspaceLifecycleDisplayStatus(status)
+		normalized[bucket] += count
+	}
+	order := []string{"open", "idle", "failed", "unknown", "closed"}
 	parts := make([]string, 0, len(order))
 	for _, status := range order {
-		count := summary[status]
+		count := normalized[status]
 		if count == 0 {
 			continue
 		}
@@ -781,6 +833,15 @@ func workspaceSummaryLabel(summary map[string]int) string {
 		return "No guarded workspaces are open."
 	}
 	return strings.Join(parts, " · ")
+}
+
+func workspaceLifecycleDisplayStatus(status string) string {
+	switch status {
+	case "open", "idle", "failed", "closed":
+		return status
+	default:
+		return "unknown"
+	}
 }
 
 func workspaceGitFragment(view WorkspaceGitView) ui.FragmentView {
@@ -954,6 +1015,7 @@ type TaskMutationResponse struct {
 type WorkspaceFragmentSnapshot struct {
 	Snapshot WorkspaceSnapshot           `json:"snapshot"`
 	Git      map[string]WorkspaceGitView `json:"git"`
+	Partial  bool                        `json:"partial,omitempty"`
 }
 
 func taskTimeLabel(value *time.Time) string {

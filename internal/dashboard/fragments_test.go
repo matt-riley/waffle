@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"html"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matt-riley/waffle/internal/dashboard/ui"
 	"github.com/matt-riley/waffle/internal/providerconfig"
 )
 
@@ -410,7 +412,8 @@ func TestWorkspaceSummaryLabel(t *testing.T) {
 		{name: "plural idle", in: map[string]int{"idle": 2}, want: "2 idle"},
 		{name: "mixed", in: map[string]int{"open": 1, "idle": 2, "closed": 1}, want: "1 open · 2 idle · 1 closed"},
 		{name: "failed", in: map[string]int{"failed": 1, "open": 1}, want: "1 open · 1 failed"},
-		{name: "attention ignored", in: map[string]int{"attention": 1, "open": 1}, want: "1 open"},
+		{name: "single unknown", in: map[string]int{"mysterious": 1}, want: "1 unknown"},
+		{name: "mixed unknown", in: map[string]int{"open": 1, "mysterious": 2, "closed": 1}, want: "1 open · 2 unknown · 1 closed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,6 +422,93 @@ func TestWorkspaceSummaryLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkspacesRenderOnePrimaryAndMoreActionsByLifecycle(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        string
+		session       string
+		wantPrimary   string
+		wantSecondary string
+		wantMore      bool
+	}{
+		{name: "open", status: "open", session: "session-open", wantPrimary: "Open at Desk", wantSecondary: "Idle", wantMore: true},
+		{name: "idle", status: "idle", session: "session-idle", wantPrimary: "Resume", wantSecondary: "Open at Desk", wantMore: true},
+		{name: "failed", status: "failed", session: "session-failed", wantMore: true},
+		{name: "unknown", status: "mysterious", session: "session-unknown", wantMore: true},
+		{name: "closed", status: "closed", session: "session-closed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fragment := workspacesFragment(WorkspaceSnapshot{Workspaces: []WorkspaceView{{
+				ID: "ws-" + tc.name, Repository: "owner/" + tc.name, SessionID: tc.session, Status: tc.status,
+			}}}, nil)
+			body := renderFragmentForTest(t, fragment)
+			if got := strings.Count(body, `class="workspace-primary"`); got != boolCount(tc.wantPrimary != "") {
+				t.Fatalf("primary count = %d, want %d: %s", got, boolCount(tc.wantPrimary != ""), body)
+			}
+			if tc.wantPrimary != "" && !strings.Contains(body, `>`+tc.wantPrimary+`</button>`) {
+				t.Fatalf("missing primary %q: %s", tc.wantPrimary, body)
+			}
+			if tc.wantSecondary != "" && !strings.Contains(body, `>`+tc.wantSecondary+`</button>`) {
+				t.Fatalf("missing secondary %q: %s", tc.wantSecondary, body)
+			}
+			if strings.Contains(body, `class="workspace-primary">Resume`) && tc.wantPrimary != "Resume" {
+				t.Fatalf("unexpected Resume primary: %s", body)
+			}
+			if got := strings.Contains(body, `class="workspace-more-actions"`); got != tc.wantMore {
+				t.Fatalf("More actions disclosure = %v, want %v: %s", got, tc.wantMore, body)
+			}
+			if tc.status == "mysterious" {
+				if strings.Contains(body, `data-status="mysterious"`) || strings.Contains(body, `>mysterious</p>`) {
+					t.Fatalf("unknown lifecycle status leaked into rendered state: %s", body)
+				}
+				if !strings.Contains(body, `data-status="unknown"`) || !strings.Contains(body, `>unknown</p>`) {
+					t.Fatalf("unknown lifecycle status was not bounded to unknown: %s", body)
+				}
+			}
+			if tc.wantMore {
+				wantLabel := `aria-label="More actions for owner/` + tc.name + `"`
+				if !strings.Contains(body, wantLabel) {
+					t.Fatalf("missing accessible disclosure name %q: %s", wantLabel, body)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkspacesEmptyStateUsesTheStableHeaderOpenPath(t *testing.T) {
+	fragment := workspacesFragment(WorkspaceSnapshot{}, nil)
+	if fragment.EmptyState == nil {
+		t.Fatal("empty workspace response has no structured empty state")
+	}
+	if fragment.EmptyState.Title != "No guarded workspaces yet" || fragment.EmptyState.Body != "Open a repository to give Waffle a bounded place to work." {
+		t.Fatalf("empty copy = %q / %q", fragment.EmptyState.Title, fragment.EmptyState.Body)
+	}
+	if fragment.EmptyState.PrimaryAction != nil || fragment.EmptyState.SecondaryAction != nil {
+		t.Fatal("empty fragment created a duplicate workspace recovery trigger; the stable header button owns this path")
+	}
+	body := renderFragmentForTest(t, fragment)
+	if strings.Contains(body, "workspace-empty-open") || strings.Contains(body, "data-waffle-dialog-trigger") {
+		t.Fatalf("empty fragment contains a duplicate open trigger: %s", body)
+	}
+}
+
+func renderFragmentForTest(t *testing.T, fragment ui.FragmentView) string {
+	t.Helper()
+	var body bytes.Buffer
+	if err := ui.FragmentList(fragment).Render(context.Background(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body.String()
+}
+
+func boolCount(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func TestCapabilitySummaries(t *testing.T) {

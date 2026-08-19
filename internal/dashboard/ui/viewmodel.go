@@ -109,12 +109,15 @@ func NewWaffleEmptyStateView(key EmptyStateKey, title, body, titleID string, pri
 }
 
 type FragmentItem struct {
-	ID          string
-	Class       string
-	Kind        string
-	Title       string
-	Detail      string
-	DetailClass string
+	ID                string
+	Class             string
+	Kind              string
+	KindClass         string
+	KindAfterTitle    bool
+	Title             string
+	Detail            string
+	DetailClass       string
+	DetailAfterFields bool
 	// Excerpt is an optional bounded readable body rendered below the item's
 	// metadata; ExcerptLong adds a native details toggle that expands the
 	// clamped text instead of hiding it (#458).
@@ -131,6 +134,11 @@ type FragmentItem struct {
 	DataTaskRedactedFields string
 	Fields                 []FragmentField
 	Actions                []FragmentAction
+	PrimaryActions         []FragmentAction
+	SecondaryActions       []FragmentAction
+	MoreActions            []FragmentAction
+	MoreActionsID          string
+	MoreActionsLabel       string
 }
 
 type FragmentField struct {
@@ -266,6 +274,13 @@ func fragmentActionFormClass(action FragmentAction) string {
 		return ""
 	}
 	return "waffle-action-form-with-inputs"
+}
+
+func fragmentKindClass(item FragmentItem) string {
+	if item.KindClass != "" {
+		return item.KindClass
+	}
+	return "waffle-fragment-kind"
 }
 
 func emptyStateArtworkClass(view EmptyStateView) string {

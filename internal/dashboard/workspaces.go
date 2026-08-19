@@ -92,6 +92,11 @@ type WorkspaceCloseConflict struct {
 	Unpushed string `json:"unpushed,omitempty"`
 }
 
+// workspacesUnavailable is kept distinct from mutation/read errorResponse so
+// an HTML list refresh can replace the list owner with the exact total-failure
+// state while JSON clients retain the existing error shape.
+type workspacesUnavailable struct{}
+
 type workspaceCloseRefusal struct {
 	report *workspace.CloseReport
 	cause  error
@@ -459,22 +464,31 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snapshot, err := service.Read(r.Context())
 		if err != nil {
+			if wantsHTMLRequest(r) {
+				writeJSON(w, http.StatusServiceUnavailable, workspacesUnavailable{})
+				return
+			}
 			writeWorkspaceError(w, http.StatusServiceUnavailable, "workspaces_unavailable", "workspaces are temporarily unavailable")
 			return
 		}
 		if wantsHTMLRequest(r) {
 			git := make(map[string]WorkspaceGitView, len(snapshot.Workspaces))
+			partial := false
 			for _, item := range snapshot.Workspaces {
 				if item.Status == workspace.StatusClosed {
 					continue
 				}
 				view, gitErr := service.GitStatus(r.Context(), item.ID)
 				if gitErr != nil {
+					partial = true
 					view = WorkspaceGitView{WorkspaceID: item.ID, Reason: "Git status could not be read from this workspace."}
+				}
+				if item.Status == workspace.StatusOpen && !view.Available {
+					partial = true
 				}
 				git[item.ID] = view
 			}
-			writeJSON(w, http.StatusOK, WorkspaceFragmentSnapshot{Snapshot: snapshot, Git: git})
+			writeJSON(w, http.StatusOK, WorkspaceFragmentSnapshot{Snapshot: snapshot, Git: git, Partial: partial})
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)

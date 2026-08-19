@@ -845,14 +845,21 @@
 				"close",
 				() => {
 					const focusID = dialog.dataset.waffleDialogFocus || "";
+					let restored = false;
 					if (focusID) {
 						for (const candidate of document.querySelectorAll("[data-waffle-action-id]")) {
-							if (candidate.dataset.waffleActionId === focusID) {
+							if (
+								candidate.dataset.waffleActionId === focusID &&
+								candidate.isConnected &&
+								(candidate.offsetWidth > 0 || candidate.offsetHeight > 0)
+							) {
 								candidate.focus?.();
+								restored = true;
 								break;
 							}
 						}
 					}
+					if (!restored) document.querySelector("#workspace-open-button")?.focus?.();
 				},
 				{ once: true },
 			);
