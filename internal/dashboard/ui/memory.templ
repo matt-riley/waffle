@@ -31,7 +31,7 @@ templ Memory(view ShellView) {
 				<p class="eyebrow">Working set</p>
 				<h2 id="memory-attach-title">Attach to a session</h2>
 				<p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p>
-				<label for="memory-session">Attach to session</label>
+				<label id="memory-session-label" for="memory-session-trigger">Attach to session</label>
 				@MemorySessionPicker(MemorySessionPickerView{Loading: true, Load: true})
 				<div id="memory-attach-status" class="memory-status" aria-live="polite"></div>
 			</aside>
