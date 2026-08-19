@@ -1109,6 +1109,7 @@ function appendDelta(text) {
   caret.className = "stream-caret";
   caret.setAttribute("aria-hidden", "true");
   body.appendChild(caret);
+  updateTurnActionAvailability();
   state.streamingMessage.scrollIntoView({ block: "nearest" });
 }
 
@@ -2409,6 +2410,10 @@ function openEventStream() {
 }
 
 async function openDesk() {
+  const leavingRecovery = state.currentPhase === phase.recovering;
+  if (leavingRecovery) {
+    resetRecoveryExit();
+  }
   const previousTemporaryLease = state.temporaryLease;
   state.temporaryLease = null;
   if (previousTemporaryLease) {
@@ -2658,6 +2663,24 @@ function resetOwnershipConflict() {
   }
   elements.staleMessage.textContent =
     "The transcript is still here, but sending is paused.";
+}
+
+function resetRecoveryExit() {
+  state.sessionsList.open = false;
+  state.sessionsList.items = [];
+  state.sessionsList.filter = "";
+  state.sessionsList.error = "";
+  closeSessionMenus();
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.setAttribute("aria-expanded", "false");
+  }
+  if (elements.sessionFilter) {
+    elements.sessionFilter.value = "";
+  }
+  if (elements.sessions) {
+    elements.sessions.hidden = true;
+  }
+  clearNode(elements.sessionOptions);
 }
 
 function settleTurn(turn) {
@@ -3154,11 +3177,7 @@ async function recoverWithNewConversation() {
     state.temporaryLease = null;
     state.clientID = lease.client_id;
     state.reattachToken = lease.reattach_token;
-    closeSessionsList();
-    state.sessionsList.items = [];
-    state.sessionsList.filter = "";
-    state.sessionsList.error = "";
-    clearNode(elements.sessionOptions);
+    resetRecoveryExit();
     resetOwnershipConflict();
     renderCanonicalState(result.state, true);
     promoted = true;

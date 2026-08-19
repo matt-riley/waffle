@@ -941,6 +941,46 @@ test("fenced-code Copy is unavailable throughout a running turn and returns when
   assert.equal(copy.disabled, false, "Copy is enabled again when idle");
 });
 
+test("newly streamed fenced-code Copy stays disabled until the turn is idle", async () => {
+  const harness = createHarness();
+  await flush();
+
+  const message = harness.elements["#desk-message"];
+  message.value = "Question";
+  const submission = harness.elements["#desk-composer"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+
+  const stream = harness.EventSource.instances[0];
+  stream.emit("text_delta", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "text_delta",
+    data: { text: "```go\nreturn true\n```" },
+  });
+  const copy = harness.elements["#desk-transcript"].querySelector(".code-copy");
+  assert.ok(copy, "streamed fenced markdown creates a Copy control");
+  assert.equal(copy.disabled, true, "new Copy is disabled during streaming");
+
+  const cancellation = harness.elements["#desk-cancel"].listener("click")();
+  await flush();
+  assert.equal(copy.disabled, true, "new Copy stays disabled while cancelling");
+
+  harness.cancelResponse.resolve(jsonResponse({}));
+  harness.turnResponse.resolve(jsonResponse({}));
+  stream.emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState({ title: "Question" }) },
+  });
+  await submission;
+  await cancellation;
+  await flush();
+  assert.equal(copy.disabled, false, "new Copy is enabled after the turn returns idle");
+});
+
 test("language header and 41-line fences collapse without truncating copy", async () => {
   const code = Array.from({ length: 41 }, (_, index) => `line ${index + 1}`).join("\n");
   const harness = createHarness({
@@ -2002,6 +2042,194 @@ test("ownership recovery loads read-only recents and opens a selected session", 
   assert.equal(openBodies[1].reattach_client_id, undefined);
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   assert.equal(harness.elements["#desk-session-title"].textContent, "Roadmap review");
+});
+
+test("Refresh exits recovery Recent before normal Recent uses the owner session", async () => {
+  let openAttempts = 0;
+  const commands = [];
+  const harness = createHarness({
+    memorySessionsHandler: async () => jsonResponse({
+      choices: [
+        {
+          id: "session-stale-refresh",
+          label: "Stale recovery row",
+          updated_at: "2026-08-18T12:00:00Z",
+        },
+      ],
+    }),
+    commandHandler: async ({ options }) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body.command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-fresh-refresh",
+              title: "Fresh owner row",
+              updated_at: "2026-08-19T12:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({});
+    },
+    openHandler: async () => {
+      openAttempts += 1;
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-refresh-owner",
+        reattach_token: "lease-refresh-owner",
+        state: defaultChatState({
+          session_id: "session-refresh-owner",
+          title: "Refresh owner",
+        }),
+      });
+    },
+  });
+  await flush();
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const filter = harness.elements["#desk-session-filter"];
+  filter.value = "stale";
+  filter.listener("input")();
+  assert.match(harness.elements["#desk-session-options"].textContent, /Stale recovery row/);
+
+  await harness.elements["#desk-refresh"].listener("click")();
+  await flush();
+
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+  assert.equal(harness.elements["#desk-recovery-navigation"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.equal(filter.value, "");
+  assert.equal(harness.elements["#desk-session-options"].textContent, "");
+  assert.equal(
+    harness.elements["#desk-session-options"].querySelector(".session-choice"),
+    null,
+  );
+  assert.equal(
+    harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
+    null,
+  );
+  assert.equal(filter.focused, true, "openDesk does not steal focus from recovery navigation");
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.deepEqual(
+    commands.at(-1),
+    {
+      client_id: "client-refresh-owner",
+      command: { name: "sessions", args: "" },
+    },
+  );
+  assert.match(harness.elements["#desk-session-options"].textContent, /Fresh owner row/);
+  assert.ok(
+    harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
+    "normal Recent renders action-capable rows",
+  );
+});
+
+test("selecting a recovery Recent row resets before normal Recent uses the new owner", async () => {
+  let openAttempts = 0;
+  const openBodies = [];
+  const commands = [];
+  const harness = createHarness({
+    memorySessionsHandler: async () => jsonResponse({
+      choices: [
+        {
+          id: "session-recovery-selection",
+          label: "Selected recovery row",
+          updated_at: "2026-08-18T12:00:00Z",
+        },
+      ],
+    }),
+    commandHandler: async ({ options }) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body.command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-fresh-selection",
+              title: "Fresh selected owner row",
+              updated_at: "2026-08-19T12:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({});
+    },
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      openBodies.push(JSON.parse(options.body));
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-selection-owner",
+        reattach_token: "lease-selection-owner",
+        state: defaultChatState({
+          session_id: "session-recovery-selection",
+          title: "Selected recovery",
+        }),
+      });
+    },
+  });
+  await flush();
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const filter = harness.elements["#desk-session-filter"];
+  filter.value = "selected";
+  filter.listener("input")();
+  const row = harness.elements["#desk-session-options"].querySelector(".session-choice");
+  assert.ok(row);
+  row.listener("click")();
+  await flush();
+
+  assert.equal(openBodies[1].session_id, "session-recovery-selection");
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.equal(filter.value, "");
+  assert.equal(harness.elements["#desk-session-options"].textContent, "");
+  assert.equal(
+    harness.elements["#desk-session-options"].querySelector(".session-choice"),
+    null,
+  );
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.deepEqual(
+    commands.at(-1),
+    {
+      client_id: "client-selection-owner",
+      command: { name: "sessions", args: "" },
+    },
+  );
+  assert.match(
+    harness.elements["#desk-session-options"].textContent,
+    /Fresh selected owner row/,
+  );
+  assert.ok(
+    harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
+    "normal Recent renders action-capable rows",
+  );
 });
 
 test("ownership recovery bridges /new through an unrendered temporary lease", async () => {
