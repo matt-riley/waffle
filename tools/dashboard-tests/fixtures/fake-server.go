@@ -43,12 +43,24 @@ import (
 var fixtureNow = time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
 var fixtureTaskMode atomic.Int32
+var fixtureWorkspaceMode atomic.Int32
 
 const (
 	fixtureTaskModeNormal int32 = iota
 	fixtureTaskModeEmpty
 	fixtureTaskModePartial
 	fixtureTaskModeFailure
+)
+
+const (
+	fixtureWorkspaceModeNormal int32 = iota
+	fixtureWorkspaceModeOne
+	fixtureWorkspaceModeMany
+	fixtureWorkspaceModeEmpty
+	fixtureWorkspaceModeHealthyLifecycle
+	fixtureWorkspaceModePartial
+	fixtureWorkspaceModeFailure
+	fixtureWorkspaceModeLong
 )
 
 func emptyStateThemeDocumentStart(requested string, shell bool) string {
@@ -347,6 +359,28 @@ func main() {
 		default:
 			fixtureTaskMode.Store(fixtureTaskModeNormal)
 		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /api/v1/desk/test/workspaces", func(w http.ResponseWriter, r *http.Request) {
+		mode := fixtureWorkspaceModeNormal
+		switch r.URL.Query().Get("state") {
+		case "one":
+			mode = fixtureWorkspaceModeOne
+		case "many":
+			mode = fixtureWorkspaceModeMany
+		case "empty":
+			mode = fixtureWorkspaceModeEmpty
+		case "lifecycle":
+			mode = fixtureWorkspaceModeHealthyLifecycle
+		case "partial":
+			mode = fixtureWorkspaceModePartial
+		case "error":
+			mode = fixtureWorkspaceModeFailure
+		case "long":
+			mode = fixtureWorkspaceModeLong
+		}
+		workspaces.reset()
+		fixtureWorkspaceMode.Store(mode)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
@@ -818,6 +852,12 @@ func newFixtureWorkspaces() *fixtureWorkspaces {
 	}}
 }
 
+func (w *fixtureWorkspaces) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.workspaces = newFixtureWorkspaces().workspaces
+}
+
 // fixtureProjectFiles maps repo-relative paths to content for the project
 // context surface (#478); ReadFile plays the workspace file reader.
 var fixtureProjectFiles = map[string]string{
@@ -833,12 +873,57 @@ func (w *fixtureWorkspaces) ReadFile(_ context.Context, _ string, path string) (
 	return []byte(content), nil
 }
 
+func fixtureManyWorkspace(suffix string) workspace.Workspace {
+	createdAt := fixtureNow
+	if index, err := strconv.Atoi(suffix); err == nil && index > 0 {
+		createdAt = fixtureNow.Add(-time.Duration(index) * time.Minute)
+	}
+	return workspace.Workspace{
+		ID:         "workspace-many-" + suffix,
+		Repo:       "matt-riley/repository-" + suffix,
+		Image:      "waffle-dev:latest",
+		SessionID:  "session-many-" + suffix,
+		Status:     workspace.StatusOpen,
+		Profile:    "reviewer",
+		CreatedAt:  createdAt,
+		UpdatedAt:  fixtureNow,
+		LastActive: fixtureNow,
+	}
+}
+
 func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	result := make([]workspace.Workspace, 0, len(w.workspaces))
-	for _, item := range w.workspaces {
+	mode := fixtureWorkspaceMode.Load()
+	if mode == fixtureWorkspaceModeFailure {
+		return nil, errors.New("fixture workspaces unavailable")
+	}
+	result := make([]workspace.Workspace, 0, len(w.workspaces)+4)
+	for id, item := range w.workspaces {
+		if mode == fixtureWorkspaceModeHealthyLifecycle {
+			switch id {
+			case "workspace-clean":
+				item.Status = workspace.StatusIdle
+			case "workspace-dirty":
+				item.Status = workspace.StatusFailed
+			}
+		}
+		if mode == fixtureWorkspaceModeOne && id != "workspace-clean" {
+			continue
+		}
+		if mode == fixtureWorkspaceModeLong {
+			item.Repo = "matt-riley/waffle-repository-with-a-deliberately-long-name-for-wrap-testing"
+			item.Profile = "profile-with-a-deliberately-long-name-for-responsive-wrap-testing"
+		}
 		result = append(result, item)
+	}
+	if mode == fixtureWorkspaceModeMany {
+		for index := 1; index <= 4; index++ {
+			result = append(result, fixtureManyWorkspace(strconv.Itoa(index)))
+		}
+	}
+	if mode == fixtureWorkspaceModeEmpty {
+		return []workspace.Workspace{}, nil
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].ID < result[j].ID
@@ -850,6 +935,20 @@ func (w *fixtureWorkspaces) Get(_ context.Context, id string) (*workspace.Worksp
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	item, ok := w.workspaces[id]
+	if !ok {
+		if strings.HasPrefix(id, "workspace-many-") {
+			item = fixtureManyWorkspace(strings.TrimPrefix(id, "workspace-many-"))
+			ok = true
+		}
+	}
+	if fixtureWorkspaceMode.Load() == fixtureWorkspaceModeHealthyLifecycle {
+		switch id {
+		case "workspace-clean":
+			item.Status = workspace.StatusIdle
+		case "workspace-dirty":
+			item.Status = workspace.StatusFailed
+		}
+	}
 	if !ok {
 		return nil, workspace.ErrWorkspaceNotFound
 	}
@@ -890,10 +989,24 @@ func (w *fixtureWorkspaces) InspectGit(_ context.Context, id string) (*workspace
 	if item.Status != workspace.StatusOpen {
 		return nil, workspace.ErrWorkspaceNotRunning
 	}
+	if fixtureWorkspaceMode.Load() == fixtureWorkspaceModePartial && id == "workspace-dirty" {
+		return nil, errors.New("fixture git evidence unavailable")
+	}
 	if id == "workspace-dirty" {
+		if fixtureWorkspaceMode.Load() == fixtureWorkspaceModeLong {
+			return &workspace.GitStatus{
+				Branch: "feature/branch-name-with-a-deliberately-long-value-for-wrap-testing", DirtyFiles: 1, Tracking: true, Ahead: 1,
+				CommitSHA: "abcdef1234567890", Subject: "commit subject with a deliberately long value for wrap testing",
+			}, nil
+		}
 		return &workspace.GitStatus{
 			Branch: "feature/dirty", DirtyFiles: 1, Tracking: true, Ahead: 1,
 			CommitSHA: "abc1234", Subject: "local commit",
+		}, nil
+	}
+	if strings.HasPrefix(id, "workspace-many-") {
+		return &workspace.GitStatus{
+			Branch: "main", Tracking: true, CommitSHA: "def5678", Subject: "chore: release",
 		}, nil
 	}
 	return &workspace.GitStatus{

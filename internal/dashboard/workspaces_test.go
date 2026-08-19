@@ -152,6 +152,90 @@ func TestWorkspaceRoutesListOpenSelectIdleAndResume(t *testing.T) {
 	}
 }
 
+func TestWorkspaceListPartialOnlyReportsRunningInspectionFailures(t *testing.T) {
+	t.Run("idle and failed are expected unavailable", func(t *testing.T) {
+		harness := newWorkspaceRouteHarness(t)
+		harness.manager.addWorkspace(workspace.Workspace{
+			ID: "ws-idle", Repo: "matt-riley/idle", SessionID: "session-workspace",
+			Status: workspace.StatusIdle,
+		})
+		harness.manager.addWorkspace(workspace.Workspace{
+			ID: "ws-failed", Repo: "matt-riley/failed", SessionID: "session-other",
+			Status: workspace.StatusFailed,
+		})
+
+		response := harness.requestHTML("/api/v1/desk/workspaces")
+		if response.Code != http.StatusOK {
+			t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "Some workspace evidence is temporarily unavailable.") {
+			t.Fatalf("expected lifecycle-unavailable git evidence not to mark the list partial: %s", response.Body.String())
+		}
+		for _, want := range []string{
+			"The workspace is idle. Resume it to read git status.",
+			"The workspace is not running.",
+		} {
+			if !strings.Contains(response.Body.String(), want) {
+				t.Fatalf("list omitted fixed lifecycle reason %q: %s", want, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("open inspection failure is partial", func(t *testing.T) {
+		harness := newWorkspaceRouteHarness(t)
+		harness.manager.addWorkspace(workspace.Workspace{
+			ID: "ws-open", Repo: "matt-riley/open", SessionID: "session-workspace",
+			Status: workspace.StatusOpen,
+		})
+		harness.manager.gitErr = errors.New("git inspection failed")
+
+		response := harness.requestHTML("/api/v1/desk/workspaces")
+		if response.Code != http.StatusOK {
+			t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), "Some workspace evidence is temporarily unavailable.") {
+			t.Fatalf("expected open inspection failure to mark the list partial: %s", response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), "Git status could not be read from this workspace.") {
+			t.Fatalf("open inspection failure reason missing: %s", response.Body.String())
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		id     string
+		repo   string
+		status string
+		reason string
+	}{
+		{name: "idle", id: "ws-idle", repo: "matt-riley/idle", status: workspace.StatusIdle, reason: "The workspace is idle. Resume it to read git status."},
+		{name: "failed", id: "ws-failed", repo: "matt-riley/failed", status: workspace.StatusFailed, reason: "The workspace is not running."},
+	} {
+		t.Run("actual inspection error is partial for "+tc.name+" row", func(t *testing.T) {
+			harness := newWorkspaceRouteHarness(t)
+			harness.manager.addWorkspace(workspace.Workspace{
+				ID: tc.id, Repo: tc.repo, SessionID: "session-workspace",
+				Status: tc.status,
+			})
+			harness.manager.gitErr = errors.New("inspection dependency unavailable")
+
+			response := harness.requestHTML("/api/v1/desk/workspaces")
+			if response.Code != http.StatusOK {
+				t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "Some workspace evidence is temporarily unavailable.") {
+				t.Fatalf("actual %s inspection error was downgraded: %s", tc.name, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "Git status could not be read from this workspace.") {
+				t.Fatalf("actual %s inspection error lost its redacted reason: %s", tc.name, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), tc.reason) {
+				t.Fatalf("actual %s inspection error was mislabeled as lifecycle unavailability: %s", tc.name, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestWorkspaceClosePreviewIsInspectOnlyExactAndResourceBound(t *testing.T) {
 	harness := newWorkspaceRouteHarness(t)
 	harness.manager.addWorkspace(workspace.Workspace{
@@ -769,6 +853,17 @@ func (h *workspaceRouteHarness) request(method, path, body, key string, token bo
 	return rec
 }
 
+func (h *workspaceRouteHarness) requestHTML(path string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422"+path, nil)
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("X-Waffle-Force", "true")
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestWorkspaceGitStatusProjection(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -852,6 +947,7 @@ func TestWorkspaceGitStatusProjection(t *testing.T) {
 			gitErr: errors.New("exec: /var/lib/waffle/queues/ws-1: https://x-access-token:ghs_secret@github.com"),
 			want: WorkspaceGitView{
 				WorkspaceID: "ws-1",
+				Partial:     true,
 				Reason:      "Git status could not be read from this workspace.",
 			},
 		},
@@ -940,6 +1036,7 @@ type recordingWorkspaceManager struct {
 	beforeCloseTransition func(string)
 	gitStatus             *workspace.GitStatus
 	gitErr                error
+	getErr                error
 	gitCalls              int
 }
 
@@ -956,6 +1053,9 @@ func (m *recordingWorkspaceManager) List(context.Context) ([]workspace.Workspace
 }
 
 func (m *recordingWorkspaceManager) Get(_ context.Context, id string) (*workspace.Workspace, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	ws, ok := m.workspaces[id]
 	if !ok {
 		return nil, workspace.ErrWorkspaceNotFound

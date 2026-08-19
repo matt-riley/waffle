@@ -19,9 +19,12 @@ func TestWorkspacesRendersLifecycleControlsAndNativeDialogs(t *testing.T) {
 		`class="workspaces"`,
 		`id="workspaces-title"`,
 		`id="workspaces-list"`,
+		`class="workspaces-panel"`,
+		`class="workspaces-panel-header"`,
 		`id="workspaces-errors"`,
-		`id="workspaces-empty"`,
 		`id="workspace-open-button"`,
+		`aria-busy="true"`,
+		`Loading workspaces…`,
 		`<dialog id="workspace-open-dialog"`,
 		`id="workspace-open-form"`,
 		`for="workspace-repository"`,
@@ -39,6 +42,12 @@ func TestWorkspacesRendersLifecycleControlsAndNativeDialogs(t *testing.T) {
 		if !strings.Contains(body, required) {
 			t.Errorf("Workspaces view missing %q", required)
 		}
+	}
+	if got := strings.Count(body, `id="workspace-open-button"`); got != 1 {
+		t.Fatalf("workspace-open-button count = %d, want one stable trigger", got)
+	}
+	if strings.Contains(body, `id="workspaces-empty"`) {
+		t.Fatal("loading must not have a sibling workspaces-empty owner")
 	}
 	// List container must not announce full re-renders; status regions keep aria-live.
 	listIdx := strings.Index(body, `id="workspaces-list"`)
@@ -82,7 +91,7 @@ func TestWorkspaceAssetsAreAdditiveVersionedAndResponsive(t *testing.T) {
 		".workspace-status",
 		".workspace-evidence",
 		":focus-visible",
-		"@media (max-width: 900px)",
+		"@media (max-width: 44.99rem)",
 		"@media (prefers-reduced-motion: reduce)",
 	} {
 		if !strings.Contains(css, required) {

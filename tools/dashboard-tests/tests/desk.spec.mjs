@@ -1246,6 +1246,80 @@ for (const [name, section, settled] of visualSections) {
   });
 }
 
+test("visual baseline workspaces keeps the Evening treatment scannable", async ({ page }) => {
+  test.skip(!["desktop", "mobile"].includes(test.info().project.name), "Run Evening Workspaces at desktop and mobile sizes.");
+  const snapshotName = `desk-visual-workspaces-evening-${test.info().project.name}.png`;
+  if (!hasVisualBaseline(snapshotName)) {
+    test.skip(`no committed ${process.platform} baseline for Evening Workspaces; set WAFFLE_VISUAL_BASELINES=1 with --update-snapshots to generate`);
+  }
+  await page.goto(deskURL("workspaces"));
+  await page.getByLabel("Theme").selectOption("dark");
+  await expect(page.locator(".workspace-card, .waffle-empty-state").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page).toHaveScreenshot(snapshotName, {
+    animations: "disabled",
+    caret: "hide",
+    maxDiffPixelRatio: 0.005,
+  });
+});
+
+test("visual baseline workspaces covers the Hearth and Evening state matrix", async ({ page }) => {
+  test.skip(!["desktop", "mobile"].includes(test.info().project.name), "Run the reviewed state matrix at desktop and mobile sizes.");
+  const states = [
+    {
+      name: "one",
+      ready: async () => {
+        await expect(page.locator(".workspace-card")).toHaveCount(1);
+      },
+    },
+    {
+      name: "many",
+      ready: async () => {
+        await expect(page.locator("[data-workspace-id='workspace-many-4']")).toBeVisible();
+      },
+    },
+    {
+      name: "empty",
+      ready: async () => {
+        await expect(page.getByRole("heading", { name: "No guarded workspaces yet", exact: true })).toBeVisible();
+      },
+    },
+    {
+      name: "error",
+      ready: async () => {
+        await expect(page.getByRole("heading", { name: "Workspaces are unavailable", exact: true })).toBeVisible();
+      },
+    },
+  ];
+  const themes = [
+    ["hearth", "light"],
+    ["evening", "dark"],
+  ];
+
+  allowExpectedResponse(503, "/api/v1/desk/workspaces");
+  allowDiagnostics("Failed to load resource: the server responded with a status of 503");
+  try {
+    for (const [themeName, themeValue] of themes) {
+      for (const state of states) {
+        const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=${state.name}`);
+        expect(response.ok()).toBe(true);
+        await page.goto(deskURL("workspaces"));
+        await page.getByLabel("Theme").selectOption(themeValue);
+        await state.ready();
+        const snapshotName = `desk-visual-workspaces-${state.name}-${themeName}-${test.info().project.name}.png`;
+        if (hasVisualBaseline(snapshotName)) {
+          await expect(page).toHaveScreenshot(snapshotName, {
+            animations: "disabled",
+            caret: "hide",
+            maxDiffPixelRatio: 0.005,
+          });
+        }
+      }
+    }
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+  }
+});
+
 test("fixture serves the embedded Desk through the production security boundary", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "Run the fixture contract once.");
   const response = await page.goto(deskURL("today"));
@@ -2563,6 +2637,7 @@ test("light code and dark destructive surfaces meet computed contrast", async ({
   await page.getByLabel("Theme").selectOption("dark");
   const clean = page.locator("[data-workspace-id='workspace-clean']");
   await expect(clean).toBeVisible();
+  await clean.locator(".workspace-more-actions > summary").click();
   await clean.getByRole("button", { name: "Review close", exact: true }).click();
   await expect(page.locator("#workspace-close-dialog")).toBeVisible();
   const darkDanger = await page.locator("#workspace-close-confirm").evaluate((element) => {
@@ -3347,6 +3422,8 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
     page.locator("[data-workspace-id='workspace-clean'] .workspace-git"),
   ).toContainText("Clean");
 
+  const dirtyMore = dirty.locator(".workspace-more-actions > summary");
+  await dirtyMore.click();
   const dirtyReview = dirty.getByRole("button", { name: "Review close", exact: true });
   await dirtyReview.click();
   const closeDialog = page.locator("#workspace-close-dialog");
@@ -3359,7 +3436,7 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
     closeDialog.getByRole("button", { name: "Close workspace", exact: true }),
   ).toBeDisabled();
   await closeDialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(dirtyReview).toBeFocused();
+  await expect(dirtyMore).toBeFocused();
 
   let clean = page.locator("[data-workspace-id='workspace-clean']");
   await clean.getByRole("button", { name: "Idle", exact: true }).click();
@@ -3381,6 +3458,7 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
   await page.goto(deskURL("workspaces"));
 
   opened = page.locator("[data-workspace-id='workspace-opened']");
+  await opened.locator(".workspace-more-actions > summary").click();
   await opened.getByRole("button", { name: "Review close", exact: true }).click();
   await expect(closeDialog).toBeVisible();
   await expect(page.locator("#workspace-close-dirty")).toHaveText("Clean");
@@ -3390,6 +3468,7 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
     "data-status",
     "closed",
   );
+  await expect(page.locator("#workspace-open-button")).toBeFocused();
 });
 
 test("workspace cards lead with truthful metadata and distinct actions", async ({ page }) => {
@@ -3401,6 +3480,9 @@ test("workspace cards lead with truthful metadata and distinct actions", async (
 
   const clean = page.locator("[data-workspace-id='workspace-clean']");
   await expect(clean).toBeVisible();
+  const more = clean.locator(".workspace-more-actions > summary");
+  await more.click();
+  await expect(more).toHaveAttribute("aria-label", "More actions for matt-riley/waffle");
   // Metadata is ordered and truthful: profile is primary, opaque IDs stay
   // secondary and copyable.
   await expect(clean.locator(".waffle-fragment-facts")).toContainText("Profile");
@@ -3422,6 +3504,285 @@ test("workspace cards lead with truthful metadata and distinct actions", async (
   await expect(
     clean.getByRole("button", { name: "Review close", exact: true }),
   ).toHaveClass(/workspace-danger-action/);
+  await expect(clean.locator(".workspace-more-actions")).toHaveAttribute("open", "");
+});
+
+test("Workspaces keeps empty, partial, and total failure states truthful", async ({ page }) => {
+  const setState = async (state) => {
+    const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=${state}`);
+    expect(response.ok()).toBe(true);
+    await page.goto(deskURL("workspaces"));
+    await expect(page.locator("#workspaces-list")).toHaveAttribute("data-waffle-fragment", "true");
+  };
+
+  try {
+    await setState("one");
+    await expect(page.locator(".workspace-card")).toHaveCount(1);
+    await expect(page.locator("[data-workspace-id='workspace-clean']")).toBeVisible();
+
+    await setState("many");
+    await expect.poll(() => page.locator(".workspace-card").count()).toBeGreaterThan(1);
+    await expect(page.locator("[data-workspace-id='workspace-many-4']")).toBeVisible();
+
+    await setState("empty");
+    await expect(page.getByRole("heading", { name: "No guarded workspaces yet", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText("Open a repository to give Waffle a bounded place to work.");
+    await expect(page.locator(".waffle-empty-state-art-workspaces")).toBeVisible();
+    await expect(page.locator("#workspace-open-button")).toHaveCount(1);
+    await page.locator("#workspace-open-button").click();
+    await expect(page.locator("#workspace-open-dialog")).toBeVisible();
+    await page.locator("#workspace-open-cancel").click();
+
+    await setState("lifecycle");
+    await expect(page.locator("[data-workspace-id='workspace-clean']")).toHaveAttribute("data-status", "idle");
+    await expect(page.locator("[data-workspace-id='workspace-dirty']")).toHaveAttribute("data-status", "failed");
+    await expect(page.locator("#workspaces-list .waffle-fragment-status")).toHaveCount(0);
+    await expect(page.locator("#workspaces-list")).not.toContainText("Some workspace evidence is temporarily unavailable.");
+
+    await setState("partial");
+    await expect.poll(() => page.locator(".workspace-card").count()).toBeGreaterThan(0);
+    await expect(page.locator("#workspaces-list .waffle-fragment-status")).toHaveCount(1);
+    await expect(page.locator("#workspaces-list .waffle-fragment-status")).toHaveText("Some workspace evidence is temporarily unavailable.");
+    await expect(page.locator("#workspaces-list")).not.toHaveAttribute("aria-live");
+
+    allowExpectedResponse(503, "/api/v1/desk/workspaces");
+    allowDiagnostics("Failed to load resource: the server responded with a status of 503");
+    await setState("error");
+    await expect(page.getByRole("heading", { name: "Workspaces are unavailable", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText("Waffle could not read guarded workspace state. No lifecycle action was taken.");
+    await expect(page.locator(".waffle-empty-state-art")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "No guarded workspaces yet", exact: true })).toHaveCount(0);
+    await expect(page.locator("#workspaces-summary")).toBeEmpty();
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+  }
+});
+
+test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async ({ page }) => {
+  try {
+    const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=long`);
+    expect(response.ok()).toBe(true);
+    await page.goto(deskURL("workspaces"));
+    await expect.poll(() => page.locator(".workspace-card").count()).toBeGreaterThan(1);
+    await expect(page.locator("[data-workspace-id='workspace-dirty'] .workspace-git")).toContainText("deliberately-long");
+
+    const geometry = await page.evaluate(() => {
+      const controls = [...document.querySelectorAll(
+        ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary, .workspace-card .workspace-more-actions button",
+      )];
+      return {
+        viewport: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        header: (() => {
+          const rect = document.querySelector(".workspaces-header")?.getBoundingClientRect();
+          return rect ? { left: rect.left, right: rect.right } : null;
+        })(),
+        panel: (() => {
+          const rect = document.querySelector(".workspaces-panel")?.getBoundingClientRect();
+          return rect ? { left: rect.left, right: rect.right } : null;
+        })(),
+        controls: controls.map((element) => {
+          const rect = element.getBoundingClientRect();
+          return { width: rect.width, height: rect.height, bottom: rect.bottom };
+        }),
+      };
+    });
+    expect(geometry.scrollWidth).toBe(geometry.viewport);
+    expect(geometry.header).not.toBeNull();
+    expect(geometry.panel).not.toBeNull();
+    expect(Math.abs(geometry.header.left - geometry.panel.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.header.right - geometry.panel.right)).toBeLessThanOrEqual(1);
+    expect(geometry.controls.length).toBeGreaterThan(0);
+    for (const control of geometry.controls) {
+      expect(control.width).toBeGreaterThanOrEqual(44);
+      expect(control.height).toBeGreaterThanOrEqual(44);
+    }
+
+    if (["mobile", "narrow"].includes(test.info().project.name)) {
+      const clearance = await page.evaluate(async () => {
+        const target = [...document.querySelectorAll(
+          ".workspace-card .workspace-more-actions > summary",
+        )].at(-1);
+        const scroller = document.querySelector(".desk-shell > main");
+        const navigation = document.querySelector(".desk-navigation");
+        if (!target || !scroller || !navigation) return null;
+        target.scrollIntoView({ block: "end", inline: "nearest" });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const targetRect = target.getBoundingClientRect();
+        const navigationRect = navigation.getBoundingClientRect();
+        return {
+          targetBottom: targetRect.bottom,
+          navigationTop: navigationRect.top,
+          scrollTop: scroller.scrollTop,
+          scrollHeight: scroller.scrollHeight,
+          clientHeight: scroller.clientHeight,
+        };
+      });
+      expect(clearance).not.toBeNull();
+      expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
+      expect(clearance.scrollTop).toBeGreaterThan(0);
+      expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
+    }
+
+    if (test.info().project.name === "desktop") {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 188,
+        height: 500,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: 375,
+        screenHeight: 1000,
+      });
+      await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
+      await expectNoHorizontalOverflow(page);
+      const zoomTargets = await page.locator(
+        ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary",
+      ).evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      }));
+      for (const target of zoomTargets) {
+        expect(target.width).toBeGreaterThanOrEqual(44);
+        expect(target.height).toBeGreaterThanOrEqual(44);
+      }
+
+      const metadataActions = await page.locator(".workspace-card").evaluateAll((cards) =>
+        cards.map((card) => {
+          const metadata = [...card.querySelectorAll(
+            ":scope > h3, :scope > .workspace-status, :scope > .waffle-fragment-facts, :scope > .workspace-git",
+          )].map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              text: element.textContent || "",
+              left: rect.left,
+              right: rect.right,
+              top: rect.top,
+              bottom: rect.bottom,
+            };
+          });
+          const actions = card.querySelector(":scope > .waffle-fragment-actions");
+          const actionRect = actions?.getBoundingClientRect();
+          const actionBox = actionRect
+            ? {
+                left: actionRect.left,
+                right: actionRect.right,
+                top: actionRect.top,
+                bottom: actionRect.bottom,
+              }
+            : null;
+          const overlaps = actionBox
+            ? metadata.filter((item) =>
+                item.left < actionBox.right &&
+                item.right > actionBox.left &&
+                item.top < actionBox.bottom &&
+                item.bottom > actionBox.top,
+              )
+            : [];
+          return {
+            id: card.getAttribute("data-workspace-id"),
+            metadata,
+            actionBox,
+            overlaps,
+          };
+        }),
+      );
+      expect(metadataActions.length).toBeGreaterThan(1);
+      for (const card of metadataActions) {
+        expect(card.actionBox).not.toBeNull();
+        expect(card.overlaps).toEqual([]);
+      }
+      const longCard = metadataActions.find((card) => card.id === "workspace-dirty");
+      expect(longCard).toBeDefined();
+      expect(longCard.metadata.some((item) => item.text.includes("deliberately-long"))).toBe(true);
+      await cdp.send("Emulation.clearDeviceMetricsOverride");
+    }
+
+  } finally {
+    const reset = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+    expect(reset.ok()).toBe(true);
+  }
+});
+
+test("Workspaces final More actions can clear fixed navigation on compact mobile layouts", async ({ page }) => {
+  test.skip(!["mobile", "narrow"].includes(test.info().project.name), "Run compact mobile navigation clearance checks.");
+  try {
+    const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=one`);
+    expect(response.ok()).toBe(true);
+    await page.goto(deskURL("workspaces"));
+    await expect(page.locator(".workspace-card")).toHaveCount(1);
+
+    const clearance = await page.evaluate(async () => {
+      const target = document.querySelector(".workspace-card .workspace-more-actions > summary");
+      const scroller = document.querySelector(".desk-shell > main");
+      const navigation = document.querySelector(".desk-navigation");
+      if (!target || !scroller || !navigation) return null;
+      target.scrollIntoView({ block: "end", inline: "nearest" });
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const targetRect = target.getBoundingClientRect();
+      const navigationRect = navigation.getBoundingClientRect();
+      return {
+        targetBottom: targetRect.bottom,
+        navigationTop: navigationRect.top,
+        scrollTop: scroller.scrollTop,
+        scrollHeight: scroller.scrollHeight,
+        clientHeight: scroller.clientHeight,
+      };
+    });
+
+    expect(clearance).not.toBeNull();
+    // The available scroll range depends on the rendered content and font
+    // metrics; it need not equal the fixed bar's measured height. The
+    // user-visible contract is the target's settled position against the
+    // rendered navigation, with a real scroll path to reach it.
+    expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
+    expect(clearance.scrollTop).toBeGreaterThan(0);
+    expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
+  } finally {
+    const reset = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+    expect(reset.ok()).toBe(true);
+  }
+});
+
+test("many Workspaces close preview uses the selected fixture workspace", async ({ page }) => {
+  const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=many`);
+  expect(response.ok()).toBe(true);
+  try {
+    await page.goto(deskURL("workspaces"));
+    const many = page.locator("[data-workspace-id='workspace-many-1']");
+    await expect(many).toBeVisible();
+    await many.locator(".workspace-more-actions > summary").click();
+
+    const closePreviewResponse = page.waitForResponse((candidate) =>
+      candidate.url().includes("/api/v1/desk/workspaces/workspace-many-1/close-preview"),
+    );
+    await many.getByRole("button", { name: "Review close", exact: true }).click();
+    const closePreview = await closePreviewResponse;
+    expect(closePreview.ok()).toBe(true);
+    await expect(page.locator("#workspace-close-dialog")).toBeVisible();
+
+    const token = await page.locator("body").getAttribute("data-request-token");
+    const idempotencyKey = ["many-close-preview", test.info().project.name, "workspace-many-1"].join("-");
+    const jsonPreviewResponse = await page.request.post(
+      `${baseURL}/api/v1/desk/workspaces/workspace-many-1/close-preview`,
+      {
+        data: {},
+        headers: {
+          Accept: "application/json",
+          "X-Waffle-Desk-Token": token || "",
+          "Idempotency-Key": idempotencyKey,
+        },
+      },
+    );
+    expect(jsonPreviewResponse.ok()).toBe(true);
+    const preview = await jsonPreviewResponse.json();
+    expect(preview.workspace.id).toBe("workspace-many-1");
+    expect(preview.workspace.repository).toBe("matt-riley/repository-1");
+    expect(preview.workspace.session).toBe("session-many-1");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+  }
 });
 
 test("async review dialogs open as native modals with contained focus", async ({ page }) => {
@@ -3429,6 +3790,8 @@ test("async review dialogs open as native modals with contained focus", async ({
   const errors = [];
   const dirty = page.locator("[data-workspace-id='workspace-dirty']");
   await expect(dirty).toBeVisible();
+  const more = dirty.locator(".workspace-more-actions > summary");
+  await more.click();
   const review = dirty.getByRole("button", { name: "Review close", exact: true });
   await review.click();
   const dialog = page.locator("#workspace-close-dialog");
@@ -3446,7 +3809,7 @@ test("async review dialogs open as native modals with contained focus", async ({
   // Escape closes and restores focus to the invoking control.
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
-  await expect(review).toBeFocused();
+  await expect(more).toBeFocused();
   // The pre-opened showModal InvalidStateError never fires.
   expect(errors).toEqual([]);
 });

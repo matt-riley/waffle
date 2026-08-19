@@ -57,6 +57,7 @@ type WorkspaceSnapshot struct {
 type WorkspaceGitView struct {
 	WorkspaceID string `json:"workspace"`
 	Available   bool   `json:"available"`
+	Partial     bool   `json:"partial,omitempty"`
 	// Reason explains an unavailable projection in fixed, redacted text.
 	Reason string `json:"reason,omitempty"`
 
@@ -91,6 +92,11 @@ type WorkspaceCloseConflict struct {
 	Dirty    string `json:"dirty,omitempty"`
 	Unpushed string `json:"unpushed,omitempty"`
 }
+
+// workspacesUnavailable is kept distinct from mutation/read errorResponse so
+// an HTML list refresh can replace the list owner with the exact total-failure
+// state while JSON clients retain the existing error shape.
+type workspacesUnavailable struct{}
 
 type workspaceCloseRefusal struct {
 	report *workspace.CloseReport
@@ -237,6 +243,9 @@ func (s *WorkspacesService) GitStatus(ctx context.Context, id string) (Workspace
 		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
 			return WorkspaceGitView{}, err
 		}
+		if !errors.Is(err, workspace.ErrWorkspaceNotRunning) && !errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) {
+			view.Partial = true
+		}
 		view.Reason = workspaceGitUnavailableReason(err, ws.Status)
 		return view, nil
 	}
@@ -261,7 +270,8 @@ func (s *WorkspacesService) GitStatus(ctx context.Context, id string) (Workspace
 // text. Upstream error strings can carry paths, remote URLs, or command
 // output and are never surfaced.
 func workspaceGitUnavailableReason(err error, status string) string {
-	if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) || status == workspace.StatusClosed {
+	if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) ||
+		(status == workspace.StatusClosed && errors.Is(err, workspace.ErrWorkspaceNotRunning)) {
 		return "The workspace is closed."
 	}
 	if errors.Is(err, workspace.ErrWorkspaceNotRunning) {
@@ -459,22 +469,31 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snapshot, err := service.Read(r.Context())
 		if err != nil {
+			if wantsHTMLRequest(r) {
+				writeJSON(w, http.StatusServiceUnavailable, workspacesUnavailable{})
+				return
+			}
 			writeWorkspaceError(w, http.StatusServiceUnavailable, "workspaces_unavailable", "workspaces are temporarily unavailable")
 			return
 		}
 		if wantsHTMLRequest(r) {
 			git := make(map[string]WorkspaceGitView, len(snapshot.Workspaces))
+			partial := false
 			for _, item := range snapshot.Workspaces {
 				if item.Status == workspace.StatusClosed {
 					continue
 				}
 				view, gitErr := service.GitStatus(r.Context(), item.ID)
 				if gitErr != nil {
+					partial = true
 					view = WorkspaceGitView{WorkspaceID: item.ID, Reason: "Git status could not be read from this workspace."}
+				}
+				if view.Partial || (item.Status == workspace.StatusOpen && !view.Available) {
+					partial = true
 				}
 				git[item.ID] = view
 			}
-			writeJSON(w, http.StatusOK, WorkspaceFragmentSnapshot{Snapshot: snapshot, Git: git})
+			writeJSON(w, http.StatusOK, WorkspaceFragmentSnapshot{Snapshot: snapshot, Git: git, Partial: partial})
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)

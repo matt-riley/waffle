@@ -17,11 +17,14 @@ templ FragmentList(view FragmentView) {
 		}
 		for _, item := range view.Items {
 			<article class={ item.Class } data-waffle-id={ item.ID } data-task-id={ item.DataTaskID } data-workspace-id={ item.DataWorkspaceID } data-status={ item.Kind } data-task-name={ item.DataTaskName } data-task-cron={ item.DataTaskCron } data-task-prompt={ item.DataTaskPrompt } data-task-deliver={ item.DataTaskDeliver } data-task-profile={ item.DataTaskProfile } data-task-enabled={ fragmentBool(item.DataTaskEnabled) } data-task-redacted-fields={ item.DataTaskRedactedFields }>
-				if item.Kind != "" {
-					<p class="waffle-fragment-kind">{ item.Kind }</p>
+				if !item.KindAfterTitle && item.Kind != "" {
+					<p class={ fragmentKindClass(item) }>{ item.Kind }</p>
 				}
 				if item.Title != "" {
 					<h3>{ item.Title }</h3>
+				}
+				if item.KindAfterTitle && item.Kind != "" {
+					<p class={ fragmentKindClass(item) }>{ item.Kind }</p>
 				}
 				if item.Excerpt != "" {
 					if item.ExcerptLong {
@@ -33,7 +36,7 @@ templ FragmentList(view FragmentView) {
 						<p class="waffle-fragment-excerpt">{ item.Excerpt }</p>
 					}
 				}
-				if item.Detail != "" {
+				if item.Detail != "" && !item.DetailAfterFields {
 					if item.DetailClass != "" {
 						<p class={ item.DetailClass }>{ item.Detail }</p>
 					} else {
@@ -47,7 +50,34 @@ templ FragmentList(view FragmentView) {
 						}
 					</dl>
 				}
-				if len(item.Actions) > 0 {
+				if item.Detail != "" && item.DetailAfterFields {
+					if item.DetailClass != "" {
+						<p class={ item.DetailClass }>{ item.Detail }</p>
+					} else {
+						<p class="waffle-fragment-detail">{ item.Detail }</p>
+					}
+				}
+
+				if len(item.PrimaryActions) > 0 || len(item.SecondaryActions) > 0 || len(item.MoreActions) > 0 {
+					<div class="waffle-fragment-actions">
+						for _, action := range item.PrimaryActions {
+							@FragmentActionControl(action, action.Class)
+						}
+						for _, action := range item.SecondaryActions {
+							@FragmentActionControl(action, action.Class)
+						}
+						if len(item.MoreActions) > 0 {
+							<details id={ item.MoreActionsID } class="workspace-more-actions">
+								<summary data-waffle-action-id={ item.MoreActionsID } aria-label={ item.MoreActionsLabel }>More actions</summary>
+								<div class="workspace-more-actions-panel">
+									for _, action := range item.MoreActions {
+										@FragmentActionControl(action, action.Class)
+									}
+								</div>
+							</details>
+						}
+					</div>
+				} else if len(item.Actions) > 0 {
 					<div class="waffle-fragment-actions">
 						for _, action := range item.Actions {
 							@FragmentActionControl(action, action.Class)
@@ -94,15 +124,15 @@ templ FragmentActionControl(action FragmentAction, class string) {
 		} else {
 			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled }>{ action.Label }</button>
 		}
-		} else if action.Method == "edit" {
+	} else if action.Method == "edit" {
 		if action.HasPressed {
 			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
 		} else {
-				<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
-			}
-		} else if action.Method == "filter" {
-			<button class={ class } data-waffle-action-id={ action.ID } type="button" hx-get={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } disabled?={ action.Disabled }>{ action.Label }</button>
-		} else {
+			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
+		}
+	} else if action.Method == "filter" {
+		<button class={ class } data-waffle-action-id={ action.ID } type="button" hx-get={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } disabled?={ action.Disabled }>{ action.Label }</button>
+	} else {
 		<form class={ fragmentActionFormClass(action) } hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
 			for _, field := range action.Fields {
 				<input type="hidden" name={ field.Label } value={ field.Value }/>

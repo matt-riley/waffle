@@ -11,12 +11,21 @@ templ Workspaces(view ShellView) {
 				<p class="eyebrow">Workspaces</p>
 				<h1 id="workspaces-title">Where Waffle is working</h1>
 			</div>
-			<button id="workspace-open-button" class="workspace-primary" type="button">Open repository</button>
 		</header>
-		<div class="workspaces-errors" id="workspaces-errors" role="status" aria-live="polite" hidden></div>
-		<p class="workspaces-summary" id="workspaces-summary" aria-live="polite"></p>
-		<div class="workspaces-grid" id="workspaces-list" hx-get="/api/v1/desk/workspaces" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML"></div>
-		<p class="workspaces-empty" id="workspaces-empty">Loading workspaces…</p>
+		<div class="workspaces-panel">
+			<header class="workspaces-panel-header">
+				<div>
+					<p class="eyebrow">Guarded repositories</p>
+					<h2>Workspace state</h2>
+				</div>
+				<button id="workspace-open-button" class="workspace-primary" type="button">Open repository</button>
+			</header>
+			<div class="workspaces-errors" id="workspaces-errors" role="status" aria-live="polite" hidden></div>
+			<p class="workspaces-summary" id="workspaces-summary" aria-live="polite"></p>
+			<div class="workspaces-grid" id="workspaces-list" hx-get="/api/v1/desk/workspaces" hx-trigger="load, waffle:refresh from:body" hx-target="this" hx-swap="outerHTML" aria-busy="true">
+				<p class="waffle-fragment-status" role="status">Loading workspaces…</p>
+			</div>
+		</div>
 
 		<dialog id="workspace-open-dialog" aria-labelledby="workspace-open-title">
 			<form id="workspace-open-form" hx-post="/api/v1/desk/workspaces/open" hx-target="#workspace-open-status" hx-swap="innerHTML" data-waffle-json="true">
