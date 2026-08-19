@@ -335,6 +335,7 @@
   min-width: 0;
   padding: 0.65rem;
   position: relative;
+  scroll-margin-bottom: var(--desk-content-clearance);
   z-index: 4;
 }
 

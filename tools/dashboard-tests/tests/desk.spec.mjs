@@ -4019,6 +4019,210 @@ test("memory session picker searches, groups, disambiguates, and preserves exact
   }
 });
 
+test("memory picker submits each duplicate title's exact opaque ID", async ({ page }) => {
+  await page.goto(deskURL("memory"));
+  const trigger = page.locator("#memory-session-trigger");
+  const input = page.locator("#memory-session");
+  await trigger.click();
+
+  const query = page.locator("#memory-session-query");
+  await query.fill("Duplicate title");
+  const duplicates = page.locator("#memory-session-options [role='option']");
+  await expect(duplicates).toHaveCount(2);
+
+  await duplicates.nth(0).click();
+  await expect(input).toHaveValue("session-duplicate-a");
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await query.fill("Duplicate title");
+  await duplicates.nth(1).click();
+  await expect(input).toHaveValue("session-duplicate-b");
+  await expect(trigger).toBeFocused();
+});
+
+test("memory search swaps preserve one status owner and one settled result owner", async ({ page }) => {
+  await page.goto(deskURL("memory"));
+  const status = page.locator("#memory-status");
+  const query = page.getByLabel("Search turns, summaries, and notes");
+  const search = page.getByRole("button", { name: "Search memory", exact: true });
+
+  const assertUniqueSettledDOM = async (expectedStatus, expectedMessage = "") => {
+    await expect(status).toHaveText(expectedStatus);
+    await expect(page.locator("#memory-status")).toHaveCount(1);
+    await expect(page.locator("#memory-results")).toHaveCount(1);
+    const duplicateIDs = await page.evaluate(() => {
+      const counts = new Map();
+      for (const element of document.querySelectorAll("[id]")) {
+        counts.set(element.id, (counts.get(element.id) || 0) + 1);
+      }
+      return [...counts.entries()].filter(([, count]) => count > 1);
+    });
+    expect(duplicateIDs, JSON.stringify(duplicateIDs)).toEqual([]);
+    if (expectedMessage) {
+      expect((await page.locator("#memory-results").innerText()).split(expectedMessage).length - 1).toBe(1);
+    }
+  };
+
+  try {
+    // First settled state: the no-result treatment owns the explanation.
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?hits=0`);
+    await query.fill("first zero result");
+    await search.click();
+    await assertUniqueSettledDOM("0 results", "No attributed memory matched that search.");
+
+    // A populated swap replaces the empty treatment instead of appending to it.
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+    await query.fill("release artifact");
+    await search.click();
+    await assertUniqueSettledDOM("2 results");
+    await expect(page.locator("#memory-results .waffle-empty-state")).toHaveCount(0);
+    await expect(page.locator("#memory-results .memory-hit")).toHaveCount(2);
+
+    // Returning to zero after results exercises the second outer/OOB swap.
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?hits=0`);
+    await query.fill("second zero result");
+    await search.click();
+    await assertUniqueSettledDOM("0 results", "No attributed memory matched that search.");
+    await expect(page.locator("#memory-results .memory-hit")).toHaveCount(0);
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+});
+
+test("Evening Memory zero and error states keep their hierarchy and artwork distinction", async ({ page }) => {
+  test.skip(!["desktop", "mobile", "narrow"].includes(test.info().project.name), "Run the final-head Evening state evidence at supported compact widths.");
+  await page.goto(deskURL("memory"));
+  await page.getByLabel("Theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const query = page.getByLabel("Search turns, summaries, and notes");
+  const search = page.getByRole("button", { name: "Search memory", exact: true });
+
+  try {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?hits=0`);
+    await query.fill("evening zero state");
+    await search.click();
+    const zero = page.locator("#memory-results .waffle-empty-state");
+    await expect(zero).toHaveCount(1);
+    await expect(zero).toHaveClass(/waffle-empty-state/);
+    await expect(zero.locator(".waffle-empty-state-copy h2")).toHaveText("No memory matched that search");
+    await expect(zero.locator(".waffle-empty-state-copy p")).toHaveText(
+      "No attributed memory matched that search. Try a different phrase or add context through conversation.",
+    );
+    await expect(zero.locator("img.waffle-empty-state-art-memory")).toHaveCount(1);
+    await expect(zero.locator("img.waffle-empty-state-art-memory")).toHaveAttribute("alt", "");
+    await expect(zero.locator("img.waffle-empty-state-art-memory")).toHaveAttribute("aria-hidden", "true");
+    await expect(zero.locator("img.waffle-empty-state-art-memory")).toHaveAttribute("src", /waffle-empty-curious\.png/);
+    await expect(page.locator("#memory-results .waffle-fragment-empty")).toHaveCount(0);
+
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search?error=all`);
+    await query.fill("evening failed state");
+    await search.click();
+    const error = page.locator("#memory-results .waffle-empty-state");
+    await expect(error).toHaveCount(1);
+    await expect(error).toHaveClass(/is-no-artwork/);
+    await expect(error.locator(".waffle-empty-state-copy h2")).toHaveText(
+      "Memory search could not be completed right now.",
+    );
+    await expect(error.locator(".waffle-empty-state-copy p")).toHaveText("Try again");
+    await expect(error.locator("img")).toHaveCount(0);
+    await expect(page.locator("#memory-results")).not.toContainText("No memory matched that search");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+});
+
+test("memory picker keeps representative metadata readable at compact and zoom widths", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit compact and 200% geometry matrix once.");
+  const cdp = await page.context().newCDPSession(page);
+  const widths = [
+    { width: 375, height: 812, zoom: false },
+    { width: 320, height: 812, zoom: false },
+    { width: 188, height: 406, zoom: true },
+  ];
+
+  try {
+    for (const viewport of widths) {
+      if (viewport.zoom) {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: viewport.width,
+          height: viewport.height,
+          deviceScaleFactor: 1,
+          mobile: false,
+          screenWidth: 375,
+          screenHeight: 812,
+        });
+      } else {
+        await cdp.send("Emulation.clearDeviceMetricsOverride");
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      }
+      await page.goto(deskURL("memory"));
+      await page.locator("#memory-session-trigger").click();
+      const query = page.locator("#memory-session-query");
+      await query.fill("Duplicate title");
+      const option = page.locator("#memory-session-options [data-session-id='session-duplicate-a']");
+      await expect(option).toBeVisible();
+
+      const metrics = await option.evaluate((element) => {
+        const rect = (selector) => {
+          const child = element.querySelector(selector);
+          if (!child) return null;
+          const box = child.getBoundingClientRect();
+          const style = getComputedStyle(child);
+          return {
+            text: child.textContent,
+            display: style.display,
+            visibility: style.visibility,
+            width: box.width,
+            height: box.height,
+            left: box.left,
+            right: box.right,
+            top: box.top,
+            bottom: box.bottom,
+          };
+        };
+        const optionBox = element.getBoundingClientRect();
+        const panel = document.querySelector("#memory-session-popover")?.getBoundingClientRect();
+        const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+        return {
+          option: { left: optionBox.left, right: optionBox.right, top: optionBox.top, bottom: optionBox.bottom },
+          title: rect(".memory-session-option-title"),
+          summary: rect(".memory-session-option-summary"),
+          meta: rect(".memory-session-option-meta"),
+          panel: panel && { left: panel.left, right: panel.right, bottom: panel.bottom },
+          navigation: navigation && { top: navigation.top, bottom: navigation.bottom },
+          viewport: { width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth },
+        };
+      });
+
+      expect(metrics.title?.text).toBe("Duplicate title");
+      expect(metrics.summary?.text).toBe("Alpha disambiguator");
+      expect(metrics.meta?.text).toContain("updated ");
+      expect(metrics.meta?.text).toContain("model fast");
+      expect(metrics.meta?.text).toContain("licate-a");
+      for (const [name, child] of Object.entries({ title: metrics.title, summary: metrics.summary, meta: metrics.meta })) {
+        expect(child, `${name} metrics at ${viewport.width}px`).not.toBeNull();
+        expect(child.display, `${name} display at ${viewport.width}px`).not.toBe("none");
+        expect(child.visibility, `${name} visibility at ${viewport.width}px`).not.toBe("hidden");
+        expect(child.width, `${name} width at ${viewport.width}px`).toBeGreaterThan(0);
+        expect(child.height, `${name} height at ${viewport.width}px`).toBeGreaterThan(0);
+        expect(child.left, `${name} left at ${viewport.width}px`).toBeGreaterThanOrEqual(metrics.option.left - 1);
+        expect(child.right, `${name} right at ${viewport.width}px`).toBeLessThanOrEqual(metrics.option.right + 1);
+        expect(child.bottom, `${name} bottom at ${viewport.width}px`).toBeLessThanOrEqual(metrics.option.bottom + 1);
+      }
+      expect(metrics.viewport.scrollWidth, `${viewport.width}px horizontal overflow`).toBeLessThanOrEqual(metrics.viewport.width);
+      expect(metrics.panel?.left, `${viewport.width}px panel left`).toBeGreaterThanOrEqual(0);
+      expect(metrics.panel?.right, `${viewport.width}px panel right`).toBeLessThanOrEqual(metrics.viewport.width + 1);
+      if (metrics.navigation) {
+        expect(metrics.panel?.bottom, `${viewport.width}px picker clears navigation`).toBeLessThanOrEqual(metrics.navigation.top + 1);
+      }
+    }
+  } finally {
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await page.setViewportSize({ width: 1470, height: 1000 });
+  }
+});
+
 test("memory search status settles and never coexists with stale instructions", async ({ page }) => {
   await page.goto(deskURL("memory"));
   const status = page.locator("#memory-status");
@@ -4129,18 +4333,29 @@ test("memory search attaches one source and forgets only after confirmation", as
   );
   await page.goto(deskURL("memory"));
 
-  await page.getByLabel("Search turns, summaries, and notes").fill("release artifact");
-  await page.getByRole("button", { name: "Search memory", exact: true }).click();
-  const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
-  await expect(note).toContainText("Use the verified release artifact.");
-
+  const query = page.getByLabel("Search turns, summaries, and notes");
   const picker = page.locator("#memory-session-trigger");
   await picker.click();
   await page.getByRole("option", { name: /Release review/ }).click();
+  await expect(page.locator("#memory-session")).toHaveValue("session-primary");
+  await expect(picker).toHaveText("Release review");
+
+  // Search is an unrelated fragment swap and must not clear the explicit
+  // target selected before the search begins.
+  await query.fill("release artifact");
+  await page.getByRole("button", { name: "Search memory", exact: true }).click();
+  await expect(query).toHaveValue("release artifact");
+  await expect(page.locator("#memory-session")).toHaveValue("session-primary");
+  await expect(picker).toHaveText("Release review");
+  const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
+  await expect(note).toContainText("Use the verified release artifact.");
+
   await note.getByRole("button", { name: "Attach to session", exact: true }).click();
   await expect(page.locator("#memory-attach-status")).toHaveText(
     "Memory reference attached to the session.",
   );
+  await expect(query).toHaveValue("release artifact");
+  await expect(page.locator("#memory-session")).toHaveValue("session-primary");
 
   const forget = note.getByRole("button", { name: "Forget…", exact: true });
   await forget.click();
@@ -4151,11 +4366,17 @@ test("memory search attaches one source and forgets only after confirmation", as
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(note).toBeVisible();
+  await expect(query).toHaveValue("release artifact");
+  await expect(page.locator("#memory-session")).toHaveValue("session-primary");
+  await expect(picker).toHaveText("Release review");
 
   await forget.click();
   await dialog.getByRole("button", { name: "Forget note", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(note).toHaveCount(0);
+  await expect(query).toHaveValue("release artifact");
+  await expect(page.locator("#memory-session")).toHaveValue("session-primary");
+  await expect(picker).toHaveText("Release review");
   await expect(page.locator("#memory-results")).toContainText(
     "Reviewing the release queue.",
   );

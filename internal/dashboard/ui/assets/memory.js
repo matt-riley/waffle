@@ -223,6 +223,16 @@ export function initMemorySessionPicker(root = document) {
     trigger.focus();
   }
 
+  function keepPickerClearOfNavigation() {
+    if (!window.matchMedia?.("(max-width: 768px)").matches) return;
+    field.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
+    const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+    const panel = popover.getBoundingClientRect();
+    const scrollOwner = field.closest("main");
+    if (!navigation || !scrollOwner || panel.bottom <= navigation.top) return;
+    scrollOwner.scrollTop += panel.bottom - navigation.top + 8;
+  }
+
   function select(choice) {
     input.value = choice.id;
     document.body.dataset.waffleMemorySessionSelection = choice.id;
@@ -239,6 +249,7 @@ export function initMemorySessionPicker(root = document) {
     activeIndex = -1;
     render({ scrollSelected: true });
     query.focus();
+    keepPickerClearOfNavigation();
   }
 
   trigger.addEventListener("click", () => {

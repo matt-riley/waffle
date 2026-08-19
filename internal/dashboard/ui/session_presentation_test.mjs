@@ -48,6 +48,31 @@ test("presentSessions groups recency by owner-local midnight and keeps pinned ro
   assert.equal(result.flatMap((group) => group.items).filter((item) => item.id === "pinned").length, 1);
 });
 
+test("presentSessions keeps every pinned choice once and newest-first at local boundaries", () => {
+  const result = presentSessions([
+    session("pinned-old", new Date(2026, 7, 18, 8), { pinned: true }),
+    session("pinned-new", new Date(2026, 7, 19, 11), { pinned: true }),
+    session("today-midnight", new Date(2026, 7, 19, 0, 0)),
+    session("yesterday-midnight", new Date(2026, 7, 18, 0, 0)),
+    session("seven-days-ago-midnight", new Date(2026, 7, 12, 0, 0)),
+    session("before-seven-days", new Date(2026, 7, 11, 23, 59)),
+  ], { now });
+
+  assert.deepEqual(
+    result.map((group) => [group.key, group.items.map((item) => item.id)]),
+    [
+      ["pinned", ["pinned-new", "pinned-old"]],
+      ["today", ["today-midnight"]],
+      ["yesterday", ["yesterday-midnight"]],
+      ["week", ["seven-days-ago-midnight"]],
+      ["older", ["before-seven-days"]],
+    ],
+  );
+
+  const flattened = result.flatMap((group) => group.items.map((item) => item.id));
+  assert.equal(new Set(flattened).size, flattened.length);
+});
+
 test("presentSessions handles local day and seven-day boundaries without UTC drift", () => {
   const result = presentSessions([
     session("at-today-midnight", new Date(2026, 7, 19, 0, 0)),
