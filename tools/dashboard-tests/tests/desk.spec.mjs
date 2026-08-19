@@ -3560,49 +3560,112 @@ test("Workspaces keeps empty, partial, and total failure states truthful", async
 });
 
 test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async ({ page }) => {
-  const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=long`);
-  expect(response.ok()).toBe(true);
-  await page.goto(deskURL("workspaces"));
-  await expect.poll(() => page.locator(".workspace-card").count()).toBeGreaterThan(1);
-  await expect(page.locator("[data-workspace-id='workspace-dirty'] .workspace-git")).toContainText("deliberately-long");
+  try {
+    const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=long`);
+    expect(response.ok()).toBe(true);
+    await page.goto(deskURL("workspaces"));
+    await expect.poll(() => page.locator(".workspace-card").count()).toBeGreaterThan(1);
+    await expect(page.locator("[data-workspace-id='workspace-dirty'] .workspace-git")).toContainText("deliberately-long");
 
-  const geometry = await page.evaluate(() => {
-    const controls = [...document.querySelectorAll(
-      ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary, .workspace-card .workspace-more-actions button",
-    )];
-    return {
-      viewport: document.documentElement.clientWidth,
-      scrollWidth: document.documentElement.scrollWidth,
-      header: (() => {
-        const rect = document.querySelector(".workspaces-header")?.getBoundingClientRect();
-        return rect ? { left: rect.left, right: rect.right } : null;
-      })(),
-      panel: (() => {
-        const rect = document.querySelector(".workspaces-panel")?.getBoundingClientRect();
-        return rect ? { left: rect.left, right: rect.right } : null;
-      })(),
-      controls: controls.map((element) => {
+    const geometry = await page.evaluate(() => {
+      const controls = [...document.querySelectorAll(
+        ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary, .workspace-card .workspace-more-actions button",
+      )];
+      return {
+        viewport: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        header: (() => {
+          const rect = document.querySelector(".workspaces-header")?.getBoundingClientRect();
+          return rect ? { left: rect.left, right: rect.right } : null;
+        })(),
+        panel: (() => {
+          const rect = document.querySelector(".workspaces-panel")?.getBoundingClientRect();
+          return rect ? { left: rect.left, right: rect.right } : null;
+        })(),
+        controls: controls.map((element) => {
+          const rect = element.getBoundingClientRect();
+          return { width: rect.width, height: rect.height, bottom: rect.bottom };
+        }),
+      };
+    });
+    expect(geometry.scrollWidth).toBe(geometry.viewport);
+    expect(geometry.header).not.toBeNull();
+    expect(geometry.panel).not.toBeNull();
+    expect(Math.abs(geometry.header.left - geometry.panel.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.header.right - geometry.panel.right)).toBeLessThanOrEqual(1);
+    expect(geometry.controls.length).toBeGreaterThan(0);
+    for (const control of geometry.controls) {
+      expect(control.width).toBeGreaterThanOrEqual(44);
+      expect(control.height).toBeGreaterThanOrEqual(44);
+    }
+
+    if (["mobile", "narrow"].includes(test.info().project.name)) {
+      const clearance = await page.evaluate(async () => {
+        const target = [...document.querySelectorAll(
+          ".workspace-card .workspace-more-actions > summary",
+        )].at(-1);
+        const scroller = document.querySelector(".desk-shell > main");
+        const navigation = document.querySelector(".desk-navigation");
+        if (!target || !scroller || !navigation) return null;
+        target.scrollIntoView({ block: "end", inline: "nearest" });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const targetRect = target.getBoundingClientRect();
+        const navigationRect = navigation.getBoundingClientRect();
+        return {
+          targetBottom: targetRect.bottom,
+          navigationTop: navigationRect.top,
+          scrollTop: scroller.scrollTop,
+          scrollHeight: scroller.scrollHeight,
+          clientHeight: scroller.clientHeight,
+        };
+      });
+      expect(clearance).not.toBeNull();
+      expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
+      expect(clearance.scrollTop).toBeGreaterThan(0);
+      expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
+    }
+
+    if (test.info().project.name === "desktop") {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 188,
+        height: 500,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: 375,
+        screenHeight: 1000,
+      });
+      await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
+      await expectNoHorizontalOverflow(page);
+      const zoomTargets = await page.locator(
+        ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary",
+      ).evaluateAll((elements) => elements.map((element) => {
         const rect = element.getBoundingClientRect();
-        return { width: rect.width, height: rect.height, bottom: rect.bottom };
-      }),
-    };
-  });
-  expect(geometry.scrollWidth).toBe(geometry.viewport);
-  expect(geometry.header).not.toBeNull();
-  expect(geometry.panel).not.toBeNull();
-  expect(Math.abs(geometry.header.left - geometry.panel.left)).toBeLessThanOrEqual(1);
-  expect(Math.abs(geometry.header.right - geometry.panel.right)).toBeLessThanOrEqual(1);
-  expect(geometry.controls.length).toBeGreaterThan(0);
-  for (const control of geometry.controls) {
-    expect(control.width).toBeGreaterThanOrEqual(44);
-    expect(control.height).toBeGreaterThanOrEqual(44);
-  }
+        return { width: rect.width, height: rect.height };
+      }));
+      for (const target of zoomTargets) {
+        expect(target.width).toBeGreaterThanOrEqual(44);
+        expect(target.height).toBeGreaterThanOrEqual(44);
+      }
+      await cdp.send("Emulation.clearDeviceMetricsOverride");
+    }
 
-  if (["mobile", "narrow"].includes(test.info().project.name)) {
+  } finally {
+    const reset = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+    expect(reset.ok()).toBe(true);
+  }
+});
+
+test("Workspaces final More actions can clear fixed navigation on compact mobile layouts", async ({ page }) => {
+  test.skip(!["mobile", "narrow"].includes(test.info().project.name), "Run compact mobile navigation clearance checks.");
+  try {
+    const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=one`);
+    expect(response.ok()).toBe(true);
+    await page.goto(deskURL("workspaces"));
+    await expect(page.locator(".workspace-card")).toHaveCount(1);
+
     const clearance = await page.evaluate(async () => {
-      const target = [...document.querySelectorAll(
-        ".workspace-card .workspace-more-actions > summary",
-      )].at(-1);
+      const target = document.querySelector(".workspace-card .workspace-more-actions > summary");
       const scroller = document.querySelector(".desk-shell > main");
       const navigation = document.querySelector(".desk-navigation");
       if (!target || !scroller || !navigation) return null;
@@ -3613,77 +3676,22 @@ test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async 
       return {
         targetBottom: targetRect.bottom,
         navigationTop: navigationRect.top,
+        navigationHeight: navigationRect.height,
         scrollTop: scroller.scrollTop,
         scrollHeight: scroller.scrollHeight,
         clientHeight: scroller.clientHeight,
       };
     });
+
     expect(clearance).not.toBeNull();
+    expect(clearance.scrollHeight - clearance.clientHeight).toBeGreaterThanOrEqual(clearance.navigationHeight + 8);
     expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
     expect(clearance.scrollTop).toBeGreaterThan(0);
     expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
+  } finally {
+    const reset = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+    expect(reset.ok()).toBe(true);
   }
-
-  if (test.info().project.name === "desktop") {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send("Emulation.setDeviceMetricsOverride", {
-      width: 188,
-      height: 500,
-      deviceScaleFactor: 1,
-      mobile: false,
-      screenWidth: 375,
-      screenHeight: 1000,
-    });
-    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
-    await expectNoHorizontalOverflow(page);
-    const zoomTargets = await page.locator(
-      ".workspace-card .workspace-primary, .workspace-card .workspace-secondary-action, .workspace-card .workspace-more-actions > summary",
-    ).evaluateAll((elements) => elements.map((element) => {
-      const rect = element.getBoundingClientRect();
-      return { width: rect.width, height: rect.height };
-    }));
-    for (const target of zoomTargets) {
-      expect(target.width).toBeGreaterThanOrEqual(44);
-      expect(target.height).toBeGreaterThanOrEqual(44);
-    }
-    await cdp.send("Emulation.clearDeviceMetricsOverride");
-  }
-
-  await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
-});
-
-test("Workspaces final More actions can clear fixed navigation on compact mobile layouts", async ({ page }) => {
-  test.skip(!["mobile", "narrow"].includes(test.info().project.name), "Run compact mobile navigation clearance checks.");
-  const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=one`);
-  expect(response.ok()).toBe(true);
-  await page.goto(deskURL("workspaces"));
-  await expect(page.locator(".workspace-card")).toHaveCount(1);
-
-  const clearance = await page.evaluate(async () => {
-    const target = document.querySelector(".workspace-card .workspace-more-actions > summary");
-    const scroller = document.querySelector(".desk-shell > main");
-    const navigation = document.querySelector(".desk-navigation");
-    if (!target || !scroller || !navigation) return null;
-    target.scrollIntoView({ block: "end", inline: "nearest" });
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const targetRect = target.getBoundingClientRect();
-    const navigationRect = navigation.getBoundingClientRect();
-    return {
-      targetBottom: targetRect.bottom,
-      navigationTop: navigationRect.top,
-      navigationHeight: navigationRect.height,
-      scrollTop: scroller.scrollTop,
-      scrollHeight: scroller.scrollHeight,
-      clientHeight: scroller.clientHeight,
-    };
-  });
-
-  expect(clearance).not.toBeNull();
-  expect(clearance.scrollHeight - clearance.clientHeight).toBeGreaterThanOrEqual(clearance.navigationHeight + 8);
-  expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
-  expect(clearance.scrollTop).toBeGreaterThan(0);
-  expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
-  await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
 });
 
 test("many Workspaces close preview uses the selected fixture workspace", async ({ page }) => {
@@ -3704,6 +3712,7 @@ test("many Workspaces close preview uses the selected fixture workspace", async 
     await expect(page.locator("#workspace-close-dialog")).toBeVisible();
 
     const token = await page.locator("body").getAttribute("data-request-token");
+    const idempotencyKey = ["many-close-preview", test.info().project.name, "workspace-many-1"].join("-");
     const jsonPreviewResponse = await page.request.post(
       `${baseURL}/api/v1/desk/workspaces/workspace-many-1/close-preview`,
       {
@@ -3711,7 +3720,7 @@ test("many Workspaces close preview uses the selected fixture workspace", async 
         headers: {
           Accept: "application/json",
           "X-Waffle-Desk-Token": token || "",
-          "Idempotency-Key": `many-close-preview-${Date.now()}`,
+          "Idempotency-Key": idempotencyKey,
         },
       },
     );

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -29,14 +30,8 @@ func TestFixtureManyWorkspaceListAndGetRemainConsistent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Get(%q) error = %v", listedWorkspace.ID, err)
 			}
-			if got.ID != listedWorkspace.ID {
-				t.Errorf("Get(%q).ID = %q, want %q", listedWorkspace.ID, got.ID, listedWorkspace.ID)
-			}
-			if got.Repo != listedWorkspace.Repo {
-				t.Errorf("Get(%q).Repo = %q, want %q", listedWorkspace.ID, got.Repo, listedWorkspace.Repo)
-			}
-			if got.SessionID != listedWorkspace.SessionID {
-				t.Errorf("Get(%q).SessionID = %q, want %q", listedWorkspace.ID, got.SessionID, listedWorkspace.SessionID)
+			if !reflect.DeepEqual(*got, listedWorkspace) {
+				t.Errorf("Get(%q) = %+v, want %+v", listedWorkspace.ID, *got, listedWorkspace)
 			}
 		})
 	}

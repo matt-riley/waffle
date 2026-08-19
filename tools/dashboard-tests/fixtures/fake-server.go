@@ -867,6 +867,10 @@ func (w *fixtureWorkspaces) ReadFile(_ context.Context, _ string, path string) (
 }
 
 func fixtureManyWorkspace(suffix string) workspace.Workspace {
+	createdAt := fixtureNow
+	if index, err := strconv.Atoi(suffix); err == nil && index > 0 {
+		createdAt = fixtureNow.Add(-time.Duration(index) * time.Minute)
+	}
 	return workspace.Workspace{
 		ID:         "workspace-many-" + suffix,
 		Repo:       "matt-riley/repository-" + suffix,
@@ -874,7 +878,7 @@ func fixtureManyWorkspace(suffix string) workspace.Workspace {
 		SessionID:  "session-many-" + suffix,
 		Status:     workspace.StatusOpen,
 		Profile:    "reviewer",
-		CreatedAt:  fixtureNow,
+		CreatedAt:  createdAt,
 		UpdatedAt:  fixtureNow,
 		LastActive: fixtureNow,
 	}
@@ -908,9 +912,7 @@ func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error)
 	}
 	if mode == fixtureWorkspaceModeMany {
 		for index := 1; index <= 4; index++ {
-			item := fixtureManyWorkspace(strconv.Itoa(index))
-			item.CreatedAt = fixtureNow.Add(-time.Duration(index) * time.Minute)
-			result = append(result, item)
+			result = append(result, fixtureManyWorkspace(strconv.Itoa(index)))
 		}
 	}
 	if mode == fixtureWorkspaceModeEmpty {
