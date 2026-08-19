@@ -278,6 +278,51 @@ async function expectTodayComposerClearance(page) {
   }
 }
 
+async function expectVisibleComposerActionsClearOfNavigation(page, label) {
+  const geometry = await page.evaluate(() => {
+    const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+    const actions = Array.from(document.querySelectorAll(".composer-actions button"))
+      .filter((element) => {
+        const style = getComputedStyle(element);
+        return !element.hidden && style.display !== "none" && style.visibility !== "hidden";
+      })
+      .map((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          id: element.id,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          bottom: bounds.bottom,
+        };
+      });
+    return {
+      navigation: navigation && {
+        left: navigation.left,
+        right: navigation.right,
+        top: navigation.top,
+        bottom: navigation.bottom,
+      },
+      actions,
+    };
+  });
+  expect(geometry.navigation).not.toBeNull();
+  expect(geometry.actions.length, `${label} has visible composer actions`).toBeGreaterThan(0);
+  for (const action of geometry.actions) {
+    expect(action.bottom, `${label} #${action.id} above navigation`).toBeLessThanOrEqual(geometry.navigation.top + 1);
+    expect(rectIntersects(action, geometry.navigation), `${label} #${action.id} intersects navigation`).toBe(false);
+  }
+  for (let first = 0; first < geometry.actions.length; first += 1) {
+    for (let second = first + 1; second < geometry.actions.length; second += 1) {
+      expect(
+        rectIntersects(geometry.actions[first], geometry.actions[second]),
+        `${label} #${geometry.actions[first].id} overlaps #${geometry.actions[second].id}`,
+      ).toBe(false);
+    }
+  }
+  return geometry;
+}
+
 async function expectMobileUtilityHeaderClearance(page) {
   await page.evaluate(() => {
     window.scrollTo(0, 0);
@@ -569,6 +614,234 @@ test("Today keeps a long transcript scrollable while the real composer remains a
     });
     expect(trailing.bodyHeight - trailing.viewportHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(24);
     expect(trailing.shellHeight - trailing.mainHeight, JSON.stringify(trailing)).toBeLessThanOrEqual(trailing.navHeight + 24);
+  }
+});
+
+test("Today Hearth centers the reading column and exercises the 15rem composer at every required width", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Run the explicit Hearth geometry contract once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  const viewports = [
+    { width: 1414, height: 920 },
+    { width: 768, height: 1000 },
+    { width: 375, height: 812 },
+    { width: 320, height: 812 },
+  ];
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("today"));
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+
+    const column = page.locator(".conversation-column");
+    await expect(column).toBeVisible();
+    await page.locator("#desk-message").fill("");
+    const initialHeight = await page.locator("#desk-message").evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    expect(initialHeight, `${viewport.width}px empty composer height`).toBeLessThanOrEqual(48);
+    if (viewport.width <= 768) {
+      const initialClearance = await page.evaluate(() => ({
+        composerBottom: document.querySelector("#desk-composer").getBoundingClientRect().bottom,
+        navigationTop: document.querySelector(".desk-navigation").getBoundingClientRect().top,
+      }));
+      expect(initialClearance.composerBottom, `${viewport.width}px empty composer clearance`)
+        .toBeLessThanOrEqual(initialClearance.navigationTop + 1);
+      await expectVisibleComposerActionsClearOfNavigation(page, `${viewport.width}px empty composer`);
+    }
+
+    await page.locator("#desk-message").fill(
+      Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"),
+    );
+    if (viewport.width <= 768) {
+      await expect.poll(async () => page.evaluate(() => {
+        const composer = document.querySelector("#desk-composer").getBoundingClientRect();
+        const navigation = document.querySelector(".desk-navigation").getBoundingClientRect();
+        return composer.bottom - navigation.top;
+      })).toBeLessThanOrEqual(1);
+    }
+    const geometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const value = document.querySelector(selector)?.getBoundingClientRect();
+        return value && {
+          left: value.left,
+          right: value.right,
+          top: value.top,
+          bottom: value.bottom,
+          width: value.width,
+          height: value.height,
+        };
+      };
+      const conversation = rect(".conversation");
+      const column = rect(".conversation-column");
+      const transcript = document.querySelector("#desk-transcript");
+      const textarea = document.querySelector("#desk-message");
+      const navigation = rect(".desk-navigation");
+      const controls = [
+        "#desk-model", "#desk-skill", "#desk-task-mode", "#desk-reasoning",
+        "#desk-cancel", "#desk-schedule-draft", "#desk-dictate",
+        "#desk-attach-button", "#desk-send",
+      ].map(rect);
+      const composerActions = [
+        "#desk-cancel", "#desk-schedule-draft", "#desk-dictate",
+        "#desk-attach-button", "#desk-send",
+      ].map((selector) => ({ selector, ...rect(selector) }));
+      return {
+        conversation,
+        column,
+        transcript: rect("#desk-transcript"),
+        composer: rect("#desk-composer"),
+        textarea: rect("#desk-message"),
+        textareaOverflowY: getComputedStyle(textarea).overflowY,
+        textareaScrollHeight: textarea.scrollHeight,
+        textareaClientHeight: textarea.clientHeight,
+        transcriptOverflowY: getComputedStyle(transcript).overflowY,
+        navigation,
+        controls,
+        composerActions,
+      };
+    });
+    expect(geometry.column.width, `${viewport.width}px column width`).toBeLessThanOrEqual(832.5);
+    expect(
+      Math.abs(
+        geometry.column.left - geometry.conversation.left -
+        (geometry.conversation.right - geometry.column.right)
+      ),
+      `${viewport.width}px centered column`,
+    ).toBeLessThanOrEqual(1.5);
+    expect(geometry.transcript.width).toBeLessThanOrEqual(832.5);
+    expect(geometry.composer.width).toBeLessThanOrEqual(832.5);
+    expect(geometry.transcriptOverflowY).toBe("auto");
+    expect(geometry.textarea.height, `${viewport.width}px textarea cap`).toBeCloseTo(240, 0);
+    expect(geometry.textareaOverflowY).toBe("auto");
+    expect(geometry.textareaScrollHeight).toBeGreaterThan(geometry.textareaClientHeight);
+    for (const control of geometry.controls) {
+      expect(control).not.toBeNull();
+      expect(control.height, `${viewport.width}px touch target`).toBeGreaterThanOrEqual(44);
+      expect(control.left).toBeGreaterThanOrEqual(geometry.composer.left - 1);
+      expect(control.right).toBeLessThanOrEqual(geometry.composer.right + 1);
+    }
+    for (let first = 0; first < geometry.controls.length; first += 1) {
+      for (let second = first + 1; second < geometry.controls.length; second += 1) {
+        expect(
+          rectIntersects(geometry.controls[first], geometry.controls[second]),
+          `${viewport.width}px controls ${first} and ${second} overlap`,
+        ).toBe(false);
+      }
+    }
+    if (viewport.width <= 768) {
+      expect(geometry.composer.bottom).toBeLessThanOrEqual(geometry.navigation.top + 1);
+      expect(
+        rectIntersects(geometry.composer, geometry.navigation),
+        `${viewport.width}px composer intersects navigation: ${JSON.stringify({ composer: geometry.composer, navigation: geometry.navigation })}`,
+      ).toBe(false);
+      for (const action of geometry.composerActions) {
+        expect(action.bottom, `${viewport.width}px ${action.selector} above navigation`)
+          .toBeLessThanOrEqual(geometry.navigation.top + 1);
+      }
+      await expectVisibleComposerActionsClearOfNavigation(page, `${viewport.width}px 15rem composer`);
+    }
+  }
+});
+
+test("Hearth and Evening show a representative Today transcript at desktop and compact widths", async ({ page }) => {
+  test.skip(test.info().project.name !== "desktop", "Capture the representative Task 3 frames once.");
+  allowExpectedResponse(404, "/api/v1/desk/chat/open");
+  await page.route("**/api/v1/desk/setup", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ complete: true, steps: [] }),
+    });
+  });
+  for (const [theme, viewport, size, snapshot] of [
+    ["light", { width: 1414, height: 920 }, "desktop", true],
+    ["light", { width: 375, height: 812 }, "compact", true],
+    ["dark", { width: 1414, height: 920 }, "desktop", true],
+    ["dark", { width: 375, height: 812 }, "compact", true],
+    ["light", { width: 320, height: 812 }, "narrow", false],
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(deskURL("today"));
+    const expectRootAtTop = async (step) => {
+      if (viewport.width > 375) return;
+      const root = await page.evaluate(() => ({
+        documentScrollTop: document.scrollingElement.scrollTop,
+        windowScrollY: window.scrollY,
+        active: document.activeElement?.id || document.activeElement?.className || document.activeElement?.tagName,
+      }));
+      expect(root.documentScrollTop, `${viewport.width}px root moved after ${step}: ${JSON.stringify(root)}`).toBe(0);
+      expect(root.windowScrollY, `${viewport.width}px window moved after ${step}: ${JSON.stringify(root)}`).toBe(0);
+    };
+    await page.getByLabel("Theme").selectOption(theme);
+    await expect(page.locator("#desk-phase")).toHaveText("Ready");
+    await expectRootAtTop("open");
+    await page.getByLabel("Message Waffle").fill("hearth visual");
+    await expectRootAtTop("fill");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expectRootAtTop("send");
+    await page.locator(".message-branch").last().evaluate((button) => {
+      const transcript = button.closest("#desk-transcript");
+      const bounds = button.getBoundingClientRect();
+      const transcriptBounds = transcript.getBoundingClientRect();
+      transcript.scrollTo({
+        top: transcript.scrollTop + Math.max(0, bounds.bottom - transcriptBounds.bottom + 8),
+        behavior: "instant",
+      });
+    });
+    await page.locator(".message-branch").last().evaluate((button) => {
+      button.focus({ preventScroll: true });
+    });
+    await page.keyboard.press("Enter");
+    await expectRootAtTop("branch");
+    const reasoning = page.locator(".message-reasoning");
+    await expect(reasoning).toBeVisible();
+    await expect(reasoning).not.toHaveAttribute("open", "");
+    await expect(reasoning.locator("summary")).toHaveText("Reasoning");
+    await expect(page.locator(".code-language")).toHaveText("go");
+    await expect(page.locator(".code-copy")).toBeVisible();
+    await expect(page.locator("#desk-composer")).toBeVisible();
+    await expectNoCanaries(page);
+    if (viewport.width <= 375) {
+      const clearance = await page.evaluate(() => {
+        const navigationTop = document.querySelector(".desk-navigation").getBoundingClientRect().top;
+        return {
+          navigationTop,
+          mainScrollTop: document.querySelector("main").scrollTop,
+          documentScrollTop: document.scrollingElement.scrollTop,
+          windowScrollY: window.scrollY,
+          actions: [
+            "#desk-cancel", "#desk-schedule-draft", "#desk-dictate",
+            "#desk-attach-button", "#desk-send",
+          ].map((selector) => {
+            const bounds = document.querySelector(selector).getBoundingClientRect();
+            return { selector, top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right };
+          }),
+        };
+      });
+      expect(clearance.mainScrollTop, `${viewport.width}px restored main scroll owner`).toBe(0);
+      expect(clearance.documentScrollTop, `${viewport.width}px restored document scroll owner`).toBe(0);
+      expect(clearance.windowScrollY, `${viewport.width}px restored window scroll owner`).toBe(0);
+      for (const action of clearance.actions) {
+        expect(action.bottom, `${viewport.width}px restored ${action.selector} above navigation`)
+          .toBeLessThanOrEqual(clearance.navigationTop + 1);
+      }
+      await expectVisibleComposerActionsClearOfNavigation(page, `${viewport.width}px restored composer`);
+      for (let first = 0; first < clearance.actions.length; first += 1) {
+        for (let second = first + 1; second < clearance.actions.length; second += 1) {
+          expect(
+            rectIntersects(clearance.actions[first], clearance.actions[second]),
+            `${viewport.width}px restored actions ${first} and ${second} overlap`,
+          ).toBe(false);
+        }
+      }
+    }
+    const snapshotName = `desk-today-${theme}-${size}.png`;
+    if (snapshot && hasVisualBaseline(snapshotName)) {
+      await expect(page).toHaveScreenshot(snapshotName, {
+        animations: "disabled",
+        caret: "hide",
+        maxDiffPixelRatio: 0.005,
+      });
+    }
   }
 });
 
@@ -899,12 +1172,17 @@ test("compact Today opens at the top while preserving message focus", async ({ p
       columns: rect(".today-columns"),
       conversation: rect(".conversation"),
       transcript: rect("#desk-transcript"),
+      composer: rect("#desk-composer"),
+      message: rect("#desk-message"),
+      actions: rect(".composer-actions"),
+      setup: rect("#desk-setup-banner"),
       context: rect(".task-context"),
       viewportHeight: window.innerHeight,
     };
   });
   expect(metrics.activeElement).toBe("desk-message");
   expect(metrics.mainScrollTop).toBe(0);
+  await expectVisibleComposerActionsClearOfNavigation(page, `${test.info().project.name} initial composer`);
   expect(metrics.columnsScrollTop).toBe(0);
   expect(metrics.columns).not.toBeNull();
   expect(metrics.conversation).not.toBeNull();
@@ -1849,7 +2127,7 @@ test("light code and dark destructive surfaces meet computed contrast", async ({
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
   await page.getByLabel("Message Waffle").fill("markdown");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
-  const lightCode = await page.locator(".code-block pre").evaluate((element) => {
+  const lightCode = await page.locator(".code-block").evaluate((element) => {
     const style = getComputedStyle(element);
     return { background: style.backgroundColor, color: style.color };
   });
@@ -1867,7 +2145,7 @@ test("light code and dark destructive surfaces meet computed contrast", async ({
   });
   const darkDangerContrast = contrastRatio(darkDanger.color, darkDanger.background);
 
-  expect.soft(lightCode).toEqual({ background: "rgb(234, 223, 206)", color: "rgb(33, 29, 25)" });
+  expect.soft(lightCode).toEqual({ background: "rgb(33, 29, 25)", color: "rgb(244, 237, 223)" });
   expect.soft(lightCodeContrast, `light code contrast: ${lightCodeContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
   expect.soft(darkDanger).toEqual({ background: "rgb(243, 161, 153)", color: "rgb(33, 29, 25)" });
   expect.soft(darkDangerContrast, `dark destructive contrast: ${darkDangerContrast.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
@@ -1883,11 +2161,11 @@ test("Evening role tokens keep rail, code, actions, and accents readable", async
   await page.getByLabel("Message Waffle").fill("markdown");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(page.locator(".code-block pre")).toBeVisible();
-  const codeSurface = await page.locator(".code-block pre").evaluate((element) => {
+  const codeSurface = await page.locator(".code-block").evaluate((element) => {
     const style = getComputedStyle(element);
     return { background: style.backgroundColor, color: style.color };
   });
-  expect(codeSurface).toEqual({ background: "rgb(16, 13, 11)", color: "rgb(242, 233, 220)" });
+  expect(codeSurface).toEqual({ background: "rgb(15, 13, 11)", color: "rgb(242, 233, 220)" });
 
   await page.goto(deskURL("workspaces"));
   await expect(page.locator(".workspace-card .workspace-primary").first()).toBeVisible();
@@ -2450,20 +2728,32 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
 
       // Bounded retries fail, then inline recovery appears; the fatal
       // out-of-date treatment is reserved for genuinely incompatible state.
-      await expect(second.locator("#desk-phase")).toHaveText("Conversation in use", {
+      await expect(second.locator("#desk-stale-status")).toBeVisible({
         timeout: 15_000,
       });
+      await expect(second.locator("#desk-phase")).toBeHidden();
       await expect(second.locator("#desk-stale-label")).toHaveText(
-        "This conversation is in use.",
+        "This conversation is open in another window.",
       );
-      await expect(second.locator("#desk-stale-message")).toContainText(
-        "Another surface",
+      await expect(second.locator("#desk-transcript")).toHaveText(
+        "This conversation is open in another window.",
       );
-      await expect(second.getByRole("button", { name: "Start a new conversation" })).toBeVisible();
+      await expect(second.locator("#desk-composer")).toBeHidden();
+      await expect(second.locator(".task-context")).toBeHidden();
+      await expect(second.getByRole("button", { name: "Start new", exact: true })).toBeVisible();
+      await expect(second.getByRole("button", { name: "Recent conversations", exact: true })).toBeVisible();
+      await expect(second.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
+      await expect(second.locator("#desk-sessions")).toBeVisible();
+      await expect(
+        second.locator(".session-choice").filter({ hasText: "Release review" }),
+      ).toHaveCount(1);
+      await expect(second.locator(".session-menu-trigger")).toHaveCount(0);
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
 
       // Inline recovery opens a fresh session and returns the composer to a
       // usable state.
-      await second.getByRole("button", { name: "Start a new conversation" }).click();
+      await second.getByRole("button", { name: "Start new", exact: true }).click();
       await expect(second.locator("#desk-phase")).toHaveText("Ready");
       const message = second.getByLabel("Message Waffle");
       await expect(message).toBeEnabled();

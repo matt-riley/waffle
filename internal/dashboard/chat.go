@@ -948,7 +948,33 @@ func (c *ChatClients) safeChatState(state chat.State) chat.State {
 	// specific projection layered on top (#289).
 	state = chat.RedactState(state, c.redactExact)
 	state.Workspace = projectChatWorkspaceLabel(state.Workspace)
+	stripPrivateReasoning(&state)
 	return state
+}
+
+// stripPrivateReasoning removes provider replay tokens from the browser copy.
+// The persisted source state keeps both fields unchanged for provider replay.
+func stripPrivateReasoning(state *chat.State) {
+	if state == nil {
+		return
+	}
+	for i := range state.History {
+		stripPrivateReasoningBlocks(state.History[i].Blocks)
+	}
+}
+
+func stripPrivateReasoningBlocks(blocks []llm.Block) {
+	for i := range blocks {
+		blocks[i].Signature = ""
+		blocks[i].Data = ""
+		if blocks[i].ToolResult == nil {
+			continue
+		}
+		toolResult := *blocks[i].ToolResult
+		toolResult.Blocks = append([]llm.Block(nil), toolResult.Blocks...)
+		blocks[i].ToolResult = &toolResult
+		stripPrivateReasoningBlocks(toolResult.Blocks)
+	}
 }
 
 func (c *ChatClients) safeDashboardChatState(state chat.State) dashboardChatState {
@@ -977,6 +1003,7 @@ func (c *ChatClients) safeChatResult(result chat.Result) chat.Result {
 		// embedded result state too, or absolute host paths would serialize
 		// to the browser.
 		result.State.Workspace = projectChatWorkspaceLabel(result.State.Workspace)
+		stripPrivateReasoning(result.State)
 	}
 	if result.Permissions != nil {
 		result.Permissions.SandboxMode = c.redactExact(result.Permissions.SandboxMode)

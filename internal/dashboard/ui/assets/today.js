@@ -240,11 +240,13 @@ const elements = {
   staleMessage: document.querySelector("#desk-stale-message"),
   refresh: document.querySelector("#desk-refresh"),
   staleLabel: document.querySelector("#desk-stale-label"),
-  recoverNew: document.querySelector("#desk-recover-new"),
+  staleActions: document.querySelector(".stale-actions"),
+  recoveryNavigation: document.querySelector("#desk-recovery-navigation"),
   phase: document.querySelector("#desk-phase"),
   transcript: document.querySelector("#desk-transcript"),
   emptyTranscript: document.querySelector("#desk-empty-transcript"),
   form: document.querySelector("#desk-composer"),
+  taskContext: document.querySelector(".task-context"),
   composerActions: document.querySelector(".composer-actions"),
   slashMenu: document.querySelector("#desk-slash-menu"),
   message: document.querySelector("#desk-message"),
@@ -304,6 +306,15 @@ const elements = {
   queue: document.querySelector("#desk-queue"),
 };
 
+const recoveryHomes = new Map(
+  [elements.newConversation, elements.sessionRefresh, elements.sessions]
+    .filter(Boolean)
+    .map((element) => [
+      element,
+      { parent: element.parentNode, next: element.nextSibling },
+    ]),
+);
+
 const storedOwner = readStoredOwner();
 const state = {
   currentPhase: phase.opening,
@@ -358,6 +369,7 @@ const state = {
     open: false,
     items: [],
     filter: "",
+    error: "",
   },
   sessionMenuOpen: null,
 };
@@ -401,8 +413,10 @@ function setPhase(next) {
   }
   const disconnected = next === phase.disconnected;
   const recovering = next === phase.recovering;
+  elements.phase.hidden = recovering;
+  elements.connection.hidden = recovering;
   elements.stale.hidden = !disconnected && !recovering;
-  elements.connection.classList.toggle("is-disconnected", disconnected || recovering);
+  elements.connection.classList.toggle("is-disconnected", disconnected);
   if (disconnected) {
     state.reconnecting = false;
     elements.connection.classList.remove("is-reconnecting");
@@ -414,10 +428,8 @@ function setPhase(next) {
   } else if (recovering) {
     state.reconnecting = false;
     elements.connection.classList.remove("is-reconnecting");
-    elements.connectionText.textContent = "In use";
-    elements.connectionDetail.textContent = "Another surface";
     pushRailConnection(
-      globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected",
+      globalThis.waffleDeskRail?.connectionStates?.connected || "connected",
     );
   } else if (next === phase.opening) {
     pushRailConnection(
@@ -450,8 +462,9 @@ function updateControls() {
       state.currentPhase === phase.streaming);
   // The composer stays usable while Waffle works so the operator can queue a
   // follow-up; it is only locked while disconnected. During an ownership
-  // conflict the textarea keeps the draft while the recovery actions decide.
-  elements.message.disabled = state.currentPhase === phase.disconnected;
+  // conflict the draft stays stored while the dead composer is collapsed.
+  elements.message.disabled =
+    state.currentPhase === phase.disconnected || recovering;
   const busy = !idle && !recovering && state.currentPhase !== phase.disconnected;
   elements.send.disabled =
     !state.clientID ||
@@ -494,9 +507,6 @@ function updateControls() {
   elements.refresh.disabled =
     state.currentPhase !== phase.disconnected &&
     state.currentPhase !== phase.recovering;
-  if (elements.recoverNew) {
-    elements.recoverNew.disabled = !recovering;
-  }
   if (elements.temporaryRow) {
     elements.temporaryRow.hidden = state.historyLength > 0;
   }
@@ -506,9 +516,13 @@ function updateControls() {
   if (elements.temporaryBadge) {
     elements.temporaryBadge.hidden = !state.temporary;
   }
+  if (elements.newConversation) {
+    elements.newConversation.disabled = !idle && !recovering;
+  }
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.disabled = !idle && !recovering;
+  }
   for (const control of [
-    elements.newConversation,
-    elements.sessionRefresh,
     elements.usageRefresh,
     elements.permissionsRefresh,
     elements.worksetRefresh,
@@ -531,11 +545,61 @@ function updateTurnActionAvailability() {
     return;
   }
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
-  for (const selector of [".message-edit", ".message-regenerate"]) {
+  const running = [phase.sending, phase.streaming, phase.cancelling].includes(
+    state.currentPhase,
+  );
+  for (const selector of [
+    ".message-edit",
+    ".message-regenerate",
+    ".message-branch",
+    ".message-schedule",
+  ]) {
     for (const button of elements.transcript.querySelectorAll(selector)) {
       button.disabled = !idle;
     }
   }
+  for (const selector of [".message-copy", ".message-read"]) {
+    for (const button of elements.transcript.querySelectorAll(selector)) {
+      button.disabled = running;
+    }
+  }
+}
+
+function alignMobileComposer() {
+  if (!globalThis.matchMedia?.("(max-width: 768px)").matches) {
+    return;
+  }
+  const align = () => {
+    const columns = document.querySelector(".today-columns");
+    const conversation = document.querySelector(".conversation");
+    if (!columns || !conversation) {
+      return;
+    }
+    const columnsRect = columns.getBoundingClientRect();
+    const conversationRect = conversation.getBoundingClientRect();
+    const composerRect = elements.form?.getBoundingClientRect();
+    const contentBottom = Math.max(
+      conversationRect.bottom,
+      composerRect?.bottom || conversationRect.bottom,
+    );
+    const overflow = contentBottom - columnsRect.bottom;
+    const nextScrollTop = columns.scrollTop + overflow;
+    columns.scrollTop = Math.max(0, overflow > 0 ? Math.ceil(nextScrollTop) : nextScrollTop);
+  };
+  align();
+  globalThis.requestAnimationFrame?.(align);
+}
+
+function adjustComposerHeight(element) {
+  if (!element) {
+    return;
+  }
+  element.style.height = "auto";
+  const cap = 15 * 16;
+  const next = Math.min(element.scrollHeight, cap);
+  element.style.height = `${next}px`;
+  element.style.overflowY = element.scrollHeight > cap ? "auto" : "hidden";
+  alignMobileComposer();
 }
 
 // syncComposerDraft restores the current session's browser-local draft after
@@ -555,6 +619,7 @@ function syncComposerDraft() {
   if (draft !== "") {
     elements.message.value = draft;
   }
+  adjustComposerHeight(elements.message);
   updateControls();
 }
 
@@ -695,11 +760,14 @@ async function copyCode(text, button) {
       textarea.value = text;
       textarea.setAttribute("readonly", "");
       document.body.appendChild(textarea);
-      textarea.select();
-      if (!document.execCommand?.("copy")) {
-        throw new Error("copy_unavailable");
+      try {
+        textarea.select();
+        if (!document.execCommand?.("copy")) {
+          throw new Error("copy_unavailable");
+        }
+      } finally {
+        textarea.remove();
       }
-      textarea.remove();
     }
     button.textContent = "Copied";
   } catch {
@@ -812,6 +880,53 @@ function renderTable(node, table) {
   node.appendChild(wrap);
 }
 
+function renderFencedCode(language, codeText) {
+  const block = document.createElement("div");
+  block.className = "code-block";
+  const header = document.createElement("div");
+  header.className = "code-block-header";
+  if (language) {
+    const badge = document.createElement("span");
+    badge.className = "code-language";
+    badge.textContent = language.toLowerCase();
+    header.appendChild(badge);
+  }
+  const actions = document.createElement("div");
+  actions.className = "code-block-actions";
+  const copy = document.createElement("button");
+  copy.className = "code-copy";
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", () => copyCode(codeText, copy));
+  actions.appendChild(copy);
+  const lineCount = codeText === "" ? 0 : codeText.split("\n").length;
+  if (lineCount > 40) {
+    block.classList.add("is-collapsed");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "code-expand";
+    toggle.textContent = "Expand code";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const open = block.classList.contains("is-collapsed");
+      block.classList.toggle("is-collapsed", !open);
+      toggle.textContent = open ? "Collapse code" : "Expand code";
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    actions.appendChild(toggle);
+  }
+  header.appendChild(actions);
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  if (language) {
+    code.setAttribute("data-language", language);
+  }
+  code.textContent = codeText;
+  pre.appendChild(code);
+  block.append(header, pre);
+  return block;
+}
+
 function renderMarkdown(node, text) {
   clearNode(node);
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
@@ -829,23 +944,8 @@ function renderMarkdown(node, text) {
       if (index < lines.length) {
         index += 1;
       }
-      const block = document.createElement("div");
-      block.className = "code-block";
-      const copy = document.createElement("button");
-      copy.className = "code-copy";
-      copy.type = "button";
-      copy.textContent = "Copy";
       const codeText = codeLines.join("\n");
-      copy.addEventListener("click", () => copyCode(codeText, copy));
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      if (language) {
-        code.setAttribute("data-language", language);
-      }
-      code.textContent = codeText;
-      pre.appendChild(code);
-      block.append(copy, pre);
-      node.appendChild(block);
+      node.appendChild(renderFencedCode(language, codeText));
       continue;
     }
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
@@ -916,6 +1016,19 @@ function startDictation() {
   dictation.start(elements.message, elements.dictate, announceDictation);
 }
 
+function messageActionToolbar(article) {
+  let toolbar = article?.querySelector(".message-actions");
+  if (!article || toolbar) {
+    return toolbar;
+  }
+  toolbar = document.createElement("div");
+  toolbar.className = "message-actions";
+  toolbar.setAttribute("role", "toolbar");
+  toolbar.setAttribute("aria-label", "Message actions");
+  article.appendChild(toolbar);
+  return toolbar;
+}
+
 function attachReadAloudButton(article) {
   const engine = globalThis.waffleReadAloud;
   if (!article || article.querySelector(".message-read") || !engine?.supported?.()) {
@@ -935,7 +1048,7 @@ function attachReadAloudButton(article) {
     }
     engine.start(article, button);
   });
-  article.appendChild(button);
+  messageActionToolbar(article)?.appendChild(button);
 }
 
 function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
@@ -971,6 +1084,7 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   } else {
     elements.transcript.appendChild(article);
   }
+  updateTurnActionAvailability();
   article.scrollIntoView({ block: "nearest" });
   return article;
 }
@@ -1054,6 +1168,46 @@ function messageText(message) {
     .join("");
 }
 
+function renderReasoning(message) {
+  if (!message || !Array.isArray(message.blocks)) {
+    return null;
+  }
+  const visible = [];
+  let withheld = false;
+  for (const block of message.blocks) {
+    if (!block) {
+      continue;
+    }
+    if (block.type === "thinking") {
+      const text = String(block.text || "");
+      if (text && !isTaskModeGuidance(text)) {
+        visible.push(text);
+      }
+    } else if (block.type === "redacted_thinking") {
+      withheld = true;
+    }
+  }
+  if (visible.length === 0 && !withheld) {
+    return null;
+  }
+  const details = document.createElement("details");
+  details.className = "message-reasoning";
+  const summary = document.createElement("summary");
+  summary.textContent = visible.length > 0 ? "Reasoning" : "Reasoning withheld";
+  details.appendChild(summary);
+  for (const text of visible) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = text;
+    details.appendChild(paragraph);
+  }
+  if (withheld && visible.length > 0) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "Reasoning withheld";
+    details.appendChild(paragraph);
+  }
+  return details;
+}
+
 function renderHistory(history) {
   clearNode(elements.transcript);
   elements.emptyTranscript = null;
@@ -1075,16 +1229,24 @@ function renderHistory(history) {
     const text = messageTextWithMarkers(message);
     const role = message.role === "user" ? "user" : "assistant";
     const media = renderMediaBlocks(message);
-    if (text === "" && media.length === 0) {
+    const reasoning = role === "assistant" ? renderReasoning(message) : null;
+    if (text === "" && media.length === 0 && !reasoning) {
       // Tool-result carriers and tool-use frames have no visible text; they
       // still occupy a history position so branch boundaries stay exact.
       index += 1;
       continue;
     }
-    const article = appendMessage(role, text);
+    const article = appendMessage(role, text, null, text === "");
     if (!article) {
       index += 1;
       continue;
+    }
+    if (reasoning) {
+      const body = article.querySelector(".message-body");
+      article.insertBefore(reasoning, body);
+      if (text === "" && media.length === 0) {
+        body?.remove();
+      }
     }
     if (role === "user" && message.metadata?.task_mode) {
       const chip = document.createElement("span");
@@ -1142,7 +1304,7 @@ function attachTurnAction(article, kind) {
     schedule.addEventListener("click", () => {
       handoffSchedule(article.dataset.rawText);
     });
-    article.appendChild(schedule);
+    messageActionToolbar(article)?.appendChild(schedule);
   }
   const button = document.createElement("button");
   button.type = "button";
@@ -1159,7 +1321,8 @@ function attachTurnAction(article, kind) {
       void regenerateResponse(article);
     }
   });
-  article.appendChild(button);
+  messageActionToolbar(article)?.appendChild(button);
+  updateTurnActionAvailability();
 }
 
 // branchToComposer creates a branch ending before the selected prompt and
@@ -1179,6 +1342,7 @@ async function branchToComposer(article) {
   }
   renderCanonicalState(branched.state, true);
   elements.message.value = text;
+  adjustComposerHeight(elements.message);
   elements.message.focus();
   setStatusMessage(
     elements.composerStatus,
@@ -1236,7 +1400,8 @@ function attachBranchButton(article, seq) {
       renderCanonicalState(result.state, true);
     }
   });
-  article.appendChild(branch);
+  messageActionToolbar(article)?.appendChild(branch);
+  updateTurnActionAvailability();
 }
 
 function renderLineage(lineage) {
@@ -1481,6 +1646,10 @@ const taskModeGuidance = {
   draft: "Draft prose suitable for editing before use.",
 };
 
+function isTaskModeGuidance(text) {
+  return Object.values(taskModeGuidance).includes(text);
+}
+
 function messageTextWithMarkers(message) {
   let text = "";
   let count = 0;
@@ -1491,7 +1660,7 @@ function messageTextWithMarkers(message) {
     if (!block || block.type !== "text") {
       continue;
     }
-    if (taskModeGuidance[block.text]) {
+    if (isTaskModeGuidance(block.text)) {
       // The trusted task-mode guidance reaches the model but is not visible
       // transcript content (#481).
       continue;
@@ -1582,7 +1751,7 @@ function attachSourcesDrawer(article, sources) {
     list.appendChild(item);
   }
   details.append(summary, list);
-  article.appendChild(details);
+  article.insertBefore(details, article.querySelector(".message-actions"));
 }
 
 function persistOwner() {
@@ -1854,6 +2023,7 @@ function renderCanonicalState(chatState, includeHistory) {
   // replaced atomically instead of being left on screen (#455).
   if (includeHistory) {
     renderHistory(Array.isArray(chatState.history) ? chatState.history : []);
+    adjustComposerHeight(elements.message);
   }
   persistOwner();
 }
@@ -1897,6 +2067,32 @@ async function getBootstrap() {
     headers: { Accept: "application/json" },
   });
   return readJSON(response);
+}
+
+async function getRecoverySessions() {
+  let response;
+  try {
+    response = await fetch("/api/v1/desk/memory/sessions", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    const error = new Error("network_error");
+    error.safeMessage = "Recent conversations could not be loaded.";
+    throw error;
+  }
+  const payload = await readJSON(response);
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  return choices
+    .filter((choice) => choice && typeof choice.id === "string" && choice.id !== "")
+    .map((choice) => ({
+      id: choice.id,
+      title: typeof choice.label === "string" ? choice.label : "",
+      updated_at: typeof choice.updated_at === "string" ? choice.updated_at : "",
+      pinned: choice.pinned === true,
+    }));
 }
 
 function validateBootstrap(bootstrap) {
@@ -2308,24 +2504,80 @@ async function openChatWithRecovery(openBody, owner, generation) {
 }
 
 function showOwnershipConflict() {
+  elements.stale.hidden = false;
+  const active = document.activeElement;
+  if (
+    active &&
+    (active === elements.message ||
+      elements.form?.contains(active) ||
+      elements.taskContext?.contains(active))
+  ) {
+    elements.stale.focus();
+  }
+  if (elements.newConversation && elements.staleActions) {
+    elements.newConversation.textContent = "Start new";
+    elements.staleActions.insertBefore(elements.newConversation, elements.refresh);
+  }
+  if (elements.recoveryNavigation) {
+    if (elements.sessionRefresh) {
+      elements.recoveryNavigation.appendChild(elements.sessionRefresh);
+    }
+    if (elements.sessions) {
+      elements.recoveryNavigation.appendChild(elements.sessions);
+    }
+    elements.recoveryNavigation.hidden = false;
+  }
+  elements.refresh.textContent = "Refresh";
+  if (elements.form) {
+    elements.form.hidden = true;
+  }
+  if (elements.taskContext) {
+    elements.taskContext.hidden = true;
+  }
+  if (state.historyLength === 0) {
+    clearNode(elements.transcript);
+    const empty = document.createElement("p");
+    empty.className = "empty-transcript";
+    empty.textContent = "This conversation is open in another window.";
+    elements.transcript.appendChild(empty);
+    elements.emptyTranscript = empty;
+  }
   if (elements.staleLabel) {
-    elements.staleLabel.textContent = "This conversation is in use.";
+    elements.staleLabel.textContent = "This conversation is open in another window.";
   }
   elements.staleMessage.textContent =
-    "Another surface is using this conversation. Start a new conversation here, or try again when it is free.";
-  if (elements.recoverNew) {
-    elements.recoverNew.hidden = false;
-  }
+    "Start a new conversation or refresh when the other window is finished.";
   setPhase(phase.recovering);
 }
 
 function resetOwnershipConflict() {
+  for (const [element, home] of [...recoveryHomes.entries()].reverse()) {
+    if (!home.parent) {
+      continue;
+    }
+    const next = home.next?.parentNode === home.parent ? home.next : null;
+    home.parent.insertBefore(element, next);
+  }
+  if (elements.newConversation) {
+    elements.newConversation.textContent = "New conversation";
+  }
+  elements.refresh.textContent = "Refresh Desk";
+  if (elements.recoveryNavigation) {
+    elements.recoveryNavigation.hidden = true;
+  }
+  if (elements.form) {
+    elements.form.hidden = false;
+  }
+  if (elements.taskContext) {
+    elements.taskContext.hidden = false;
+  }
+  elements.phase.hidden = false;
+  elements.connection.hidden = false;
   if (elements.staleLabel) {
     elements.staleLabel.textContent = "This desk is out of date.";
   }
-  if (elements.recoverNew) {
-    elements.recoverNew.hidden = true;
-  }
+  elements.staleMessage.textContent =
+    "The transcript is still here, but sending is paused.";
 }
 
 function settleTurn(turn) {
@@ -2470,6 +2722,7 @@ function renderQueueBanner() {
       return;
     }
     elements.message.value = current.text;
+    adjustComposerHeight(elements.message);
     state.attachments = (current.attachments || []).slice();
     renderAttachmentPreviews();
     persistQueue(null);
@@ -2616,6 +2869,7 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
   showTypingIndicator();
   if (options?.clearComposer) {
     elements.message.value = "";
+    adjustComposerHeight(elements.message);
   }
   updateControls();
   try {
@@ -2670,6 +2924,7 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
       retry.remove();
       setStatusMessage(elements.composerStatus, "", false, "composer");
       elements.message.value = turn.text;
+      adjustComposerHeight(elements.message);
       state.attachments = (turn.attachments || []).slice();
       renderAttachmentPreviews();
       elements.message.focus();
@@ -2886,11 +3141,34 @@ async function resumeSession(sessionID) {
   });
 }
 
+async function openRecoverySession(sessionID) {
+  if (!sessionID) {
+    return;
+  }
+  state.clientID = "";
+  state.reattachToken = "";
+  state.storedOwner = null;
+  forgetStoredOwner();
+  state.sessionID = sessionID;
+  await openDesk();
+}
+
 // toggleSessions opens or closes the recent-conversation disclosure. The first
 // open loads the list; subsequent opens reuse the cached items.
 async function toggleSessions() {
   if (state.sessionsList.open) {
     closeSessionsList();
+    return;
+  }
+  if (state.currentPhase === phase.recovering) {
+    try {
+      state.sessionsList.items = await getRecoverySessions();
+      state.sessionsList.error = "";
+    } catch {
+      state.sessionsList.items = [];
+      state.sessionsList.error = "Recent conversations could not be loaded.";
+    }
+    openSessionsList();
     return;
   }
   if (state.sessionsList.items.length === 0) {
@@ -2903,6 +3181,7 @@ async function toggleSessions() {
     state.sessionsList.items = Array.isArray(result.sessions)
       ? result.sessions
       : [];
+    state.sessionsList.error = "";
   }
   openSessionsList();
 }
@@ -2935,6 +3214,7 @@ function closeSessionsList() {
 
 function renderSessions(sessions) {
   state.sessionsList.items = Array.isArray(sessions) ? sessions : [];
+  state.sessionsList.error = "";
   if (state.sessionsList.open) {
     renderSessionList();
   }
@@ -2950,6 +3230,12 @@ function renderSessionList() {
   clearNode(elements.sessionOptions);
   if (elements.sessions) {
     elements.sessions.hidden = false;
+  }
+  if (state.sessionsList.error) {
+    const error = document.createElement("p");
+    error.textContent = state.sessionsList.error;
+    elements.sessionOptions.appendChild(error);
+    return;
   }
   const available = state.sessionsList.items;
   if (available.length === 0) {
@@ -3020,9 +3306,17 @@ function renderSessionList() {
     } else {
       button.append(title, meta);
     }
-    button.addEventListener("click", () => resumeSession(session.id || ""));
+    button.addEventListener("click", () => {
+      if (state.currentPhase === phase.recovering) {
+        void openRecoverySession(session.id || "");
+        return;
+      }
+      void resumeSession(session.id || "");
+    });
     row.appendChild(button);
-    attachSessionActions(row, session);
+    if (state.currentPhase !== phase.recovering) {
+      attachSessionActions(row, session);
+    }
     elements.sessionOptions.appendChild(row);
   }
 }
@@ -3099,6 +3393,7 @@ async function refreshSessionList() {
     state.sessionsList.items = Array.isArray(result.sessions)
       ? result.sessions
       : [];
+    state.sessionsList.error = "";
     if (state.sessionsList.open) {
       renderSessionList();
     }
@@ -3589,7 +3884,8 @@ function attachCopyButton(article) {
       copy.textContent = "Copy";
     }, 1500);
   });
-  article.appendChild(copy);
+  messageActionToolbar(article)?.appendChild(copy);
+  updateTurnActionAvailability();
 }
 
 function finalizeStreamingMessage() {
@@ -3794,6 +4090,7 @@ function selectSlashItem() {
     const tokenStart = match ? caret - match[1].length : caret;
     const next = value.slice(0, tokenStart) + insertion + value.slice(caret);
     elements.message.value = next;
+    adjustComposerHeight(elements.message);
     const nextCaret = tokenStart + insertion.length;
     elements.message.selectionStart = nextCaret;
     elements.message.selectionEnd = nextCaret;
@@ -3865,6 +4162,7 @@ async function fetchCommands() {
 
 function onComposerInput() {
   setDraft(state.sessionID, elements.message.value);
+  adjustComposerHeight(elements.message);
   updateControls();
   syncSlashMenu();
 }
@@ -3992,8 +4290,13 @@ if (elements.form) {
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
-  elements.recoverNew?.addEventListener("click", () => openDesk({ forceNewSession: true }));
-  elements.newConversation?.addEventListener("click", newConversation);
+  elements.newConversation?.addEventListener("click", () => {
+    if (state.currentPhase === phase.recovering) {
+      void openDesk({ forceNewSession: true });
+      return;
+    }
+    void newConversation();
+  });
   elements.sessionRefresh?.addEventListener("click", toggleSessions);
   elements.sessionFilter?.addEventListener("input", onSessionFilterInput);
   elements.sessions?.addEventListener("keydown", handleSessionsKeydown);

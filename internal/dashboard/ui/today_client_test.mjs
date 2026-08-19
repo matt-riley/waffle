@@ -27,6 +27,9 @@ class FakeElement {
     this.selected = false;
     this.attributes = new Map();
     this.style = {};
+    this.scrollTop = 0;
+    this.rect = { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 };
+    this._scrollHeight = null;
     this._textContent = "";
     this.classList = {
       toggle: (name, force) => {
@@ -62,6 +65,18 @@ class FakeElement {
     return this._textContent + this.childNodes.map((child) => child.textContent).join("");
   }
 
+  get scrollHeight() {
+    if (this._scrollHeight !== null) {
+      return this._scrollHeight;
+    }
+    const lines = String(this.value || "").split("\n").length;
+    return Math.max(44, lines * 16 + 28);
+  }
+
+  set scrollHeight(value) {
+    this._scrollHeight = Number(value);
+  }
+
   set textContent(value) {
     this._textContent = String(value);
     this.childNodes = [];
@@ -74,12 +89,18 @@ class FakeElement {
   }
 
   appendChild(child) {
+    if (child.parentNode && child.parentNode !== this) {
+      child.remove();
+    }
     child.parentNode = this;
     this.childNodes.push(child);
     return child;
   }
 
   insertBefore(child, before) {
+    if (child.parentNode) {
+      child.remove();
+    }
     const index = this.childNodes.indexOf(before);
     if (index === -1) {
       return this.appendChild(child);
@@ -102,6 +123,13 @@ class FakeElement {
 
   hasChildNodes() {
     return this.childNodes.length > 0;
+  }
+
+  contains(node) {
+    if (node === this) {
+      return true;
+    }
+    return this.childNodes.some((child) => child.contains?.(node));
   }
 
   querySelector(selector) {
@@ -180,6 +208,10 @@ class FakeElement {
   }
 
   scrollIntoView() {}
+
+  getBoundingClientRect() {
+    return this.rect;
+  }
 }
 
 class FakeTextNode extends FakeElement {
@@ -242,14 +274,22 @@ function createHarness({
   workspacesHandler,
   projectHandler,
   artifactHandler,
+  memorySessionsHandler,
 
   confirmResult = true,
   storedLease = null,
   sharedStorage = null,
   denyStorage = false,
   noSpeechRecognition = false,
+  noClipboard = false,
+  clipboardWriteError = false,
+  execCommandResult = true,
+  mobileViewport = false,
 } = {}) {
   const selectors = [
+    "main",
+    ".today-columns",
+    ".conversation",
     ".desk-shell",
     "#desk-session-title",
     "#desk-connection",
@@ -259,13 +299,15 @@ function createHarness({
     "#desk-stale-label",
     "#desk-stale-message",
     "#desk-refresh",
-    "#desk-recover-new",
     "#desk-phase",
     "#desk-transcript",
     "#desk-empty-transcript",
     "#desk-slash-menu",
     ".composer-actions",
+    ".stale-actions",
+    ".task-context",
     "#desk-composer",
+    "#desk-recovery-navigation",
     "#desk-message",
     "#desk-send",
     "#desk-cancel",
@@ -323,6 +365,14 @@ function createHarness({
   ];
   const elements = Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
   elements["#desk-transcript"].appendChild(elements["#desk-empty-transcript"]);
+  elements["#desk-composer"].appendChild(elements["#desk-message"]);
+  elements[".task-context"].append(
+    elements["#desk-new"],
+    elements["#desk-session-refresh"],
+    elements["#desk-sessions"],
+  );
+  elements[".stale-actions"].append(elements["#desk-refresh"]);
+  elements["#desk-recovery-navigation"].hidden = true;
   elements["#desk-composer-status"].hidden = true;
   elements["#desk-model-status"].textContent = "Changes this conversation only.";
   elements["#desk-skill-status"].textContent = "Changes this conversation only.";
@@ -348,6 +398,7 @@ function createHarness({
       forbiddenMarkupAssignments.push(String(value));
     },
   });
+  const scrollingElement = new FakeElement("html");
   const document = {
     get activeElement() {
       return activeElement;
@@ -355,8 +406,9 @@ function createHarness({
     body,
     createElement: (tagName) => new FakeElement(tagName),
     createTextNode: (text) => new FakeTextNode(text),
-    execCommand: () => true,
+    execCommand: () => execCommandResult,
     querySelector: (selector) => elements[selector] || null,
+    scrollingElement,
   };
   // Track programmatic focus so listbox arrow navigation is observable.
   let activeElement = null;
@@ -462,6 +514,12 @@ function createHarness({
           { name: "status", usage: "/status", description: "show current runtime status" },
         ],
       });
+    }
+    if (path === "/api/v1/desk/memory/sessions") {
+      if (memorySessionsHandler) {
+        return memorySessionsHandler({ path, options });
+      }
+      return jsonResponse({ choices: [] });
     }
     return jsonResponse({});
   };
@@ -582,6 +640,7 @@ function createHarness({
       };
   const lifecycleListeners = new Map();
   const clipboardWrites = [];
+  const scrollCalls = [];
   const context = vm.createContext({
     console,
     crypto: { randomUUID: () => `key-${calls.length}` },
@@ -589,13 +648,18 @@ function createHarness({
     EventSource: FakeEventSource,
     fetch,
     location: { href },
-    navigator: {
-      clipboard: {
-        async writeText(value) {
-          clipboardWrites.push(String(value));
+    navigator: noClipboard
+      ? {}
+      : {
+          clipboard: {
+            async writeText(value) {
+              if (clipboardWriteError) {
+                throw new Error("clipboard denied");
+              }
+              clipboardWrites.push(String(value));
+            },
+          },
         },
-      },
-    },
     sessionStorage,
     confirm: () => confirmResult,
     FileReader: FakeFileReader,
@@ -609,6 +673,12 @@ function createHarness({
     },
     URL,
     waffleDeskRail,
+    matchMedia: () => ({ matches: mobileViewport }),
+    requestAnimationFrame: (callback) => {
+      callback();
+      return 1;
+    },
+    scrollTo: (...args) => scrollCalls.push(args),
     setTimeout: (fn, delay) => {
       const handle = { fn, delay, cleared: false };
       timers.push(handle);
@@ -625,6 +695,7 @@ function createHarness({
   new vm.Script(source, { filename: "today.js" }).runInContext(context);
 
   return {
+    body,
     calls,
     clipboardWrites,
     fakeFilePayloads,
@@ -641,6 +712,8 @@ function createHarness({
     storage,
     timers,
     railCalls,
+    scrollCalls,
+    scrollingElement,
     turnResponse,
     runTimers: async () => {
       const due = timers.splice(0, timers.length);
@@ -807,6 +880,183 @@ test("assistant markdown renders structured inert DOM and copies a fenced block"
   await copy.listener("click")();
   assert.deepEqual(harness.clipboardWrites, ['fmt.Println("safe")']);
   assert.equal(copy.textContent, "Copied");
+});
+
+test("language header and 41-line fences collapse without truncating copy", async () => {
+  const code = Array.from({ length: 41 }, (_, index) => `line ${index + 1}`).join("\n");
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: `\`\`\`Go\n${code}\n\`\`\`` }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const block = harness.elements["#desk-transcript"].querySelector(".code-block");
+  const language = block.querySelector(".code-language");
+  const expand = block.querySelector(".code-expand");
+  assert.ok(language, "language badge is rendered");
+  assert.ok(expand, "long-code disclosure is rendered");
+  assert.equal(language.textContent, "go");
+  assert.equal(block.classList.contains("is-collapsed"), true);
+  assert.equal(expand.textContent, "Expand code");
+  assert.equal(expand.getAttribute("aria-expanded"), "false");
+
+  await block.querySelector(".code-copy").listener("click")();
+  assert.deepEqual(harness.clipboardWrites, [code]);
+
+  expand.listener("click")();
+  assert.equal(block.classList.contains("is-collapsed"), false);
+  assert.equal(expand.textContent, "Collapse code");
+  assert.equal(expand.getAttribute("aria-expanded"), "true");
+});
+
+test("code copy reports clipboard failure without exposing a partial buffer", async () => {
+  const harness = createHarness({
+    clipboardWriteError: true,
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: "```txt\nfirst\nsecond\n```" }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const copy = harness.elements["#desk-transcript"].querySelector(".code-copy");
+  await copy.listener("click")();
+  assert.equal(copy.textContent, "Copy unavailable");
+  assert.deepEqual(harness.clipboardWrites, []);
+});
+
+test("failed legacy code copy removes its temporary textarea", async () => {
+  const harness = createHarness({
+    noClipboard: true,
+    execCommandResult: false,
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: "```txt\nprivate draft\n```" }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const copy = harness.elements["#desk-transcript"].querySelector(".code-copy");
+  await copy.listener("click")();
+  assert.equal(copy.textContent, "Copy unavailable");
+  assert.equal(harness.body.querySelector("textarea"), null);
+});
+
+test("restored thinking is closed above the answer and private reasoning fields stay absent", async () => {
+  const signatureCanary = "signature-private-canary";
+  const dataCanary = "redacted-data-private-canary";
+  const taskGuidance = "Work through the problem carefully before giving a final answer.";
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [
+                { type: "thinking", text: "Check the release evidence.", signature: signatureCanary },
+                { type: "thinking", text: taskGuidance, signature: signatureCanary },
+                { type: "redacted_thinking", data: dataCanary },
+                { type: "text", text: "The release is ready." },
+              ],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  const details = article.querySelector(".message-reasoning");
+  assert.ok(details, "restored reasoning disclosure is rendered");
+  assert.notEqual(details.open, true, "reasoning starts closed");
+  assert.equal(details.querySelector("summary").textContent, "Reasoning");
+  assert.match(details.textContent, /Check the release evidence\./);
+  assert.match(details.textContent, /Reasoning withheld/);
+  assert.match(article.querySelector(".message-body").textContent, /The release is ready\./);
+  for (const privateValue of [signatureCanary, dataCanary, taskGuidance]) {
+    assert.doesNotMatch(article.textContent, new RegExp(privateValue));
+  }
+  assert.equal(harness.forbiddenMarkupAssignments.length, 0);
+});
+
+test("text-only history does not gain an empty reasoning disclosure", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            { role: "assistant", blocks: [{ type: "text", text: "Plain answer" }] },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  assert.equal(article.querySelector(".message-reasoning"), null);
+  assert.equal(article.querySelector(".message-body").textContent, "Plain answer");
+});
+
+test("redacted-only reasoning remains visible without exposing its private payload", async () => {
+  const dataCanary = "redacted-data-private-canary";
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "redacted_thinking", data: dataCanary }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const article = harness.elements["#desk-transcript"].querySelector(".waffle-message");
+  assert.ok(article, "reasoning-only history entry remains in the transcript");
+  const details = article.querySelector(".message-reasoning");
+  assert.ok(details, "withheld reasoning disclosure is rendered");
+  assert.equal(details.querySelector("summary").textContent, "Reasoning withheld");
+  assert.notEqual(details.open, true, "withheld reasoning starts closed");
+  assert.doesNotMatch(article.textContent, new RegExp(dataCanary));
 });
 
 test("assistant inline markdown renders bold, italic, strike, and safe links; unsafe links stay literal", async () => {
@@ -1019,6 +1269,72 @@ test("message copy preserves raw markdown table delimiters", async () => {
   assert.deepEqual(harness.clipboardWrites, [markdown]);
 });
 
+test("composer grows from one row through 12 lines, caps at 15rem, and resets on send", async () => {
+  const harness = createHarness({ turnHandler: async () => jsonResponse({}) });
+  await flush();
+  const message = harness.elements["#desk-message"];
+  const input = message.listener("input");
+
+  assert.equal(message.style.height, "44px");
+  assert.equal(message.style.overflowY, "hidden");
+
+  message.value = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n");
+  input();
+  assert.equal(message.style.height, "220px");
+  assert.equal(message.style.overflowY, "hidden");
+
+  message.value = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n");
+  input();
+  assert.equal(message.style.height, "240px");
+  assert.equal(message.style.overflowY, "auto");
+
+  await harness.elements["#desk-composer"].listener("submit")({ preventDefault() {} });
+  await flush();
+  assert.equal(message.value, "");
+  assert.equal(message.style.height, "44px");
+  assert.equal(message.style.overflowY, "hidden");
+});
+
+test("mobile composer alignment scrolls only the bounded Today columns", async () => {
+  const harness = createHarness({ mobileViewport: true });
+  await flush();
+
+  const columns = harness.elements[".today-columns"];
+  const conversation = harness.elements[".conversation"];
+  const composer = harness.elements["#desk-composer"];
+  const main = harness.elements.main;
+  columns.rect = { top: 0, right: 320, bottom: 100, left: 0, width: 320, height: 100 };
+  conversation.rect = { top: 0, right: 320, bottom: 140, left: 0, width: 320, height: 140 };
+  composer.rect = { top: 140, right: 320, bottom: 180, left: 0, width: 320, height: 40 };
+  columns.scrollTop = 4;
+  main.scrollTop = 7;
+  harness.scrollingElement.scrollTop = 9;
+  harness.scrollCalls.length = 0;
+
+  harness.elements["#desk-message"].listener("input")();
+
+  assert.ok(columns.scrollTop > 4, "bounded Today columns advances to reveal the composer");
+  assert.equal(main.scrollTop, 7);
+  assert.equal(harness.scrollingElement.scrollTop, 9);
+  assert.deepEqual(harness.scrollCalls, []);
+});
+
+test("restored drafts regain their measured composer height", async () => {
+  const storage = new Map([
+    [
+      "waffle.desk.today.drafts.v1",
+      JSON.stringify({
+        "session-1": Array.from({ length: 12 }, (_, index) => `draft ${index + 1}`).join("\n"),
+      }),
+    ],
+  ]);
+  const harness = createHarness({ sharedStorage: storage });
+  await flush();
+
+  assert.equal(harness.elements["#desk-message"].style.height, "220px");
+  assert.equal(harness.elements["#desk-message"].style.overflowY, "hidden");
+});
+
 test("Ctrl or Cmd Enter sends the message", async () => {
   const harness = createHarness({
     turnHandler: async () => jsonResponse({}),
@@ -1202,6 +1518,7 @@ test("slash menu filters commands and skills and inserts a command on Enter", as
     preventDefault() {},
   });
   assert.equal(message.value, "/model ");
+  assert.equal(message.style.height, "44px");
   assert.equal(menu.hidden, true, "menu closes after insertion");
 });
 
@@ -1338,6 +1655,7 @@ test("rejected turn offers retry that resends the same text", async () => {
   assert.match(harness.elements["#desk-composer-status"].textContent, /rejected/);
   await retry.listener("click")();
   await flush();
+  assert.equal(message.style.height, "44px");
   const turns = mutationCalls(harness, "/api/v1/desk/chat/turn").map((call) =>
     JSON.parse(call.options.body).text,
   );
@@ -1434,25 +1752,127 @@ test("new conversation with an empty history atomically replaces the previous tr
 
 test("ownership conflict offers inline recovery instead of a fatal screen", async () => {
   let openAttempts = 0;
+  const conflict = deferred();
   const harness = createHarness({
     openHandler: async () => {
       openAttempts += 1;
-      return jsonResponse(
-        { code: "session_active", message: "chat session is already active" },
-        false,
-      );
+      return conflict.promise;
+    },
+  });
+  harness.elements["#desk-message"].focus();
+  conflict.resolve(jsonResponse(
+    { code: "session_active", message: "chat session is already active" },
+    false,
+  ));
+  await flush();
+  assert.equal(openAttempts, 1);
+  assert.equal(harness.elements["#desk-phase"].hidden, true);
+  assert.equal(harness.elements["#desk-connection"].hidden, true);
+  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
+  assert.equal(harness.elements["#desk-stale-label"].textContent, "This conversation is open in another window.");
+  assert.equal(
+    harness.elements["#desk-stale-message"].textContent,
+    "Start a new conversation or refresh when the other window is finished.",
+  );
+  assert.equal(harness.elements["#desk-transcript"].textContent, "This conversation is open in another window.");
+  assert.equal(harness.elements["#desk-composer"].hidden, true);
+  assert.equal(harness.elements[".task-context"].hidden, true);
+  assert.equal(harness.elements["#desk-stale-status"].focused, true);
+  assert.equal(harness.elements["#desk-new"].disabled, false);
+  assert.equal(harness.elements["#desk-new"].textContent, "Start new");
+  assert.equal(harness.elements["#desk-refresh"].disabled, false);
+  assert.equal(harness.elements["#desk-refresh"].textContent, "Refresh");
+  assert.equal(harness.elements["#desk-session-refresh"].disabled, false);
+  assert.equal(harness.elements["#desk-recovery-navigation"].hidden, false);
+  assert.equal(
+    harness.elements["#desk-recovery-navigation"].contains(
+      harness.elements["#desk-session-refresh"],
+    ),
+    true,
+  );
+  assert.equal(
+    harness.railCalls.some(
+      (call) => call.kind === "connection" && call.state === "disconnected",
+    ),
+    false,
+  );
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/command").length,
+    0,
+    "recovery navigation never calls a disconnected lease",
+  );
+});
+
+test("ownership recovery loads read-only recents and opens a selected session", async () => {
+  let openAttempts = 0;
+  const openBodies = [];
+  const harness = createHarness({
+    memorySessionsHandler: async () => jsonResponse({
+      choices: [
+        {
+          id: "session-2",
+          label: "Roadmap review",
+          updated_at: "2026-08-18T12:00:00Z",
+          pinned: true,
+        },
+      ],
+    }),
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      openBodies.push(JSON.parse(options.body));
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-2",
+        reattach_token: "lease-2",
+        state: defaultChatState({
+          session_id: "session-2",
+          title: "Roadmap review",
+        }),
+      });
     },
   });
   await flush();
-  assert.equal(openAttempts, 1);
-  assert.equal(harness.elements["#desk-phase"].textContent, "Conversation in use");
-  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
-  assert.match(harness.elements["#desk-stale-message"].textContent, /Another surface/);
-  assert.match(harness.elements["#desk-stale-label"].textContent, /in use/);
-  assert.doesNotMatch(harness.elements["#desk-stale-label"].textContent, /out of date/);
-  assert.equal(harness.elements["#desk-recover-new"].hidden, false);
-  assert.equal(harness.elements["#desk-recover-new"].disabled, false);
-  assert.equal(harness.elements["#desk-refresh"].disabled, false);
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/memory/sessions").length,
+    1,
+  );
+  assert.equal(
+    mutationCalls(harness, "/api/v1/desk/chat/command").length,
+    0,
+    "recovery recents never call the lease-bound command endpoint",
+  );
+  const sessionButton = harness.elements["#desk-session-options"]
+    .querySelector(".session-choice");
+  assert.ok(sessionButton, "read-only recovery list renders a session choice");
+  assert.match(sessionButton.textContent, /Roadmap review.*Pinned.*18 Aug 2026/i);
+  assert.equal(
+    harness.elements["#desk-session-options"].querySelector(".session-menu-trigger"),
+    null,
+    "lease-bound session actions stay hidden during recovery",
+  );
+
+  sessionButton.listener("click")();
+  await flush();
+
+  assert.equal(openAttempts, 2);
+  assert.equal(openBodies[1].continue, false);
+  assert.equal(openBodies[1].session_id, "session-2");
+  assert.equal(openBodies[1].reattach_client_id, undefined);
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Roadmap review");
 });
 
 test("Start a new conversation recovery opens a fresh session", async () => {
@@ -1479,8 +1899,8 @@ test("Start a new conversation recovery opens a fresh session", async () => {
     },
   });
   await flush();
-  assert.equal(harness.elements["#desk-recover-new"].hidden, false);
-  await harness.elements["#desk-recover-new"].listener("click")();
+  assert.equal(harness.elements["#desk-new"].textContent, "Start new");
+  await harness.elements["#desk-new"].listener("click")();
   await flush();
   assert.equal(harness.elements["#desk-session-title"].textContent, "Fresh recovery");
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
@@ -2571,6 +2991,7 @@ test("edit and regenerate branch at exact boundaries and fail closed mid-turn", 
   await flush();
   assert.deepEqual(branchCalls, ["s1 2"]);
   assert.equal(harness.elements["#desk-message"].value, "Second prompt");
+  assert.equal(harness.elements["#desk-message"].style.height, "44px");
   assert.match(harness.elements["#desk-composer-status"].textContent, /branch/i);
 
   // Regenerate the remaining answer: branch before its prompt and re-send it.
