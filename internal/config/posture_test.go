@@ -409,3 +409,28 @@ func TestValidateProfileFileRootsHoldsTheBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveProfileSystemRefusesSymlinkOutOfHome pins the containment
+// boundary against a link: filepath.Abs does not resolve symlinks, so a link
+// inside WAFFLE_HOME passes the relative-path check and used to be read
+// straight off the host.
+func TestResolveProfileSystemRefusesSymlinkOutOfHome(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv("WAFFLE_HOME", home)
+	secret := filepath.Join(outside, "secret.md")
+	if err := os.WriteFile(secret, []byte("host secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(home, "escape.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := ResolveProfileSystem("@escape.md")
+	if err == nil {
+		t.Fatalf("ResolveProfileSystem = %+v, want an error", got)
+	}
+	if strings.Contains(got.Text, "host secret") {
+		t.Fatalf("symlink target leaked: %+v", got)
+	}
+}

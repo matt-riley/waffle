@@ -77,7 +77,16 @@ func ResolveProfileSystem(system string) (SystemPrompt, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return SystemPrompt{}, fmt.Errorf("profile system file %q is outside WAFFLE_HOME", path)
 	}
-	body, err := os.ReadFile(abs)
+	// The read goes through an os.Root bound to WAFFLE_HOME. filepath.Abs
+	// does not resolve symlinks, so the containment check above accepted a
+	// link inside WAFFLE_HOME pointing anywhere on the host; os.Root refuses
+	// any component that resolves outside the root.
+	root, err := os.OpenRoot(homeAbs)
+	if err != nil {
+		return SystemPrompt{}, fmt.Errorf("profile system file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	body, err := root.ReadFile(rel)
 	if err != nil {
 		return SystemPrompt{}, fmt.Errorf("profile system file: %w", err)
 	}
