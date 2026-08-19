@@ -22,6 +22,9 @@ templ Navigation(view ShellView) {
 			@NavigationItem("memory", "Memory", view.ActiveSection)
 			@NavigationItem("capabilities", "Capabilities", view.ActiveSection)
 		</ul>
+		if view.ActiveSection == "today" || view.ActiveSection == "" {
+			@TodaySessionRail()
+		}
 		<div
 			class="rail-status"
 			id="rail-status"
@@ -34,6 +37,24 @@ templ Navigation(view ShellView) {
 			<code id="rail-model" data-model-scope="">{ view.ModelAlias }</code>
 		</div>
 	</nav>
+}
+
+templ TodaySessionRail() {
+	<div class="desk-session-rail" id="desk-session-rail">
+		<button id="desk-session-refresh" type="button" aria-expanded="false" hidden>Recent conversations</button>
+		<div class="desk-session-drawer" id="desk-sessions" role="region" aria-labelledby="desk-session-drawer-title" hidden>
+			<div class="desk-session-drawer-head">
+				<h2 id="desk-session-drawer-title">Conversations</h2>
+				<button id="desk-session-drawer-close" type="button">Close</button>
+			</div>
+			<button id="desk-new" type="button" disabled>New conversation</button>
+			<label class="visually-hidden" for="desk-session-filter">Find a conversation</label>
+			<input type="search" id="desk-session-filter" placeholder="Find a conversation…" autocomplete="off" />
+			<div class="session-list" id="desk-session-options" role="listbox" aria-label="Recent conversations" aria-live="polite">
+				<p>Opening recent conversations…</p>
+			</div>
+		</div>
+	</div>
 }
 
 templ NavigationItem(section string, label string, active string) {

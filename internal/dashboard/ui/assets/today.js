@@ -246,7 +246,9 @@ const elements = {
   transcript: document.querySelector("#desk-transcript"),
   emptyTranscript: document.querySelector("#desk-empty-transcript"),
   form: document.querySelector("#desk-composer"),
-  taskContext: document.querySelector(".task-context"),
+  sessionRail: document.querySelector("#desk-session-rail"),
+  conversationsOpen: document.querySelector("#desk-conversations-open"),
+  sessionDrawerClose: document.querySelector("#desk-session-drawer-close"),
   composerActions: document.querySelector(".composer-actions"),
   slashMenu: document.querySelector("#desk-slash-menu"),
   message: document.querySelector("#desk-message"),
@@ -286,9 +288,7 @@ const elements = {
   sessions: document.querySelector("#desk-sessions"),
   sessionFilter: document.querySelector("#desk-session-filter"),
   sessionOptions: document.querySelector("#desk-session-options"),
-  usageRefresh: document.querySelector("#desk-usage-refresh"),
   usage: document.querySelector("#desk-usage"),
-  projectRefresh: document.querySelector("#desk-project-refresh"),
   project: document.querySelector("#desk-project"),
   projectPinForm: document.querySelector("#desk-project-pin-form"),
   projectPath: document.querySelector("#desk-project-path"),
@@ -297,13 +297,21 @@ const elements = {
   projectNoteName: document.querySelector("#desk-project-note-name"),
   projectNote: document.querySelector("#desk-project-note"),
   projectAddNote: document.querySelector("#desk-project-add-note"),
-  permissionsRefresh: document.querySelector("#desk-permissions-refresh"),
   permissions: document.querySelector("#desk-permissions"),
-  worksetRefresh: document.querySelector("#desk-workset-refresh"),
   workset: document.querySelector("#desk-workset"),
-  helpRefresh: document.querySelector("#desk-help-refresh"),
   help: document.querySelector("#desk-help"),
   queue: document.querySelector("#desk-queue"),
+  canvasToggle: document.querySelector("#desk-context-toggle"),
+  canvas: document.querySelector("#desk-canvas-drawer"),
+  canvasClose: document.querySelector("#desk-canvas-close"),
+  canvasArtifactTab: document.querySelector("#desk-canvas-tab-artifact"),
+  canvasSessionTab: document.querySelector("#desk-canvas-tab-session"),
+  canvasDiagnosticsTab: document.querySelector("#desk-canvas-tab-diagnostics"),
+  canvasProjectTab: document.querySelector("#desk-canvas-tab-project"),
+  canvasArtifact: document.querySelector("#desk-canvas-artifact"),
+  canvasSession: document.querySelector("#desk-canvas-session"),
+  canvasDiagnostics: document.querySelector("#desk-canvas-diagnostics"),
+  canvasProject: document.querySelector("#desk-canvas-project"),
 };
 
 const recoveryHomes = new Map(
@@ -368,12 +376,26 @@ const state = {
     items: [],
   },
   sessionsList: {
-    open: false,
+    drawerOpen: false,
+    loaded: false,
+    loading: false,
     items: [],
     filter: "",
     error: "",
   },
+  sessionsHydrationToken: 0,
   sessionMenuOpen: null,
+  sessionOpener: null,
+  canvasTab: "session",
+  canvasArtifact: null,
+  canvasOpen: false,
+  canvasOpener: null,
+  panelHydrationToken: 0,
+  hydrationCommandQueue: Promise.resolve(),
+  hydrationEpoch: 0,
+  hydrationActive: null,
+  hydrationNeedsRefresh: false,
+  interactivePending: false,
 };
 
 function pushRailConnection(railState) {
@@ -456,6 +478,7 @@ function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
   const recovering = state.currentPhase === phase.recovering;
   const recoveryBusy = recovering && state.recoveryNewInFlight;
+  const interactivePending = state.interactivePending;
   if (!idle) {
     closeSlashMenu();
   }
@@ -467,9 +490,10 @@ function updateControls() {
   // follow-up; it is only locked while disconnected. During an ownership
   // conflict the draft stays stored while the dead composer is collapsed.
   elements.message.disabled =
-    state.currentPhase === phase.disconnected || recovering;
+    state.currentPhase === phase.disconnected || recovering || interactivePending;
   const busy = !idle && !recovering && state.currentPhase !== phase.disconnected;
   elements.send.disabled =
+    interactivePending ||
     !state.clientID ||
     (elements.message.value.trim() === "" && state.attachments.length === 0);
   if (busy) {
@@ -492,7 +516,7 @@ function updateControls() {
     }
   }
   if (elements.attachButton) {
-    elements.attachButton.disabled = !idle;
+    elements.attachButton.disabled = !idle || interactivePending;
   }
   if (elements.exportButton) {
     elements.exportButton.disabled = !idle;
@@ -526,15 +550,7 @@ function updateControls() {
   if (elements.sessionRefresh) {
     elements.sessionRefresh.disabled = (!idle && !recovering) || recoveryBusy;
   }
-  for (const control of [
-    elements.usageRefresh,
-    elements.permissionsRefresh,
-    elements.worksetRefresh,
-    elements.helpRefresh,
-    elements.projectRefresh,
-    elements.projectPin,
-    elements.projectAddNote,
-  ]) {
+  for (const control of [elements.projectPin, elements.projectAddNote]) {
     if (control) {
       control.disabled = !idle;
     }
@@ -582,11 +598,26 @@ function alignMobileComposer() {
     const columnsRect = columns.getBoundingClientRect();
     const conversationRect = conversation.getBoundingClientRect();
     const composerRect = elements.form?.getBoundingClientRect();
-    const contentBottom = Math.max(
-      conversationRect.bottom,
-      composerRect?.bottom || conversationRect.bottom,
-    );
-    const overflow = contentBottom - columnsRect.bottom;
+    const navigationRect = document
+      .querySelector(".desk-navigation")
+      ?.getBoundingClientRect();
+    const visibleBottom = navigationRect
+      ? Math.min(columnsRect.bottom, navigationRect.top)
+      : columnsRect.bottom;
+    // The composer is the only content that needs mobile alignment. Using the
+    // conversation shell's bottom here can scroll an otherwise visible empty
+    // composer by a few pixels at narrow widths.
+    const contentBottom = composerRect?.bottom || conversationRect.bottom;
+    const overflow = contentBottom - visibleBottom;
+    if (
+      !elements.message?.value?.trim() &&
+      state.attachments.length === 0 &&
+      !state.slash.open &&
+      overflow <= 1
+    ) {
+      columns.scrollTop = 0;
+      return;
+    }
     const nextScrollTop = columns.scrollTop + overflow;
     columns.scrollTop = Math.max(0, overflow > 0 ? Math.ceil(nextScrollTop) : nextScrollTop);
   };
@@ -1502,73 +1533,230 @@ function renderArtifactCard(ref) {
     card.append(head, unavailable);
     return card;
   }
-  const preview = document.createElement("button");
-  preview.type = "button";
-  preview.className = "artifact-preview-toggle";
-  preview.textContent = "Preview";
-  preview.addEventListener("click", () => previewArtifact(ref, preview, card));
-  const download = document.createElement("button");
-  download.type = "button";
-  download.textContent = "Download";
-  download.addEventListener("click", () => downloadArtifact(ref, download));
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.textContent = "Copy reference";
-  copy.addEventListener("click", () => copyReference(ref.id || "", copy));
-  actions.append(preview, download, copy);
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "artifact-preview-toggle artifact-open-canvas";
+  open.textContent = "Open in canvas";
+  open.addEventListener("click", () => openArtifactCanvas(ref, open));
+  actions.append(open);
   card.append(head, actions);
   return card;
 }
 
-// previewArtifact fetches the owner-authorized preview projection and renders
-// inline text/markdown, an image content URL, or a download-only notice.
-async function previewArtifact(ref, button, card) {
-  if (button.disabled) {
+function canvasTabElements() {
+  return {
+    artifact: [elements.canvasArtifactTab, elements.canvasArtifact],
+    session: [elements.canvasSessionTab, elements.canvasSession],
+    diagnostics: [elements.canvasDiagnosticsTab, elements.canvasDiagnostics],
+    project: [elements.canvasProjectTab, elements.canvasProject],
+  };
+}
+
+function setCanvasTab(tab, focus = false) {
+  const available = canvasTabElements();
+  if (!available[tab] || available[tab][0]?.hidden) {
+    tab = "session";
+  }
+  state.canvasTab = tab;
+  for (const [name, [button, panel]] of Object.entries(available)) {
+    const selected = name === tab;
+    button?.setAttribute("aria-selected", selected ? "true" : "false");
+    if (panel) {
+      panel.hidden = !selected;
+    }
+    if (button) {
+      button.classList.toggle("is-selected", selected);
+    }
+  }
+  if (focus) {
+    available[tab][0]?.focus?.();
+  }
+}
+
+function canvasFocusables() {
+  if (!elements.canvas) {
+    return [];
+  }
+  const candidates = ["button", "input", "select", "textarea", "a"].flatMap(
+    (selector) => [...elements.canvas.querySelectorAll(selector)],
+  );
+  const isRendered = (node) => {
+    for (
+      let current = node;
+      current;
+      current = current.parentElement || current.parentNode
+    ) {
+      if (
+        current.hidden ||
+        current.getAttribute?.("aria-hidden") === "true"
+      ) {
+        return false;
+      }
+      if (typeof globalThis.getComputedStyle === "function") {
+        const style = globalThis.getComputedStyle(current);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return false;
+        }
+      }
+      if (current === elements.canvas) {
+        break;
+      }
+    }
+    if (typeof globalThis.getComputedStyle === "function") {
+      const rect = node.getBoundingClientRect?.();
+      if (rect && rect.width === 0 && rect.height === 0) {
+        return false;
+      }
+    }
+    return true;
+  };
+  return [...new Set(candidates)].filter((node) => {
+    if (node.disabled || node.hidden || !isRendered(node)) {
+      return false;
+    }
+    if (node.tagName === "INPUT" && node.type === "hidden") {
+      return false;
+    }
+    return node.tagName === "A" || node.getAttribute("tabindex") !== "-1";
+  });
+}
+
+function clearSessionScopedCanvas() {
+  state.projectWorkspaceID = "";
+  state.canvasArtifact = null;
+  if (elements.canvasArtifactTab) {
+    elements.canvasArtifactTab.hidden = true;
+  }
+  clearNode(elements.canvasArtifact);
+  setCanvasTab("session");
+}
+
+function openCanvas(opener = elements.canvasToggle) {
+  if (!elements.canvas) {
+    return;
+  }
+  state.canvasOpen = true;
+  state.canvasOpener = opener;
+  elements.canvas.hidden = false;
+  syncCanvasViewport();
+  elements.shell?.setAttribute("data-canvas", "open");
+  elements.canvasToggle?.setAttribute("aria-expanded", "true");
+  setCanvasTab(state.canvasTab);
+  elements.canvasClose?.focus?.({ preventScroll: true });
+}
+
+function isCanvasOverlayViewport() {
+  return globalThis.matchMedia?.("(max-width: 1099px)")?.matches === true;
+}
+
+function syncCanvasViewport() {
+  if (!elements.canvas) {
+    return;
+  }
+  const overlay = isCanvasOverlayViewport();
+  elements.canvas.setAttribute("role", overlay ? "dialog" : "complementary");
+  if (overlay) {
+    elements.canvas.setAttribute("aria-modal", "true");
+  } else {
+    elements.canvas.removeAttribute("aria-modal");
+  }
+}
+
+function closeCanvas() {
+  if (!state.canvasOpen && elements.canvas?.hidden !== false) {
+    return;
+  }
+  state.canvasOpen = false;
+  if (elements.canvas) {
+    elements.canvas.hidden = true;
+    elements.canvas.removeAttribute("aria-modal");
+  }
+  elements.shell?.removeAttribute("data-canvas");
+  elements.canvasToggle?.setAttribute("aria-expanded", "false");
+  const opener = state.canvasOpener || elements.canvasToggle;
+  state.canvasOpener = null;
+  opener?.focus?.({ preventScroll: true });
+}
+
+function renderCanvasArtifact(ref) {
+  if (!elements.canvasArtifact) {
+    return;
+  }
+  clearNode(elements.canvasArtifact);
+  const heading = document.createElement("h3");
+  heading.textContent = ref.name || "Artifact";
+  const meta = document.createElement("p");
+  meta.className = "artifact-meta";
+  meta.textContent = [ref.media_type || "file", formatBytes(ref.size)].join(" · ");
+  const actions = document.createElement("div");
+  actions.className = "artifact-actions";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy reference";
+  copy.addEventListener("click", () => copyReference(ref.id || "", copy));
+  const download = document.createElement("button");
+  download.type = "button";
+  download.textContent = "Download";
+  download.addEventListener("click", () => downloadArtifact(ref, download));
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.textContent = "Preview";
+  preview.addEventListener("click", () => previewCanvasArtifact(ref, preview));
+  actions.append(preview, download, copy);
+  elements.canvasArtifact.append(heading, meta, actions);
+}
+
+async function previewCanvasArtifact(ref, button) {
+  if (!button || button.disabled) {
     return;
   }
   button.disabled = true;
   button.textContent = "Loading";
-  let body;
   try {
-    body = card.querySelector(".artifact-preview-body");
-    if (!body) {
-      body = document.createElement("div");
-      body.className = "artifact-preview-body";
-      card.appendChild(body);
-    }
-    body.textContent = "Loading preview…";
     const view = await postMutation(
       `/api/v1/desk/artifacts/${encodeURIComponent(ref.id)}/preview`,
       { client_id: state.clientID },
     );
-    clearNode(body);
-    if (view.mode === "inline") {
-      renderMarkdown(body, view.content || "");
-    } else if (view.mode === "content" && view.content_url) {
-      const img = document.createElement("img");
-      img.className = "artifact-image";
-      img.setAttribute("src", view.content_url);
-      img.setAttribute("alt", ref.name || "artifact preview");
-      body.appendChild(img);
+    const body = document.createElement(view.mode === "content" ? "div" : "pre");
+    body.className = "canvas-artifact-preview";
+    if (view.mode === "content" && view.content_url) {
+      const image = document.createElement("img");
+      image.className = "artifact-image";
+      image.src = view.content_url;
+      image.alt = ref.name || "Artifact preview";
+      body.appendChild(image);
+    } else if (view.mode === "inline") {
+      body.textContent = view.content || "";
     } else {
-      const note = document.createElement("p");
-      note.className = "artifact-unavailable";
-      note.textContent =
-        view.reason || "This artifact type is available for download only.";
-      body.appendChild(note);
+      body.textContent = view.reason || "This artifact type is available for download only.";
     }
-  } catch {
-    if (body) {
-      clearNode(body);
-      const note = document.createElement("p");
-      note.className = "artifact-unavailable";
-      note.textContent = "Preview is unavailable for this artifact.";
-      body.appendChild(note);
+    const previous = elements.canvasArtifact.querySelector(".canvas-artifact-preview");
+    previous?.replaceWith?.(body);
+    if (!previous) {
+      elements.canvasArtifact.appendChild(body);
     }
+  } catch (error) {
+    const note = document.createElement("p");
+    note.className = "artifact-unavailable";
+    note.textContent = error.safeMessage || "Preview is unavailable for this artifact.";
+    elements.canvasArtifact.appendChild(note);
   } finally {
     button.disabled = false;
     button.textContent = "Preview";
   }
+}
+
+function openArtifactCanvas(ref, opener) {
+  if (!ref || ref.state && ref.state !== "available") {
+    return;
+  }
+  state.canvasArtifact = ref;
+  if (elements.canvasArtifactTab) {
+    elements.canvasArtifactTab.hidden = false;
+  }
+  renderCanvasArtifact(ref);
+  openCanvas(opener);
+  setCanvasTab("artifact");
 }
 
 // downloadArtifact streams the verified payload through the owner-authorized
@@ -2000,7 +2188,11 @@ function renderCanonicalState(chatState, includeHistory) {
   if (includeHistory) {
     globalThis.waffleReadAloud?.stop();
   }
-  state.sessionID = chatState.session_id || state.sessionID;
+  const nextSessionID = chatState.session_id || state.sessionID;
+  if (state.sessionID && nextSessionID && nextSessionID !== state.sessionID) {
+    clearSessionScopedCanvas();
+  }
+  state.sessionID = nextSessionID;
   state.temporary = Boolean(chatState.temporary);
   if (state.temporary && Array.isArray(chatState.history) && chatState.history.length > 0) {
     writeTemporaryPreference(false);
@@ -2249,6 +2441,7 @@ function disconnect(message) {
   holdQueue("the connection dropped");
   state.activeTurn = null;
   state.activeOperation = null;
+  state.interactivePending = false;
   state.streamingMessage = null;
   state.reconnecting = false;
   state.reconnectAttempts = 0;
@@ -2512,6 +2705,13 @@ async function openDesk() {
     renderCanonicalState(opened.state, true);
     openEventStream();
     setPhase(phase.idle);
+    if (elements.sessionRail) {
+      configureSessionRail();
+      void hydrateSessionRail();
+    }
+    if (elements.canvas) {
+      void hydrateSessionPanels();
+    }
     // Do not steal focus if the user already moved it (e.g. skip link → main)
     // while the async open was in flight. Autofocus only when focus is still
     // on the document default or the composer itself.
@@ -2599,8 +2799,7 @@ function showOwnershipConflict() {
   if (
     active &&
     (active === elements.message ||
-      elements.form?.contains(active) ||
-      elements.taskContext?.contains(active))
+      elements.form?.contains(active))
   ) {
     elements.stale.focus();
   }
@@ -2610,6 +2809,7 @@ function showOwnershipConflict() {
   }
   if (elements.recoveryNavigation) {
     if (elements.sessionRefresh) {
+      elements.sessionRefresh.hidden = false;
       elements.recoveryNavigation.appendChild(elements.sessionRefresh);
     }
     if (elements.sessions) {
@@ -2620,9 +2820,6 @@ function showOwnershipConflict() {
   elements.refresh.textContent = "Refresh";
   if (elements.form) {
     elements.form.hidden = true;
-  }
-  if (elements.taskContext) {
-    elements.taskContext.hidden = true;
   }
   if (state.historyLength === 0) {
     clearNode(elements.transcript);
@@ -2658,9 +2855,6 @@ function resetOwnershipConflict() {
   if (elements.form) {
     elements.form.hidden = false;
   }
-  if (elements.taskContext) {
-    elements.taskContext.hidden = false;
-  }
   elements.phase.hidden = false;
   elements.connection.hidden = false;
   if (elements.staleLabel) {
@@ -2671,12 +2865,15 @@ function resetOwnershipConflict() {
 }
 
 function resetRecoveryExit() {
-  state.sessionsList.open = false;
+  state.sessionsList.drawerOpen = false;
+  state.sessionsList.loaded = false;
+  state.sessionsHydrationToken += 1;
   state.sessionsList.items = [];
   state.sessionsList.filter = "";
   state.sessionsList.error = "";
   closeSessionMenus();
   if (elements.sessionRefresh) {
+    elements.sessionRefresh.hidden = true;
     elements.sessionRefresh.setAttribute("aria-expanded", "false");
   }
   if (elements.sessionFilter) {
@@ -2712,7 +2909,9 @@ function settleTurn(turn) {
   state.pendingTurn = null;
   elements.composerActions?.querySelector(".retry-button")?.remove();
   setPhase(phase.idle);
-  maybeDispatchFollowUp(turn);
+  if (!maybeDispatchFollowUp(turn)) {
+    rehydrateAfterInteractiveOperation();
+  }
 }
 
 function turnIdempotencyKey(text, provided) {
@@ -2736,10 +2935,26 @@ async function submitTurn(event, explicitText, idempotencyKey) {
   if ((!text && attachments.length === 0) || state.clientID === "") {
     return;
   }
+  if (state.interactivePending) {
+    return;
+  }
   if (state.currentPhase !== phase.idle) {
     queueFollowUp(text, attachments);
     return;
   }
+  state.interactivePending = true;
+  updateControls();
+  const hydrationWait = prioritizeInteractiveOperation();
+  if (hydrationWait) {
+    await hydrationWait;
+  }
+  if (state.currentPhase !== phase.idle) {
+    state.interactivePending = false;
+    updateControls();
+    queueFollowUp(text, attachments);
+    return;
+  }
+  state.interactivePending = false;
   await sendTurn(text, turnIdempotencyKey(text, idempotencyKey), {
     clearComposer: explicitText === undefined,
   }, attachments);
@@ -2866,7 +3081,7 @@ function maybeDispatchFollowUp(turn) {
     queue.held ||
     queue.sessionID !== state.sessionID
   ) {
-    return;
+    return false;
   }
   const followUp = queue;
   persistQueue(null);
@@ -2876,9 +3091,21 @@ function maybeDispatchFollowUp(turn) {
     false,
     "composer",
   );
-  void sendTurn(followUp.text, followUp.idempotencyKey, {
-    clearComposer: false,
-  }, followUp.attachments || []);
+  const hydrationWait = prioritizeInteractiveOperation();
+  const dispatch = () => {
+    if (state.currentPhase !== phase.idle) {
+      return;
+    }
+    void sendTurn(followUp.text, followUp.idempotencyKey, {
+      clearComposer: false,
+    }, followUp.attachments || []);
+  };
+  if (hydrationWait) {
+    void hydrationWait.then(dispatch);
+  } else {
+    dispatch();
+  }
+  return true;
 }
 
 function consumeAttachments() {
@@ -3098,6 +3325,13 @@ async function runCommandOperation(label, operation) {
   if (state.currentPhase !== phase.idle) {
     return null;
   }
+  const hydrationWait = prioritizeInteractiveOperation();
+  if (hydrationWait) {
+    await hydrationWait;
+  }
+  if (state.currentPhase !== phase.idle) {
+    return null;
+  }
   const generation = state.generation;
   state.activeOperation = "command";
   setPhase(phase.sending);
@@ -3111,6 +3345,7 @@ async function runCommandOperation(label, operation) {
     state.activeOperation = null;
     if (state.currentPhase !== phase.disconnected) {
       setPhase(phase.idle);
+      rehydrateAfterInteractiveOperation();
     }
     return result;
   } catch (error) {
@@ -3119,6 +3354,7 @@ async function runCommandOperation(label, operation) {
     }
     state.activeOperation = null;
     setPhase(phase.idle);
+    rehydrateAfterInteractiveOperation();
     setStatusMessage(
       elements.composerStatus,
       error.safeMessage || "The command could not be completed.",
@@ -3129,11 +3365,66 @@ async function runCommandOperation(label, operation) {
   }
 }
 
+// Interactive owner work gets the next lease turn. Any queued hydration made
+// stale by that action is skipped; an already-started hydration is allowed to
+// settle before the interactive request starts so the server never sees two
+// owner mutations at once. Cancel deliberately does not use this seam: it
+// must remain the fastest path during a running turn.
+function prioritizeInteractiveOperation() {
+  state.hydrationEpoch += 1;
+  state.hydrationNeedsRefresh = true;
+  state.sessionsHydrationToken += 1;
+  state.panelHydrationToken += 1;
+  state.hydrationCommandQueue = Promise.resolve();
+  const active = state.hydrationActive?.promise;
+  return active ? active.catch(() => null) : null;
+}
+
+function rehydrateAfterInteractiveOperation() {
+  if (
+    !state.hydrationNeedsRefresh ||
+    state.currentPhase !== phase.idle ||
+    !state.clientID
+  ) {
+    return;
+  }
+  state.hydrationNeedsRefresh = false;
+  if (elements.sessionRail) {
+    void hydrateSessionRail();
+  }
+  if (elements.canvas) {
+    void hydrateSessionPanels();
+  }
+}
+
 function commandMutation(name, args = "", clientID = state.clientID) {
   return postMutation("/api/v1/desk/chat/command", {
     client_id: clientID,
     command: { name, args },
   });
+}
+
+// The live owner lease serializes command mutations. Hydration stays outside
+// runCommandOperation so it never changes the composer phase, but its
+// independent commands still take turns on that lease.
+function queueHydrationCommand(name, clientID, isCurrent) {
+  const epoch = state.hydrationEpoch;
+  const task = state.hydrationCommandQueue.then(() => {
+    if (epoch !== state.hydrationEpoch || !isCurrent()) {
+      return null;
+    }
+    const active = { promise: null };
+    state.hydrationActive = active;
+    const promise = commandMutation(name, "", clientID);
+    active.promise = promise.finally(() => {
+      if (state.hydrationActive === active) {
+        state.hydrationActive = null;
+      }
+    });
+    return active.promise;
+  });
+  state.hydrationCommandQueue = task.catch(() => null);
+  return task;
 }
 
 async function runNewConversation(clientID, renderState) {
@@ -3188,6 +3479,13 @@ async function recoverWithNewConversation() {
     promoted = true;
     openEventStream();
     setPhase(phase.idle);
+    if (elements.sessionRail) {
+      configureSessionRail();
+      void hydrateSessionRail();
+    }
+    if (elements.canvas) {
+      void hydrateSessionPanels();
+    }
     const active = document.activeElement;
     if (
       !active ||
@@ -3291,20 +3589,37 @@ function formatSessionUpdated(value) {
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "UTC",
   });
 }
 
 async function resumeSession(sessionID) {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
-  await runCommandOperation("Resuming conversation", async () => {
+  state.panelHydrationToken += 1;
+  const resumed = await runCommandOperation("Resuming conversation", async () => {
     const result = await commandMutation("resume", sessionID);
     if (result.state) {
       renderCanonicalState(result.state, true);
     }
     return result;
   });
+  if (resumed && state.currentPhase === phase.idle) {
+    void hydrateSessionRail();
+    void hydrateSessionPanels();
+  }
+}
+
+async function exportSession(session) {
+  if (!session?.id) {
+    return;
+  }
+  if (session.id !== state.sessionID) {
+    await resumeSession(session.id);
+  }
+  if (state.sessionID !== session.id) {
+    return;
+  }
+  await exportConversation();
 }
 
 async function openRecoverySession(sessionID) {
@@ -3321,8 +3636,8 @@ async function openRecoverySession(sessionID) {
 
 // toggleSessions opens or closes the recent-conversation disclosure. The first
 // open loads the list; subsequent opens reuse the cached items.
-async function toggleSessions() {
-  if (state.sessionsList.open) {
+async function toggleSessions({ opener = null } = {}) {
+  if (state.sessionsList.drawerOpen) {
     closeSessionsList();
     return;
   }
@@ -3342,55 +3657,61 @@ async function toggleSessions() {
       state.sessionsList.items = [];
       state.sessionsList.error = "Recent conversations could not be loaded.";
     }
-    openSessionsList();
+    openSessionsList({ opener });
     return;
   }
-  if (state.sessionsList.items.length === 0) {
-    const result = await runCommandOperation("Loading conversations", () =>
-      commandMutation("sessions"),
-    );
+  if (!state.sessionsList.loaded || state.sessionsList.error) {
+    const result = await refreshSessionList();
     if (!result) {
       return;
     }
-    state.sessionsList.items = Array.isArray(result.sessions)
-      ? result.sessions
-      : [];
-    state.sessionsList.error = "";
   }
-  openSessionsList();
+  openSessionsList({ opener });
 }
 
-function openSessionsList() {
-  state.sessionsList.open = true;
+function openSessionsList({ focus = true, opener = null } = {}) {
+  state.sessionsList.drawerOpen = true;
+  if (elements.sessionRefresh && state.currentPhase !== phase.recovering) {
+    elements.sessionRefresh.hidden = true;
+  } else if (elements.sessionRefresh) {
+    elements.sessionRefresh.hidden = false;
+  }
+  state.sessionOpener = opener || state.sessionOpener || elements.sessionRefresh;
   if (elements.sessionRefresh) {
     elements.sessionRefresh.setAttribute("aria-expanded", "true");
   }
   renderSessionList();
-  if (elements.sessionFilter) {
+  if (focus && elements.sessionFilter) {
     elements.sessionFilter.value = state.sessionsList.filter;
     elements.sessionFilter.focus();
   }
 }
 
 function closeSessionsList() {
-  if (!state.sessionsList.open) {
+  if (!state.sessionsList.drawerOpen) {
     return;
   }
-  state.sessionsList.open = false;
+  state.sessionsList.drawerOpen = false;
   if (elements.sessionRefresh) {
+    elements.sessionRefresh.hidden = state.currentPhase !== phase.recovering;
     elements.sessionRefresh.setAttribute("aria-expanded", "false");
-    elements.sessionRefresh.focus();
+    const opener = state.sessionOpener || elements.sessionRefresh;
+    opener?.focus?.();
   }
-  if (elements.sessions) {
-    elements.sessions.hidden = true;
-  }
+  state.sessionOpener = null;
+  syncSessionRailVisibility();
 }
 
 function renderSessions(sessions) {
   state.sessionsList.items = Array.isArray(sessions) ? sessions : [];
+  state.sessionsList.loaded = true;
   state.sessionsList.error = "";
-  if (state.sessionsList.open) {
-    renderSessionList();
+  renderSessionList();
+}
+
+function syncSessionRailVisibility() {
+  if (elements.sessions) {
+    elements.sessions.hidden = isCompactViewport() && !state.sessionsList.drawerOpen;
   }
 }
 
@@ -3401,10 +3722,8 @@ function renderSessionList() {
   if (!elements.sessionOptions) {
     return;
   }
+  syncSessionRailVisibility();
   clearNode(elements.sessionOptions);
-  if (elements.sessions) {
-    elements.sessions.hidden = false;
-  }
   if (state.sessionsList.error) {
     const error = document.createElement("p");
     error.textContent = state.sessionsList.error;
@@ -3418,80 +3737,79 @@ function renderSessionList() {
     elements.sessionOptions.appendChild(empty);
     return;
   }
-  const filter = state.sessionsList.filter.trim().toLowerCase();
-  const matches = filter
-    ? available.filter((session) => {
-        const haystack = [
-          session.title,
-          session.summary,
-          session.id,
-          session.model_alias,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        return haystack.includes(filter);
-      })
-    : available;
-  if (matches.length === 0) {
+  const presentation = globalThis.waffleSessionPresentation;
+  const groups = presentation
+    ? presentation.presentSessions(available, { query: state.sessionsList.filter })
+    : [];
+  if (groups.length === 0) {
     const empty = document.createElement("p");
     empty.textContent = "No conversations match.";
     elements.sessionOptions.appendChild(empty);
     return;
   }
-  for (const session of matches) {
-    const row = document.createElement("div");
-    row.className = "session-row";
-    const selected = session.id === state.sessionID;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "session-choice";
-    button.setAttribute("role", "option");
-    button.setAttribute("data-session-id", session.id || "");
-    button.setAttribute(
-      "aria-selected",
-      selected ? "true" : "false",
-    );
-    if (selected) {
-      button.classList.add("is-selected");
-      button.setAttribute("aria-current", "true");
-    }
-    const title = document.createElement("span");
-    title.className = "session-title";
-    const titleText =
-      session.title || session.summary || "Untitled conversation";
-    title.textContent = titleText;
-    const meta = document.createElement("span");
-    meta.className = "session-meta";
-    const parts = [];
-    if (session.pinned) {
-      parts.push("Pinned");
-    }
-    parts.push(formatSessionUpdated(session.updated_at));
-    if (session.model_alias) {
-      parts.push(session.model_alias);
-    }
-    meta.textContent = parts.join(" · ");
-    if (session.summary && session.summary !== titleText) {
-      const detail = document.createElement("span");
-      detail.className = "session-detail";
-      detail.textContent = session.summary;
-      button.append(title, detail, meta);
-    } else {
-      button.append(title, meta);
-    }
-    button.addEventListener("click", () => {
-      if (state.currentPhase === phase.recovering) {
-        void openRecoverySession(session.id || "");
-        return;
+  for (const group of groups) {
+    const heading = document.createElement("p");
+    heading.className = "session-group-label";
+    heading.textContent = group.label;
+    heading.setAttribute("aria-hidden", "true");
+    elements.sessionOptions.appendChild(heading);
+    for (const session of group.items) {
+      const row = document.createElement("div");
+      row.className = "session-row";
+      const selected = session.id === state.sessionID;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "session-choice";
+      button.setAttribute("role", "option");
+      button.setAttribute("data-session-id", session.id || "");
+      button.setAttribute(
+        "aria-selected",
+        selected ? "true" : "false",
+      );
+      if (selected) {
+        button.classList.add("is-selected");
+        button.setAttribute("aria-current", "true");
       }
-      void resumeSession(session.id || "");
-    });
-    row.appendChild(button);
-    if (state.currentPhase !== phase.recovering) {
-      attachSessionActions(row, session);
+      const title = document.createElement("span");
+      title.className = "session-title";
+      const titleText = presentation.sessionTitle(session);
+      title.textContent = titleText;
+      button.setAttribute(
+        "aria-label",
+        presentation.sessionAccessibleLabel(session),
+      );
+      const meta = document.createElement("span");
+      meta.className = "session-meta";
+      const parts = [];
+      if (session.pinned) {
+        parts.push("Pinned");
+      }
+      parts.push(formatSessionUpdated(session.updated_at));
+      if (session.model_alias) {
+        parts.push(session.model_alias);
+      }
+      meta.textContent = parts.join(" · ");
+      if (session.summary && session.summary !== titleText) {
+        const detail = document.createElement("span");
+        detail.className = "session-detail";
+        detail.textContent = session.summary;
+        button.append(title, detail, meta);
+      } else {
+        button.append(title, meta);
+      }
+      button.addEventListener("click", () => {
+        if (state.currentPhase === phase.recovering) {
+          void openRecoverySession(session.id || "");
+          return;
+        }
+        void resumeSession(session.id || "");
+      });
+      row.appendChild(button);
+      if (state.currentPhase !== phase.recovering) {
+        attachSessionActions(row, session);
+      }
+      elements.sessionOptions.appendChild(row);
     }
-    elements.sessionOptions.appendChild(row);
   }
 }
 
@@ -3504,7 +3822,7 @@ function attachSessionActions(row, session) {
   trigger.textContent = "⋯";
   trigger.setAttribute(
     "aria-label",
-    `Actions for ${session.title || "Untitled conversation"}`,
+    `Actions for ${globalThis.waffleSessionPresentation.sessionTitle(session)}`,
   );
   trigger.setAttribute("aria-haspopup", "menu");
   trigger.setAttribute("aria-expanded", "false");
@@ -3518,6 +3836,7 @@ function attachSessionActions(row, session) {
       toggleSessionPin(session),
     ),
     menuItem("Delete", () => deleteSession(session)),
+    menuItem("Export", () => exportSession(session)),
   );
   trigger.addEventListener("click", () =>
     toggleSessionMenu(trigger, popover),
@@ -3564,14 +3883,100 @@ async function refreshSessionList() {
     commandMutation("sessions"),
   );
   if (result) {
+    state.sessionsList.loaded = true;
     state.sessionsList.items = Array.isArray(result.sessions)
       ? result.sessions
       : [];
     state.sessionsList.error = "";
-    if (state.sessionsList.open) {
-      renderSessionList();
-    }
+    renderSessionList();
   }
+  return result;
+}
+
+function sessionsHydrationIsCurrent(request) {
+  return (
+    request.token === state.sessionsHydrationToken &&
+    request.generation === state.generation &&
+    request.sessionID === state.sessionID &&
+    request.clientID === state.clientID &&
+    state.currentPhase !== phase.recovering &&
+    state.currentPhase !== phase.disconnected
+  );
+}
+
+async function hydrateSessionRail() {
+  if (
+    !elements.sessionRail ||
+    !state.clientID ||
+    state.currentPhase === phase.recovering ||
+    state.currentPhase === phase.disconnected
+  ) {
+    return;
+  }
+  const request = {
+    token: ++state.sessionsHydrationToken,
+    generation: state.generation,
+    sessionID: state.sessionID,
+    clientID: state.clientID,
+  };
+  state.sessionsList.loading = true;
+  try {
+    const result = await queueHydrationCommand(
+      "sessions",
+      request.clientID,
+      () => sessionsHydrationIsCurrent(request),
+    );
+    if (!result || !sessionsHydrationIsCurrent(request)) {
+      return;
+    }
+    state.sessionsList.loaded = true;
+    state.sessionsList.loading = false;
+    state.sessionsList.items = Array.isArray(result?.sessions)
+      ? result.sessions
+      : [];
+    state.sessionsList.error = "";
+    renderSessionList();
+  } catch (error) {
+    if (!sessionsHydrationIsCurrent(request)) {
+      return;
+    }
+    state.sessionsList.loading = false;
+    state.sessionsList.loaded = true;
+    state.sessionsList.items = [];
+    state.sessionsList.error =
+      `Recent conversations unavailable: ${error?.safeMessage || "try again later."}`;
+    renderSessionList();
+  }
+}
+
+function configureSessionRail() {
+  if (!elements.sessionRail) {
+    return;
+  }
+  if (isCompactViewport()) {
+    state.sessionsList.drawerOpen = false;
+    if (elements.sessionRefresh) {
+      elements.sessionRefresh.hidden = true;
+    }
+    if (elements.sessions) {
+      elements.sessions.hidden = true;
+    }
+    if (elements.conversationsOpen) {
+      elements.conversationsOpen.hidden = false;
+    }
+    return;
+  }
+  state.sessionsList.drawerOpen = false;
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.hidden = true;
+  }
+  if (elements.sessions) {
+    elements.sessions.hidden = false;
+  }
+  if (elements.conversationsOpen) {
+    elements.conversationsOpen.hidden = true;
+  }
+  renderSessionList();
 }
 
 async function toggleSessionPin(session) {
@@ -3659,7 +4064,7 @@ function beginSessionRename(row, session) {
 // markSessionSelection re-marks the current conversation after canonical state
 // changes without rebuilding the list.
 function markSessionSelection() {
-  if (!elements.sessionOptions || !state.sessionsList.open) {
+  if (!elements.sessionOptions) {
     return;
   }
   for (const child of elements.sessionOptions.querySelectorAll(".session-choice")) {
@@ -3679,21 +4084,76 @@ function onSessionFilterInput() {
   renderSessionList();
 }
 
-// handleSessionsKeydown gives the listbox arrows/selection and Escape closes
-// the disclosure with focus restored to its trigger.
-function handleSessionsKeydown(event) {
-  if (!state.sessionsList.open) {
+function isCompactViewport() {
+  return globalThis.matchMedia?.("(max-width: 768px)")?.matches === true;
+}
+
+function canvasEscapeIsBlocked() {
+  if (state.slash.open || dictation.listening()) {
+    return true;
+  }
+  try {
+    return Boolean(document.querySelector("dialog:modal"));
+  } catch {
+    return false;
+  }
+}
+
+function handleCanvasKeydown(event) {
+  if (!state.canvasOpen || event.defaultPrevented) {
     return;
   }
   if (event.key === "Escape") {
+    const palette = document.querySelector("#command-palette");
+    if (palette && !palette.hidden) {
+      return;
+    }
+    if (canvasEscapeIsBlocked()) {
+      return;
+    }
     event.preventDefault();
+    closeCanvas();
+    return;
+  }
+  if (event.key !== "Tab" || !isCanvasOverlayViewport()) {
+    return;
+  }
+  const focusables = canvasFocusables();
+  if (focusables.length === 0) {
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey) {
+    if (active === first || !elements.canvas.contains(active)) {
+      event.preventDefault();
+      last.focus();
+    }
+  } else if (active === last || !elements.canvas.contains(active)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+// handleSessionsKeydown gives the listbox arrows/selection and Escape closes
+// the disclosure with focus restored to its trigger.
+function handleSessionsKeydown(event) {
+  if (!state.sessionsList.drawerOpen && !elements.sessionRail) {
+    return;
+  }
+  if (event.key === "Escape") {
     if (state.sessionMenuOpen) {
+      event.preventDefault();
       const trigger = state.sessionMenuOpen.trigger;
       closeSessionMenus();
       trigger.focus();
       return;
     }
-    closeSessionsList();
+    if (isCompactViewport()) {
+      event.preventDefault();
+      closeSessionsList();
+    }
     return;
   }
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
@@ -3784,37 +4244,95 @@ function renderHelp(commands) {
   elements.help.appendChild(list);
 }
 
-async function refreshResultPanel(name, label, render) {
-  const result = await runCommandOperation(label, () => commandMutation(name));
-  if (result) {
-    render(result[name]);
+function renderPanelError(node, label, error) {
+  if (!node) {
+    return;
   }
+  clearNode(node);
+  node.classList.add("is-error");
+  node.textContent = `${label} unavailable: ${error?.safeMessage || "try again later."}`;
+}
+
+function panelHydrationIsCurrent(hydration) {
+  return (
+    hydration.token === state.panelHydrationToken &&
+    hydration.generation === state.generation &&
+    hydration.sessionID === state.sessionID &&
+    hydration.clientID === state.clientID &&
+    state.currentPhase !== phase.disconnected
+  );
+}
+
+async function hydratePanel(name, label, render, node, hydration) {
+  try {
+    const result = await queueHydrationCommand(
+      name,
+      hydration.clientID,
+      () => panelHydrationIsCurrent(hydration),
+    );
+    if (!result || !panelHydrationIsCurrent(hydration)) {
+      return;
+    }
+    node?.classList.remove("is-error");
+    render(name === "help" ? result.commands : result[name]);
+  } catch (error) {
+    if (panelHydrationIsCurrent(hydration)) {
+      renderPanelError(node, label, error);
+    }
+  }
+}
+
+async function hydrateSessionPanels() {
+  if (!state.clientID || state.currentPhase === phase.disconnected) {
+    return;
+  }
+  const hydration = {
+    token: ++state.panelHydrationToken,
+    generation: state.generation,
+    sessionID: state.sessionID,
+    clientID: state.clientID,
+  };
+  await Promise.all([
+    hydratePanel("usage", "Usage", renderUsage, elements.usage, hydration),
+    hydratePanel("permissions", "Permissions", renderPermissions, elements.permissions, hydration),
+    hydratePanel("workset", "Working set", renderWorkset, elements.workset, hydration),
+    hydratePanel("help", "Commands", renderHelp, elements.help, hydration),
+    refreshProjectContext(hydration),
+  ]);
 }
 
 // findProjectWorkspace resolves the open workspace bound to the current
 // session so project context never crosses workspace boundaries (#478). An
 // empty result means the conversation has no workspace.
-async function findProjectWorkspace() {
+async function findProjectWorkspace(sessionID = state.sessionID) {
+  let response;
   try {
-    const response = await fetch("/api/v1/desk/workspaces", {
+    response = await fetch("/api/v1/desk/workspaces", {
       credentials: "same-origin",
       cache: "no-store",
     });
-    if (!response.ok) {
-      return null;
-    }
-    const snapshot = await response.json();
-    const workspaces = Array.isArray(snapshot.workspaces)
-      ? snapshot.workspaces
-      : [];
-    return (
-      workspaces.find(
-        (ws) => ws.session === state.sessionID && ws.status !== "closed",
-      ) || null
-    );
   } catch {
+    const error = new Error("workspace_list_unreachable");
+    error.safeMessage = "The workspace list could not be reached.";
+    throw error;
+  }
+  if (response.status === 404) {
     return null;
   }
+  if (!response.ok) {
+    const error = new Error("workspace_list_failed");
+    error.safeMessage = "The workspace list could not be loaded.";
+    throw error;
+  }
+  const snapshot = await response.json();
+  const workspaces = Array.isArray(snapshot.workspaces)
+    ? snapshot.workspaces
+    : [];
+  return (
+    workspaces.find(
+      (ws) => ws.session === sessionID && ws.status !== "closed",
+    ) || null
+  );
 }
 
 async function projectMutation(resourceID, action) {
@@ -3823,25 +4341,49 @@ async function projectMutation(resourceID, action) {
   });
 }
 
-async function refreshProjectContext() {
-  const workspace = await findProjectWorkspace();
-  clearNode(elements.project);
-  if (!workspace) {
+async function refreshProjectContext(hydration = null) {
+  const current = () => !hydration || panelHydrationIsCurrent(hydration);
+  try {
+    const sessionID = hydration?.sessionID || state.sessionID;
+    const workspace = await findProjectWorkspace(sessionID);
+    if (!current()) {
+      return;
+    }
+    clearNode(elements.project);
+    elements.project.classList.remove("is-error");
+    if (!workspace) {
+      elements.project.textContent =
+        "This conversation has no open workspace, so project context is unavailable.";
+      return;
+    }
+    const workspaceID = workspace.id || "";
+    state.projectWorkspaceID = workspaceID;
+    const response = await fetch(
+      `/api/v1/desk/projects/${encodeURIComponent(workspaceID)}/resources?session_id=${encodeURIComponent(sessionID)}`,
+      { credentials: "same-origin", cache: "no-store" },
+    );
+    if (!current()) {
+      return;
+    }
+    if (!response.ok) {
+      elements.project.classList.add("is-error");
+      elements.project.textContent = "Project context could not be loaded.";
+      return;
+    }
+    const snapshot = await response.json();
+    if (!current()) {
+      return;
+    }
+    renderProjectResources(snapshot.resources || []);
+  } catch (error) {
+    if (!current() || !elements.project) {
+      return;
+    }
+    clearNode(elements.project);
+    elements.project.classList.add("is-error");
     elements.project.textContent =
-      "This conversation has no open workspace, so project context is unavailable.";
-    return;
+      `Project context unavailable: ${error?.safeMessage || "try again later."}`;
   }
-  state.projectWorkspaceID = workspace.id || "";
-  const response = await fetch(
-    `/api/v1/desk/projects/${encodeURIComponent(state.projectWorkspaceID)}/resources?session_id=${encodeURIComponent(state.sessionID)}`,
-    { credentials: "same-origin", cache: "no-store" },
-  );
-  if (!response.ok) {
-    elements.project.textContent = "Project context could not be loaded.";
-    return;
-  }
-  const snapshot = await response.json();
-  renderProjectResources(snapshot.resources || []);
 }
 
 function renderProjectResources(resources) {
@@ -3942,6 +4484,13 @@ async function selectModel() {
   if (state.currentPhase !== phase.idle) {
     return;
   }
+  const hydrationWait = prioritizeInteractiveOperation();
+  if (hydrationWait) {
+    await hydrationWait;
+  }
+  if (state.currentPhase !== phase.idle) {
+    return;
+  }
   const alias = elements.model.value;
   if (!alias) {
     return;
@@ -3983,6 +4532,13 @@ async function selectModel() {
 }
 
 async function toggleSkill() {
+  if (state.currentPhase !== phase.idle) {
+    return;
+  }
+  const hydrationWait = prioritizeInteractiveOperation();
+  if (hydrationWait) {
+    await hydrationWait;
+  }
   if (state.currentPhase !== phase.idle) {
     return;
   }
@@ -4276,46 +4832,57 @@ function selectSlashItem() {
     const skill = item.skill;
     const action = skill.attached ? "detach" : "attach";
     const generation = state.generation;
-    setPhase(phase.sending);
-    elements.phase.textContent =
-      action === "attach" ? "Attaching skill" : "Detaching skill";
-    void postMutation("/api/v1/desk/chat/command", {
-      client_id: state.clientID,
-      command: { name: "skills", args: `${action} ${skill.name}` },
-    })
-      .then((result) => {
-        if (generation !== state.generation) {
-          return;
-        }
-        renderCanonicalState(result.state, false);
-        state.activeOperation = null;
-        if (state.currentPhase !== phase.disconnected) {
-          setPhase(phase.idle);
-        }
-        setStatusMessage(
-          elements.composerStatus,
-          action === "attach"
-            ? `Attached skill ${skill.name}.`
-            : `Detached skill ${skill.name}.`,
-          false,
-          "composer",
-        );
+    const hydrationWait = prioritizeInteractiveOperation();
+    const start = () => {
+      if (generation !== state.generation || state.currentPhase !== phase.idle) {
+        return;
+      }
+      setPhase(phase.sending);
+      elements.phase.textContent =
+        action === "attach" ? "Attaching skill" : "Detaching skill";
+      void postMutation("/api/v1/desk/chat/command", {
+        client_id: state.clientID,
+        command: { name: "skills", args: `${action} ${skill.name}` },
       })
-      .catch(() => {
-        if (generation !== state.generation) {
-          return;
-        }
-        state.activeOperation = null;
-        if (state.currentPhase !== phase.disconnected) {
-          setPhase(phase.idle);
-        }
-        setStatusMessage(
-          elements.composerStatus,
-          `Could not ${action} skill ${skill.name}.`,
-          true,
-          "composer",
-        );
-      });
+        .then((result) => {
+          if (generation !== state.generation) {
+            return;
+          }
+          renderCanonicalState(result.state, false);
+          state.activeOperation = null;
+          if (state.currentPhase !== phase.disconnected) {
+            setPhase(phase.idle);
+          }
+          setStatusMessage(
+            elements.composerStatus,
+            action === "attach"
+              ? `Attached skill ${skill.name}.`
+              : `Detached skill ${skill.name}.`,
+            false,
+            "composer",
+          );
+        })
+        .catch(() => {
+          if (generation !== state.generation) {
+            return;
+          }
+          state.activeOperation = null;
+          if (state.currentPhase !== phase.disconnected) {
+            setPhase(phase.idle);
+          }
+          setStatusMessage(
+            elements.composerStatus,
+            `Could not ${action} skill ${skill.name}.`,
+            true,
+            "composer",
+          );
+        });
+    };
+    if (hydrationWait) {
+      void hydrationWait.then(start);
+    } else {
+      start();
+    }
   }
   closeSlashMenu();
   elements.message.focus();
@@ -4481,32 +5048,36 @@ if (elements.form) {
     void newConversation();
   });
   elements.sessionRefresh?.addEventListener("click", toggleSessions);
+  elements.conversationsOpen?.addEventListener("click", () =>
+    toggleSessions({ opener: elements.conversationsOpen }),
+  );
+  elements.sessionDrawerClose?.addEventListener("click", closeSessionsList);
   elements.sessionFilter?.addEventListener("input", onSessionFilterInput);
   elements.sessions?.addEventListener("keydown", handleSessionsKeydown);
-  elements.usageRefresh?.addEventListener("click", () =>
-    refreshResultPanel("usage", "Loading usage", renderUsage),
-  );
-  elements.permissionsRefresh?.addEventListener("click", () =>
-    refreshResultPanel(
-      "permissions",
-      "Loading permissions",
-      renderPermissions,
-    ),
-  );
-  elements.worksetRefresh?.addEventListener("click", () =>
-    refreshResultPanel("workset", "Loading working set", renderWorkset),
-  );
-  elements.helpRefresh?.addEventListener("click", async () => {
-    const result = await runCommandOperation("Loading commands", () =>
-      commandMutation("help"),
-    );
-    if (result) {
-      renderHelp(result.commands);
+  elements.canvasToggle?.addEventListener("click", () => {
+    if (state.canvasOpen) {
+      closeCanvas();
+    } else {
+      openCanvas(elements.canvasToggle);
     }
   });
-  elements.projectRefresh?.addEventListener("click", () =>
-    refreshProjectContext(),
-  );
+  elements.canvasClose?.addEventListener("click", closeCanvas);
+  for (const [tab, button] of Object.entries({
+    artifact: elements.canvasArtifactTab,
+    session: elements.canvasSessionTab,
+    diagnostics: elements.canvasDiagnosticsTab,
+    project: elements.canvasProjectTab,
+  })) {
+    button?.addEventListener("click", () => setCanvasTab(tab, true));
+  }
+  document.addEventListener?.("keydown", handleCanvasKeydown);
+  globalThis.addEventListener?.("resize", () => {
+    syncCanvasViewport();
+    if (elements.sessionRail) {
+      configureSessionRail();
+      renderSessionList();
+    }
+  });
   elements.projectPinForm?.addEventListener("submit", pinProjectFile);
   elements.projectNoteForm?.addEventListener("submit", addProjectNote);
   if (elements.dictateHint && !dictation.supported()) {

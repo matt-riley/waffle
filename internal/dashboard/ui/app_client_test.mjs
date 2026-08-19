@@ -373,3 +373,18 @@ test("failed bootstrap marks the rail disconnected", async () => {
     "capabilities fetch is skipped after bootstrap failure",
   );
 });
+
+test("Today palette keeps Ctrl/Cmd+K global and offers a conversation-filter focus command", () => {
+  assert.match(source, /Find a conversation/);
+  assert.match(source, /desk-session-filter/);
+  assert.match(source, /ctrlKey|metaKey/);
+});
+
+test("Today presentation loads before today.js with the shared asset version", () => {
+  assert.match(source, /session-presentation\.mjs/);
+  assert.match(source, /presentationURL\.searchParams\.set\("v", version\)/);
+  assert.match(
+    source,
+    /import\(presentationURL\.href\)\.then\(\(presentation\) => \{[\s\S]*globalThis\.waffleSessionPresentation = presentation;[\s\S]*return import\(moduleURL\.href\);/,
+  );
+});

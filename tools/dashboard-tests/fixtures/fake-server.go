@@ -510,14 +510,53 @@ type fixtureSessions struct {
 }
 
 func newFixtureSessions() *fixtureSessions {
+	now := time.Now().In(time.Local)
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	todayNoon := todayMidnight.Add(12 * time.Hour)
+	yesterdayNoon := todayMidnight.AddDate(0, 0, -1).Add(12 * time.Hour)
+	weekNoon := todayMidnight.AddDate(0, 0, -3).Add(12 * time.Hour)
+	olderNoon := todayMidnight.AddDate(0, 0, -9).Add(12 * time.Hour)
 	return &fixtureSessions{sessions: map[string]*session.Session{
+		"session-pinned": {
+			ID:         "session-pinned",
+			Title:      "Pinned design notes",
+			Summary:    "The pinned Hearth reference conversation.",
+			ModelAlias: "primary",
+			CreatedAt:  todayNoon.Add(-2 * time.Hour),
+			UpdatedAt:  todayNoon.Add(-2 * time.Hour),
+			Pinned:     true,
+		},
 		"session-primary": {
 			ID:         "session-primary",
 			Title:      "Release review",
 			Summary:    "Reviewing the release queue.",
 			ModelAlias: "primary",
-			CreatedAt:  fixtureNow.Add(-time.Hour),
-			UpdatedAt:  fixtureNow,
+			CreatedAt:  todayNoon.Add(-time.Hour),
+			UpdatedAt:  todayNoon,
+		},
+		"session-yesterday": {
+			ID:         "session-yesterday",
+			Title:      "Yesterday planning",
+			Summary:    "A conversation from yesterday.",
+			ModelAlias: "primary",
+			CreatedAt:  yesterdayNoon.Add(-time.Hour),
+			UpdatedAt:  yesterdayNoon,
+		},
+		"session-week": {
+			ID:         "session-week",
+			Title:      "Kiln notes",
+			Summary:    "Notes from the previous seven days.",
+			ModelAlias: "primary",
+			CreatedAt:  weekNoon.Add(-time.Hour),
+			UpdatedAt:  weekNoon,
+		},
+		"session-older": {
+			ID:         "session-older",
+			Title:      "Older archive",
+			Summary:    "An older conversation.",
+			ModelAlias: "primary",
+			CreatedAt:  olderNoon.Add(-time.Hour),
+			UpdatedAt:  olderNoon,
 		},
 	}}
 }
