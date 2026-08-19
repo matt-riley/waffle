@@ -884,6 +884,63 @@ test("assistant markdown renders structured inert DOM and copies a fenced block"
   assert.equal(copy.textContent, "Copied");
 });
 
+test("fenced-code Copy is unavailable throughout a running turn and returns when idle", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [
+            {
+              role: "assistant",
+              blocks: [{ type: "text", text: "```go\nreturn true\n```" }],
+            },
+          ],
+        }),
+      }),
+  });
+  await flush();
+
+  const copy = harness.elements["#desk-transcript"].querySelector(".code-copy");
+  assert.ok(copy, "fenced code renders a Copy control");
+  assert.equal(copy.disabled, false, "Copy is enabled while idle");
+
+  const message = harness.elements["#desk-message"];
+  message.value = "Question";
+  const submission = harness.elements["#desk-composer"].listener("submit")({
+    preventDefault() {},
+  });
+  await flush();
+  assert.equal(copy.disabled, true, "Copy is disabled during sending");
+
+  const stream = harness.EventSource.instances[0];
+  stream.emit("text_delta", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "text_delta",
+    data: { text: "Answer" },
+  });
+  assert.equal(copy.disabled, true, "Copy is disabled during streaming");
+
+  const cancellation = harness.elements["#desk-cancel"].listener("click")();
+  await flush();
+  assert.equal(copy.disabled, true, "Copy is disabled while cancelling");
+
+  harness.cancelResponse.resolve(jsonResponse({}));
+  harness.turnResponse.resolve(jsonResponse({}));
+  stream.emit("turn_done", {
+    resource: "chat",
+    resource_id: "client-1",
+    type: "turn_done",
+    data: { state: defaultChatState({ title: "Question" }) },
+  });
+  await submission;
+  await cancellation;
+  await flush();
+  assert.equal(copy.disabled, false, "Copy is enabled again when idle");
+});
+
 test("language header and 41-line fences collapse without truncating copy", async () => {
   const code = Array.from({ length: 41 }, (_, index) => `line ${index + 1}`).join("\n");
   const harness = createHarness({
@@ -1552,6 +1609,48 @@ test("slash menu keeps a long draft internally scrollable within its compact vie
   assert.equal(message.style.overflowY, "auto");
 });
 
+test("Escape closes a long slash draft and restores the ordinary composer height", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = Array.from({ length: 12 }, (_, index) => index === 0 ? "/" : `line ${index + 1}`).join("\n");
+  message.selectionStart = 1;
+  message.listener("input")();
+  assert.equal(message.style.height, "96px");
+  assert.equal(message.style.overflowY, "auto");
+
+  message.listener("keydown")({
+    key: "Escape",
+    preventDefault() {},
+  });
+
+  assert.equal(harness.elements["#desk-slash-menu"].hidden, true);
+  assert.equal(message.style.height, "220px");
+  assert.equal(message.style.overflowY, "hidden");
+});
+
+test("selecting a slash command restores the ordinary composer height", async () => {
+  const harness = createHarness();
+  await flush();
+  const message = harness.elements["#desk-message"];
+  message.value = Array.from({ length: 12 }, (_, index) => index === 0 ? "/" : `line ${index + 1}`).join("\n");
+  message.selectionStart = 1;
+  message.listener("input")();
+  assert.equal(message.style.height, "96px");
+
+  message.listener("keydown")({
+    key: "Enter",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    preventDefault() {},
+  });
+
+  assert.equal(harness.elements["#desk-slash-menu"].hidden, true);
+  assert.equal(message.style.height, "220px");
+  assert.equal(message.style.overflowY, "hidden");
+});
+
 test("slash menu lists skills and attaches the selected one", async () => {
   const harness = createHarness();
   await flush();
@@ -1916,6 +2015,15 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
       confirmText = message;
       return true;
     },
+    memorySessionsHandler: async () => jsonResponse({
+      choices: [
+        {
+          id: "session-recovery-stale",
+          label: "Stale recovery row",
+          updated_at: "2026-08-18T12:00:00Z",
+        },
+      ],
+    }),
     commandHandler: async ({ options }) => {
       const { command } = JSON.parse(options.body);
       commands.push({ ...command, client_id: JSON.parse(options.body).client_id });
@@ -1924,6 +2032,17 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
       }
       if (command.name === "new" && command.args === "confirm") {
         return confirmResponse.promise;
+      }
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [
+            {
+              id: "session-final",
+              title: "Fresh owned row",
+              updated_at: "2026-08-19T12:00:00Z",
+            },
+          ],
+        });
       }
       return jsonResponse({}, false);
     },
@@ -1950,6 +2069,13 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
   await flush();
   assert.equal(harness.elements["#desk-new"].textContent, "Start new");
   const conflictTitle = harness.elements["#desk-session-title"].textContent;
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, false);
+  assert.match(
+    harness.elements["#desk-session-options"].textContent,
+    /Stale recovery row/,
+  );
   harness.elements["#desk-temporary"].checked = false;
   harness.elements["#desk-new"].listener("click")();
   await flush();
@@ -1981,6 +2107,15 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
   assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
   assert.equal(harness.EventSource.instances.length, 1);
   assert.equal(harness.elements["#desk-recovery-navigation"].hidden, true);
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.doesNotMatch(
+    harness.elements["#desk-session-options"].textContent,
+    /Stale recovery row/,
+  );
   assert.equal(harness.elements[".task-context"].hidden, false);
   assert.equal(harness.elements["#desk-composer"].hidden, false);
   assert.equal(harness.elements["#desk-new"].textContent, "New conversation");
@@ -1989,6 +2124,128 @@ test("ownership recovery bridges /new through an unrendered temporary lease", as
     reattach_token: "lease-temporary",
     session_id: "session-final",
   });
+
+  await harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  const sessionCommand = mutationCalls(harness, "/api/v1/desk/chat/command")
+    .map((call) => JSON.parse(call.options.body).command)
+    .at(-1);
+  assert.deepEqual(sessionCommand, { name: "sessions", args: "" });
+  assert.match(
+    harness.elements["#desk-session-options"].textContent,
+    /Fresh owned row/,
+  );
+});
+
+test("deferred recovery recents cannot reopen after successful promotion", async () => {
+  const recoveryList = deferred();
+  let openAttempts = 0;
+  const harness = createHarness({
+    confirmHandler: () => true,
+    memorySessionsHandler: async () => {
+      return recoveryList.promise;
+    },
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "new" && command.args === "") {
+        return jsonResponse({ confirm: true, text: "Start over?" });
+      }
+      if (command.name === "new" && command.args === "confirm") {
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-final", title: "Promoted" }),
+        });
+      }
+      return jsonResponse({}, false);
+    },
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return jsonResponse({
+        client_id: "client-temporary",
+        reattach_token: "lease-temporary",
+        state: defaultChatState({ session_id: "session-intermediate" }),
+      });
+    },
+  });
+  harness.elements["#desk-sessions"].hidden = true;
+  harness.elements["#desk-session-refresh"].setAttribute("aria-expanded", "false");
+  await flush();
+
+  harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  harness.elements["#desk-new"].listener("click")();
+  await flush();
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+
+  recoveryList.resolve(jsonResponse({
+    choices: [{ id: "session-stale", label: "Promotion stale row" }],
+  }));
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.doesNotMatch(harness.elements["#desk-session-options"].textContent, /Promotion stale row/);
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Promoted");
+});
+
+test("deferred recovery recents cannot render after Refresh reopens an owned session", async () => {
+  const recoveryList = deferred();
+  let openAttempts = 0;
+  const openBodies = [];
+  const harness = createHarness({
+    memorySessionsHandler: async () => recoveryList.promise,
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      const body = JSON.parse(options.body);
+      openBodies.push(body);
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      assert.equal(body.temporary, false);
+      return jsonResponse({
+        client_id: "client-refreshed",
+        reattach_token: "lease-refreshed",
+        state: defaultChatState({
+          session_id: "session-refreshed",
+          title: "Refreshed owner",
+        }),
+      });
+    },
+  });
+  harness.elements["#desk-sessions"].hidden = true;
+  harness.elements["#desk-session-refresh"].setAttribute("aria-expanded", "false");
+  await flush();
+
+  harness.elements["#desk-session-refresh"].listener("click")();
+  await flush();
+  harness.elements["#desk-refresh"].listener("click")();
+  await flush();
+  assert.equal(openAttempts, 2);
+  assert.equal(openBodies[1].temporary, false);
+  assert.equal(harness.elements["#desk-phase"].textContent, "Ready");
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Refreshed owner");
+
+  recoveryList.resolve(jsonResponse({
+    choices: [{ id: "session-stale-refresh", label: "Refresh stale row" }],
+  }));
+  await flush();
+  assert.equal(harness.elements["#desk-sessions"].hidden, true);
+  assert.equal(
+    harness.elements["#desk-session-refresh"].getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.doesNotMatch(harness.elements["#desk-session-options"].textContent, /Refresh stale row/);
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Refreshed owner");
 });
 
 test("declined ownership recovery closes only its temporary lease and preserves conflict", async () => {
@@ -2207,6 +2464,75 @@ test("pagehide closes an assigned temporary recovery lease", async () => {
   assert.deepEqual(closeBodies, [
     { client_id: "client-temporary", reattach_token: "lease-temporary" },
   ]);
+});
+
+test("pagehide before temporary recovery open settles closes the returned lease and abandons recovery", async () => {
+  const temporaryOpen = deferred();
+  const closeBodies = [];
+  const commands = [];
+  let confirmCalls = 0;
+  let openAttempts = 0;
+  const harness = createHarness({
+    confirmHandler: () => {
+      confirmCalls += 1;
+      return true;
+    },
+    commandHandler: async ({ options }) => {
+      commands.push(JSON.parse(options.body));
+      return jsonResponse({ confirm: true, text: "Should never reach confirmation." });
+    },
+    openHandler: async ({ options }) => {
+      openAttempts += 1;
+      if (openAttempts === 1) {
+        return jsonResponse(
+          { code: "session_active", message: "chat session is already active" },
+          false,
+        );
+      }
+      return temporaryOpen.promise;
+    },
+    closeHandler: async ({ options }) => {
+      closeBodies.push(JSON.parse(options.body));
+      return jsonResponse({});
+    },
+  });
+  await flush();
+
+  const conflictTitle = harness.elements["#desk-session-title"].textContent;
+  harness.elements["#desk-new"].listener("click")();
+  await flush();
+  assert.equal(openAttempts, 2);
+  assert.equal(commands.length, 0);
+
+  for (const listener of harness.lifecycleListeners.get("pagehide") || []) {
+    listener();
+  }
+  await flush();
+
+  temporaryOpen.resolve(jsonResponse({
+    client_id: "client-late-temporary",
+    reattach_token: "lease-late-temporary",
+    state: defaultChatState({
+      session_id: "session-intermediate",
+      title: "Must never render",
+    }),
+  }));
+  await flush();
+
+  assert.deepEqual(closeBodies, [
+    {
+      client_id: "client-late-temporary",
+      reattach_token: "lease-late-temporary",
+    },
+  ]);
+  assert.equal(commands.length, 0);
+  assert.equal(confirmCalls, 0);
+  assert.equal(harness.EventSource.instances.length, 0);
+  assert.equal(harness.storage.has("waffle.desk.today.owner.v1"), false);
+  assert.equal(harness.elements["#desk-session-title"].textContent, conflictTitle);
+  assert.equal(harness.elements["#desk-phase"].textContent, "Conversation in use");
+  assert.equal(harness.elements["#desk-stale-status"].hidden, false);
+  assert.equal(harness.elements["#desk-recovery-navigation"].hidden, false);
 });
 
 test("ownership recovery ignores duplicate starts and closes stale temporary work on refresh", async () => {

@@ -2765,7 +2765,6 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
         second.locator(".session-choice").filter({ hasText: "Release review" }),
       ).toHaveCount(1);
       await expect(second.locator(".session-menu-trigger")).toHaveCount(0);
-      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
 
       // Inline recovery opens a fresh session and returns the composer to a
       // usable state.
@@ -2783,11 +2782,28 @@ test("an active-session ownership conflict recovers inline instead of the fatal 
         { name: "new", args: "confirm" },
       ]);
       expect(commandBodies[0].client_id).toBe(commandBodies[1].client_id);
+      await expect.poll(() => eventRequests.length).toBe(1);
       expect(eventRequests).toHaveLength(1);
       const owner = await second.evaluate(() =>
         JSON.parse(sessionStorage.getItem("waffle.desk.today.owner.v1")),
       );
       expect(owner.session_id).toBe("session-fresh");
+      await expect(second.locator("#desk-sessions")).toBeHidden();
+      await expect(
+        second.getByRole("button", { name: "Recent conversations", exact: true }),
+      ).toHaveAttribute("aria-expanded", "false");
+      await expect(
+        second.locator(".session-choice").filter({ hasText: "Release review" }),
+      ).toHaveCount(0);
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
+      await expect(
+        second.locator(".session-choice").filter({ hasText: "Fresh conversation" }),
+      ).toHaveCount(1);
+      expect(commandBodies.at(-1)).toMatchObject({
+        client_id: owner.client_id,
+        command: { name: "sessions", args: "" },
+      });
+      await second.getByRole("button", { name: "Recent conversations", exact: true }).click();
       await page.request.post(`${baseURL}/api/v1/desk/test/lock-latest?on=0`);
       await second.reload();
       await expect(second.locator("#desk-phase")).toHaveText("Ready");

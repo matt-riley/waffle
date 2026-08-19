@@ -562,7 +562,7 @@ function updateTurnActionAvailability() {
       button.disabled = !idle;
     }
   }
-  for (const selector of [".message-copy", ".message-read"]) {
+  for (const selector of [".message-copy", ".message-read", ".code-copy"]) {
     for (const button of elements.transcript.querySelectorAll(selector)) {
       button.disabled = running;
     }
@@ -3154,6 +3154,11 @@ async function recoverWithNewConversation() {
     state.temporaryLease = null;
     state.clientID = lease.client_id;
     state.reattachToken = lease.reattach_token;
+    closeSessionsList();
+    state.sessionsList.items = [];
+    state.sessionsList.filter = "";
+    state.sessionsList.error = "";
+    clearNode(elements.sessionOptions);
     resetOwnershipConflict();
     renderCanonicalState(result.state, true);
     promoted = true;
@@ -3298,10 +3303,18 @@ async function toggleSessions() {
     return;
   }
   if (state.currentPhase === phase.recovering) {
+    const generation = state.generation;
     try {
-      state.sessionsList.items = await getRecoverySessions();
+      const items = await getRecoverySessions();
+      if (generation !== state.generation || state.currentPhase !== phase.recovering) {
+        return;
+      }
+      state.sessionsList.items = items;
       state.sessionsList.error = "";
     } catch {
+      if (generation !== state.generation || state.currentPhase !== phase.recovering) {
+        return;
+      }
       state.sessionsList.items = [];
       state.sessionsList.error = "Recent conversations could not be loaded.";
     }
@@ -4203,9 +4216,13 @@ function moveSlashSelection(delta) {
 }
 
 function closeSlashMenu() {
+  const wasOpen = state.slash.open;
   state.slash.open = false;
   if (elements.slashMenu) {
     elements.slashMenu.hidden = true;
+  }
+  if (wasOpen) {
+    adjustComposerHeight(elements.message);
   }
 }
 
@@ -4343,6 +4360,10 @@ function handleComposerKeydown(event) {
 function closeOwnerOnPageHide() {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
+  if (state.recoveryNewInFlight) {
+    state.recoveryNewInFlight = false;
+    state.generation += 1;
+  }
   const lease = state.temporaryLease ||
     (state.clientID && state.reattachToken
       ? {
