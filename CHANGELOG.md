@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.31.0](https://github.com/matt-riley/waffle/compare/v0.30.4...v0.31.0) (2026-08-19)
+
+
+### Features
+
+* **desk:** add branded Evening theme foundation ([#532](https://github.com/matt-riley/waffle/issues/532)) ([#548](https://github.com/matt-riley/waffle/issues/548)) ([ccbc2a3](https://github.com/matt-riley/waffle/commit/ccbc2a30d84f68ddaae1756921a54bf076255d68))
+* **desk:** add Today history rail and Split Kiln canvas ([#558](https://github.com/matt-riley/waffle/issues/558)) ([9e5354e](https://github.com/matt-riley/waffle/commit/9e5354ea649e379c07ec023648a3bf1bc2d16b87))
+* **desk:** build the Hearth conversation and composer ([#533](https://github.com/matt-riley/waffle/issues/533) [#534](https://github.com/matt-riley/waffle/issues/534) [#538](https://github.com/matt-riley/waffle/issues/538)) ([#552](https://github.com/matt-riley/waffle/issues/552)) ([20d837a](https://github.com/matt-riley/waffle/commit/20d837af99b4a0ec103807f905405f5bfdd1d502))
+* **desk:** fix Memory status and add a searchable session picker ([#568](https://github.com/matt-riley/waffle/issues/568)) ([b6118c0](https://github.com/matt-riley/waffle/commit/b6118c069d255a6e56fceeb9cca405e2baac31fe))
+* **desk:** rebuild Tasks hierarchy and fix schedule cancellation ([#566](https://github.com/matt-riley/waffle/issues/566)) ([8b812d9](https://github.com/matt-riley/waffle/commit/8b812d9b985fc33890217a52e09b34bcc9d23874))
+* **desk:** rebuild Workspaces as a responsive truthful list ([#567](https://github.com/matt-riley/waffle/issues/567)) ([0b99b4d](https://github.com/matt-riley/waffle/commit/0b99b4d3209e2f74691937cd12b95eac91bd4652))
+* **desk:** repair shared shell, navigation clearance, and Waffle identity ([#539](https://github.com/matt-riley/waffle/issues/539) [#540](https://github.com/matt-riley/waffle/issues/540) [#542](https://github.com/matt-riley/waffle/issues/542)) ([#550](https://github.com/matt-riley/waffle/issues/550)) ([7fe6ae1](https://github.com/matt-riley/waffle/commit/7fe6ae1ac47a5af45019521e5ad0ef7590d79eba))
+
 ## [0.30.4](https://github.com/matt-riley/waffle/compare/v0.30.3...v0.30.4) (2026-08-19)
 
 
