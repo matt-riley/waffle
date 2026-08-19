@@ -463,7 +463,9 @@ func unescapeDouble(s string) (string, error) {
 				return "", errors.New("truncated \\u escape")
 			}
 			hex := s[i+1 : i+5]
-			code, err := strconv.ParseUint(hex, 16, 32)
+			// bitSize 16 bounds the parse to the four hex digits \u actually
+			// carries, so the rune conversion below cannot truncate.
+			code, err := strconv.ParseUint(hex, 16, 16)
 			if err != nil {
 				return "", fmt.Errorf("invalid \\u escape %q", hex)
 			}

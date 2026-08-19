@@ -214,3 +214,40 @@ func TestMarshalSKILLRoundTrip(t *testing.T) {
 		t.Errorf("empty-body round-trip = %v, %v", got, err)
 	}
 }
+
+// TestParseFrontmatterUnicodeEscapeBounds pins the boundary values of both
+// unicode escapes: \u tops out at four hex digits and \U must refuse anything
+// above the Unicode maximum rather than truncate into a rune (CodeQL
+// go/incorrect-integer-conversion).
+func TestParseFrontmatterUnicodeEscapeBounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		escape  string
+		want    string
+		wantSub string
+	}{
+		{name: "u minimum", escape: "\\u0041", want: "A"},
+		{name: "u maximum", escape: "\\uFFFF", want: "\uffff"},
+		{name: "U basic", escape: `\U0001F600`, want: "\U0001f600"},
+		{name: "U maximum", escape: `\U0010FFFF`, want: "\U0010ffff"},
+		{name: "U above maximum", escape: `\U00110000`, wantSub: `invalid \U escape`},
+		{name: "U far above maximum", escape: `\UFFFFFFFF`, wantSub: `invalid \U escape`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fields, _, err := ParseFrontmatter("---\nname: x\ndescription: \"" + tc.escape + "\"\n---\n")
+			if tc.wantSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+					t.Fatalf("error = %v, want naming %q", err, tc.wantSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseFrontmatter: %v", err)
+			}
+			if fields["description"] != tc.want {
+				t.Errorf("description = %q, want %q", fields["description"], tc.want)
+			}
+		})
+	}
+}
