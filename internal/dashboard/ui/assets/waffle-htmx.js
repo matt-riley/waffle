@@ -168,6 +168,8 @@
 	}
 
 	async function schedulePreview(form) {
+		const previewGeneration = String((Number(form.dataset.waffleSchedulePreviewGeneration) || 0) + 1);
+		form.dataset.waffleSchedulePreviewGeneration = previewGeneration;
 		const name = input(form, "task-schedule-name")?.value || "";
 		const prompt = input(form, "task-schedule-prompt")?.value || "";
 		const cron = input(form, "task-schedule-cron")?.value || "";
@@ -197,6 +199,7 @@
 			return;
 		}
 		const preview = await response.json().catch(() => ({}));
+		if (form.dataset.waffleSchedulePreviewGeneration !== previewGeneration) return;
 
 		const summary = input(form, "task-schedule-summary");
 		if (summary) {
@@ -350,6 +353,9 @@
 	}
 
 	function resetTaskSchedule(form) {
+		form.dataset.waffleSchedulePreviewGeneration = String(
+			(Number(form.dataset.waffleSchedulePreviewGeneration) || 0) + 1,
+		);
 		const id = input(form, "task-schedule-id");
 		const enabled = input(form, "task-schedule-enabled");
 		if (id) {
@@ -369,12 +375,16 @@
 		}
 		const cadence = input(form, "task-schedule-cadence");
 		const time = input(form, "task-schedule-time");
+		const dow = input(form, "task-schedule-dow");
+		const dom = input(form, "task-schedule-dom");
 		const chatID = input(form, "task-schedule-chat-id");
 		const summary = input(form, "task-schedule-summary");
 		const errors = input(form, "task-schedule-field-errors");
 		const advanced = input(form, "task-schedule-advanced");
 		if (cadence) cadence.value = "weekdays";
 		if (time) time.value = "09:00";
+		if (dow) dow.value = "1";
+		if (dom) dom.value = "1";
 		if (chatID) chatID.value = "";
 		if (summary) summary.textContent = "";
 		if (errors) {
@@ -383,6 +393,7 @@
 		}
 		if (advanced) advanced.open = false;
 		syncGuidedFromCron(form);
+		syncGuidedVisibility(form);
 		syncScheduleDeliverUI(form);
 		for (const field of ["deliver", "profile"]) {
 			const clear = input(form, `task-schedule-${field}-clear`);
