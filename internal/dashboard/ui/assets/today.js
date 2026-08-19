@@ -240,11 +240,13 @@ const elements = {
   staleMessage: document.querySelector("#desk-stale-message"),
   refresh: document.querySelector("#desk-refresh"),
   staleLabel: document.querySelector("#desk-stale-label"),
-  recoverNew: document.querySelector("#desk-recover-new"),
+  staleActions: document.querySelector(".stale-actions"),
+  recoveryNavigation: document.querySelector("#desk-recovery-navigation"),
   phase: document.querySelector("#desk-phase"),
   transcript: document.querySelector("#desk-transcript"),
   emptyTranscript: document.querySelector("#desk-empty-transcript"),
   form: document.querySelector("#desk-composer"),
+  taskContext: document.querySelector(".task-context"),
   composerActions: document.querySelector(".composer-actions"),
   slashMenu: document.querySelector("#desk-slash-menu"),
   message: document.querySelector("#desk-message"),
@@ -304,6 +306,15 @@ const elements = {
   queue: document.querySelector("#desk-queue"),
 };
 
+const recoveryHomes = new Map(
+  [elements.newConversation, elements.sessionRefresh, elements.sessions]
+    .filter(Boolean)
+    .map((element) => [
+      element,
+      { parent: element.parentNode, next: element.nextSibling },
+    ]),
+);
+
 const storedOwner = readStoredOwner();
 const state = {
   currentPhase: phase.opening,
@@ -316,8 +327,10 @@ const state = {
   activeOperation: null,
   turnSequence: 0,
   generation: 0,
+  recoveryNewInFlight: false,
   sessionID: "",
   temporary: false,
+  temporaryLease: null,
   attachments: [],
   skills: [],
   modelAlias: "",
@@ -358,6 +371,7 @@ const state = {
     open: false,
     items: [],
     filter: "",
+    error: "",
   },
   sessionMenuOpen: null,
 };
@@ -401,8 +415,10 @@ function setPhase(next) {
   }
   const disconnected = next === phase.disconnected;
   const recovering = next === phase.recovering;
+  elements.phase.hidden = recovering;
+  elements.connection.hidden = recovering;
   elements.stale.hidden = !disconnected && !recovering;
-  elements.connection.classList.toggle("is-disconnected", disconnected || recovering);
+  elements.connection.classList.toggle("is-disconnected", disconnected);
   if (disconnected) {
     state.reconnecting = false;
     elements.connection.classList.remove("is-reconnecting");
@@ -414,10 +430,8 @@ function setPhase(next) {
   } else if (recovering) {
     state.reconnecting = false;
     elements.connection.classList.remove("is-reconnecting");
-    elements.connectionText.textContent = "In use";
-    elements.connectionDetail.textContent = "Another surface";
     pushRailConnection(
-      globalThis.waffleDeskRail?.connectionStates?.disconnected || "disconnected",
+      globalThis.waffleDeskRail?.connectionStates?.connected || "connected",
     );
   } else if (next === phase.opening) {
     pushRailConnection(
@@ -441,6 +455,7 @@ function setPhase(next) {
 function updateControls() {
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
   const recovering = state.currentPhase === phase.recovering;
+  const recoveryBusy = recovering && state.recoveryNewInFlight;
   if (!idle) {
     closeSlashMenu();
   }
@@ -450,8 +465,9 @@ function updateControls() {
       state.currentPhase === phase.streaming);
   // The composer stays usable while Waffle works so the operator can queue a
   // follow-up; it is only locked while disconnected. During an ownership
-  // conflict the textarea keeps the draft while the recovery actions decide.
-  elements.message.disabled = state.currentPhase === phase.disconnected;
+  // conflict the draft stays stored while the dead composer is collapsed.
+  elements.message.disabled =
+    state.currentPhase === phase.disconnected || recovering;
   const busy = !idle && !recovering && state.currentPhase !== phase.disconnected;
   elements.send.disabled =
     !state.clientID ||
@@ -493,10 +509,8 @@ function updateControls() {
   }
   elements.refresh.disabled =
     state.currentPhase !== phase.disconnected &&
-    state.currentPhase !== phase.recovering;
-  if (elements.recoverNew) {
-    elements.recoverNew.disabled = !recovering;
-  }
+    state.currentPhase !== phase.recovering ||
+    recoveryBusy;
   if (elements.temporaryRow) {
     elements.temporaryRow.hidden = state.historyLength > 0;
   }
@@ -506,9 +520,13 @@ function updateControls() {
   if (elements.temporaryBadge) {
     elements.temporaryBadge.hidden = !state.temporary;
   }
+  if (elements.newConversation) {
+    elements.newConversation.disabled = (!idle && !recovering) || recoveryBusy;
+  }
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.disabled = (!idle && !recovering) || recoveryBusy;
+  }
   for (const control of [
-    elements.newConversation,
-    elements.sessionRefresh,
     elements.usageRefresh,
     elements.permissionsRefresh,
     elements.worksetRefresh,
@@ -531,11 +549,66 @@ function updateTurnActionAvailability() {
     return;
   }
   const idle = state.currentPhase === phase.idle && state.clientID !== "";
-  for (const selector of [".message-edit", ".message-regenerate"]) {
+  const running = [phase.sending, phase.streaming, phase.cancelling].includes(
+    state.currentPhase,
+  );
+  for (const selector of [
+    ".message-edit",
+    ".message-regenerate",
+    ".message-branch",
+    ".message-schedule",
+  ]) {
     for (const button of elements.transcript.querySelectorAll(selector)) {
       button.disabled = !idle;
     }
   }
+  for (const selector of [".message-copy", ".message-read", ".code-copy"]) {
+    for (const button of elements.transcript.querySelectorAll(selector)) {
+      button.disabled = running;
+    }
+  }
+}
+
+function alignMobileComposer() {
+  if (!globalThis.matchMedia?.("(max-width: 768px)").matches) {
+    return;
+  }
+  const align = () => {
+    const columns = document.querySelector(".today-columns");
+    const conversation = document.querySelector(".conversation");
+    if (!columns || !conversation) {
+      return;
+    }
+    const columnsRect = columns.getBoundingClientRect();
+    const conversationRect = conversation.getBoundingClientRect();
+    const composerRect = elements.form?.getBoundingClientRect();
+    const contentBottom = Math.max(
+      conversationRect.bottom,
+      composerRect?.bottom || conversationRect.bottom,
+    );
+    const overflow = contentBottom - columnsRect.bottom;
+    const nextScrollTop = columns.scrollTop + overflow;
+    columns.scrollTop = Math.max(0, overflow > 0 ? Math.ceil(nextScrollTop) : nextScrollTop);
+  };
+  align();
+  globalThis.requestAnimationFrame?.(align);
+}
+
+function adjustComposerHeight(element) {
+  if (!element) {
+    return;
+  }
+  element.style.height = "auto";
+  const rootFontSize =
+    parseFloat(
+      typeof getComputedStyle === "function" &&
+        getComputedStyle(document.documentElement)?.fontSize,
+    ) || 16;
+  const cap = (state.slash.open ? 6 : 15) * rootFontSize;
+  const next = Math.min(element.scrollHeight, cap);
+  element.style.height = `${next}px`;
+  element.style.overflowY = element.scrollHeight > cap ? "auto" : "hidden";
+  alignMobileComposer();
 }
 
 // syncComposerDraft restores the current session's browser-local draft after
@@ -555,6 +628,7 @@ function syncComposerDraft() {
   if (draft !== "") {
     elements.message.value = draft;
   }
+  adjustComposerHeight(elements.message);
   updateControls();
 }
 
@@ -695,11 +769,14 @@ async function copyCode(text, button) {
       textarea.value = text;
       textarea.setAttribute("readonly", "");
       document.body.appendChild(textarea);
-      textarea.select();
-      if (!document.execCommand?.("copy")) {
-        throw new Error("copy_unavailable");
+      try {
+        textarea.select();
+        if (!document.execCommand?.("copy")) {
+          throw new Error("copy_unavailable");
+        }
+      } finally {
+        textarea.remove();
       }
-      textarea.remove();
     }
     button.textContent = "Copied";
   } catch {
@@ -812,6 +889,53 @@ function renderTable(node, table) {
   node.appendChild(wrap);
 }
 
+function renderFencedCode(language, codeText) {
+  const block = document.createElement("div");
+  block.className = "code-block";
+  const header = document.createElement("div");
+  header.className = "code-block-header";
+  if (language) {
+    const badge = document.createElement("span");
+    badge.className = "code-language";
+    badge.textContent = language.toLowerCase();
+    header.appendChild(badge);
+  }
+  const actions = document.createElement("div");
+  actions.className = "code-block-actions";
+  const copy = document.createElement("button");
+  copy.className = "code-copy";
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", () => copyCode(codeText, copy));
+  actions.appendChild(copy);
+  const lineCount = codeText === "" ? 0 : codeText.split("\n").length;
+  if (lineCount > 40) {
+    block.classList.add("is-collapsed");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "code-expand";
+    toggle.textContent = "Expand code";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const open = block.classList.contains("is-collapsed");
+      block.classList.toggle("is-collapsed", !open);
+      toggle.textContent = open ? "Collapse code" : "Expand code";
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    actions.appendChild(toggle);
+  }
+  header.appendChild(actions);
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  if (language) {
+    code.setAttribute("data-language", language);
+  }
+  code.textContent = codeText;
+  pre.appendChild(code);
+  block.append(header, pre);
+  return block;
+}
+
 function renderMarkdown(node, text) {
   clearNode(node);
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
@@ -829,23 +953,8 @@ function renderMarkdown(node, text) {
       if (index < lines.length) {
         index += 1;
       }
-      const block = document.createElement("div");
-      block.className = "code-block";
-      const copy = document.createElement("button");
-      copy.className = "code-copy";
-      copy.type = "button";
-      copy.textContent = "Copy";
       const codeText = codeLines.join("\n");
-      copy.addEventListener("click", () => copyCode(codeText, copy));
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      if (language) {
-        code.setAttribute("data-language", language);
-      }
-      code.textContent = codeText;
-      pre.appendChild(code);
-      block.append(copy, pre);
-      node.appendChild(block);
+      node.appendChild(renderFencedCode(language, codeText));
       continue;
     }
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
@@ -916,6 +1025,19 @@ function startDictation() {
   dictation.start(elements.message, elements.dictate, announceDictation);
 }
 
+function messageActionToolbar(article) {
+  let toolbar = article?.querySelector(".message-actions");
+  if (!article || toolbar) {
+    return toolbar;
+  }
+  toolbar = document.createElement("div");
+  toolbar.className = "message-actions";
+  toolbar.setAttribute("role", "toolbar");
+  toolbar.setAttribute("aria-label", "Message actions");
+  article.appendChild(toolbar);
+  return toolbar;
+}
+
 function attachReadAloudButton(article) {
   const engine = globalThis.waffleReadAloud;
   if (!article || article.querySelector(".message-read") || !engine?.supported?.()) {
@@ -935,7 +1057,7 @@ function attachReadAloudButton(article) {
     }
     engine.start(article, button);
   });
-  article.appendChild(button);
+  messageActionToolbar(article)?.appendChild(button);
 }
 
 function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
@@ -971,6 +1093,7 @@ function appendMessage(role, text, beforeNode = null, allowEmpty = false) {
   } else {
     elements.transcript.appendChild(article);
   }
+  updateTurnActionAvailability();
   article.scrollIntoView({ block: "nearest" });
   return article;
 }
@@ -991,6 +1114,7 @@ function appendDelta(text) {
   caret.className = "stream-caret";
   caret.setAttribute("aria-hidden", "true");
   body.appendChild(caret);
+  updateTurnActionAvailability();
   state.streamingMessage.scrollIntoView({ block: "nearest" });
 }
 
@@ -1054,6 +1178,51 @@ function messageText(message) {
     .join("");
 }
 
+function renderReasoning(message) {
+  if (!message || !Array.isArray(message.blocks)) {
+    return null;
+  }
+  const visible = [];
+  const ordered = [];
+  const withheld = [];
+  for (const block of message.blocks) {
+    if (!block) {
+      continue;
+    }
+    if (block.type === "thinking") {
+      const text = String(block.text || "");
+      if (text && !isTaskModeGuidance(text)) {
+        visible.push(text);
+        ordered.push({ type: "thinking", text });
+      }
+    } else if (block.type === "redacted_thinking") {
+      ordered.push({ type: "withheld", text: "Reasoning withheld" });
+      withheld.push("Reasoning withheld");
+    }
+  }
+  if (visible.length === 0 && withheld.length === 0) {
+    return null;
+  }
+  let details = null;
+  if (visible.length > 0) {
+    details = document.createElement("details");
+    details.className = "message-reasoning";
+    const summary = document.createElement("summary");
+    summary.textContent = "Reasoning";
+    details.appendChild(summary);
+    for (const item of ordered) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = item.text;
+      if (item.type === "withheld") {
+        paragraph.className = "message-reasoning-withheld";
+      }
+      details.appendChild(paragraph);
+    }
+    return { details, withheld: [] };
+  }
+  return { details, withheld };
+}
+
 function renderHistory(history) {
   clearNode(elements.transcript);
   elements.emptyTranscript = null;
@@ -1075,16 +1244,32 @@ function renderHistory(history) {
     const text = messageTextWithMarkers(message);
     const role = message.role === "user" ? "user" : "assistant";
     const media = renderMediaBlocks(message);
-    if (text === "" && media.length === 0) {
+    const reasoning = role === "assistant" ? renderReasoning(message) : null;
+    if (text === "" && media.length === 0 && !reasoning) {
       // Tool-result carriers and tool-use frames have no visible text; they
       // still occupy a history position so branch boundaries stay exact.
       index += 1;
       continue;
     }
-    const article = appendMessage(role, text);
+    const article = appendMessage(role, text, null, text === "");
     if (!article) {
       index += 1;
       continue;
+    }
+    if (reasoning) {
+      const body = article.querySelector(".message-body");
+      if (reasoning.details) {
+        article.insertBefore(reasoning.details, body);
+      }
+      for (const text of reasoning.withheld) {
+        const paragraph = document.createElement("p");
+        paragraph.className = "message-reasoning-withheld";
+        paragraph.textContent = text;
+        article.insertBefore(paragraph, body);
+      }
+      if (text === "" && media.length === 0) {
+        body?.remove();
+      }
     }
     if (role === "user" && message.metadata?.task_mode) {
       const chip = document.createElement("span");
@@ -1142,7 +1327,7 @@ function attachTurnAction(article, kind) {
     schedule.addEventListener("click", () => {
       handoffSchedule(article.dataset.rawText);
     });
-    article.appendChild(schedule);
+    messageActionToolbar(article)?.appendChild(schedule);
   }
   const button = document.createElement("button");
   button.type = "button";
@@ -1159,7 +1344,8 @@ function attachTurnAction(article, kind) {
       void regenerateResponse(article);
     }
   });
-  article.appendChild(button);
+  messageActionToolbar(article)?.appendChild(button);
+  updateTurnActionAvailability();
 }
 
 // branchToComposer creates a branch ending before the selected prompt and
@@ -1179,6 +1365,7 @@ async function branchToComposer(article) {
   }
   renderCanonicalState(branched.state, true);
   elements.message.value = text;
+  adjustComposerHeight(elements.message);
   elements.message.focus();
   setStatusMessage(
     elements.composerStatus,
@@ -1236,7 +1423,8 @@ function attachBranchButton(article, seq) {
       renderCanonicalState(result.state, true);
     }
   });
-  article.appendChild(branch);
+  messageActionToolbar(article)?.appendChild(branch);
+  updateTurnActionAvailability();
 }
 
 function renderLineage(lineage) {
@@ -1481,6 +1669,10 @@ const taskModeGuidance = {
   draft: "Draft prose suitable for editing before use.",
 };
 
+function isTaskModeGuidance(text) {
+  return Object.values(taskModeGuidance).includes(text);
+}
+
 function messageTextWithMarkers(message) {
   let text = "";
   let count = 0;
@@ -1491,7 +1683,7 @@ function messageTextWithMarkers(message) {
     if (!block || block.type !== "text") {
       continue;
     }
-    if (taskModeGuidance[block.text]) {
+    if (isTaskModeGuidance(block.text)) {
       // The trusted task-mode guidance reaches the model but is not visible
       // transcript content (#481).
       continue;
@@ -1582,7 +1774,7 @@ function attachSourcesDrawer(article, sources) {
     list.appendChild(item);
   }
   details.append(summary, list);
-  article.appendChild(details);
+  article.insertBefore(details, article.querySelector(".message-actions"));
 }
 
 function persistOwner() {
@@ -1854,6 +2046,7 @@ function renderCanonicalState(chatState, includeHistory) {
   // replaced atomically instead of being left on screen (#455).
   if (includeHistory) {
     renderHistory(Array.isArray(chatState.history) ? chatState.history : []);
+    adjustComposerHeight(elements.message);
   }
   persistOwner();
 }
@@ -1899,6 +2092,32 @@ async function getBootstrap() {
   return readJSON(response);
 }
 
+async function getRecoverySessions() {
+  let response;
+  try {
+    response = await fetch("/api/v1/desk/memory/sessions", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    const error = new Error("network_error");
+    error.safeMessage = "Recent conversations could not be loaded.";
+    throw error;
+  }
+  const payload = await readJSON(response);
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  return choices
+    .filter((choice) => choice && typeof choice.id === "string" && choice.id !== "")
+    .map((choice) => ({
+      id: choice.id,
+      title: typeof choice.label === "string" ? choice.label : "",
+      updated_at: typeof choice.updated_at === "string" ? choice.updated_at : "",
+      pinned: choice.pinned === true,
+    }));
+}
+
 function validateBootstrap(bootstrap) {
   if (
     !bootstrap ||
@@ -1941,6 +2160,37 @@ async function postMutation(path, body, options = {}) {
     throw error;
   }
   return readJSON(response);
+}
+
+function sameLease(left, right) {
+  return Boolean(
+    left?.client_id &&
+      left.client_id === right?.client_id &&
+      left.reattach_token &&
+      left.reattach_token === right?.reattach_token,
+  );
+}
+
+function closeTemporaryLease(lease) {
+  if (!lease?.client_id || !lease.reattach_token || !state.requestToken) {
+    return Promise.resolve();
+  }
+  return postMutation(
+    "/api/v1/desk/chat/close",
+    {
+      client_id: lease.client_id,
+      reattach_token: lease.reattach_token,
+    },
+    { keepalive: true },
+  ).catch(() => {});
+}
+
+function releaseTemporaryLease(lease) {
+  if (!lease || !sameLease(state.temporaryLease, lease)) {
+    return Promise.resolve();
+  }
+  state.temporaryLease = null;
+  return closeTemporaryLease(lease);
 }
 
 function clearReconnectTimer() {
@@ -2164,7 +2414,17 @@ function openEventStream() {
   });
 }
 
-async function openDesk({ forceNewSession = false } = {}) {
+async function openDesk() {
+  const leavingRecovery = state.currentPhase === phase.recovering;
+  if (leavingRecovery) {
+    resetRecoveryExit();
+  }
+  const previousTemporaryLease = state.temporaryLease;
+  state.temporaryLease = null;
+  if (previousTemporaryLease) {
+    void closeTemporaryLease(previousTemporaryLease);
+  }
+  state.recoveryNewInFlight = false;
   clearReconnectTimer();
   state.generation += 1;
   state.streamGeneration += 1;
@@ -2226,13 +2486,13 @@ async function openDesk({ forceNewSession = false } = {}) {
       owner = null;
     }
     const openBody = {
-      continue: requested === "" && !forceNewSession,
-      session_id: forceNewSession ? "" : requested,
+      continue: requested === "",
+      session_id: requested,
       profile: "",
       capabilities: [],
       temporary: Boolean(elements.temporary?.checked),
     };
-    if (owner && !forceNewSession) {
+    if (owner) {
       openBody.reattach_client_id = owner.client_id;
       openBody.reattach_token = owner.reattach_token;
     }
@@ -2272,6 +2532,32 @@ async function openDesk({ forceNewSession = false } = {}) {
   }
 }
 
+async function openTemporaryRecoveryLease(generation) {
+  if (generation !== state.generation) {
+    return null;
+  }
+  const opened = await postMutation("/api/v1/desk/chat/open", {
+    continue: false,
+    session_id: "",
+    profile: "",
+    capabilities: [],
+    temporary: true,
+  });
+  const lease = {
+    client_id: opened.client_id || "",
+    reattach_token: opened.reattach_token || "",
+  };
+  if (!lease.client_id || !lease.reattach_token) {
+    throw new Error("missing_client_lease");
+  }
+  if (generation !== state.generation) {
+    void closeTemporaryLease(lease);
+    return null;
+  }
+  state.temporaryLease = lease;
+  return { generation, lease };
+}
+
 // openChatWithRecovery opens (or reattaches to) the desk chat. A reaped
 // owner falls back to a fresh open. A live session_active conflict is a
 // real second surface — serve already waited out a draining previous
@@ -2308,24 +2594,98 @@ async function openChatWithRecovery(openBody, owner, generation) {
 }
 
 function showOwnershipConflict() {
+  elements.stale.hidden = false;
+  const active = document.activeElement;
+  if (
+    active &&
+    (active === elements.message ||
+      elements.form?.contains(active) ||
+      elements.taskContext?.contains(active))
+  ) {
+    elements.stale.focus();
+  }
+  if (elements.newConversation && elements.staleActions) {
+    elements.newConversation.textContent = "Start new";
+    elements.staleActions.insertBefore(elements.newConversation, elements.refresh);
+  }
+  if (elements.recoveryNavigation) {
+    if (elements.sessionRefresh) {
+      elements.recoveryNavigation.appendChild(elements.sessionRefresh);
+    }
+    if (elements.sessions) {
+      elements.recoveryNavigation.appendChild(elements.sessions);
+    }
+    elements.recoveryNavigation.hidden = false;
+  }
+  elements.refresh.textContent = "Refresh";
+  if (elements.form) {
+    elements.form.hidden = true;
+  }
+  if (elements.taskContext) {
+    elements.taskContext.hidden = true;
+  }
+  if (state.historyLength === 0) {
+    clearNode(elements.transcript);
+    const empty = document.createElement("p");
+    empty.className = "empty-transcript";
+    empty.textContent = "This conversation is open in another window.";
+    elements.transcript.appendChild(empty);
+    elements.emptyTranscript = empty;
+  }
   if (elements.staleLabel) {
-    elements.staleLabel.textContent = "This conversation is in use.";
+    elements.staleLabel.textContent = "This conversation is open in another window.";
   }
   elements.staleMessage.textContent =
-    "Another surface is using this conversation. Start a new conversation here, or try again when it is free.";
-  if (elements.recoverNew) {
-    elements.recoverNew.hidden = false;
-  }
+    "Start a new conversation or refresh when the other window is finished.";
   setPhase(phase.recovering);
 }
 
 function resetOwnershipConflict() {
+  for (const [element, home] of [...recoveryHomes.entries()].reverse()) {
+    if (!home.parent) {
+      continue;
+    }
+    const next = home.next?.parentNode === home.parent ? home.next : null;
+    home.parent.insertBefore(element, next);
+  }
+  if (elements.newConversation) {
+    elements.newConversation.textContent = "New conversation";
+  }
+  elements.refresh.textContent = "Refresh Desk";
+  if (elements.recoveryNavigation) {
+    elements.recoveryNavigation.hidden = true;
+  }
+  if (elements.form) {
+    elements.form.hidden = false;
+  }
+  if (elements.taskContext) {
+    elements.taskContext.hidden = false;
+  }
+  elements.phase.hidden = false;
+  elements.connection.hidden = false;
   if (elements.staleLabel) {
     elements.staleLabel.textContent = "This desk is out of date.";
   }
-  if (elements.recoverNew) {
-    elements.recoverNew.hidden = true;
+  elements.staleMessage.textContent =
+    "The transcript is still here, but sending is paused.";
+}
+
+function resetRecoveryExit() {
+  state.sessionsList.open = false;
+  state.sessionsList.items = [];
+  state.sessionsList.filter = "";
+  state.sessionsList.error = "";
+  closeSessionMenus();
+  if (elements.sessionRefresh) {
+    elements.sessionRefresh.setAttribute("aria-expanded", "false");
   }
+  if (elements.sessionFilter) {
+    elements.sessionFilter.value = "";
+  }
+  if (elements.sessions) {
+    elements.sessions.hidden = true;
+  }
+  clearNode(elements.sessionOptions);
 }
 
 function settleTurn(turn) {
@@ -2470,6 +2830,7 @@ function renderQueueBanner() {
       return;
     }
     elements.message.value = current.text;
+    adjustComposerHeight(elements.message);
     state.attachments = (current.attachments || []).slice();
     renderAttachmentPreviews();
     persistQueue(null);
@@ -2616,6 +2977,7 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
   showTypingIndicator();
   if (options?.clearComposer) {
     elements.message.value = "";
+    adjustComposerHeight(elements.message);
   }
   updateControls();
   try {
@@ -2670,6 +3032,7 @@ async function sendTurn(text, idempotencyKey, options, attachments = []) {
       retry.remove();
       setStatusMessage(elements.composerStatus, "", false, "composer");
       elements.message.value = turn.text;
+      adjustComposerHeight(elements.message);
       state.attachments = (turn.attachments || []).slice();
       renderAttachmentPreviews();
       elements.message.focus();
@@ -2766,34 +3129,92 @@ async function runCommandOperation(label, operation) {
   }
 }
 
-function commandMutation(name, args = "") {
+function commandMutation(name, args = "", clientID = state.clientID) {
   return postMutation("/api/v1/desk/chat/command", {
-    client_id: state.clientID,
+    client_id: clientID,
     command: { name, args },
   });
+}
+
+async function runNewConversation(clientID, renderState) {
+  const preview = await commandMutation("new", "", clientID);
+  if (preview.confirm) {
+    const confirmed = globalThis.confirm?.(
+      preview.text || "Start a new conversation?",
+    );
+    if (!confirmed) {
+      return preview;
+    }
+  }
+  const result = preview.confirm
+    ? await commandMutation("new", "confirm", clientID)
+    : preview;
+  if (renderState && result.state) {
+    renderCanonicalState(result.state, true);
+  }
+  return result;
+}
+
+async function recoverWithNewConversation() {
+  if (state.currentPhase !== phase.recovering || state.recoveryNewInFlight) {
+    return;
+  }
+  state.recoveryNewInFlight = true;
+  updateControls();
+  let opened = null;
+  let promoted = false;
+  const operationGeneration = state.generation;
+  try {
+    opened = await openTemporaryRecoveryLease(operationGeneration);
+    if (!opened) {
+      return;
+    }
+    const { generation, lease } = opened;
+    const result = await runNewConversation(lease.client_id, false);
+    if (generation !== state.generation) {
+      await releaseTemporaryLease(lease);
+      return;
+    }
+    if (!result?.state || !sameLease(state.temporaryLease, lease)) {
+      await releaseTemporaryLease(lease);
+      return;
+    }
+    state.temporaryLease = null;
+    state.clientID = lease.client_id;
+    state.reattachToken = lease.reattach_token;
+    resetRecoveryExit();
+    resetOwnershipConflict();
+    renderCanonicalState(result.state, true);
+    promoted = true;
+    openEventStream();
+    setPhase(phase.idle);
+    const active = document.activeElement;
+    if (
+      !active ||
+      active === document.body ||
+      active === document.documentElement ||
+      active === elements.message
+    ) {
+      elements.message.focus({ preventScroll: true });
+    }
+  } catch {
+    if (opened && !promoted) {
+      await releaseTemporaryLease(opened.lease);
+    }
+  } finally {
+    if (operationGeneration === state.generation) {
+      state.recoveryNewInFlight = false;
+      updateControls();
+    }
+  }
 }
 
 async function newConversation() {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
-  await runCommandOperation("Starting conversation", async () => {
-    const preview = await commandMutation("new");
-    if (preview.confirm) {
-      const confirmed = globalThis.confirm?.(
-        preview.text || "Start a new conversation?",
-      );
-      if (!confirmed) {
-        return preview;
-      }
-    }
-    const result = preview.confirm
-      ? await commandMutation("new", "confirm")
-      : preview;
-    if (result.state) {
-      renderCanonicalState(result.state, true);
-    }
-    return result;
-  });
+  await runCommandOperation("Starting conversation", () =>
+    runNewConversation(state.clientID, true),
+  );
 }
 
 // exportConversation downloads the owner-local transcript in the chosen
@@ -2886,11 +3307,42 @@ async function resumeSession(sessionID) {
   });
 }
 
+async function openRecoverySession(sessionID) {
+  if (!sessionID) {
+    return;
+  }
+  state.clientID = "";
+  state.reattachToken = "";
+  state.storedOwner = null;
+  forgetStoredOwner();
+  state.sessionID = sessionID;
+  await openDesk();
+}
+
 // toggleSessions opens or closes the recent-conversation disclosure. The first
 // open loads the list; subsequent opens reuse the cached items.
 async function toggleSessions() {
   if (state.sessionsList.open) {
     closeSessionsList();
+    return;
+  }
+  if (state.currentPhase === phase.recovering) {
+    const generation = state.generation;
+    try {
+      const items = await getRecoverySessions();
+      if (generation !== state.generation || state.currentPhase !== phase.recovering) {
+        return;
+      }
+      state.sessionsList.items = items;
+      state.sessionsList.error = "";
+    } catch {
+      if (generation !== state.generation || state.currentPhase !== phase.recovering) {
+        return;
+      }
+      state.sessionsList.items = [];
+      state.sessionsList.error = "Recent conversations could not be loaded.";
+    }
+    openSessionsList();
     return;
   }
   if (state.sessionsList.items.length === 0) {
@@ -2903,6 +3355,7 @@ async function toggleSessions() {
     state.sessionsList.items = Array.isArray(result.sessions)
       ? result.sessions
       : [];
+    state.sessionsList.error = "";
   }
   openSessionsList();
 }
@@ -2935,6 +3388,7 @@ function closeSessionsList() {
 
 function renderSessions(sessions) {
   state.sessionsList.items = Array.isArray(sessions) ? sessions : [];
+  state.sessionsList.error = "";
   if (state.sessionsList.open) {
     renderSessionList();
   }
@@ -2950,6 +3404,12 @@ function renderSessionList() {
   clearNode(elements.sessionOptions);
   if (elements.sessions) {
     elements.sessions.hidden = false;
+  }
+  if (state.sessionsList.error) {
+    const error = document.createElement("p");
+    error.textContent = state.sessionsList.error;
+    elements.sessionOptions.appendChild(error);
+    return;
   }
   const available = state.sessionsList.items;
   if (available.length === 0) {
@@ -3020,9 +3480,17 @@ function renderSessionList() {
     } else {
       button.append(title, meta);
     }
-    button.addEventListener("click", () => resumeSession(session.id || ""));
+    button.addEventListener("click", () => {
+      if (state.currentPhase === phase.recovering) {
+        void openRecoverySession(session.id || "");
+        return;
+      }
+      void resumeSession(session.id || "");
+    });
     row.appendChild(button);
-    attachSessionActions(row, session);
+    if (state.currentPhase !== phase.recovering) {
+      attachSessionActions(row, session);
+    }
     elements.sessionOptions.appendChild(row);
   }
 }
@@ -3099,6 +3567,7 @@ async function refreshSessionList() {
     state.sessionsList.items = Array.isArray(result.sessions)
       ? result.sessions
       : [];
+    state.sessionsList.error = "";
     if (state.sessionsList.open) {
       renderSessionList();
     }
@@ -3589,7 +4058,8 @@ function attachCopyButton(article) {
       copy.textContent = "Copy";
     }, 1500);
   });
-  article.appendChild(copy);
+  messageActionToolbar(article)?.appendChild(copy);
+  updateTurnActionAvailability();
 }
 
 function finalizeStreamingMessage() {
@@ -3770,9 +4240,13 @@ function moveSlashSelection(delta) {
 }
 
 function closeSlashMenu() {
+  const wasOpen = state.slash.open;
   state.slash.open = false;
   if (elements.slashMenu) {
     elements.slashMenu.hidden = true;
+  }
+  if (wasOpen) {
+    adjustComposerHeight(elements.message);
   }
 }
 
@@ -3794,6 +4268,7 @@ function selectSlashItem() {
     const tokenStart = match ? caret - match[1].length : caret;
     const next = value.slice(0, tokenStart) + insertion + value.slice(caret);
     elements.message.value = next;
+    adjustComposerHeight(elements.message);
     const nextCaret = tokenStart + insertion.length;
     elements.message.selectionStart = nextCaret;
     elements.message.selectionEnd = nextCaret;
@@ -3865,8 +4340,9 @@ async function fetchCommands() {
 
 function onComposerInput() {
   setDraft(state.sessionID, elements.message.value);
-  updateControls();
   syncSlashMenu();
+  adjustComposerHeight(elements.message);
+  updateControls();
 }
 
 function handleComposerKeydown(event) {
@@ -3908,19 +4384,24 @@ function handleComposerKeydown(event) {
 function closeOwnerOnPageHide() {
   globalThis.waffleReadAloud?.stop();
   dictation.stop();
-  if (!state.clientID || !state.reattachToken || !state.requestToken) {
+  if (state.recoveryNewInFlight) {
+    state.recoveryNewInFlight = false;
+    state.generation += 1;
+  }
+  const lease = state.temporaryLease ||
+    (state.clientID && state.reattachToken
+      ? {
+          client_id: state.clientID,
+          reattach_token: state.reattachToken,
+        }
+      : null);
+  if (!lease || !state.requestToken) {
     return;
   }
-  const lease = {
-    client_id: state.clientID,
-    reattach_token: state.reattachToken,
-  };
-  void postMutation("/api/v1/desk/chat/close", lease, { keepalive: true }).catch(
-    () => {
-      // Navigation cleanup is best effort. The rotated lease and idle reaper
-      // remain the recovery paths after a dropped keepalive request.
-    },
-  );
+  if (state.temporaryLease && sameLease(state.temporaryLease, lease)) {
+    state.temporaryLease = null;
+  }
+  void closeTemporaryLease(lease);
 }
 
 if (elements.form) {
@@ -3992,8 +4473,13 @@ if (elements.form) {
   elements.skill.addEventListener("change", updateSkillControl);
   elements.skillToggle.addEventListener("click", toggleSkill);
   elements.refresh.addEventListener("click", openDesk);
-  elements.recoverNew?.addEventListener("click", () => openDesk({ forceNewSession: true }));
-  elements.newConversation?.addEventListener("click", newConversation);
+  elements.newConversation?.addEventListener("click", () => {
+    if (state.currentPhase === phase.recovering) {
+      void recoverWithNewConversation();
+      return;
+    }
+    void newConversation();
+  });
   elements.sessionRefresh?.addEventListener("click", toggleSessions);
   elements.sessionFilter?.addEventListener("input", onSessionFilterInput);
   elements.sessions?.addEventListener("keydown", handleSessionsKeydown);

@@ -59,6 +59,7 @@ func RedactState(state State, redact RedactFunc) State {
 	state.ProviderLabel = redact(state.ProviderLabel)
 	state.Profile = redact(state.Profile)
 	state.Workspace = redact(state.Workspace)
+	state.History = append([]llm.Message(nil), state.History...)
 	for i := range state.History {
 		state.History[i] = RedactMessage(state.History[i], redact)
 	}

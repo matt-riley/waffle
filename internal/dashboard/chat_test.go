@@ -532,6 +532,66 @@ func TestSafeChatResultProjectsEmbeddedStateWorkspace(t *testing.T) {
 	}
 }
 
+func TestSafeChatStateOmitsPrivateReasoningPayloadsWithoutMutatingSource(t *testing.T) {
+	const (
+		textCanary            = "sk-thinking-text-canary"
+		signatureCanary       = "signature-private-canary"
+		dataCanary            = "redacted-data-private-canary"
+		nestedSignatureCanary = "nested-signature-private-canary"
+		nestedDataCanary      = "nested-redacted-data-private-canary"
+	)
+	clients := NewChatClients(nil, nil)
+	clients.SetRedactor(func(value string) string {
+		return strings.ReplaceAll(value, textCanary, "[redacted]")
+	})
+	source := chat.State{History: []llm.Message{{
+		Role: llm.RoleAssistant,
+		Blocks: []llm.Block{
+			{Type: llm.BlockThinking, Text: "check " + textCanary, Signature: signatureCanary},
+			{Type: llm.BlockRedactedThinking, Data: dataCanary},
+			{Type: llm.BlockToolResult, ToolResult: &llm.ToolResult{ToolUseID: "tool-1", Blocks: []llm.Block{
+				{Type: llm.BlockThinking, Text: "nested " + textCanary, Signature: nestedSignatureCanary},
+				{Type: llm.BlockRedactedThinking, Data: nestedDataCanary},
+			}}},
+			{Type: llm.BlockText, Text: "answer"},
+		},
+	}}}
+
+	projected := clients.safeChatState(source)
+	data, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		signatureCanary,
+		dataCanary,
+		nestedSignatureCanary,
+		nestedDataCanary,
+		`"signature"`,
+		`"data"`,
+	} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("browser projection contains %q: %s", forbidden, data)
+		}
+	}
+	if got := projected.History[0].Blocks[0].Text; got != "check [redacted]" {
+		t.Fatalf("thinking text = %q, want exact-value redaction", got)
+	}
+	if got := source.History[0].Blocks[0].Signature; got != signatureCanary {
+		t.Fatalf("source thinking signature mutated to %q", got)
+	}
+	if got := source.History[0].Blocks[1].Data; got != dataCanary {
+		t.Fatalf("source redacted-thinking data mutated to %q", got)
+	}
+	nested := source.History[0].Blocks[2].ToolResult.Blocks
+	if got := nested[0].Signature; got != nestedSignatureCanary {
+		t.Fatalf("source nested thinking signature mutated to %q", got)
+	}
+	if got := nested[1].Data; got != nestedDataCanary {
+		t.Fatalf("source nested redacted-thinking data mutated to %q", got)
+	}
+}
+
 func TestChatClientsShutdownWaitsForActiveTurn(t *testing.T) {
 	backend := &fakeChatBackend{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{}), closeCalled: make(chan struct{})}
 	clients := NewChatClients(func(context.Context) (chat.Backend, error) { return backend, nil }, bytes.NewReader(bytes.Repeat([]byte{6}, 32)))

@@ -1184,7 +1184,16 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		llm.Message{Role: llm.RoleUser, Blocks: []llm.Block{{Type: llm.BlockText, Text: input}}},
 	)
 	var assistantText string
+	var assistantBlocks []llm.Block
 	switch {
+	case strings.Contains(strings.ToLower(input), "hearth visual"):
+		assistantText = "Release review is ready.\n\n```go\nreturn focusedChecks == green\n```"
+		assistantBlocks = []llm.Block{
+			{Type: llm.BlockThinking, Text: "I checked the focused failures, kept the existing interaction paths, and chose the smallest safe layout change.", Signature: "desk-secret-canary"},
+			{Type: llm.BlockRedactedThinking, Data: "WAFFLE_PRIVATE_ENV"},
+			{Type: llm.BlockText, Text: assistantText},
+		}
+		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
 	case strings.Contains(strings.ToLower(input), "markdown"):
 		emit(chat.Event{
 			Kind:       chat.EventToolStarted,
@@ -1247,8 +1256,11 @@ func (b *fixtureChatBackend) Turn(ctx context.Context, input string, emit func(c
 		assistantText = "Fixture reply"
 		emit(chat.Event{Kind: chat.EventTextDelta, Text: assistantText})
 	}
+	if len(assistantBlocks) == 0 {
+		assistantBlocks = []llm.Block{{Type: llm.BlockText, Text: assistantText}}
+	}
 	b.history = append(b.history,
-		llm.Message{Role: llm.RoleAssistant, Blocks: []llm.Block{{Type: llm.BlockText, Text: assistantText}}},
+		llm.Message{Role: llm.RoleAssistant, Blocks: assistantBlocks},
 	)
 	// Keep the shared chat cache current so owner-only reads (export, #476)
 	// see the same transcript the page rendered.
@@ -1276,6 +1288,7 @@ func (b *fixtureChatBackend) Command(_ context.Context, command chat.ParsedComma
 		}
 		b.sessions.mu.Unlock()
 		b.session = "session-fresh"
+		b.temporary = false
 		// Match the real backend: a brand-new session has no history, which
 		// serializes as a missing/null history so the browser must treat an
 		// authoritative empty state as an empty transcript (#455).
