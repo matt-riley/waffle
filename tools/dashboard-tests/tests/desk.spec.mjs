@@ -1053,8 +1053,8 @@ test("structured empty state reflows at an honest 200 percent zoom equivalent", 
     height: 406,
     deviceScaleFactor: 1,
     mobile: false,
-    screenWidth: width,
-    screenHeight: height,
+    screenWidth: 375,
+    screenHeight: 812,
   });
   await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
   const after = await page.evaluate(() => ({
@@ -4289,15 +4289,8 @@ test("memory picker remains clear through viewport resize and picker outer swaps
     window.__memoryResizeListenerSnapshot = () => [...active.keys()].sort();
   });
   await page.emulateMedia({ reducedMotion: "reduce" });
-  const cdp = await page.context().newCDPSession(page);
-  const setMetrics = (width, height) => cdp.send("Emulation.setDeviceMetricsOverride", {
-    width,
-    height,
-    deviceScaleFactor: 1,
-    mobile: false,
-    screenWidth: 375,
-    screenHeight: 812,
-  });
+  const originalViewport = page.viewportSize();
+  const setMetrics = (width, height) => page.setViewportSize({ width, height });
 
   try {
     await setMetrics(375, 812);
@@ -4338,8 +4331,7 @@ test("memory picker remains clear through viewport resize and picker outer swaps
     await refreshedQuery.press("Escape");
     await expect(page.locator("#memory-session-trigger")).toBeFocused();
   } finally {
-    await cdp.send("Emulation.clearDeviceMetricsOverride");
-    await page.setViewportSize({ width: 375, height: 812 });
+    if (originalViewport) await page.setViewportSize(originalViewport);
   }
 });
 
