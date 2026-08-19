@@ -379,6 +379,7 @@ func main() {
 		case "long":
 			mode = fixtureWorkspaceModeLong
 		}
+		workspaces.reset()
 		fixtureWorkspaceMode.Store(mode)
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -849,6 +850,12 @@ func newFixtureWorkspaces() *fixtureWorkspaces {
 			CreatedAt: fixtureNow.Add(-30 * time.Minute), UpdatedAt: fixtureNow, LastActive: fixtureNow,
 		},
 	}}
+}
+
+func (w *fixtureWorkspaces) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.workspaces = newFixtureWorkspaces().workspaces
 }
 
 // fixtureProjectFiles maps repo-relative paths to content for the project
