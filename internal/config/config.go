@@ -1643,9 +1643,13 @@ func validateProviderConnection(name string, connection ProviderConnection, allo
 	if connection.MaxTokens < 0 {
 		return fmt.Errorf("provider connection %q: max_tokens must be >= 0", name)
 	}
-	expectedAPIKey := "secret://provider/" + name + "/api-key"
-	if !allowLegacyAPIKey && connection.APIKey != "" && connection.APIKey != expectedAPIKey {
-		return fmt.Errorf("provider connection %q: api_key must be empty or %s", name, expectedAPIKey)
+	// expectedSecretRef is a secret:// pointer, never a credential: the real
+	// key lives in the encrypted secret store. Naming it after a key made
+	// CodeQL treat every error that quotes it as a leaked API key, so the
+	// validation message tripped go/clear-text-logging at seven log sites.
+	expectedSecretRef := "secret://provider/" + name + "/api-key"
+	if !allowLegacyAPIKey && connection.APIKey != "" && connection.APIKey != expectedSecretRef {
+		return fmt.Errorf("provider connection %q: api_key must be empty or %s", name, expectedSecretRef)
 	}
 	return nil
 }
