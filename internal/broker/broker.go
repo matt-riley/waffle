@@ -1463,7 +1463,9 @@ func (b *Broker) record(ctx context.Context, token, sessionID, action, detail st
 		INSERT INTO broker_audit (at, token_prefix, session, action, detail)
 		VALUES (?, ?, ?, ?, ?)`,
 		b.now().Format(time.RFC3339Nano), prefix, sessionID, action, b.redact(detail)); err != nil {
-		slog.Default().Error("broker audit insert failed", "err", err, "token_prefix", prefix, "action", action)
+		// The session is the useful identity here; the token prefix stays in
+		// the audit row and never reaches a log sink (go/clear-text-logging).
+		slog.Default().Error("broker audit insert failed", "err", err, "session", sessionID, "action", action)
 	}
 }
 
