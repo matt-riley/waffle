@@ -65,11 +65,11 @@ templ MemorySessionPicker(view MemorySessionPickerView) {
 			<button id="memory-session-trigger" class="memory-session-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="memory-session-popover">Select a conversation…</button>
 			<div id="memory-session-popover" class="memory-session-popover" hidden>
 				<label for="memory-session-query">Find a conversation</label>
-				<input id="memory-session-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="memory-session-options" aria-activedescendant="" autocomplete="off"/>
+				<input id="memory-session-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="memory-session-options" aria-activedescendant="" autocomplete="off"/>
 				<div id="memory-session-options" role="listbox" aria-label="Persisted conversations"></div>
 				<p id="memory-session-no-matches" class="memory-session-hint" role="status" hidden>No conversations match.</p>
 			</div>
-			<button id="memory-session-clear" type="button" hidden>Clear selection</button>
+			<button id="memory-session-clear" class="memory-session-clear" type="button" hidden>Clear selection</button>
 			<div id="memory-session-choice-data" hidden aria-hidden="true">
 				for _, choice := range view.Choices {
 					<span class="memory-session-choice-data" data-session-id={ choice.ID } data-session-title={ choice.Label } data-session-summary={ choice.Summary } data-session-model-alias={ choice.ModelAlias } data-session-updated-at={ choice.UpdatedAt } data-session-pinned={ fragmentBool(choice.Pinned) }></span>

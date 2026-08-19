@@ -121,11 +121,15 @@ export function initMemorySessionPicker(root = document) {
     options.replaceChildren();
     visibleChoices = [];
     let optionIndex = 0;
+    let groupIndex = 0;
     for (const group of groups) {
       const wrapper = document.createElement("div");
       wrapper.className = "memory-session-group";
+      wrapper.setAttribute("role", "group");
       const heading = document.createElement("h3");
       heading.className = "memory-session-group-label";
+      heading.id = `memory-session-group-${groupIndex}`;
+      wrapper.setAttribute("aria-labelledby", heading.id);
       heading.textContent = group.label;
       wrapper.append(heading);
       for (const choice of group.items) {
@@ -134,6 +138,7 @@ export function initMemorySessionPicker(root = document) {
         optionIndex += 1;
       }
       options.append(wrapper);
+      groupIndex += 1;
     }
     noMatches.hidden = visibleChoices.length > 0;
     if (visibleChoices.length === 0) {
@@ -151,20 +156,26 @@ export function initMemorySessionPicker(root = document) {
     }
   }
 
-  function updateActive() {
+  function updateActive({ scrollIntoView = false } = {}) {
     const active = options.querySelector(`#memory-session-option-${activeIndex}`);
+    for (const option of options.querySelectorAll('[role="option"]')) {
+      if (option === active) option.setAttribute("data-active", "true");
+      else option.removeAttribute("data-active");
+    }
     query.setAttribute("aria-activedescendant", active?.id || "");
+    if (scrollIntoView) active?.scrollIntoView?.({ block: "nearest" });
   }
 
   function moveActive(offset) {
     if (visibleChoices.length === 0) return;
     activeIndex = (activeIndex + offset + visibleChoices.length) % visibleChoices.length;
-    updateActive();
+    updateActive({ scrollIntoView: true });
   }
 
   function close() {
     popover.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    query.setAttribute("aria-expanded", "false");
     query.value = "";
     activeIndex = -1;
     query.setAttribute("aria-activedescendant", "");
@@ -182,6 +193,7 @@ export function initMemorySessionPicker(root = document) {
   function open() {
     popover.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
+    query.setAttribute("aria-expanded", "true");
     query.value = "";
     activeIndex = -1;
     render({ scrollSelected: true });
@@ -214,12 +226,12 @@ export function initMemorySessionPicker(root = document) {
       case "Home":
         event.preventDefault();
         activeIndex = visibleChoices.length > 0 ? 0 : -1;
-        updateActive();
+        updateActive({ scrollIntoView: true });
         break;
       case "End":
         event.preventDefault();
         activeIndex = visibleChoices.length > 0 ? visibleChoices.length - 1 : -1;
-        updateActive();
+        updateActive({ scrollIntoView: true });
         break;
       case "Enter":
         event.preventDefault();
@@ -239,6 +251,12 @@ export function initMemorySessionPicker(root = document) {
     delete document.body.dataset.waffleMemorySessionSelection;
     updateTrigger(null);
     dispatchSessionChange(input);
+    close();
+  });
+  field.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || popover.hidden) return;
+    event.preventDefault();
+    event.stopPropagation();
     close();
   });
 

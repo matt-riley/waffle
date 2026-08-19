@@ -3883,6 +3883,14 @@ test("memory attach uses a session picker with stale-selection recovery", async 
 
 test("memory session picker searches, groups, disambiguates, and preserves exact selection", async ({ page }) => {
   await page.goto(deskURL("memory"));
+  await page.evaluate(() => {
+    window.__memoryPickerScrolls = [];
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (options) {
+      window.__memoryPickerScrolls.push({ id: this.id, block: options?.block });
+      return scrollIntoView.call(this, options);
+    };
+  });
   const trigger = page.locator("#memory-session-trigger");
   await expect(trigger).toBeVisible();
   const sessionRequests = [];
@@ -3891,10 +3899,18 @@ test("memory session picker searches, groups, disambiguates, and preserves exact
   });
 
   await trigger.click();
-  const query = page.getByRole("combobox", { name: "Find a conversation" });
+  const query = page.locator("#memory-session-query");
+  await expect(query).toHaveAttribute("role", "combobox");
   const listbox = page.getByRole("listbox", { name: "Persisted conversations" });
   await expect(query).toBeFocused();
   await expect(listbox).toBeVisible();
+  await expect(query).toHaveAttribute("aria-expanded", "true");
+  const groups = page.locator("#memory-session-options [role='group']");
+  await expect(groups).toHaveCount(5);
+  for (let index = 0; index < 5; index += 1) {
+    await expect(groups.nth(index)).toHaveAttribute("aria-labelledby", `memory-session-group-${index}`);
+    await expect(groups.nth(index).locator(`#memory-session-group-${index}`)).toHaveCount(1);
+  }
   await page.keyboard.press("Escape");
   await trigger.focus();
   await page.keyboard.press(" ");
@@ -3930,15 +3946,20 @@ test("memory session picker searches, groups, disambiguates, and preserves exact
   await query.fill("");
   await query.press("Home");
   await expect(query).toHaveAttribute("aria-activedescendant", /^memory-session-option-/);
+  const firstActive = await query.getAttribute("aria-activedescendant");
+  await expect(page.locator(`#${firstActive}`)).toHaveAttribute("data-active", "true");
   await query.press("End");
   const lastActive = await query.getAttribute("aria-activedescendant");
+  await expect(page.locator(`#${lastActive}`)).toHaveAttribute("data-active", "true");
   await query.press("ArrowUp");
   expect(await query.getAttribute("aria-activedescendant")).not.toBe(lastActive);
   await query.press("ArrowDown");
   expect(await query.getAttribute("aria-activedescendant")).toBe(lastActive);
+  expect(await page.evaluate(() => window.__memoryPickerScrolls.some((entry) => entry.block === "nearest"))).toBe(true);
   await query.press("Enter");
   await expect(page.locator("#memory-session")).toHaveValue("session-older");
   await expect(trigger).toBeFocused();
+  await expect(query).toHaveAttribute("aria-expanded", "false");
   await trigger.click();
   await expect(listbox.getByRole("option", { name: /Older archive/ })).toHaveAttribute("aria-selected", "true");
 
@@ -3946,9 +3967,11 @@ test("memory session picker searches, groups, disambiguates, and preserves exact
   await query.fill("nothing can match this");
   await expect(page.locator("#memory-session-no-matches")).toBeVisible();
   await expect(page.locator("#memory-session")).toHaveValue("session-older");
-  await page.keyboard.press("Escape");
+  await page.evaluate(() => document.querySelector("#memory-session-popover").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await expect(trigger).toBeFocused();
   await expect(page.locator("#memory-session")).toHaveValue("session-older");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(query).toHaveAttribute("aria-expanded", "false");
 
   const refresh = page.waitForResponse((response) => response.url().includes("/api/v1/desk/memory/sessions"));
   await page.evaluate(() => window.htmx.ajax("GET", "/api/v1/desk/memory/sessions", {
@@ -3960,9 +3983,12 @@ test("memory session picker searches, groups, disambiguates, and preserves exact
   await expect(page.locator("#memory-session-trigger")).toHaveText("Older archive");
 
   await trigger.click();
+  await expect(page.locator("#memory-session-clear")).toHaveClass(/memory-session-clear/);
   await page.getByRole("button", { name: "Clear selection", exact: true }).click();
   await expect(page.locator("#memory-session")).toHaveValue("");
   await expect(trigger).toHaveText("Select a conversation…");
+  await expect(page.locator("#memory-session-trigger")).toHaveCount(1);
+  await expect(page.locator("#memory-session-options")).toHaveCount(1);
   await expect(trigger).toBeFocused();
 
   await trigger.click();
