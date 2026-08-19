@@ -1529,6 +1529,51 @@ func TestWriteReviewedTreeCleansPartialCopyFailure(t *testing.T) {
 	}
 }
 
+// TestWriteReviewedTreeWritesNestedEntriesInsideRoot pins the os.Root write
+// path: nested entries land at the right depth with private modes, and an
+// entry that tries to climb out is refused with nothing created outside.
+func TestWriteReviewedTreeWritesNestedEntriesInsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "tree")
+	files := []reviewedFile{
+		{entry: FileEntry{Path: "SKILL.md", Size: 1}, data: []byte("top\n")},
+		{entry: FileEntry{Path: "references/deep/notes.md", Size: 1}, data: []byte("deep\n")},
+	}
+	if err := writeReviewedTree(destination, files); err != nil {
+		t.Fatalf("writeReviewedTree: %v", err)
+	}
+	for path, want := range map[string]string{
+		"SKILL.md":                 "top\n",
+		"references/deep/notes.md": "deep\n",
+	} {
+		body, err := os.ReadFile(filepath.Join(destination, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(body) != want {
+			t.Errorf("%s = %q, want %q", path, body, want)
+		}
+	}
+	info, err := os.Stat(filepath.Join(destination, "references", "deep"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("nested directory mode = %v, want 0700", info.Mode().Perm())
+	}
+
+	escape := filepath.Join(parent, "escaped")
+	err = writeReviewedTree(escape, []reviewedFile{
+		{entry: FileEntry{Path: "../pwned.txt", Size: 1}, data: []byte("no\n")},
+	})
+	if !errors.Is(err, ErrUnsafeTree) {
+		t.Fatalf("traversal entry error = %v, want ErrUnsafeTree", err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, "pwned.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("traversal entry escaped the destination: %v", err)
+	}
+}
+
 func TestInstallConcurrentConfirmIsSingleUse(t *testing.T) {
 	f := newInstallerFixture(t)
 	manifest := stageLocal(t, f)

@@ -17,7 +17,6 @@ import (
 	"regexp"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -470,27 +469,33 @@ func writeReviewedTree(destination string, files []reviewedFile) (retErr error) 
 			retErr = errors.Join(retErr, os.RemoveAll(destination), syncDirectory(filepath.Dir(destination)))
 		}
 	}()
-	directories := map[string]struct{}{destination: {}}
+	// Archive-derived paths are created and opened through an os.Root bound to
+	// destination. safeRelativePath still rejects them up front, but the root
+	// makes containment a kernel guarantee rather than a string check: no
+	// component - traversal or symlink - can resolve outside the tree
+	// (CodeQL go/zipslip).
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	directories := map[string]struct{}{".": {}}
 	for _, file := range files {
 		relative := filepath.FromSlash(file.entry.Path)
 		if !safeRelativePath(relative) {
 			return ErrUnsafeTree
 		}
-		path := filepath.Join(destination, relative)
-		parent := filepath.Dir(path)
-		if err := os.MkdirAll(parent, 0o700); err != nil {
+		parent := filepath.Dir(relative)
+		if err := root.MkdirAll(parent, 0o700); err != nil {
 			return err
 		}
-		for current := parent; strings.HasPrefix(current, destination); current = filepath.Dir(current) {
+		for current := parent; current != "."; current = filepath.Dir(current) {
 			directories[current] = struct{}{}
-			if current == destination {
-				break
-			}
 		}
-		if err := os.Chmod(parent, 0o700); err != nil {
+		if err := root.Chmod(parent, 0o700); err != nil {
 			return err
 		}
-		output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		output, err := root.OpenFile(relative, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return err
 		}
@@ -506,12 +511,23 @@ func writeReviewedTree(destination string, files []reviewedFile) (retErr error) 
 		return len(ordered[left]) > len(ordered[right])
 	})
 	for _, directory := range ordered {
-		if err := syncDirectory(directory); err != nil {
+		if err := syncRootDirectory(root, directory); err != nil {
 			return err
 		}
 	}
 	complete = true
 	return nil
+}
+
+// syncRootDirectory fsyncs one directory inside root, so a written tree
+// survives a crash without ever naming an absolute archive-derived path.
+func syncRootDirectory(root *os.Root, name string) error {
+	directory, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	return directory.Sync()
 }
 
 func writeSyncClose(file *os.File, data []byte) error {
