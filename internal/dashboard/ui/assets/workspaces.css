@@ -351,6 +351,10 @@
 }
 
 @media (max-width: 44.99rem) {
+  .workspaces {
+    padding-block-end: var(--desk-content-clearance);
+  }
+
   .workspaces-panel-header,
   .workspace-card .waffle-fragment-actions,
   .workspace-card .waffle-fragment-actions form,

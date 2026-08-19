@@ -866,6 +866,20 @@ func (w *fixtureWorkspaces) ReadFile(_ context.Context, _ string, path string) (
 	return []byte(content), nil
 }
 
+func fixtureManyWorkspace(suffix string) workspace.Workspace {
+	return workspace.Workspace{
+		ID:         "workspace-many-" + suffix,
+		Repo:       "matt-riley/repository-" + suffix,
+		Image:      "waffle-dev:latest",
+		SessionID:  "session-many-" + suffix,
+		Status:     workspace.StatusOpen,
+		Profile:    "reviewer",
+		CreatedAt:  fixtureNow,
+		UpdatedAt:  fixtureNow,
+		LastActive: fixtureNow,
+	}
+}
+
 func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -894,12 +908,9 @@ func (w *fixtureWorkspaces) List(context.Context) ([]workspace.Workspace, error)
 	}
 	if mode == fixtureWorkspaceModeMany {
 		for index := 1; index <= 4; index++ {
-			result = append(result, workspace.Workspace{
-				ID:   "workspace-many-" + strconv.Itoa(index),
-				Repo: "matt-riley/repository-" + strconv.Itoa(index), Image: "waffle-dev:latest",
-				SessionID: "session-many-" + strconv.Itoa(index), Status: workspace.StatusOpen, Profile: "reviewer",
-				CreatedAt: fixtureNow.Add(-time.Duration(index) * time.Minute), UpdatedAt: fixtureNow, LastActive: fixtureNow,
-			})
+			item := fixtureManyWorkspace(strconv.Itoa(index))
+			item.CreatedAt = fixtureNow.Add(-time.Duration(index) * time.Minute)
+			result = append(result, item)
 		}
 	}
 	if mode == fixtureWorkspaceModeEmpty {
@@ -917,11 +928,7 @@ func (w *fixtureWorkspaces) Get(_ context.Context, id string) (*workspace.Worksp
 	item, ok := w.workspaces[id]
 	if !ok {
 		if strings.HasPrefix(id, "workspace-many-") {
-			item = workspace.Workspace{
-				ID: id, Repo: "matt-riley/repository-" + strings.TrimPrefix(id, "workspace-many-"), Image: "waffle-dev:latest",
-				SessionID: "session-" + id, Status: workspace.StatusOpen, Profile: "reviewer",
-				CreatedAt: fixtureNow, UpdatedAt: fixtureNow, LastActive: fixtureNow,
-			}
+			item = fixtureManyWorkspace(strings.TrimPrefix(id, "workspace-many-"))
 			ok = true
 		}
 	}

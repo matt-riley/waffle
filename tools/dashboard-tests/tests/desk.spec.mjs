@@ -3598,7 +3598,7 @@ test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async 
     expect(control.height).toBeGreaterThanOrEqual(44);
   }
 
-  if (test.info().project.name === "narrow") {
+  if (["mobile", "narrow"].includes(test.info().project.name)) {
     const clearance = await page.evaluate(async () => {
       const target = [...document.querySelectorAll(
         ".workspace-card .workspace-more-actions > summary",
@@ -3650,6 +3650,79 @@ test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async 
   }
 
   await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+});
+
+test("Workspaces final More actions can clear fixed navigation on compact mobile layouts", async ({ page }) => {
+  test.skip(!["mobile", "narrow"].includes(test.info().project.name), "Run compact mobile navigation clearance checks.");
+  const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=one`);
+  expect(response.ok()).toBe(true);
+  await page.goto(deskURL("workspaces"));
+  await expect(page.locator(".workspace-card")).toHaveCount(1);
+
+  const clearance = await page.evaluate(async () => {
+    const target = document.querySelector(".workspace-card .workspace-more-actions > summary");
+    const scroller = document.querySelector(".desk-shell > main");
+    const navigation = document.querySelector(".desk-navigation");
+    if (!target || !scroller || !navigation) return null;
+    target.scrollIntoView({ block: "end", inline: "nearest" });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const targetRect = target.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    return {
+      targetBottom: targetRect.bottom,
+      navigationTop: navigationRect.top,
+      navigationHeight: navigationRect.height,
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+    };
+  });
+
+  expect(clearance).not.toBeNull();
+  expect(clearance.scrollHeight - clearance.clientHeight).toBeGreaterThanOrEqual(clearance.navigationHeight + 8);
+  expect(clearance.scrollHeight).toBeGreaterThan(clearance.clientHeight);
+  expect(clearance.scrollTop).toBeGreaterThan(0);
+  expect(clearance.targetBottom).toBeLessThanOrEqual(clearance.navigationTop - 8);
+  await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+});
+
+test("many Workspaces close preview uses the selected fixture workspace", async ({ page }) => {
+  const response = await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=many`);
+  expect(response.ok()).toBe(true);
+  try {
+    await page.goto(deskURL("workspaces"));
+    const many = page.locator("[data-workspace-id='workspace-many-1']");
+    await expect(many).toBeVisible();
+    await many.locator(".workspace-more-actions > summary").click();
+
+    const closePreviewResponse = page.waitForResponse((candidate) =>
+      candidate.url().includes("/api/v1/desk/workspaces/workspace-many-1/close-preview"),
+    );
+    await many.getByRole("button", { name: "Review close", exact: true }).click();
+    const closePreview = await closePreviewResponse;
+    expect(closePreview.ok()).toBe(true);
+    await expect(page.locator("#workspace-close-dialog")).toBeVisible();
+
+    const token = await page.locator("body").getAttribute("data-request-token");
+    const jsonPreviewResponse = await page.request.post(
+      `${baseURL}/api/v1/desk/workspaces/workspace-many-1/close-preview`,
+      {
+        data: {},
+        headers: {
+          Accept: "application/json",
+          "X-Waffle-Desk-Token": token || "",
+          "Idempotency-Key": `many-close-preview-${Date.now()}`,
+        },
+      },
+    );
+    expect(jsonPreviewResponse.ok()).toBe(true);
+    const preview = await jsonPreviewResponse.json();
+    expect(preview.workspace.id).toBe("workspace-many-1");
+    expect(preview.workspace.repository).toBe("matt-riley/repository-1");
+    expect(preview.workspace.session).toBe("session-many-1");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/workspaces?state=normal`);
+  }
 });
 
 test("async review dialogs open as native modals with contained focus", async ({ page }) => {
