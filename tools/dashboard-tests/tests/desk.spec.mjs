@@ -1714,12 +1714,20 @@ test("Tasks empty and evidence states keep one bounded owner with direct recover
       }
     };
     await assertPressed("all");
+    const emptyStateWidths = {};
+    const measureEmptyState = async (name) => {
+      emptyStateWidths[name] = await page
+        .locator(".tasks-board .waffle-empty-state")
+        .evaluate((element) => element.getBoundingClientRect().width);
+    };
+    await measureEmptyState("all");
     await capture("empty-all");
 
     await page.getByRole("button", { name: "Active", exact: true }).click();
     await expect(page.getByRole("heading", { name: "No active runs", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toBeVisible();
     await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("active");
     await assertPressed("active");
     await page.getByRole("button", { name: "View all tasks", exact: true }).click();
     await assertPressed("all");
@@ -1727,18 +1735,21 @@ test("Tasks empty and evidence states keep one bounded owner with direct recover
     await page.getByRole("button", { name: "Scheduled", exact: true }).click();
     await expect(page.getByRole("heading", { name: "No schedules yet", exact: true })).toBeVisible();
     await expect(page.locator("#task-schedule-open")).toHaveClass(/action-primary/);
+    await measureEmptyState("scheduled");
     await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-quiet/);
     await assertPressed("scheduled");
 
     await page.getByRole("button", { name: "Completed", exact: true }).click();
     await expect(page.getByRole("heading", { name: "No completed runs", exact: true })).toBeVisible();
     await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("completed");
     await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-primary/);
     await assertPressed("completed");
 
     await page.getByRole("button", { name: "Attention", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Nothing needs attention", exact: true })).toBeVisible();
     await expect(page.locator("#task-schedule-open")).not.toHaveClass(/action-primary/);
+    await measureEmptyState("attention");
     await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toHaveClass(/action-primary/);
     await assertPressed("attention");
 
@@ -1748,9 +1759,6 @@ test("Tasks empty and evidence states keep one bounded owner with direct recover
     await expect(page.locator("#task-schedule-dialog")).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator("#task-schedule-dialog")).toBeHidden();
-
-    await setState("empty");
-    const emptyWidth = await page.locator(".tasks-board .waffle-empty-state").evaluate((element) => element.getBoundingClientRect().width);
 
     await setState("partial");
     await expect(page.locator("#tasks-list")).toContainText("Some task evidence is temporarily unavailable.");
@@ -1765,13 +1773,16 @@ test("Tasks empty and evidence states keep one bounded owner with direct recover
     );
     await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
     await expect(page.locator("#tasks-list .waffle-empty-state-art")).toHaveCount(0);
+    await measureEmptyState("error");
     await capture("error");
 
     await setState("normal");
     const card = page.locator("#tasks-list .task-card").first();
     expect(await page.locator("#tasks-list .task-card").count()).toBeGreaterThan(0);
     const cardWidth = await card.evaluate((element) => element.getBoundingClientRect().width);
-    expect(Math.abs(emptyWidth - cardWidth)).toBeLessThanOrEqual(1);
+    for (const [state, width] of Object.entries(emptyStateWidths)) {
+      expect(Math.abs(width - cardWidth), `${state} empty state width ${width}, card width ${cardWidth}`).toBeLessThanOrEqual(1);
+    }
     await expect(page.locator("#tasks-list .waffle-empty-state")).toHaveCount(0);
     if (["mobile", "narrow"].includes(project)) {
       const separation = await page.evaluate(() => {
@@ -1853,27 +1864,45 @@ test("schedule dialog Escape cancels without validation and restores its opener"
     expect(await form.evaluate((element) => element.dataset.waffleRedactedFields || "")).toBe("");
   };
 
-  const escapeFrom = async (selector, { scroll = false, prepare } = {}) => {
+  const setDialogScrollPosition = async (position) => {
+    const scrollState = await dialog.evaluate((element, requestedPosition) => {
+      const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      const targetScrollTop = {
+        top: 0,
+        middle: Math.round(maxScrollTop / 2),
+        bottom: maxScrollTop,
+      }[requestedPosition];
+      element.scrollTop = targetScrollTop;
+      return {
+        maxScrollTop,
+        targetScrollTop,
+        actualScrollTop: element.scrollTop,
+      };
+    }, position);
+    if (scrollState.maxScrollTop > 0) {
+      expect(scrollState.actualScrollTop, `${position} scroll position was not applied`).toBe(scrollState.targetScrollTop);
+    } else {
+      expect(scrollState.actualScrollTop).toBe(0);
+    }
+  };
+
+  const escapeFrom = async (selector, { scrollPosition, prepare } = {}) => {
     await newSchedule.click();
     await expect(dialog).toBeVisible();
     if (prepare) await prepare();
     const control = form.locator(selector);
     await control.focus();
     await expect(control).toBeFocused();
-    if (scroll) {
-      await dialog.evaluate((element) => {
-        element.scrollTop = element.scrollHeight;
-      });
-    }
+    if (scrollPosition) await setDialogScrollPosition(scrollPosition);
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(newSchedule).toBeFocused();
     await assertNewScheduleDefaults();
   };
 
-  await escapeFrom("#task-schedule-name", { scroll: true });
-  await escapeFrom("#task-schedule-prompt");
-  await escapeFrom("#task-schedule-cadence");
+  await escapeFrom("#task-schedule-name", { scrollPosition: "top" });
+  await escapeFrom("#task-schedule-prompt", { scrollPosition: "middle" });
+  await escapeFrom("#task-schedule-cadence", { scrollPosition: "bottom" });
   await escapeFrom("#task-schedule-time");
   await escapeFrom("#task-schedule-deliver");
   await escapeFrom("#task-schedule-chat-id", {

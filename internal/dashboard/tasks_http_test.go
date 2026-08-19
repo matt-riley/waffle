@@ -164,6 +164,32 @@ func TestTaskScheduleUpdatePreservesStateAndPublishesCanonicalEvent(t *testing.T
 	}
 }
 
+func TestTaskScheduleUpdatePassesCanonicalInputToStore(t *testing.T) {
+	schedules := &capturingTaskUpdateStore{job: schedule.Job{
+		ID: "job-normalize", Name: "Old", Cron: "0 8 * * *", Prompt: "Old prompt", Enabled: true,
+	}}
+	handler, security := newTaskMutationTestHandler(t, schedules, NewEventHub(4), time.Second)
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1:8422/api/v1/desk/tasks/schedules/job-normalize",
+		strings.NewReader(`{"name":"  Edited  ","cron":" 0 9 * * * ","prompt":"  Changed  ","deliver":" telegram:901 ","profile":"reviewer","enabled":false}`))
+	req = req.WithContext(context.Background())
+	req.Host = "127.0.0.1:8422"
+	req.Header.Set("X-Waffle-Desk-Token", security.Token())
+	req.Header.Set("Idempotency-Key", "canonical-update")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	want := schedule.Update{
+		Name: "Edited", Cron: "0 9 * * *", Prompt: "Changed", Deliver: "telegram:901", Profile: "reviewer",
+		Enabled: false,
+	}
+	if schedules.input != want {
+		t.Fatalf("store input = %+v, want canonical %+v", schedules.input, want)
+	}
+}
+
 func TestTaskScheduleLateCancellationReplaysCommittedUpdate(t *testing.T) {
 	security := mustSecurity(t, "127.0.0.1:8422")
 	events := NewEventHub(4)
@@ -895,6 +921,32 @@ func (f failingTaskScheduleStore) Get(context.Context, string) (*schedule.Job, e
 
 func (f failingTaskScheduleStore) Update(context.Context, string, schedule.Update) (*schedule.Job, error) {
 	return nil, f.err
+}
+
+type capturingTaskUpdateStore struct {
+	job   schedule.Job
+	input schedule.Update
+}
+
+func (s *capturingTaskUpdateStore) AddWithProfile(context.Context, string, string, string, string, string) (*schedule.Job, error) {
+	return nil, errors.New("unexpected create")
+}
+
+func (s *capturingTaskUpdateStore) Get(context.Context, string) (*schedule.Job, error) {
+	job := s.job
+	return &job, nil
+}
+
+func (s *capturingTaskUpdateStore) Update(_ context.Context, _ string, input schedule.Update) (*schedule.Job, error) {
+	s.input = input
+	s.job.Name = input.Name
+	s.job.Cron = input.Cron
+	s.job.Prompt = input.Prompt
+	s.job.Deliver = input.Deliver
+	s.job.Profile = input.Profile
+	s.job.Enabled = input.Enabled
+	job := s.job
+	return &job, nil
 }
 
 type cancelAfterTaskUpdateStore struct {

@@ -1759,6 +1759,10 @@ h3 {
 	max-width: 52rem;
 }
 
+.tasks-board .waffle-empty-state.is-no-artwork {
+	max-width: 64rem;
+}
+
 .waffle-empty-state-art.is-hidden {
 	display: none;
 }

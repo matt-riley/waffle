@@ -179,7 +179,8 @@ func newTaskScheduleUpdateHandler(store TaskScheduleStore, events *EventHub) htt
 			writeTaskError(w, http.StatusBadRequest, "invalid_request", "task request is invalid")
 			return
 		}
-		if _, err := schedule.ValidateUpdate(input); err != nil {
+		input, err = schedule.ValidateUpdate(input)
+		if err != nil {
 			writeTaskStoreError(w, err)
 			return
 		}
