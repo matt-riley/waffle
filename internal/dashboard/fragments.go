@@ -108,9 +108,15 @@ func markedRequestContext(marked wantsHTMLWriter) context.Context {
 
 func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 	if response, ok := value.(errorResponse); ok {
+		if r != nil && r.URL.Path == "/api/v1/desk/memory/sessions" {
+			return ui.MemorySessionPicker(ui.MemorySessionPickerView{Error: true})
+		}
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: response.Message, Error: true})
 	}
 	if response, ok := value.(*errorResponse); ok && response != nil {
+		if r != nil && r.URL.Path == "/api/v1/desk/memory/sessions" {
+			return ui.MemorySessionPicker(ui.MemorySessionPickerView{Error: true})
+		}
 		return ui.FragmentStatus(ui.FragmentStatusView{Message: response.Message, Error: true})
 	}
 	switch typed := value.(type) {
@@ -173,18 +179,10 @@ func fragmentComponent(r *http.Request, status int, value any) templ.Component {
 	case MemorySessionsResponse:
 		options := make([]ui.MemorySessionOption, 0, len(typed.Choices))
 		for _, choice := range typed.Choices {
-			label := strings.TrimSpace(choice.Label)
-			recency := memorySessionRecency(choice.UpdatedAt)
-			if recency != "" {
-				label += " · " + recency
-			}
-			if choice.Pinned {
-				label += " · Pinned"
-			}
-			if id := shortSessionID(choice.ID); id != "" {
-				label += " · " + id
-			}
-			options = append(options, ui.MemorySessionOption{ID: choice.ID, Label: label})
+			options = append(options, ui.MemorySessionOption{
+				ID: choice.ID, Label: choice.Label, Summary: choice.Summary, ModelAlias: choice.ModelAlias,
+				UpdatedAt: choice.UpdatedAt.Format(time.RFC3339Nano), Pinned: choice.Pinned,
+			})
 		}
 		return ui.MemorySessionPicker(ui.MemorySessionPickerView{Choices: options})
 	case MemoryForgetPreview:
@@ -858,12 +856,43 @@ func memoryFragment(hits []MemoryHit, query string, sectionErrors []*SectionErro
 		empty = "Memory search could not be completed right now."
 	}
 	fragment := ui.FragmentView{ID: "memory-results", Class: "memory-results", Empty: empty}
+	if len(sectionErrors) == 0 && len(hits) == 0 {
+		state, ok := ui.NewWaffleEmptyStateView(
+			ui.EmptyStateMemory,
+			"No memory matched that search",
+			"No attributed memory matched that search. Try a different phrase or add context through conversation.",
+			"memory-empty-title",
+			nil,
+			nil,
+		)
+		if ok {
+			fragment.EmptyState = &state
+		}
+	} else if len(sectionErrors) > 0 && len(hits) == 0 {
+		state, ok := ui.NewWaffleEmptyStateView(
+			ui.EmptyStateMemory,
+			"Memory search could not be completed right now.",
+			"Try again",
+			"memory-error-title",
+			nil,
+			nil,
+		)
+		if ok {
+			state.NoArtwork = true
+			fragment.EmptyState = &state
+		}
+	} else if len(sectionErrors) > 0 {
+		fragment.Footers = append(fragment.Footers, ui.FragmentTextSwap{
+			ID: "memory-partial-warning", Class: "memory-partial-warning", Text: "Some memory sources are unavailable.",
+		})
+	}
 	// The status line is swapped with every search so the initial instruction
 	// never coexists with settled results (#458).
 	fragment.TextSwaps = append(fragment.TextSwaps, ui.FragmentTextSwap{
 		ID:    "memory-status",
 		Class: "memory-status",
 		Text:  memoryStatusMessage(len(hits), sectionErrors),
+		Live:  true,
 	})
 	for _, hit := range hits {
 		fields := []ui.FragmentField{
@@ -897,37 +926,11 @@ func memoryStatusMessage(hits int, sectionErrors []*SectionError) string {
 	case len(sectionErrors) > 0:
 		return fmt.Sprintf("%d result(s) — some memory sources are unavailable.", hits)
 	case hits == 0:
-		return "No attributed memory matched that search."
+		return "0 results"
 	case hits == 1:
 		return "1 result"
 	default:
 		return fmt.Sprintf("%d results", hits)
-	}
-}
-
-func shortSessionID(id string) string {
-	id = strings.TrimSpace(id)
-	if len(id) <= 8 {
-		return id
-	}
-	return id[len(id)-8:]
-}
-
-func memorySessionRecency(value time.Time) string {
-	if value.IsZero() {
-		return ""
-	}
-	age := time.Since(value)
-	if age < 0 {
-		age = 0
-	}
-	switch {
-	case age < time.Hour:
-		return "updated moments ago"
-	case age < 24*time.Hour:
-		return fmt.Sprintf("updated %d hours ago", int(age.Hours()))
-	default:
-		return "updated " + value.Format("2 Jan 2006")
 	}
 }
 

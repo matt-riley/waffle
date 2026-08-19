@@ -79,7 +79,7 @@ test("the four migrated sections declare server fragments and Today stays bespok
     assert.match(templates[section], /hx-(get|post)=/);
   }
   assert.doesNotMatch(templates.today, /hx-(get|post)=|hx-trigger=/);
-  for (const asset of ["capabilities.js", "tasks.js", "workspaces.js", "memory.js"]) {
+  for (const asset of ["capabilities.js", "tasks.js", "workspaces.js"]) {
     assert.equal(fs.existsSync(new URL(`./assets/${asset}`, import.meta.url)), false);
   }
 });

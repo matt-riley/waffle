@@ -315,6 +315,7 @@ func main() {
 	// memory attach picker can cover empty and stale-selection states (#459).
 	mux.HandleFunc("POST /api/v1/desk/test/memory-sessions", func(w http.ResponseWriter, r *http.Request) {
 		sessions.mu.Lock()
+		sessions.listErr = r.URL.Query().Get("error") == "1"
 		if r.URL.Query().Get("empty") == "1" {
 			sessions.sessions = map[string]*session.Session{}
 		} else {
@@ -575,6 +576,7 @@ type fixtureSessions struct {
 	sessions    map[string]*session.Session
 	searchEmpty bool
 	searchErr   string
+	listErr     bool
 }
 
 func newFixtureSessions() *fixtureSessions {
@@ -584,7 +586,7 @@ func newFixtureSessions() *fixtureSessions {
 	yesterdayNoon := todayMidnight.AddDate(0, 0, -1).Add(12 * time.Hour)
 	weekNoon := todayMidnight.AddDate(0, 0, -3).Add(12 * time.Hour)
 	olderNoon := todayMidnight.AddDate(0, 0, -9).Add(12 * time.Hour)
-	return &fixtureSessions{sessions: map[string]*session.Session{
+	sessions := map[string]*session.Session{
 		"session-pinned": {
 			ID:         "session-pinned",
 			Title:      "Pinned design notes",
@@ -626,7 +628,21 @@ func newFixtureSessions() *fixtureSessions {
 			CreatedAt:  olderNoon.Add(-time.Hour),
 			UpdatedAt:  olderNoon,
 		},
-	}}
+		"session-duplicate-a": {
+			ID: "session-duplicate-a", Title: "Duplicate title", Summary: "Alpha disambiguator", ModelAlias: "fast", CreatedAt: todayNoon, UpdatedAt: todayNoon.Add(-3 * time.Hour),
+		},
+		"session-duplicate-b": {
+			ID: "session-duplicate-b", Title: "Duplicate title", Summary: "Beta disambiguator", ModelAlias: "careful", CreatedAt: todayNoon, UpdatedAt: todayNoon.Add(-4 * time.Hour),
+		},
+	}
+	for index := 0; index < 34; index++ {
+		id := fmt.Sprintf("session-extra-%02d", index)
+		sessions[id] = &session.Session{
+			ID: id, Title: fmt.Sprintf("Extra conversation %02d", index), Summary: fmt.Sprintf("Fixture summary %02d", index), ModelAlias: "primary",
+			CreatedAt: todayNoon.Add(-time.Duration(index+5) * time.Minute), UpdatedAt: todayNoon.Add(-time.Duration(index+5) * time.Minute),
+		}
+	}
+	return &fixtureSessions{sessions: sessions}
 }
 
 func (s *fixtureSessions) Get(_ context.Context, id string) (*session.Session, error) {
@@ -694,6 +710,9 @@ func (s *fixtureSessions) SetPinned(_ context.Context, id string, pinned bool) e
 func (s *fixtureSessions) List(_ context.Context, _ int) ([]session.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.listErr {
+		return nil, errors.New("fixture sessions unavailable")
+	}
 	out := make([]session.Session, 0, len(s.sessions))
 	for _, value := range s.sessions {
 		copy := *value

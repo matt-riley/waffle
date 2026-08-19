@@ -42,7 +42,20 @@ func MemoryAssets(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><script type=\"module\" src=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var3 string
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(AssetURL("memory.js", view.AssetVersion))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 5, Col: 69}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"></script>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -66,12 +79,20 @@ func Memory(view ShellView) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var3 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var3 == nil {
-			templ_7745c5c3_Var3 = templ.NopComponent
+		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var4 == nil {
+			templ_7745c5c3_Var4 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Memory</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\" hx-get=\"/api/v1/desk/memory\" hx-target=\"#memory-results\" hx-swap=\"outerHTML\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session\">Attach to session</label><div class=\"memory-session-field\" id=\"memory-session-field\"><select id=\"memory-session\" name=\"session_id\" class=\"memory-session-picker\" autocomplete=\"off\" aria-describedby=\"memory-session-empty\" hx-get=\"/api/v1/desk/memory/sessions\" hx-trigger=\"load\" hx-target=\"#memory-session-field\" hx-swap=\"outerHTML\"><option value=\"\">Loading conversations…</option></select><p class=\"memory-session-hint\" id=\"memory-session-empty\" hidden></p></div><div id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></div></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" data-waffle-dialog-cancel type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<section class=\"memory\" aria-labelledby=\"memory-title\"><header class=\"memory-header\"><div><p class=\"eyebrow\">Memory</p><h1 id=\"memory-title\">Memory</h1><p>Find the exact source, pin a bounded reference to a session, or archive a Waffle-owned note.</p></div><a class=\"memory-conversation-link\" href=\"/desk/?section=today\">Add through conversation</a></header><div class=\"memory-layout\"><div class=\"memory-search-panel\"><form id=\"memory-search-form\" class=\"memory-search-form\" hx-get=\"/api/v1/desk/memory\" hx-target=\"#memory-results\" hx-swap=\"outerHTML\"><label for=\"memory-query\">Search turns, summaries, and notes</label><div class=\"memory-search-row\"><input id=\"memory-query\" name=\"query\" type=\"search\" maxlength=\"1024\" autocomplete=\"off\" placeholder=\"What do you need to recall?\"> <button type=\"submit\">Search memory</button></div></form><p id=\"memory-status\" class=\"memory-status\" aria-live=\"polite\">Enter a search to begin.</p><div id=\"memory-results\" class=\"memory-results\"></div></div><aside class=\"memory-attach-panel\" aria-labelledby=\"memory-attach-title\"><p class=\"eyebrow\">Working set</p><h2 id=\"memory-attach-title\">Attach to a session</h2><p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p><label for=\"memory-session\">Attach to session</label>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = MemorySessionPicker(MemorySessionPickerView{Loading: true, Load: true}).Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div id=\"memory-attach-status\" class=\"memory-status\" aria-live=\"polite\"></div></aside></div><dialog id=\"memory-forget-dialog\" class=\"memory-forget-dialog\" aria-labelledby=\"memory-forget-title\"><h2 id=\"memory-forget-title\">Archive this note?</h2><p id=\"memory-forget-note\"></p><p id=\"memory-forget-scope\"></p><ul id=\"memory-forget-exclusions\"></ul><p>This confirmation expires after 60 seconds.</p><div class=\"memory-dialog-actions\"><button id=\"memory-forget-cancel\" data-waffle-dialog-cancel type=\"button\" autofocus>Cancel</button> <button id=\"memory-forget-confirm\" class=\"danger-button\" type=\"button\">Forget note</button></div></dialog></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -95,74 +116,135 @@ func MemorySessionPicker(view MemorySessionPickerView) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var4 == nil {
-			templ_7745c5c3_Var4 = templ.NopComponent
+		templ_7745c5c3_Var5 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var5 == nil {
+			templ_7745c5c3_Var5 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<div class=\"memory-session-field\" id=\"memory-session-field\"><select id=\"memory-session\" name=\"session_id\" class=\"memory-session-picker\" autocomplete=\"off\" aria-describedby=\"memory-session-empty\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"memory-session-field\" id=\"memory-session-field\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if len(view.Choices) == 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<option value=\"\">No persisted conversations yet</option>")
+		if view.Load {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, " hx-get=\"/api/v1/desk/memory/sessions\" hx-trigger=\"load\" hx-target=\"#memory-session-field\" hx-swap=\"outerHTML\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
-			}
-		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<option value=\"\">Select a conversation…</option> ")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			for _, choice := range view.Choices {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<option value=\"")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				var templ_7745c5c3_Var5 string
-				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.ID)
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 65, Col: 30}
-				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "\">")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				var templ_7745c5c3_Var6 string
-				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(choice.Label)
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 65, Col: 47}
-				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</option>")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</select> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "><input id=\"memory-session\" name=\"session_id\" type=\"hidden\" value=\"\"> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if len(view.Choices) == 0 {
+		if view.Loading {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<button id=\"memory-session-trigger\" class=\"memory-session-trigger\" type=\"button\" disabled aria-haspopup=\"listbox\" aria-expanded=\"false\">Loading conversations…</button><p id=\"memory-session-status\" class=\"memory-session-hint visually-hidden\" role=\"status\" aria-live=\"polite\">Loading conversations…</p>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else if view.Error {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "<p class=\"memory-session-hint\" id=\"memory-session-error\">Conversations could not be loaded.</p><button id=\"memory-session-retry\" type=\"button\" hx-get=\"/api/v1/desk/memory/sessions\" hx-target=\"#memory-session-field\" hx-swap=\"outerHTML\">Try again</button>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else if len(view.Choices) == 0 {
 			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<p class=\"memory-session-hint\" id=\"memory-session-empty\">No persisted conversations yet. <a href=\"/desk/?section=today\">Start one in Today</a> to attach memory to it.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "<p class=\"memory-session-hint\" id=\"memory-session-empty\" hidden></p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "<button id=\"memory-session-trigger\" class=\"memory-session-trigger\" type=\"button\" aria-haspopup=\"listbox\" aria-expanded=\"false\" aria-controls=\"memory-session-popover\">Select a conversation…</button><div id=\"memory-session-popover\" class=\"memory-session-popover\" hidden><label for=\"memory-session-query\">Find a conversation</label> <input id=\"memory-session-query\" type=\"search\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"true\" aria-controls=\"memory-session-options\" aria-activedescendant=\"\" autocomplete=\"off\"><div id=\"memory-session-options\" role=\"listbox\" aria-label=\"Persisted conversations\"></div><p id=\"memory-session-no-matches\" class=\"memory-session-hint\" role=\"status\" hidden>No conversations match.</p></div><button id=\"memory-session-clear\" type=\"button\" hidden>Clear selection</button><div id=\"memory-session-choice-data\" hidden aria-hidden=\"true\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			for _, choice := range view.Choices {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<span class=\"memory-session-choice-data\" data-session-id=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var6 string
+				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.ID)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 73}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var6)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "\" data-session-title=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var7 string
+				templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.Label)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 109}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var7)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "\" data-session-summary=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var8 string
+				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.Summary)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 149}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var8)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "\" data-session-model-alias=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var9 string
+				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.ModelAlias)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 196}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var9)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "\" data-session-updated-at=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var10 string
+				templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.ResolveAttributeValue(choice.UpdatedAt)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 241}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var10)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "\" data-session-pinned=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var11 string
+				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.ResolveAttributeValue(fragmentBool(choice.Pinned))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `memory.templ`, Line: 75, Col: 293}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var11)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "\"></span>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "</div><p class=\"memory-session-hint\" id=\"memory-session-empty\" hidden></p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

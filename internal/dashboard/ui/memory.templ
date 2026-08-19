@@ -2,6 +2,7 @@ package ui
 
 templ MemoryAssets(view ShellView) {
 	<link rel="stylesheet" href={ AssetURL("memory.css", view.AssetVersion) }/>
+	<script type="module" src={ AssetURL("memory.js", view.AssetVersion) }></script>
 }
 
 templ Memory(view ShellView) {
@@ -31,12 +32,7 @@ templ Memory(view ShellView) {
 				<h2 id="memory-attach-title">Attach to a session</h2>
 				<p>Choose an explicit persisted session. Attached references are pinned, user-sourced facts and stay within the working-set limits.</p>
 				<label for="memory-session">Attach to session</label>
-				<div class="memory-session-field" id="memory-session-field">
-					<select id="memory-session" name="session_id" class="memory-session-picker" autocomplete="off" aria-describedby="memory-session-empty" hx-get="/api/v1/desk/memory/sessions" hx-trigger="load" hx-target="#memory-session-field" hx-swap="outerHTML">
-						<option value="">Loading conversations…</option>
-					</select>
-					<p class="memory-session-hint" id="memory-session-empty" hidden></p>
-				</div>
+				@MemorySessionPicker(MemorySessionPickerView{Loading: true, Load: true})
 				<div id="memory-attach-status" class="memory-status" aria-live="polite"></div>
 			</aside>
 		</div>
@@ -55,20 +51,30 @@ templ Memory(view ShellView) {
 }
 
 templ MemorySessionPicker(view MemorySessionPickerView) {
-	<div class="memory-session-field" id="memory-session-field">
-		<select id="memory-session" name="session_id" class="memory-session-picker" autocomplete="off" aria-describedby="memory-session-empty">
-			if len(view.Choices) == 0 {
-				<option value="">No persisted conversations yet</option>
-			} else {
-				<option value="">Select a conversation…</option>
-				for _, choice := range view.Choices {
-					<option value={ choice.ID }>{ choice.Label }</option>
-				}
-			}
-		</select>
-		if len(view.Choices) == 0 {
+	<div class="memory-session-field" id="memory-session-field" if view.Load { hx-get="/api/v1/desk/memory/sessions" hx-trigger="load" hx-target="#memory-session-field" hx-swap="outerHTML" }>
+		<input id="memory-session" name="session_id" type="hidden" value=""/>
+		if view.Loading {
+			<button id="memory-session-trigger" class="memory-session-trigger" type="button" disabled aria-haspopup="listbox" aria-expanded="false">Loading conversations…</button>
+			<p id="memory-session-status" class="memory-session-hint visually-hidden" role="status" aria-live="polite">Loading conversations…</p>
+		} else if view.Error {
+			<p class="memory-session-hint" id="memory-session-error">Conversations could not be loaded.</p>
+			<button id="memory-session-retry" type="button" hx-get="/api/v1/desk/memory/sessions" hx-target="#memory-session-field" hx-swap="outerHTML">Try again</button>
+		} else if len(view.Choices) == 0 {
 			<p class="memory-session-hint" id="memory-session-empty">No persisted conversations yet. <a href="/desk/?section=today">Start one in Today</a> to attach memory to it.</p>
 		} else {
+			<button id="memory-session-trigger" class="memory-session-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="memory-session-popover">Select a conversation…</button>
+			<div id="memory-session-popover" class="memory-session-popover" hidden>
+				<label for="memory-session-query">Find a conversation</label>
+				<input id="memory-session-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="memory-session-options" aria-activedescendant="" autocomplete="off"/>
+				<div id="memory-session-options" role="listbox" aria-label="Persisted conversations"></div>
+				<p id="memory-session-no-matches" class="memory-session-hint" role="status" hidden>No conversations match.</p>
+			</div>
+			<button id="memory-session-clear" type="button" hidden>Clear selection</button>
+			<div id="memory-session-choice-data" hidden aria-hidden="true">
+				for _, choice := range view.Choices {
+					<span class="memory-session-choice-data" data-session-id={ choice.ID } data-session-title={ choice.Label } data-session-summary={ choice.Summary } data-session-model-alias={ choice.ModelAlias } data-session-updated-at={ choice.UpdatedAt } data-session-pinned={ fragmentBool(choice.Pinned) }></span>
+				}
+			</div>
 			<p class="memory-session-hint" id="memory-session-empty" hidden></p>
 		}
 	</div>

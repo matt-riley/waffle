@@ -3839,10 +3839,13 @@ test("posture dialog contains keyboard focus and restores the opener", async ({ 
 test("memory attach uses a session picker with stale-selection recovery", async ({ page }) => {
   await page.goto(deskURL("memory"));
   const picker = page.locator("#memory-session");
-  // The picker loads persisted sessions with human-readable labels.
-  await expect(picker).toBeVisible();
-  await expect(picker.locator("option")).toContainText(["Select a conversation", "Release review"]);
-  await expect(picker.locator("option[value='session-primary']")).toContainText(/Release review/);
+  const trigger = page.locator("#memory-session-trigger");
+  // The accessible picker loads persisted sessions with human-readable labels.
+  await expect(picker).toBeAttached();
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await expect(page.getByRole("listbox", { name: "Persisted conversations" })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Release review/ })).toBeVisible();
 
   // Attach stays disabled until a valid session is selected.
   const query = page.getByLabel("Search turns, summaries, and notes");
@@ -3852,7 +3855,7 @@ test("memory attach uses a session picker with stale-selection recovery", async 
   const attach = note.getByRole("button", { name: "Attach to session", exact: true });
   await expect(attach).toBeDisabled();
 
-  await picker.selectOption("session-primary");
+  await page.getByRole("option", { name: /Release review/ }).click();
   await expect(attach).toBeEnabled();
   await attach.click();
   await expect(page.locator("#memory-attach-status")).toHaveText(
@@ -3864,16 +3867,129 @@ test("memory attach uses a session picker with stale-selection recovery", async 
   await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?empty=1`);
   try {
     allowExpectedResponse(404, "/api/v1/desk/memory/attach");
-    await picker.selectOption("session-primary");
+    await trigger.click();
+    await page.getByRole("option", { name: /Release review/ }).click();
     await attach.click();
     await expect(page.locator("#memory-attach-status")).toContainText(
       "target session was not found",
     );
-    await expect(picker.locator("option[value='session-primary']")).toHaveCount(0);
-    await expect(picker.locator("option")).toContainText("No persisted conversations yet");
+    await expect(page.locator("#memory-session-trigger")).toHaveCount(0);
+    await expect(page.locator("#memory-session-options")).toHaveCount(0);
     await expect(page.locator("#memory-session-empty")).toContainText("Start one in Today");
   } finally {
     await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions`);
+  }
+});
+
+test("memory session picker searches, groups, disambiguates, and preserves exact selection", async ({ page }) => {
+  await page.goto(deskURL("memory"));
+  const trigger = page.locator("#memory-session-trigger");
+  await expect(trigger).toBeVisible();
+  const sessionRequests = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/desk/memory/sessions")) sessionRequests.push(request);
+  });
+
+  await trigger.click();
+  const query = page.getByRole("combobox", { name: "Find a conversation" });
+  const listbox = page.getByRole("listbox", { name: "Persisted conversations" });
+  await expect(query).toBeFocused();
+  await expect(listbox).toBeVisible();
+  await page.keyboard.press("Escape");
+  await trigger.focus();
+  await page.keyboard.press(" ");
+  await expect(query).toBeFocused();
+  await page.keyboard.press("Escape");
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await expect(query).toBeFocused();
+  await expect(page.locator(".memory-session-group-label")).toHaveText([
+    "Pinned", "Today", "Yesterday", "Previous 7 days", "Older",
+  ]);
+  expect(await listbox.getByRole("option").count()).toBeGreaterThanOrEqual(35);
+
+  // Filtering is local and matches each approved field, including the full ID.
+  const requestCount = sessionRequests.length;
+  await query.fill("Alpha disambiguator");
+  await expect(listbox.getByRole("option")).toHaveCount(1);
+  await query.fill("careful");
+  await expect(listbox.getByRole("option")).toHaveCount(1);
+  await query.fill("session-duplicate-b");
+  await expect(listbox.getByRole("option")).toHaveCount(1);
+  expect(sessionRequests.length).toBe(requestCount);
+
+  // Duplicate primary titles remain distinct through their accessible metadata.
+  await query.fill("Duplicate title");
+  const duplicates = listbox.getByRole("option");
+  await expect(duplicates).toHaveCount(2);
+  const duplicateNames = await duplicates.evaluateAll((options) => options.map((option) => option.getAttribute("aria-label")));
+  expect(new Set(duplicateNames).size).toBe(2);
+
+  // All required movement keys update the one active descendant; Enter submits
+  // the exact opaque ID, not a derived DOM ID or visible short label.
+  await query.fill("");
+  await query.press("Home");
+  await expect(query).toHaveAttribute("aria-activedescendant", /^memory-session-option-/);
+  await query.press("End");
+  const lastActive = await query.getAttribute("aria-activedescendant");
+  await query.press("ArrowUp");
+  expect(await query.getAttribute("aria-activedescendant")).not.toBe(lastActive);
+  await query.press("ArrowDown");
+  expect(await query.getAttribute("aria-activedescendant")).toBe(lastActive);
+  await query.press("Enter");
+  await expect(page.locator("#memory-session")).toHaveValue("session-older");
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await expect(listbox.getByRole("option", { name: /Older archive/ })).toHaveAttribute("aria-selected", "true");
+
+  // Escape is non-committing; no-match filtering never clears the prior choice.
+  await query.fill("nothing can match this");
+  await expect(page.locator("#memory-session-no-matches")).toBeVisible();
+  await expect(page.locator("#memory-session")).toHaveValue("session-older");
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await expect(page.locator("#memory-session")).toHaveValue("session-older");
+
+  const refresh = page.waitForResponse((response) => response.url().includes("/api/v1/desk/memory/sessions"));
+  await page.evaluate(() => window.htmx.ajax("GET", "/api/v1/desk/memory/sessions", {
+    target: "#memory-session-field",
+    swap: "outerHTML",
+  }));
+  await refresh;
+  await expect(page.locator("#memory-session")).toHaveValue("session-older");
+  await expect(page.locator("#memory-session-trigger")).toHaveText("Older archive");
+
+  await trigger.click();
+  await page.getByRole("button", { name: "Clear selection", exact: true }).click();
+  await expect(page.locator("#memory-session")).toHaveValue("");
+  await expect(trigger).toHaveText("Select a conversation…");
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await expect(listbox).toBeVisible();
+  await page.locator("#memory-session-popover").scrollIntoViewIfNeeded();
+
+  const geometry = await page.locator("#memory-session-field").evaluate((field) => {
+    const panel = field.querySelector("#memory-session-popover");
+    const options = field.querySelector("#memory-session-options");
+    const nav = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+    const fieldBox = field.getBoundingClientRect();
+    const panelBox = panel?.getBoundingClientRect();
+    const optionsBox = options?.getBoundingClientRect();
+    return {
+      fieldWidth: fieldBox.width,
+      panelWidth: panelBox?.width || 0,
+      optionsHeight: optionsBox?.height || 0,
+      viewportHeight: window.innerHeight,
+      navTop: nav?.top ?? null,
+      panelBottom: panelBox?.bottom ?? null,
+    };
+  });
+  expect(geometry.panelWidth).toBeLessThanOrEqual(geometry.fieldWidth + 1);
+  expect(geometry.optionsHeight).toBeLessThanOrEqual(geometry.viewportHeight * 0.5 + 2);
+  await expectNoHorizontalOverflow(page);
+  if (["tablet", "mobile", "narrow"].includes(test.info().project.name) && geometry.navTop !== null) {
+    expect(geometry.panelBottom).toBeLessThanOrEqual(geometry.navTop + 1);
   }
 });
 
@@ -3884,6 +4000,17 @@ test("memory search status settles and never coexists with stale instructions", 
 
   const query = page.getByLabel("Search turns, summaries, and notes");
   const search = page.getByRole("button", { name: "Search memory", exact: true });
+
+  await page.route("**/api/v1/desk/memory?query=loading-check", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  await query.fill("loading-check");
+  const loadingResponse = page.waitForResponse((response) => response.url().includes("query=loading-check"));
+  await search.click();
+  await expect(status).toHaveText("Searching memory…");
+  await loadingResponse;
+  await page.unroute("**/api/v1/desk/memory?query=loading-check");
 
   // Settled results: the count replaces the initial instruction.
   await query.fill("release artifact");
@@ -3903,10 +4030,14 @@ test("memory search status settles and never coexists with stale instructions", 
   try {
     await query.fill("nothing matches this");
     await search.click();
-    await expect(status).toHaveText("No attributed memory matched that search.");
-    await expect(page.locator("#memory-results .waffle-fragment-empty")).toContainText(
-      "No attributed memory",
+    await expect(status).toHaveText("0 results");
+    await expect(page.locator("#memory-results h2")).toHaveText("No memory matched that search");
+    const emptyBody = page.locator("#memory-results .waffle-empty-state-copy p");
+    await expect(emptyBody).toHaveText(
+      "No attributed memory matched that search. Try a different phrase or add context through conversation.",
     );
+    expect((await page.locator("#memory-results").innerText()).split("No attributed memory matched that search.").length - 1).toBe(1);
+    await expect(page.locator("#memory-results .waffle-fragment-empty")).toHaveCount(0);
   } finally {
     await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
   }
@@ -3917,9 +4048,10 @@ test("memory search status settles and never coexists with stale instructions", 
     await query.fill("release artifact");
     await search.click();
     await expect(status).toHaveText("Memory search is unavailable right now.");
-    await expect(page.locator("#memory-results .waffle-fragment-empty")).toContainText(
-      "could not be completed",
+    await expect(page.locator("#memory-results .waffle-empty-state-copy h2")).toHaveText(
+      "Memory search could not be completed right now.",
     );
+    await expect(page.locator("#memory-results .waffle-empty-state-copy p")).toHaveText("Try again");
   } finally {
     await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
   }
@@ -3932,8 +4064,34 @@ test("memory search status settles and never coexists with stale instructions", 
     await expect(status).toHaveText(
       "1 result(s) — some memory sources are unavailable.",
     );
+    await expect(page.locator("#memory-results .memory-partial-warning")).toHaveText(
+      "Some memory sources are unavailable.",
+    );
   } finally {
     await page.request.post(`${baseURL}/api/v1/desk/test/memory-search`);
+  }
+
+  await query.fill("release artifact");
+  await search.click();
+  await expect(status).toHaveText("2 results");
+});
+
+test("memory session picker fails closed on endpoint error and retries without stale choices", async ({ page }) => {
+  await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?error=1`);
+  try {
+    allowDiagnostics("503", "Response Status Error Code 503");
+    allowExpectedResponse(503, "/api/v1/desk/memory/sessions");
+    await page.goto(deskURL("memory"));
+    await expect(page.locator("#memory-session-error")).toHaveText("Conversations could not be loaded.");
+    await expect(page.locator("#memory-session-trigger")).toHaveCount(0);
+    await expect(page.locator("#memory-session-options")).toHaveCount(0);
+
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?error=0`);
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.locator("#memory-session-trigger")).toBeVisible();
+    await expect(page.locator("#memory-session-options")).toHaveCount(1);
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/memory-sessions?error=0`);
   }
 });
 
@@ -3950,9 +4108,9 @@ test("memory search attaches one source and forgets only after confirmation", as
   const note = page.locator(".memory-hit").filter({ hasText: "a1b2c3" });
   await expect(note).toContainText("Use the verified release artifact.");
 
-  const picker = page.locator("#memory-session");
-  await expect(picker.locator("option[value='session-primary']")).toContainText(/Release review/);
-  await picker.selectOption("session-primary");
+  const picker = page.locator("#memory-session-trigger");
+  await picker.click();
+  await page.getByRole("option", { name: /Release review/ }).click();
   await note.getByRole("button", { name: "Attach to session", exact: true }).click();
   await expect(page.locator("#memory-attach-status")).toHaveText(
     "Memory reference attached to the session.",
@@ -4291,6 +4449,16 @@ test("200 percent zoom preserves keyboard-discoverable content", async ({ page }
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeAttached();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  await page.goto(deskURL("memory"));
+  await page.locator("#memory-session-trigger").click();
+  await expect(page.getByRole("combobox", { name: "Find a conversation" })).toBeFocused();
+  await expectNoHorizontalOverflow(page);
+  const pickerWidth = await page.locator("#memory-session-popover").evaluate((panel) => ({
+    panel: panel.getBoundingClientRect().width,
+    field: document.querySelector("#memory-session-field").getBoundingClientRect().width,
+  }));
+  expect(pickerWidth.panel).toBeLessThanOrEqual(pickerWidth.field + 1);
 });
 
 function deskURL(section) {
