@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.3](https://github.com/matt-riley/waffle/compare/v0.30.2...v0.30.3) (2026-08-19)
+
+
+### Bug Fixes
+
+* **deps:** update module charm.land/lipgloss/v2 to v2.0.6 ([#555](https://github.com/matt-riley/waffle/issues/555)) ([f3c23f8](https://github.com/matt-riley/waffle/commit/f3c23f8823e658242ca91ee1b1ec25520c54953a))
+* **deps:** update module github.com/charmbracelet/x/ansi to v0.11.8 ([#556](https://github.com/matt-riley/waffle/issues/556)) ([a3a2886](https://github.com/matt-riley/waffle/commit/a3a2886c1912dd855143835ea77260a9fe83e610))
+
 ## [0.30.2](https://github.com/matt-riley/waffle/compare/v0.30.1...v0.30.2) (2026-08-18)
 
 
