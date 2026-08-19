@@ -552,7 +552,7 @@ function updateControls() {
   }
   for (const control of [elements.projectPin, elements.projectAddNote]) {
     if (control) {
-      control.disabled = !idle;
+      control.disabled = !idle || !state.projectWorkspaceID;
     }
   }
   updateTurnActionAvailability();
@@ -1573,45 +1573,49 @@ function setCanvasTab(tab, focus = false) {
   }
 }
 
+function isRenderedNode(node, boundary = null) {
+  if (!node?.isConnected) {
+    return false;
+  }
+  for (
+    let current = node;
+    current;
+    current = current.parentElement || current.parentNode
+  ) {
+    if (current.hidden || current.getAttribute?.("aria-hidden") === "true") {
+      return false;
+    }
+    if (
+      typeof globalThis.getComputedStyle === "function" &&
+      typeof current.getAttribute === "function"
+    ) {
+      const style = globalThis.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden") {
+        return false;
+      }
+    }
+    if (current === boundary) {
+      break;
+    }
+  }
+  if (typeof globalThis.getComputedStyle === "function") {
+    const rect = node.getBoundingClientRect?.();
+    if (rect && rect.width === 0 && rect.height === 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function canvasFocusables() {
   if (!elements.canvas) {
     return [];
   }
-  const candidates = ["button", "input", "select", "textarea", "a"].flatMap(
-    (selector) => [...elements.canvas.querySelectorAll(selector)],
-  );
-  const isRendered = (node) => {
-    for (
-      let current = node;
-      current;
-      current = current.parentElement || current.parentNode
-    ) {
-      if (
-        current.hidden ||
-        current.getAttribute?.("aria-hidden") === "true"
-      ) {
-        return false;
-      }
-      if (typeof globalThis.getComputedStyle === "function") {
-        const style = globalThis.getComputedStyle(current);
-        if (style.display === "none" || style.visibility === "hidden") {
-          return false;
-        }
-      }
-      if (current === elements.canvas) {
-        break;
-      }
-    }
-    if (typeof globalThis.getComputedStyle === "function") {
-      const rect = node.getBoundingClientRect?.();
-      if (rect && rect.width === 0 && rect.height === 0) {
-        return false;
-      }
-    }
-    return true;
-  };
+  const candidates = [
+    ...elements.canvas.querySelectorAll("button, input, select, textarea, a"),
+  ];
   return [...new Set(candidates)].filter((node) => {
-    if (node.disabled || node.hidden || !isRendered(node)) {
+    if (node.disabled || node.hidden || !isRenderedNode(node, elements.canvas)) {
       return false;
     }
     if (node.tagName === "INPUT" && node.type === "hidden") {
@@ -1624,6 +1628,30 @@ function canvasFocusables() {
 function clearSessionScopedCanvas() {
   state.projectWorkspaceID = "";
   state.canvasArtifact = null;
+  for (const [node, label] of [
+    [elements.usage, "Usage"],
+    [elements.permissions, "Permissions"],
+    [elements.workset, "Working set"],
+    [elements.help, "Commands"],
+    [elements.project, "Project context"],
+  ]) {
+    if (!node) {
+      continue;
+    }
+    clearNode(node);
+    node.classList.remove("is-error");
+    node.textContent = `${label} is loading for this conversation.`;
+  }
+  for (const input of [
+    elements.projectPath,
+    elements.projectNoteName,
+    elements.projectNote,
+  ]) {
+    if (input) {
+      input.value = "";
+    }
+  }
+  updateControls();
   if (elements.canvasArtifactTab) {
     elements.canvasArtifactTab.hidden = true;
   }
@@ -1673,7 +1701,9 @@ function closeCanvas() {
   }
   elements.shell?.removeAttribute("data-canvas");
   elements.canvasToggle?.setAttribute("aria-expanded", "false");
-  const opener = state.canvasOpener || elements.canvasToggle;
+  const opener = isRenderedNode(state.canvasOpener)
+    ? state.canvasOpener
+    : elements.canvasToggle;
   state.canvasOpener = null;
   opener?.focus?.({ preventScroll: true });
 }
@@ -3702,6 +3732,17 @@ function closeSessionsList() {
   syncSessionRailVisibility();
 }
 
+function revealConversationFilter() {
+  if (isCompactViewport()) {
+    if (state.canvasOpen || elements.canvas?.hidden === false) {
+      closeCanvas();
+    }
+    openSessionsList({ opener: elements.conversationsOpen });
+    return;
+  }
+  elements.sessionFilter?.focus?.();
+}
+
 function renderSessions(sessions) {
   state.sessionsList.items = Array.isArray(sessions) ? sessions : [];
   state.sessionsList.loaded = true;
@@ -4352,12 +4393,15 @@ async function refreshProjectContext(hydration = null) {
     clearNode(elements.project);
     elements.project.classList.remove("is-error");
     if (!workspace) {
+      state.projectWorkspaceID = "";
+      updateControls();
       elements.project.textContent =
         "This conversation has no open workspace, so project context is unavailable.";
       return;
     }
     const workspaceID = workspace.id || "";
     state.projectWorkspaceID = workspaceID;
+    updateControls();
     const response = await fetch(
       `/api/v1/desk/projects/${encodeURIComponent(workspaceID)}/resources?session_id=${encodeURIComponent(sessionID)}`,
       { credentials: "same-origin", cache: "no-store" },
@@ -4379,6 +4423,8 @@ async function refreshProjectContext(hydration = null) {
     if (!current() || !elements.project) {
       return;
     }
+    state.projectWorkspaceID = "";
+    updateControls();
     clearNode(elements.project);
     elements.project.classList.add("is-error");
     elements.project.textContent =
@@ -5071,6 +5117,10 @@ if (elements.form) {
     button?.addEventListener("click", () => setCanvasTab(tab, true));
   }
   document.addEventListener?.("keydown", handleCanvasKeydown);
+  document.addEventListener?.(
+    "waffle:find-conversation",
+    revealConversationFilter,
+  );
   globalThis.addEventListener?.("resize", () => {
     syncCanvasViewport();
     if (elements.sessionRail) {

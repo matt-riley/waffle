@@ -376,7 +376,7 @@ test("failed bootstrap marks the rail disconnected", async () => {
 
 test("Today palette keeps Ctrl/Cmd+K global and offers a conversation-filter focus command", () => {
   assert.match(source, /Find a conversation/);
-  assert.match(source, /desk-session-filter/);
+  assert.match(source, /waffle:find-conversation/);
   assert.match(source, /ctrlKey|metaKey/);
 });
 

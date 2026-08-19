@@ -323,16 +323,9 @@ const palette = (() => {
           {
             label: "Find a conversation",
             hint: "today",
-            run: () => {
-              const filter = document.querySelector("#desk-session-filter");
-              const drawer = document.querySelector("#desk-sessions");
-              const opener = document.querySelector("#desk-conversations-open");
-              if (drawer?.hidden && opener && !opener.hidden) {
-                opener.click();
-                return;
-              }
-              filter?.focus?.();
-            },
+            run: () => document.dispatchEvent(
+              new CustomEvent("waffle:find-conversation"),
+            ),
           },
           { label: "Export conversation", hint: "today", run: () => run(document.querySelector("#desk-export")) },
           { label: "Schedule this draft", hint: "today", run: () => run(document.querySelector("#desk-schedule-draft")) },

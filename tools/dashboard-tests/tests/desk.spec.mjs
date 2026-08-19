@@ -3813,6 +3813,11 @@ test("Task 4: Split Kiln crosses the exact breakpoint with a true split and view
   expect(overlay.canvas.top).toBeGreaterThan(0);
   expect(overlay.canvas.bottom).toBeLessThanOrEqual(overlay.viewport.height);
 
+  await page.getByRole("tab", { name: "Session" }).click();
+  await page.locator("#desk-posture-open").focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#desk-canvas-close")).toBeFocused();
+
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator("#desk-canvas-close").focus();
   await page.keyboard.press("Shift+Tab");
@@ -3854,14 +3859,27 @@ test("Task 4: palette Find a conversation reveals the compact drawer before focu
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(deskURL("today"));
   await expect(page.locator("#desk-phase")).toHaveText("Ready");
+  await page.locator("#desk-context-toggle").click();
+  await expect(page.locator("#desk-canvas-drawer")).toBeVisible();
   await page.locator("#palette-open").click();
   await page.locator("#palette-search").fill("Find a conversation");
   const command = page.getByRole("option", { name: /Find a conversation/i });
   await expect(command).toBeVisible();
   await command.click();
   await expect(page.locator("#command-palette")).toBeHidden();
+  await expect(page.locator("#desk-canvas-drawer")).toBeHidden();
   await expect(page.locator("#desk-sessions")).toBeVisible();
-  await expect(page.locator("#desk-session-filter")).toBeFocused();
+  const filter = page.locator("#desk-session-filter");
+  await expect(filter).toBeFocused();
+  await expect(filter).toBeInViewport();
+  expect(await filter.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const topmost = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return topmost === element || element.contains(topmost);
+  })).toBe(true);
 });
 
 test("Task 4: mobile Conversations drawer clears the composer, bottom tabs, and Escape focus", async ({ page }) => {

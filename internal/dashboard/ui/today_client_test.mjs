@@ -35,6 +35,7 @@ class FakeElement {
     this.selected = false;
     this.attributes = new Map();
     this.style = {};
+    this.isConnected = true;
     this.scrollTop = 0;
     this.rect = { top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 };
     this._scrollHeight = null;
@@ -87,7 +88,17 @@ class FakeElement {
 
   set textContent(value) {
     this._textContent = String(value);
+    for (const child of this.childNodes) {
+      child.setConnected(false);
+    }
     this.childNodes = [];
+  }
+
+  setConnected(connected) {
+    this.isConnected = connected;
+    for (const child of this.childNodes) {
+      child.setConnected(connected);
+    }
   }
 
   append(...children) {
@@ -101,6 +112,7 @@ class FakeElement {
       child.remove();
     }
     child.parentNode = this;
+    child.setConnected(this.isConnected);
     this.childNodes.push(child);
     return child;
   }
@@ -114,12 +126,14 @@ class FakeElement {
       return this.appendChild(child);
     }
     child.parentNode = this;
+    child.setConnected(this.isConnected);
     this.childNodes.splice(index, 0, child);
     return child;
   }
 
   remove() {
     if (!this.parentNode) {
+      this.setConnected(false);
       return;
     }
     const index = this.parentNode.childNodes.indexOf(this);
@@ -127,6 +141,7 @@ class FakeElement {
       this.parentNode.childNodes.splice(index, 1);
     }
     this.parentNode = null;
+    this.setConnected(false);
   }
 
   hasChildNodes() {
@@ -163,14 +178,15 @@ class FakeElement {
   }
 
   querySelectorAll(selector) {
+    const selectors = selector.split(",").map((value) => value.trim());
     const matches = [];
     const visit = (node) => {
       for (const child of node.childNodes) {
-        if (
-          (selector.startsWith(".") &&
-            child.className.split(/\s+/).includes(selector.slice(1))) ||
-          (!selector.startsWith(".") && child.tagName === selector.toUpperCase())
-        ) {
+        if (selectors.some((candidate) =>
+          (candidate.startsWith(".") &&
+            child.className.split(/\s+/).includes(candidate.slice(1))) ||
+          (!candidate.startsWith(".") && child.tagName === candidate.toUpperCase())
+        )) {
           matches.push(child);
         }
         visit(child);
@@ -453,6 +469,12 @@ function createHarness({
       const listeners = this.listeners.get(type) || [];
       listeners.push(listener);
       this.listeners.set(type, listeners);
+    },
+    dispatchEvent(event) {
+      for (const listener of this.listeners.get(event.type) || []) {
+        listener(event);
+      }
+      return true;
     },
     listener(type) {
       return this.listeners.get(type)?.[0];
@@ -5487,6 +5509,103 @@ test("panel hydration ignores a stale response after switching sessions", async 
   assert.match(harness.elements["#desk-usage"].textContent, /new-session/);
 });
 
+test("session switch synchronously clears every old canvas panel and project action", async () => {
+  const nextPanel = deferred();
+  const nextWorkspace = deferred();
+  let switched = false;
+  let workspaceCalls = 0;
+  const harness = createHarness({
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [{ id: "session-b", title: "Session B", updated_at: "2026-08-19T12:00:00Z" }],
+        });
+      }
+      if (command.name === "resume") {
+        switched = true;
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-b", title: "Session B" }),
+        });
+      }
+      if (switched) {
+        return command.name === "usage" ? nextPanel.promise : jsonResponse({});
+      }
+      if (command.name === "usage") {
+        return jsonResponse({ usage: [{ period: "session-a-usage", requests: 1 }] });
+      }
+      if (command.name === "permissions") {
+        return jsonResponse({ permissions: { sandbox_mode: "session-a-permissions" } });
+      }
+      if (command.name === "workset") {
+        return jsonResponse({ workset: [{ id: "session-a-workset", text: "old" }] });
+      }
+      if (command.name === "help") {
+        return jsonResponse({ commands: [{ name: "old", usage: "/session-a-help" }] });
+      }
+      return jsonResponse({});
+    },
+    workspacesHandler: async () => {
+      workspaceCalls += 1;
+      if (workspaceCalls === 1) {
+        return jsonResponse({
+          workspaces: [{ id: "workspace-a", session: "session-1", status: "open" }],
+        });
+      }
+      return nextWorkspace.promise;
+    },
+    projectHandler: async ({ path }) => {
+      if (path.includes("workspace-a") && path.includes("/resources")) {
+        return jsonResponse({
+          resources: [{ id: "resource-a", name: "Session A note", kind: "note", attached: false }],
+        });
+      }
+      return jsonResponse({ resources: [] });
+    },
+  });
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+  assert.match(harness.elements["#desk-project"].textContent, /Session A note/);
+  assert.equal(
+    harness.elements["#desk-project"].querySelectorAll("button").length,
+    1,
+    "Session A starts with an actionable resource",
+  );
+
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  row.querySelector(".session-choice").listener("click")();
+  await flush();
+
+  assert.equal(harness.elements["#desk-session-title"].textContent, "Session B");
+  for (const [selector, marker] of [
+    ["#desk-usage", "session-a-usage"],
+    ["#desk-permissions", "session-a-permissions"],
+    ["#desk-workset", "session-a-workset"],
+    ["#desk-help", "session-a-help"],
+    ["#desk-project", "Session A note"],
+  ]) {
+    assert.doesNotMatch(
+      harness.elements[selector].textContent,
+      new RegExp(marker),
+      `${selector} is cleared before Session B hydration settles`,
+    );
+  }
+  assert.equal(
+    harness.elements["#desk-project"].querySelectorAll("button").length,
+    0,
+    "Session A resource actions are removed",
+  );
+  assert.equal(harness.elements["#desk-project-pin"].disabled, true);
+  assert.equal(harness.elements["#desk-project-add-note"].disabled, true);
+
+  nextPanel.resolve(jsonResponse({ usage: [] }));
+  nextWorkspace.resolve(jsonResponse({ workspaces: [] }));
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+});
+
 test("canvas opens as a named surface, selects safe artifacts, and restores focus without stealing higher-priority Escape", async () => {
   const harness = createHarness({
     openHandler: async () =>
@@ -5586,4 +5705,124 @@ test("canvas opens as a named surface, selects safe artifacts, and restores focu
   harness.elements["#desk-canvas-close"].listener("click")();
   assert.equal(canvas.hidden, true);
   assert.equal(toggle.focused, true);
+});
+
+test("canvas modal Tab wraps after the Session posture control in DOM order", async () => {
+  const harness = createHarness({ viewportWidth: 1099 });
+  await flush();
+
+  const canvas = harness.elements["#desk-canvas-drawer"];
+  const close = harness.elements["#desk-canvas-close"];
+  const session = harness.elements["#desk-canvas-session"];
+  for (const selector of [
+    "#desk-canvas-close",
+    "#desk-canvas-tab-artifact",
+    "#desk-canvas-tab-session",
+    "#desk-canvas-tab-diagnostics",
+    "#desk-canvas-tab-project",
+  ]) {
+    harness.elements[selector].tagName = "BUTTON";
+  }
+  const exportFormat = new FakeElement("select");
+  const posture = new FakeElement("button");
+  session.append(exportFormat, posture);
+
+  harness.elements["#desk-context-toggle"].listener("click")();
+  posture.focus();
+  close.focused = false;
+  let prevented = false;
+  harness.document.listener("keydown")({
+    key: "Tab",
+    shiftKey: false,
+    defaultPrevented: false,
+    preventDefault() {
+      prevented = true;
+    },
+  });
+
+  assert.equal(canvas.getAttribute("aria-modal"), "true");
+  assert.equal(prevented, true, "Tab is trapped after the actual last visible control");
+  assert.equal(close.focused, true, "focus wraps to the first control in DOM order");
+});
+
+test("closing canvas falls back to the context toggle when an artifact opener was detached by a session switch", async () => {
+  const harness = createHarness({
+    openHandler: async () =>
+      jsonResponse({
+        client_id: "client-1",
+        reattach_token: "lease-1",
+        state: defaultChatState({
+          history: [{
+            role: "assistant",
+            blocks: [{
+              type: "tool_result",
+              tool_result: {
+                blocks: [{
+                  type: "artifact",
+                  artifact: {
+                    id: "artifact-a",
+                    name: "session-a.md",
+                    media_type: "text/markdown",
+                    size: 10,
+                    state: "available",
+                  },
+                }],
+              },
+            }],
+          }],
+        }),
+      }),
+    commandHandler: async ({ options }) => {
+      const { command } = JSON.parse(options.body);
+      if (command.name === "sessions") {
+        return jsonResponse({
+          sessions: [{ id: "session-b", title: "Session B", updated_at: "2026-08-19T12:00:00Z" }],
+        });
+      }
+      if (command.name === "resume") {
+        return jsonResponse({
+          state: defaultChatState({ session_id: "session-b", title: "Session B" }),
+        });
+      }
+      return jsonResponse({ permissions: {}, workset: [], commands: [], usage: [] });
+    },
+  });
+  for (let index = 0; index < 6; index += 1) {
+    await flush();
+  }
+
+  const opener = harness.elements["#desk-transcript"].querySelector(".artifact-open-canvas");
+  opener.listener("click")();
+  const row = harness.elements["#desk-session-options"].querySelector(".session-row");
+  row.querySelector(".session-choice").listener("click")();
+  for (let index = 0; index < 4; index += 1) {
+    await flush();
+  }
+  assert.equal(opener.isConnected, false, "the old transcript action is detached");
+
+  const toggle = harness.elements["#desk-context-toggle"];
+  opener.focused = false;
+  toggle.focused = false;
+  harness.elements["#desk-canvas-close"].listener("click")();
+
+  assert.equal(opener.focused, false, "focus is not sent to a detached artifact action");
+  assert.equal(toggle.focused, true, "the stable canvas toggle receives restored focus");
+});
+
+test("Find conversation event closes the compact canvas before revealing and focusing history", async () => {
+  const harness = createHarness({ mobileViewport: true });
+  await flush();
+
+  const canvas = harness.elements["#desk-canvas-drawer"];
+  const sessions = harness.elements["#desk-sessions"];
+  const filter = harness.elements["#desk-session-filter"];
+  harness.elements["#desk-context-toggle"].listener("click")();
+  assert.equal(canvas.hidden, false);
+  assert.equal(sessions.hidden, true);
+
+  harness.document.dispatchEvent({ type: "waffle:find-conversation" });
+
+  assert.equal(canvas.hidden, true, "the higher canvas layer is closed first");
+  assert.equal(sessions.hidden, false, "compact history is revealed");
+  assert.equal(harness.document.activeElement, filter, "the now-visible filter receives focus");
 });
