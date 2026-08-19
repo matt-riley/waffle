@@ -21,16 +21,19 @@ const (
 	MemorySourceSummary = "summary"
 	MemorySourceTurn    = "turn"
 
-	MemorySearchLimit        = 20
-	MemorySessionPickerLimit = 50
-	MemoryQueryMaxBytes      = 1024
-	MemoryExcerptMaxBytes    = 512
-	MemoryForgetPreviewTTL   = 60 * time.Second
-	MemoryForgetOperation    = "memory-forget"
-	MemoryAttachedEvent      = "memory.attached"
-	MemoryForgottenEvent     = "memory.forgotten"
-	MemoryForgetScope        = "Affects Waffle-owned memory only."
-	memorySourceLabelMaxLen  = 256
+	MemorySearchLimit             = 20
+	MemorySessionPickerLimit      = 50
+	MemoryQueryMaxBytes           = 1024
+	MemoryExcerptMaxBytes         = 512
+	MemoryForgetPreviewTTL        = 60 * time.Second
+	MemoryForgetOperation         = "memory-forget"
+	MemoryAttachedEvent           = "memory.attached"
+	MemoryForgottenEvent          = "memory.forgotten"
+	MemoryForgetScope             = "Affects Waffle-owned memory only."
+	memorySourceLabelMaxLen       = 256
+	memorySessionLabelMaxLen      = 256
+	memorySessionSummaryMaxLen    = 256
+	memorySessionModelAliasMaxLen = 64
 )
 
 var (
@@ -66,10 +69,12 @@ type MemoryAttachRequest struct {
 // MemorySessionChoice is one eligible persisted session for the memory attach
 // picker: a human-readable label plus the opaque identifier as the value.
 type MemorySessionChoice struct {
-	ID        string    `json:"id"`
-	Label     string    `json:"label"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	Pinned    bool      `json:"pinned,omitempty"`
+	ID         string    `json:"id"`
+	Label      string    `json:"label"`
+	Summary    string    `json:"summary,omitempty"`
+	ModelAlias string    `json:"model_alias,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Pinned     bool      `json:"pinned,omitempty"`
 }
 
 // sessionLister is the optional SessionStore capability that powers the
@@ -200,21 +205,29 @@ func (s *MemoryService) ListSessions(ctx context.Context, limit int) ([]MemorySe
 	if !ok {
 		return nil, fmt.Errorf("%w: sessions", ErrMemoryUnavailable)
 	}
+	if limit <= 0 || limit > MemorySessionPickerLimit {
+		limit = MemorySessionPickerLimit
+	}
 	sessions, err := lister.List(ctx, limit)
 	if err != nil {
 		return nil, fmt.Errorf("%w: sessions", ErrMemoryUnavailable)
 	}
+	if len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
 	choices := make([]MemorySessionChoice, 0, len(sessions))
 	for _, value := range sessions {
-		title := strings.TrimSpace(value.Title)
+		title := safeMemorySessionText(value.Title, memorySessionLabelMaxLen)
 		if title == "" {
 			title = "Untitled conversation"
 		}
 		choices = append(choices, MemorySessionChoice{
-			ID:        value.ID,
-			Label:     title,
-			UpdatedAt: value.UpdatedAt,
-			Pinned:    value.Pinned,
+			ID:         value.ID,
+			Label:      title,
+			Summary:    safeMemorySessionText(value.Summary, memorySessionSummaryMaxLen),
+			ModelAlias: safeMemorySessionText(value.ModelAlias, memorySessionModelAliasMaxLen),
+			UpdatedAt:  value.UpdatedAt,
+			Pinned:     value.Pinned,
 		})
 	}
 	return choices, nil
@@ -471,6 +484,11 @@ func safeMemoryExcerpt(value string) string {
 func safeMemoryLabel(value string) string {
 	value = strings.ToValidUTF8(value, "\uFFFD")
 	return textcut.Cut(memory.OneLine(sanitizeDashboardString(value)), memorySourceLabelMaxLen)
+}
+
+func safeMemorySessionText(value string, maxLen int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	return textcut.Cut(memory.OneLine(sanitizeDashboardString(value)), maxLen)
 }
 
 func memorySessionProvenance(sessionID string) string {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -533,5 +534,107 @@ func TestCapabilitySummaries(t *testing.T) {
 	})
 	if conns != "1 connections · 1 healthy" {
 		t.Fatalf("connections summary = %q", conns)
+	}
+}
+
+func TestMemoryZeroFragmentHasOneStructuredVisibleExplanationAndOneLiveOwner(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/memory?query=nothing", nil)
+	component := fragmentComponent(request, http.StatusOK, MemorySearchResponse{Query: "nothing"})
+	var rendered bytes.Buffer
+	if err := component.Render(request.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	if got := strings.Count(body, "No attributed memory matched that search."); got != 1 {
+		t.Fatalf("zero explanation count = %d, want 1: %s", got, body)
+	}
+	for _, want := range []string{
+		"No memory matched that search",
+		"No attributed memory matched that search. Try a different phrase or add context through conversation.",
+		"waffle-empty-curious.png",
+		">0 results</p>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("zero fragment missing %q: %s", want, body)
+		}
+	}
+	if strings.Count(body, `id="memory-status"`) != 1 || strings.Count(body, `id="memory-results"`) != 1 {
+		t.Fatalf("zero fragment duplicated stable IDs: %s", body)
+	}
+	if !strings.Contains(body, `id="memory-status"`) || !strings.Contains(body, `aria-live="polite"`) {
+		t.Fatalf("memory status lost its polite live-region owner: %s", body)
+	}
+	resultsStart := strings.Index(body, `id="memory-results"`)
+	resultsEnd := strings.Index(body[resultsStart:], ">")
+	if resultsStart < 0 || resultsEnd < 0 || strings.Contains(body[resultsStart:resultsStart+resultsEnd+1], "aria-live") {
+		t.Fatalf("memory results became a second live owner: %s", body)
+	}
+}
+
+func TestMemorySessionFragmentUsesEscapedSafeChoiceDataAndErrorRecovery(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/memory/sessions", nil)
+	choice := MemorySessionChoice{ID: "session-full-id-1234567890", Label: "<Duplicate title>", Summary: "Summary & context", ModelAlias: "model/alias", UpdatedAt: time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC), Pinned: true}
+	component := fragmentComponent(request, http.StatusOK, MemorySessionsResponse{Choices: []MemorySessionChoice{choice}})
+	var rendered bytes.Buffer
+	if err := component.Render(request.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, want := range []string{
+		`id="memory-session"`,
+		`type="hidden"`,
+		`data-session-id="session-full-id-1234567890"`,
+		`data-session-summary="Summary &amp; context"`,
+		`data-session-model-alias="model/alias"`,
+		"Duplicate title",
+		`data-session-pinned="true"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("session picker fragment missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "<select") || strings.Contains(body, ">session-full-id-1234567890<") {
+		t.Fatalf("session picker exposed a native select or full ID as primary text: %s", body)
+	}
+
+	errorComponent := fragmentComponent(request, http.StatusServiceUnavailable, errorResponse{Code: "memory_unavailable", Message: "memory request could not be completed"})
+	rendered.Reset()
+	if err := errorComponent.Render(request.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	errorBody := rendered.String()
+	for _, want := range []string{`id="memory-session-field"`, "Conversations could not be loaded.", "Try again", `id="memory-session"`} {
+		if !strings.Contains(errorBody, want) {
+			t.Errorf("session picker error missing %q: %s", want, errorBody)
+		}
+	}
+}
+
+func TestMemoryPartialFragmentKeepsHealthyCardsAndOneNonLiveWarning(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8422/api/v1/desk/memory?query=healthy", nil)
+	component := fragmentComponent(request, http.StatusOK, MemorySearchResponse{
+		Query:  "healthy",
+		Hits:   []MemoryHit{{Source: MemorySourceSummary, SourceID: "summary-1", Excerpt: "Healthy result"}},
+		Errors: []*SectionError{newSectionError("notes", errors.New("notes unavailable"))},
+	})
+	var rendered bytes.Buffer
+	if err := component.Render(request.Context(), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, want := range []string{
+		"Healthy result",
+		"1 result(s) — some memory sources are unavailable.",
+		`class="memory-partial-warning"`,
+		"Some memory sources are unavailable.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("partial fragment missing %q: %s", want, body)
+		}
+	}
+	resultsStart := strings.Index(body, `id="memory-results"`)
+	resultsEnd := strings.Index(body[resultsStart:], ">")
+	if strings.Contains(body, "No memory matched that search") || resultsStart < 0 || resultsEnd < 0 || strings.Contains(body[resultsStart:resultsStart+resultsEnd+1], `aria-live="polite"`) {
+		t.Fatalf("partial fragment rendered an empty/live result region: %s", body)
 	}
 }

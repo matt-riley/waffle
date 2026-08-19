@@ -624,6 +624,13 @@
 		});
 	}
 
+	function isMemorySearchRequest(detail) {
+		const path = detail?.requestConfig?.path || detail?.pathInfo?.requestPath || "";
+		return detail?.elt?.id === "memory-search-form" &&
+			String(path).includes("/api/v1/desk/memory") &&
+			!String(path).includes("/sessions");
+	}
+
 	function filterCatalogue() {
 		const search = document.querySelector("#capability-catalogue-search");
 		const results = document.querySelector("#capability-catalogue-results");
@@ -696,6 +703,19 @@
 		setRestartControlsDisabled(true);
 		void pollRestart();
 	}
+
+	document.body.addEventListener("htmx:beforeRequest", (event) => {
+		if (!isMemorySearchRequest(event.detail)) return;
+		const status = document.querySelector("#memory-status");
+		const results = document.querySelector("#memory-results");
+		if (status) status.textContent = "Searching memory…";
+		if (results) results.setAttribute("aria-busy", "true");
+	});
+
+	document.body.addEventListener("htmx:afterRequest", (event) => {
+		if (!isMemorySearchRequest(event.detail)) return;
+		document.querySelector("#memory-results")?.removeAttribute("aria-busy");
+	});
 
 	document.body.addEventListener("htmx:configRequest", (event) => {
     const detail = event.detail || {};

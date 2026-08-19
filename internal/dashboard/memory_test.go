@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -388,9 +389,16 @@ type memorySessionStore struct {
 	turns        []session.Hit
 	summaries    []session.Hit
 	get          map[string]*session.Session
+	listed       []session.Session
+	listLimit    int
 	err          error
 	turnsErr     error
 	summariesErr error
+}
+
+func (s *memorySessionStore) List(_ context.Context, limit int) ([]session.Session, error) {
+	s.listLimit = limit
+	return append([]session.Session(nil), s.listed...), nil
 }
 
 func (s *memorySessionStore) Get(_ context.Context, id string) (*session.Session, error) {
@@ -516,7 +524,7 @@ func TestMemorySearchStatusMessages(t *testing.T) {
 	}{
 		{name: "results", hits: 3, want: "3 results"},
 		{name: "single", hits: 1, want: "1 result"},
-		{name: "none", hits: 0, want: "No attributed memory matched that search."},
+		{name: "none", hits: 0, want: "0 results"},
 		{name: "partial", hits: 2, errs: errs, want: "2 result(s) — some memory sources are unavailable."},
 		{name: "total failure", hits: 0, errs: errs, want: "Memory search is unavailable right now."},
 	}
@@ -526,5 +534,55 @@ func TestMemorySearchStatusMessages(t *testing.T) {
 				t.Fatalf("memoryStatusMessage(%d, %v) = %q, want %q", tc.hits, tc.errs != nil, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMemoryListSessionsCapsAndSanitizesTheSafePickerProjection(t *testing.T) {
+	sessions := make([]session.Session, 0, 60)
+	for index := range 60 {
+		sessions = append(sessions, session.Session{
+			ID:         fmt.Sprintf("session-%02d", index),
+			Title:      "Release review",
+			Summary:    "summary\n" + strings.Repeat("x", 400),
+			ModelAlias: "model\t" + strings.Repeat("y", 120),
+			UpdatedAt:  time.Date(2026, 8, 19, 12, index, 0, 0, time.UTC),
+			Pinned:     index == 0,
+		})
+	}
+	lister := &memorySessionStore{listed: sessions}
+	service := NewMemoryService(&Operations{Sessions: lister}, memory.Workspace{})
+
+	choices, err := service.ListSessions(context.Background(), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lister.listLimit != MemorySessionPickerLimit {
+		t.Fatalf("List limit = %d, want %d", lister.listLimit, MemorySessionPickerLimit)
+	}
+	if len(choices) != MemorySessionPickerLimit {
+		t.Fatalf("choices = %d, want cap %d", len(choices), MemorySessionPickerLimit)
+	}
+	if choices[0].ID != "session-00" || !choices[0].Pinned {
+		t.Fatalf("first choice = %#v, want the pinned newest-first record", choices[0])
+	}
+	encoded, err := json.Marshal(choices[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projection map[string]any
+	if err := json.Unmarshal(encoded, &projection); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []struct {
+		name string
+		max  int
+	}{
+		{name: "summary", max: 256},
+		{name: "model_alias", max: 64},
+	} {
+		value, ok := projection[field.name].(string)
+		if !ok || strings.ContainsAny(value, "\n\r\t") || len(value) > field.max {
+			t.Fatalf("unsafe %s projection = %#v", field.name, projection[field.name])
+		}
 	}
 }

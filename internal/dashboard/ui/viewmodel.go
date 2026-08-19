@@ -171,12 +171,19 @@ type FragmentTextSwap struct {
 // memory attach picker (#459). The label is human-readable; the opaque
 // identifier is only the form value.
 type MemorySessionOption struct {
-	ID    string
-	Label string
+	ID         string
+	Label      string
+	Summary    string
+	ModelAlias string
+	UpdatedAt  string
+	Pinned     bool
 }
 
 type MemorySessionPickerView struct {
 	Choices []MemorySessionOption
+	Loading bool
+	Error   bool
+	Load    bool
 }
 
 type FragmentFilter struct {

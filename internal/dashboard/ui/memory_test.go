@@ -21,6 +21,7 @@ func TestMemoryRendersSearchAttachConversationAndCancelFirstDialog(t *testing.T)
 		`id="memory-search-form"`,
 		`id="memory-query"`,
 		`id="memory-session"`,
+		`id="memory-session-trigger"`,
 		`id="memory-results"`,
 		`id="memory-status"`,
 		`id="memory-forget-dialog"`,
@@ -32,6 +33,18 @@ func TestMemoryRendersSearchAttachConversationAndCancelFirstDialog(t *testing.T)
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("Memory view missing %q", required)
+		}
+	}
+	if strings.Contains(body, "<select") || !strings.Contains(body, `id="memory-session" name="session_id" type="hidden"`) {
+		t.Fatalf("Memory view does not expose the required hidden exact-ID session field: %s", body)
+	}
+	var picker bytes.Buffer
+	if err := MemorySessionPicker(MemorySessionPickerView{Choices: []MemorySessionOption{{ID: "session-1", Label: "Release review"}}}).Render(context.Background(), &picker); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`id="memory-session-query"`, `id="memory-session-options"`, `role="listbox"`, `id="memory-session-clear"`} {
+		if !strings.Contains(picker.String(), required) {
+			t.Errorf("populated Memory picker missing %q: %s", required, picker.String())
 		}
 	}
 	// Results list must not announce full re-renders.
