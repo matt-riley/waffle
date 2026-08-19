@@ -1,8 +1,18 @@
-import {
+export function sessionPresentationURL(moduleURL) {
+  const presentationURL = new URL("./session-presentation.mjs", moduleURL);
+  const version = new URL(moduleURL).searchParams.get("v");
+  if (version) {
+    presentationURL.searchParams.set("v", version);
+  }
+  return presentationURL;
+}
+
+const presentationURL = sessionPresentationURL(import.meta.url);
+const {
   presentSessions,
   sessionAccessibleLabel,
   sessionTitle,
-} from "./session-presentation.mjs";
+} = await import(presentationURL.href);
 
 const sessionEndpoint = "/api/v1/desk/memory/sessions";
 
@@ -43,17 +53,46 @@ function sessionChoices(field) {
   })).filter((choice) => choice.id);
 }
 
+export function sessionAccessibleLabels(sessions) {
+  const values = Array.isArray(sessions) ? sessions : [];
+  const labels = values.map(sessionAccessibleLabel);
+  const counts = new Map();
+  for (const label of labels) {
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+
+  // Keep a unique base label untouched, but reserve every such label before
+  // adding ordinal suffixes so a user-authored title cannot collide with one.
+  const used = new Set(labels.filter((label) => counts.get(label) === 1));
+  const occurrences = new Map();
+  return labels.map((label, index) => {
+    const total = counts.get(label) || 0;
+    if (total === 1) return label;
+
+    const occurrence = (occurrences.get(label) || 0) + 1;
+    occurrences.set(label, occurrence);
+    let candidate = `${label} · conversation ${occurrence} of ${total}`;
+    let attempt = 0;
+    while (used.has(candidate)) {
+      attempt += 1;
+      candidate = `${label} · conversation ${occurrence} of ${total} · picker item ${index + 1}${attempt > 1 ? ` (${attempt})` : ""}`;
+    }
+    used.add(candidate);
+    return candidate;
+  });
+}
+
 function dispatchSessionChange(input) {
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-function optionControl(document, choice, index, selectedID, select) {
+function optionControl(document, choice, index, selectedID, select, accessibleLabel) {
   const option = document.createElement("div");
   option.className = "memory-session-option";
   option.id = `memory-session-option-${index}`;
   option.dataset.sessionId = choice.id;
   option.setAttribute("role", "option");
-  option.setAttribute("aria-label", sessionAccessibleLabel(choice));
+  option.setAttribute("aria-label", accessibleLabel);
   option.setAttribute("aria-selected", choice.id === selectedID ? "true" : "false");
 
   const primary = document.createElement("span");
@@ -97,13 +136,15 @@ export function initMemorySessionPicker(root = document) {
   if (!input || !trigger || !popover || !query || !options || choices.length === 0) return false;
 
   field.dataset.waffleMemoryPickerBound = "true";
+  const accessibleLabels = sessionAccessibleLabels(choices);
+  const accessibleLabelByChoice = new Map(choices.map((choice, index) => [choice, accessibleLabels[index]]));
   let visibleChoices = [];
   let activeIndex = -1;
 
   function updateTrigger(choice) {
     if (choice) {
       trigger.textContent = sessionTitle(choice);
-      trigger.setAttribute("aria-label", sessionAccessibleLabel(choice));
+      trigger.setAttribute("aria-label", accessibleLabelByChoice.get(choice));
       clear.hidden = false;
     } else {
       trigger.textContent = "Select a conversation…";
@@ -134,7 +175,7 @@ export function initMemorySessionPicker(root = document) {
       wrapper.append(heading);
       for (const choice of group.items) {
         visibleChoices.push(choice);
-        wrapper.append(optionControl(document, choice, optionIndex, input.value, select));
+        wrapper.append(optionControl(document, choice, optionIndex, input.value, select, accessibleLabelByChoice.get(choice)));
         optionIndex += 1;
       }
       options.append(wrapper);
