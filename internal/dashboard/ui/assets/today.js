@@ -599,7 +599,12 @@ function adjustComposerHeight(element) {
     return;
   }
   element.style.height = "auto";
-  const cap = state.slash.open ? 6 * 16 : 15 * 16;
+  const rootFontSize =
+    parseFloat(
+      typeof getComputedStyle === "function" &&
+        getComputedStyle(document.documentElement)?.fontSize,
+    ) || 16;
+  const cap = (state.slash.open ? 6 : 15) * rootFontSize;
   const next = Math.min(element.scrollHeight, cap);
   element.style.height = `${next}px`;
   element.style.overflowY = element.scrollHeight > cap ? "auto" : "hidden";
