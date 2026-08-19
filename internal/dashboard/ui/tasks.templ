@@ -7,28 +7,29 @@ templ Tasks(view ShellView) {
 				<p class="eyebrow">Tasks</p>
 				<h1 id="tasks-title">What Waffle is carrying</h1>
 			</div>
-			<div class="tasks-header-actions">
-				<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
-				<button id="task-schedule-open" type="button">New schedule</button>
-			</div>
 		</header>
-		<div class="task-filters" aria-label="Filter tasks">
-			<button id="task-filter-all" class="task-filter" type="button" data-task-filter="all" aria-pressed="true" hx-get="/api/v1/desk/tasks?filter=all" hx-target="#tasks-list" hx-swap="outerHTML">All</button>
-			<button id="task-filter-active" class="task-filter" type="button" data-task-filter="active" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=active" hx-target="#tasks-list" hx-swap="outerHTML">Active</button>
-			<button id="task-filter-scheduled" class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=scheduled" hx-target="#tasks-list" hx-swap="outerHTML">Scheduled</button>
-			<button id="task-filter-completed" class="task-filter" type="button" data-task-filter="completed" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=completed" hx-target="#tasks-list" hx-swap="outerHTML">Completed</button>
-			<button id="task-filter-attention" class="task-filter" type="button" data-task-filter="attention" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=attention" hx-target="#tasks-list" hx-swap="outerHTML">Attention</button>
-		</div>
-		<div class="tasks-errors" id="tasks-errors" role="status" aria-live="polite" hidden></div>
 		<div class="tasks-layout">
 			<section class="tasks-board" aria-labelledby="tasks-board-title">
-				<div class="panel-heading">
+				<div class="tasks-board-header">
 					<div>
 						<h2 id="tasks-board-title">Runs and schedules</h2>
 					</div>
+					<div class="tasks-board-actions">
+						<p class="tasks-attention" id="tasks-attention-count" aria-live="polite">Checking attention…</p>
+						<button id="task-schedule-open" type="button">New schedule</button>
+					</div>
 				</div>
-				<div class="task-list" id="tasks-list" hx-get="/api/v1/desk/tasks?filter=all" hx-trigger="load" hx-target="this" hx-swap="outerHTML"></div>
-				<p class="tasks-empty" id="tasks-empty">Loading task evidence…</p>
+				<div class="task-filters" aria-label="Filter tasks">
+					<button id="task-filter-all" class="task-filter" type="button" data-task-filter="all" aria-pressed="true" hx-get="/api/v1/desk/tasks?filter=all" hx-target="#tasks-list" hx-swap="outerHTML">All</button>
+					<button id="task-filter-active" class="task-filter" type="button" data-task-filter="active" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=active" hx-target="#tasks-list" hx-swap="outerHTML">Active</button>
+					<button id="task-filter-scheduled" class="task-filter" type="button" data-task-filter="scheduled" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=scheduled" hx-target="#tasks-list" hx-swap="outerHTML">Scheduled</button>
+					<button id="task-filter-completed" class="task-filter" type="button" data-task-filter="completed" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=completed" hx-target="#tasks-list" hx-swap="outerHTML">Completed</button>
+					<button id="task-filter-attention" class="task-filter" type="button" data-task-filter="attention" aria-pressed="false" hx-get="/api/v1/desk/tasks?filter=attention" hx-target="#tasks-list" hx-swap="outerHTML">Attention</button>
+				</div>
+				<div class="tasks-errors" id="tasks-errors" role="status" aria-live="polite" hidden></div>
+				<div class="task-list is-loading" id="tasks-list" hx-get="/api/v1/desk/tasks?filter=all" hx-trigger="load" hx-target="this" hx-swap="outerHTML" aria-busy="true">
+					<p class="waffle-fragment-status" role="status">Loading tasks…</p>
+				</div>
 			</section>
 		</div>
 		<dialog id="task-schedule-dialog" aria-labelledby="schedule-editor-title">

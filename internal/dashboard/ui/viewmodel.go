@@ -53,6 +53,7 @@ type EmptyStateView struct {
 	TitleID         string
 	PrimaryAction   *FragmentAction
 	SecondaryAction *FragmentAction
+	NoArtwork       bool
 	artwork         emptyStateArtwork
 }
 
@@ -255,5 +256,15 @@ func fragmentActionFormClass(action FragmentAction) string {
 }
 
 func emptyStateArtworkClass(view EmptyStateView) string {
+	if view.NoArtwork {
+		return "waffle-empty-state-art is-hidden"
+	}
 	return "waffle-empty-state-art " + view.artwork.Class
+}
+
+func emptyStateClass(view EmptyStateView) string {
+	if view.NoArtwork {
+		return "waffle-empty-state is-no-artwork"
+	}
+	return "waffle-empty-state"
 }

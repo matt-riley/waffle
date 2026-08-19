@@ -87,13 +87,15 @@ templ FragmentActionControl(action FragmentAction, class string) {
 		} else {
 			<button class={ class } data-waffle-action-id={ action.ID } type="button" data-waffle-copy={ action.Value } disabled?={ action.Disabled }>{ action.Label }</button>
 		}
-	} else if action.Method == "edit" {
+		} else if action.Method == "edit" {
 		if action.HasPressed {
 			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled } aria-pressed={ fragmentBool(action.Pressed) }>{ action.Label }</button>
 		} else {
-			<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
-		}
-	} else {
+				<button class={ class } data-waffle-action-id={ action.ID } data-waffle-task-edit="true" type="button" disabled?={ action.Disabled }>{ action.Label }</button>
+			}
+		} else if action.Method == "filter" {
+			<button class={ class } data-waffle-action-id={ action.ID } type="button" hx-get={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } disabled?={ action.Disabled }>{ action.Label }</button>
+		} else {
 		<form class={ fragmentActionFormClass(action) } hx-post={ action.URL } hx-target={ action.Target } hx-swap={ action.Swap } hx-include={ action.Include } data-waffle-json="true">
 			for _, field := range action.Fields {
 				<input type="hidden" name={ field.Label } value={ field.Value }/>

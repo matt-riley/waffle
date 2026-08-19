@@ -602,7 +602,7 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 	fragment := ui.FragmentView{ID: "tasks-list", Class: "task-list", Empty: "No tasks match this view.", Filters: taskFilterFragments(snapshot.Filter)}
 	attentionClass := "tasks-attention"
 	attentionFailed := attentionEvidenceFailed(snapshot.Errors)
-	if len(snapshot.Errors) > 0 {
+	if len(snapshot.Errors) > 0 && len(snapshot.Tasks) > 0 {
 		fragment.Status = "Some task evidence is temporarily unavailable."
 	}
 	if attentionFailed {
@@ -613,6 +613,10 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 		Class: attentionClass,
 		Text:  tasksAttentionLabel(snapshot.AttentionCount, attentionFailed),
 	})
+	if len(snapshot.Tasks) == 0 {
+		state := tasksEmptyState(snapshot)
+		fragment.EmptyState = &state
+	}
 	for _, task := range snapshot.Tasks {
 		kind := task.Kind + " / " + task.Source
 		title := task.Name
@@ -642,6 +646,62 @@ func tasksFragment(snapshot TasksSnapshot) ui.FragmentView {
 		fragment.Items = append(fragment.Items, item)
 	}
 	return fragment
+}
+
+func tasksEmptyState(snapshot TasksSnapshot) ui.EmptyStateView {
+	viewAll := ui.FragmentAction{
+		ID: "task-empty-view-all", Label: "View all tasks", Method: "filter",
+		URL: "/api/v1/desk/tasks?filter=all", Target: "#tasks-list", Swap: "outerHTML",
+	}
+	tryAgain := ui.FragmentAction{
+		ID: "task-empty-try-again", Label: "Try again", Method: "filter",
+		URL: "/api/v1/desk/tasks?filter=" + url.QueryEscape(string(snapshot.Filter)), Target: "#tasks-list", Swap: "outerHTML",
+	}
+	startConversation := ui.FragmentAction{
+		ID: "task-empty-start-conversation", Label: "Start a conversation", Method: "get", URL: "/desk/?section=today",
+	}
+
+	if len(snapshot.Errors) > 0 {
+		state, _ := ui.NewWaffleEmptyStateView(
+			ui.EmptyStateTasks,
+			"Some task evidence is unavailable",
+			"Waffle could not check every task source. Try again before assuming the queue is empty.",
+			"tasks-empty-title",
+			&tryAgain,
+			nil,
+		)
+		state.NoArtwork = true
+		return state
+	}
+
+	title := "Nothing on Waffle's plate"
+	body := "Scheduled runs and completed work will appear here."
+	var primary, secondary *ui.FragmentAction
+	switch snapshot.Filter {
+	case TaskFilterActive:
+		title = "No active runs"
+		body = "Nothing is running right now."
+		primary = &viewAll
+	case TaskFilterScheduled:
+		title = "No schedules yet"
+		body = "Create a schedule and Waffle can pick this up later."
+		secondary = &viewAll
+	case TaskFilterCompleted:
+		title = "No completed runs"
+		body = "Finished runs will appear here."
+		primary = &viewAll
+	case TaskFilterAttention:
+		title = "Nothing needs attention"
+		body = "Waffle has no blocked or failed work to review."
+		primary = &viewAll
+	default:
+		secondary = &startConversation
+	}
+	state, _ := ui.NewWaffleEmptyStateView(ui.EmptyStateTasks, title, body, "tasks-empty-title", primary, secondary)
+	if snapshot.Filter != TaskFilterAll && snapshot.Filter != TaskFilterScheduled {
+		state.NoArtwork = true
+	}
+	return state
 }
 
 func taskFilterFragments(active TaskFilter) []ui.FragmentFilter {

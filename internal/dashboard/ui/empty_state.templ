@@ -1,8 +1,10 @@
 package ui
 
 templ WaffleEmptyState(view EmptyStateView) {
-	<section class="waffle-empty-state" role="region" aria-labelledby={ view.TitleID }>
-		<img class={ emptyStateArtworkClass(view) } src={ AssetURL(view.artwork.AssetName, AssetVersion()) } width={ view.artwork.Width } height={ view.artwork.Height } alt="" aria-hidden="true" loading="lazy" decoding="async"/>
+	<section class={ emptyStateClass(view) } role="region" aria-labelledby={ view.TitleID }>
+		if !view.NoArtwork {
+			<img class={ emptyStateArtworkClass(view) } src={ AssetURL(view.artwork.AssetName, AssetVersion()) } width={ view.artwork.Width } height={ view.artwork.Height } alt="" aria-hidden="true" loading="lazy" decoding="async"/>
+		}
 		<div class="waffle-empty-state-copy">
 			<h2 id={ view.TitleID }>{ view.Title }</h2>
 			<p>{ view.Body }</p>

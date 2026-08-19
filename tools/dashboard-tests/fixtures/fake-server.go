@@ -42,6 +42,15 @@ import (
 
 var fixtureNow = time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
+var fixtureTaskMode atomic.Int32
+
+const (
+	fixtureTaskModeNormal int32 = iota
+	fixtureTaskModeEmpty
+	fixtureTaskModePartial
+	fixtureTaskModeFailure
+)
+
 func emptyStateThemeDocumentStart(requested string, shell bool) string {
 	if shell {
 		if requested == "dark" {
@@ -327,6 +336,19 @@ func main() {
 		notes.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("POST /api/v1/desk/test/tasks", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("state") {
+		case "empty":
+			fixtureTaskMode.Store(fixtureTaskModeEmpty)
+		case "partial":
+			fixtureTaskMode.Store(fixtureTaskModePartial)
+		case "error":
+			fixtureTaskMode.Store(fixtureTaskModeFailure)
+		default:
+			fixtureTaskMode.Store(fixtureTaskModeNormal)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	setupIdentity := fixtureSetupIdentity{created: &atomic.Bool{}}
 	dashboard.RegisterRoutes(mux, dashboard.APIConfig{
 		Observability: obs,
@@ -454,12 +476,27 @@ type fixtureRuns struct {
 }
 
 func (r fixtureRuns) Snapshot(context.Context) (observability.Snapshot, error) {
+	switch fixtureTaskMode.Load() {
+	case fixtureTaskModeEmpty:
+		return observability.Snapshot{}, nil
+	case fixtureTaskModePartial, fixtureTaskModeFailure:
+		if fixtureTaskMode.Load() == fixtureTaskModeFailure {
+			return observability.Snapshot{}, errors.New("fixture runs unavailable")
+		}
+		return observability.Snapshot{}, errors.New("fixture runs unavailable")
+	}
 	return r.snapshot, nil
 }
 
 type fixtureJobs []schedule.Job
 
 func (j *fixtureJobs) List(context.Context) ([]schedule.Job, error) {
+	switch fixtureTaskMode.Load() {
+	case fixtureTaskModeEmpty:
+		return nil, nil
+	case fixtureTaskModeFailure:
+		return nil, errors.New("fixture jobs unavailable")
+	}
 	return append([]schedule.Job(nil), (*j)...), nil
 }
 
@@ -758,6 +795,9 @@ type fixtureUsage struct {
 }
 
 func (u fixtureUsage) List(context.Context, string) ([]usage.Row, error) {
+	if fixtureTaskMode.Load() == fixtureTaskModeEmpty || fixtureTaskMode.Load() == fixtureTaskModeFailure {
+		return nil, nil
+	}
 	return append([]usage.Row(nil), u.rows...), nil
 }
 

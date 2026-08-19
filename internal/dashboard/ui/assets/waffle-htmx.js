@@ -20,6 +20,7 @@
 
 	const intents = new Map();
 	const inFlight = new Set();
+	let taskScheduleOpener = null;
 	let processGeneration = "";
 	let restartPolling = false;
 	let restartPollStartedAt = 0;
@@ -371,6 +372,7 @@
 		const chatID = input(form, "task-schedule-chat-id");
 		const summary = input(form, "task-schedule-summary");
 		const errors = input(form, "task-schedule-field-errors");
+		const advanced = input(form, "task-schedule-advanced");
 		if (cadence) cadence.value = "weekdays";
 		if (time) time.value = "09:00";
 		if (chatID) chatID.value = "";
@@ -379,6 +381,7 @@
 			errors.hidden = true;
 			errors.replaceChildren();
 		}
+		if (advanced) advanced.open = false;
 		syncGuidedFromCron(form);
 		syncScheduleDeliverUI(form);
 		for (const field of ["deliver", "profile"]) {
@@ -399,12 +402,40 @@
 		delete form.dataset.waffleRedactedFields;
 	}
 
-	function openTaskScheduleDialog() {
+	function openTaskScheduleDialog(opener = null) {
+		taskScheduleOpener = opener?.isConnected ? opener : null;
 		document.querySelector("#task-schedule-dialog")?.showModal?.();
 	}
 
 	function closeTaskScheduleDialog() {
+		taskScheduleOpener = null;
 		document.querySelector("#task-schedule-dialog")?.close?.();
+	}
+
+	function dismissTaskScheduleDialog({ reset = true } = {}) {
+		const dialog = document.querySelector("#task-schedule-dialog");
+		const form = document.querySelector("#task-schedule-form");
+		if (!dialog?.open) {
+			taskScheduleOpener = null;
+			return;
+		}
+		if (reset && form) resetTaskSchedule(form);
+		dialog.close("cancel");
+		const target = taskScheduleOpener?.isConnected
+			? taskScheduleOpener
+			: document.querySelector("#task-schedule-open");
+		taskScheduleOpener = null;
+		queueMicrotask(() => target?.focus?.());
+	}
+
+	function bindTaskScheduleDialog() {
+		const dialog = document.querySelector("#task-schedule-dialog");
+		if (!dialog || dialog.dataset.waffleCancelBound === "true") return;
+		dialog.addEventListener("cancel", (event) => {
+			event.preventDefault();
+			dismissTaskScheduleDialog({ reset: true });
+		});
+		dialog.dataset.waffleCancelBound = "true";
 	}
 
 	function beginTaskEdit(button) {
@@ -478,7 +509,7 @@
 			cancel.textContent = "Cancel edit";
 		}
 		if (submit) submit.textContent = "Save schedule";
-		openTaskScheduleDialog();
+		openTaskScheduleDialog(button);
 		form.querySelector?.("#task-schedule-name")?.focus?.();
 	}
 
@@ -835,17 +866,14 @@
 				void loadScheduleOptions(form);
 				updateScheduleGuide(form);
 			}
-			openTaskScheduleDialog();
+			openTaskScheduleDialog(scheduleOpen);
 			document.querySelector("#task-schedule-name")?.focus?.();
 			return;
 		}
 		const scheduleCancel = event.target?.closest?.("#task-schedule-cancel");
 		if (scheduleCancel) {
 			event.preventDefault();
-			const form = document.querySelector("#task-schedule-form");
-			if (form) resetTaskSchedule(form);
-			closeTaskScheduleDialog();
-			document.querySelector("#task-schedule-open")?.focus?.();
+			dismissTaskScheduleDialog({ reset: true });
 			return;
 		}
     const open = event.target?.closest?.("#workspace-open-button");
@@ -872,6 +900,7 @@
 		if (event.target?.id === "capability-catalogue-search") filterCatalogue();
 	});
 
+	bindTaskScheduleDialog();
 	consumeScheduleHandoff();
 
 	void readBootstrap().then((bootstrap) => {

@@ -1635,6 +1635,164 @@ test("Tasks attention chip settles to a truthful count instead of Checking forev
   await expect(page.locator("#tasks-attention-count")).toHaveText("1 task needs attention");
 });
 
+test("Tasks empty and evidence states keep one bounded owner with direct recovery", async ({ page }) => {
+  test.skip(
+    !["desktop", "mobile", "narrow"].includes(test.info().project.name),
+    "Run the Tasks state geometry matrix at desktop, 375px, and 320px.",
+  );
+  const project = test.info().project.name;
+  const capture = async (name) => {
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({
+      path: path.join(test.info().outputDir, `task5-tasks-${project}-${name}.png`),
+      fullPage: true,
+      animations: "disabled",
+    });
+  };
+  const setState = async (state) => {
+    await page.request.post(`${baseURL}/api/v1/desk/test/tasks?state=${state}`);
+    await page.goto(deskURL("tasks"));
+    await expect(page.locator(".tasks-board")).toBeVisible();
+  };
+
+  try {
+    await setState("empty");
+    await expect(page.getByRole("heading", { name: "Nothing on Waffle's plate", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText(
+      "Scheduled runs and completed work will appear here.",
+    );
+    await expect(page.getByRole("link", { name: "Start a conversation", exact: true })).toHaveAttribute(
+      "href",
+      "/desk/?section=today",
+    );
+    await expect(page.locator("#tasks-empty")).toHaveCount(0);
+    await expect(page.locator("#tasks-list .waffle-fragment-status")).toHaveCount(0);
+    await expect(page.locator("#task-schedule-open")).toHaveCount(1);
+    await capture("empty-all");
+
+    await page.getByRole("button", { name: "Active", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "No active runs", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "View all tasks", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View all tasks", exact: true }).click();
+    await expect(page.locator("#task-filter-all")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#task-filter-active")).toHaveAttribute("aria-pressed", "false");
+
+    await setState("partial");
+    await expect(page.locator("#tasks-list")).toContainText("Some task evidence is temporarily unavailable.");
+    await expect(page.locator("#tasks-list .task-card")).toHaveCount(1);
+    await expect(page.locator("#tasks-list .waffle-empty-state-art")).toHaveCount(0);
+    await capture("partial-with-card");
+
+    await setState("error");
+    await expect(page.getByRole("heading", { name: "Some task evidence is unavailable", exact: true })).toBeVisible();
+    await expect(page.locator(".waffle-empty-state")).toContainText(
+      "Try again before assuming the queue is empty.",
+    );
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+    await expect(page.locator("#tasks-list .waffle-empty-state-art")).toHaveCount(0);
+    await capture("error");
+
+    await setState("normal");
+    await expect(page.locator("#tasks-list .task-card")).toHaveCount(2);
+    await expect(page.locator("#tasks-list .waffle-empty-state")).toHaveCount(0);
+    await capture("populated");
+  } finally {
+    await page.request.post(`${baseURL}/api/v1/desk/test/tasks`);
+  }
+});
+
+test("schedule dialog Escape cancels without validation and restores its opener", async ({ page }) => {
+  await page.goto(deskURL("tasks"));
+  const dialog = page.locator("#task-schedule-dialog");
+  const form = page.locator("#task-schedule-form");
+  const newSchedule = page.locator("#task-schedule-open");
+  const mutationRequests = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      request.method() === "POST" &&
+      url.pathname.startsWith("/api/v1/desk/tasks/schedules") &&
+      !url.pathname.endsWith("/preview")
+    ) {
+      mutationRequests.push(url.pathname);
+    }
+  });
+
+  const escapeFrom = async (selector, { scroll = false, prepare } = {}) => {
+    await newSchedule.click();
+    await expect(dialog).toBeVisible();
+    if (prepare) await prepare();
+    const control = form.locator(selector);
+    await control.focus();
+    await expect(control).toBeFocused();
+    if (scroll) {
+      await dialog.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+    }
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(newSchedule).toBeFocused();
+    await expect(form.locator("#task-schedule-field-errors")).toBeHidden();
+  };
+
+  await escapeFrom("#task-schedule-name", { scroll: true });
+  await escapeFrom("#task-schedule-prompt");
+  await escapeFrom("#task-schedule-cadence");
+  await escapeFrom("#task-schedule-time");
+  await escapeFrom("#task-schedule-deliver");
+  await escapeFrom("#task-schedule-profile");
+  await escapeFrom("#task-schedule-cron", {
+    prepare: async () => form.locator("#task-schedule-advanced summary").click(),
+  });
+  await escapeFrom("#task-schedule-dow", {
+    prepare: async () => form.locator("#task-schedule-cadence").selectOption("weekly"),
+  });
+  await escapeFrom("#task-schedule-dom", {
+    prepare: async () => form.locator("#task-schedule-cadence").selectOption("monthly"),
+  });
+
+  const editCard = page.locator("[data-task-id='job-daily']");
+  const edit = editCard.getByRole("button", { name: "Edit schedule", exact: true });
+  await edit.click();
+  await expect(dialog).toBeVisible();
+  await form.locator("#task-schedule-enabled").focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(edit).toBeFocused();
+
+  await edit.click();
+  await page.evaluate(() => document.querySelector("[data-task-id='job-daily'] [data-waffle-task-edit]")?.remove());
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(newSchedule).toBeFocused();
+
+  await page.screenshot({
+    path: path.join(test.info().outputDir, `task5-schedule-dialog-${test.info().project.name}.png`),
+    fullPage: true,
+    animations: "disabled",
+  });
+  expect(mutationRequests).toEqual([]);
+
+  await page.evaluate(() => {
+    sessionStorage.setItem(
+      "waffle.desk.schedule.draft.v1",
+      JSON.stringify({ text: "Review this handoff" }),
+    );
+  });
+  await page.goto(deskURL("tasks"));
+  await expect(dialog).toBeVisible();
+  await expect(form.getByLabel("Prompt")).toHaveValue("Review this handoff");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(newSchedule).toBeFocused();
+  await newSchedule.click();
+  await expect(form.getByLabel("Prompt")).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(mutationRequests).toEqual([]);
+});
+
 test("Capabilities htmx catalogue add, search, and prospective test use fragments", async ({ page }) => {
   await page.goto(deskURL("capabilities"));
   await openCapabilityTab(page, "Tools & connections");

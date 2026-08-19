@@ -1487,8 +1487,9 @@ h3 {
 }
 
 .tasks {
-  margin: 0 auto;
-  max-width: 76rem;
+	margin: 0 auto;
+	max-width: 72rem;
+	min-width: 0;
 }
 
 .tasks-header {
@@ -1499,14 +1500,6 @@ h3 {
   justify-content: space-between;
   margin-bottom: 1rem;
   padding-bottom: 1rem;
-}
-
-.tasks-header-actions {
-  align-items: start;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-  justify-content: flex-end;
 }
 
 .tasks-attention {
@@ -1524,10 +1517,29 @@ h3 {
 }
 
 .task-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem;
-  margin-bottom: 1rem;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.55rem;
+	margin-bottom: 1rem;
+}
+
+.tasks-board-header {
+	align-items: center;
+	display: flex;
+	gap: 1rem;
+	justify-content: space-between;
+}
+
+.tasks-board-header h2 {
+	margin: 0;
+}
+
+.tasks-board-actions {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.65rem;
+	justify-content: flex-end;
 }
 
 .task-filter {
@@ -1549,13 +1561,13 @@ h3 {
 }
 
 .tasks-layout {
-  display: grid;
-  gap: 1.25rem;
-  grid-template-columns: minmax(0, 1fr);
+	display: block;
 }
 
-#tasks-list[data-waffle-fragment] + .tasks-empty {
-  display: none;
+.tasks-board {
+	margin-inline: auto;
+	max-width: 64rem;
+	width: 100%;
 }
 
 #task-schedule-dialog {
@@ -1595,8 +1607,13 @@ h3 {
 }
 
 .task-list {
-  display: grid;
-  gap: 0.8rem;
+	display: grid;
+	gap: 0.8rem;
+	min-width: 0;
+}
+
+.task-list.is-loading {
+	min-height: 8rem;
 }
 
 .task-card {
@@ -1730,6 +1747,41 @@ h3 {
 .tasks-empty {
   color: var(--muted);
   margin: 0.75rem 0 0;
+}
+
+.waffle-empty-state.is-no-artwork {
+	grid-template-columns: minmax(0, 1fr);
+	max-width: 52rem;
+}
+
+.waffle-empty-state-art.is-hidden {
+	display: none;
+}
+
+@media (max-width: 520px) {
+	.tasks-board-header {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+
+	.tasks-board-actions {
+		justify-content: flex-start;
+		width: 100%;
+	}
+
+	.task-filters {
+		flex-wrap: nowrap;
+		margin-inline: calc(-1 * clamp(1rem, 2vw, 1.5rem));
+		overflow-x: auto;
+		padding: 0 clamp(1rem, 2vw, 1.5rem) 0.25rem;
+		scroll-padding-inline: clamp(1rem, 2vw, 1.5rem);
+		width: auto;
+	}
+
+	.task-filter {
+		flex: 0 0 auto;
+		white-space: nowrap;
+	}
 }
 
 @keyframes message-arrive {
