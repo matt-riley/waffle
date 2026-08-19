@@ -656,27 +656,34 @@ function appendInlineMarkdown(node, text) {
   }
 }
 
+// linkScheme returns the lowercased URL scheme a browser would resolve href
+// to, or "" when href has no scheme. Browsers strip ASCII tab/CR/LF anywhere
+// in a URL and trim leading C0 controls and spaces before reading the scheme,
+// so "java\tscript:alert(1)", "\njavascript:alert(1)", and " javascript:..."
+// all navigate exactly like "javascript:alert(1)". Matching the raw string
+// missed every one of those, letting a crafted markdown link through both
+// scheme guards below.
+function linkScheme(href) {
+  const normalized = String(href ?? "")
+    .replace(/[\t\n\r]/g, "")
+    .replace(/^[\u0000-\u0020]+/, "");
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(normalized);
+  return scheme ? scheme[1].toLowerCase() : "";
+}
+
 // isSafeLink reports whether a markdown link href may become an anchor href.
 // Only http(s), mailto, and relative targets are allowed; anything else
 // (notably javascript:) is rendered as plain text instead.
 function isSafeLink(href) {
-  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(href);
-  if (!scheme) {
-    return true;
-  }
-  const name = scheme[1].toLowerCase();
-  return name === "http" || name === "https" || name === "mailto";
+  const scheme = linkScheme(href);
+  return scheme === "" || scheme === "http" || scheme === "https" || scheme === "mailto";
 }
 
 // isHttpLink reports whether href is an http/https destination only. Source
 // drawers must never navigate to mailto, relative, or hostile targets (#479).
 function isHttpLink(href) {
-  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(href || "");
-  if (!scheme) {
-    return false;
-  }
-  const name = scheme[1].toLowerCase();
-  return name === "http" || name === "https";
+  const scheme = linkScheme(href);
+  return scheme === "http" || scheme === "https";
 }
 
 async function copyCode(text, button) {
