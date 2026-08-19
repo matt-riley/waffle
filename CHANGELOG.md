@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.4](https://github.com/matt-riley/waffle/compare/v0.30.3...v0.30.4) (2026-08-19)
+
+
+### Bug Fixes
+
+* **broker:** keep the token prefix out of the audit-failure log ([#560](https://github.com/matt-riley/waffle/issues/560)) ([7422ff1](https://github.com/matt-riley/waffle/commit/7422ff14ee03f537fc9385aefe58a5beb4cebcd5))
+* **config:** name the provider api_key reference for what it is ([#559](https://github.com/matt-riley/waffle/issues/559)) ([5067ac9](https://github.com/matt-riley/waffle/commit/5067ac9cc1d21cc4e7b2c23fd10958cd2a48ef0d))
+* **config:** resolve profile system files inside an os.Root ([#564](https://github.com/matt-riley/waffle/issues/564)) ([ae654bf](https://github.com/matt-riley/waffle/commit/ae654bfbdf0218a66c21c543d2730c23cf06d423))
+* **desk:** read link schemes the way a browser does ([#562](https://github.com/matt-riley/waffle/issues/562)) ([77a2a75](https://github.com/matt-riley/waffle/commit/77a2a75c688ec5b836d7d0c3a741769ddc31a7ec))
+* **skill:** bound the \u escape parse to sixteen bits ([#561](https://github.com/matt-riley/waffle/issues/561)) ([c3545b7](https://github.com/matt-riley/waffle/commit/c3545b79710dc9b3a668ba14c68d8bb3c2ee77c7))
+* **skillinstall:** write reviewed trees through an os.Root ([#563](https://github.com/matt-riley/waffle/issues/563)) ([7b4d4eb](https://github.com/matt-riley/waffle/commit/7b4d4ebcf1f1f836f64f9af477f93d1772cac05d))
+
 ## [0.30.3](https://github.com/matt-riley/waffle/compare/v0.30.2...v0.30.3) (2026-08-19)
 
 
