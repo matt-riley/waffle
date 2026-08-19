@@ -81,7 +81,7 @@ func Today(view ShellView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</span></p><button type=\"button\" id=\"desk-conversations-open\" class=\"conversations-open\" aria-controls=\"desk-sessions\" hidden>Conversations</button> <button type=\"button\" id=\"desk-context-toggle\" class=\"context-toggle\" aria-controls=\"desk-canvas-drawer\" aria-expanded=\"false\">Session and files</button></header>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</span></p><button type=\"button\" id=\"desk-conversations-open\" class=\"conversations-open\" aria-controls=\"desk-sessions\" aria-expanded=\"false\" hidden>Conversations</button> <button type=\"button\" id=\"desk-context-toggle\" class=\"context-toggle\" aria-controls=\"desk-canvas-drawer\" aria-expanded=\"false\">Session and files</button></header>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -14,7 +14,7 @@ templ Today(view ShellView) {
 				<span class="connection-light" aria-hidden="true"></span>
 				<span id="desk-connection-text">{ view.Connection }</span>
 			</p>
-			<button type="button" id="desk-conversations-open" class="conversations-open" aria-controls="desk-sessions" hidden>Conversations</button>
+			<button type="button" id="desk-conversations-open" class="conversations-open" aria-controls="desk-sessions" aria-expanded="false" hidden>Conversations</button>
 			<button type="button" id="desk-context-toggle" class="context-toggle" aria-controls="desk-canvas-drawer" aria-expanded="false">Session and files</button>
 		</header>
 		@SetupBanner()

@@ -2906,6 +2906,7 @@ function resetRecoveryExit() {
     elements.sessionRefresh.hidden = true;
     elements.sessionRefresh.setAttribute("aria-expanded", "false");
   }
+  elements.conversationsOpen?.setAttribute("aria-expanded", "false");
   if (elements.sessionFilter) {
     elements.sessionFilter.value = "";
   }
@@ -3710,6 +3711,7 @@ function openSessionsList({ focus = true, opener = null } = {}) {
   if (elements.sessionRefresh) {
     elements.sessionRefresh.setAttribute("aria-expanded", "true");
   }
+  elements.conversationsOpen?.setAttribute("aria-expanded", "true");
   renderSessionList();
   if (focus && elements.sessionFilter) {
     elements.sessionFilter.value = state.sessionsList.filter;
@@ -3725,6 +3727,7 @@ function closeSessionsList() {
   if (elements.sessionRefresh) {
     elements.sessionRefresh.hidden = state.currentPhase !== phase.recovering;
     elements.sessionRefresh.setAttribute("aria-expanded", "false");
+    elements.conversationsOpen?.setAttribute("aria-expanded", "false");
     const opener = state.sessionOpener || elements.sessionRefresh;
     opener?.focus?.();
   }
