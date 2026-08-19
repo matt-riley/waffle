@@ -92,6 +92,29 @@ test("presentSessions handles local day and seven-day boundaries without UTC dri
   );
 });
 
+test("presentSessions uses local midnight for offset timestamps in a deterministic non-UTC zone", () => {
+  const previousTZ = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const result = presentSessions([
+      session("utc-today-local-yesterday", "2026-08-19T06:30:00Z"),
+      session("local-today-midnight", "2026-08-19T07:00:00Z"),
+    ], { now: new Date("2026-08-19T19:00:00Z") });
+
+    assert.deepEqual(
+      Object.fromEntries(result.map((group) => [group.key, group.items.map((item) => item.id)])),
+      {
+        today: ["local-today-midnight"],
+        yesterday: ["utc-today-local-yesterday"],
+      },
+    );
+  } finally {
+    if (previousTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTZ;
+  }
+  assert.equal(process.env.TZ, previousTZ);
+});
+
 test("presentSessions keeps invalid timestamps stable and after valid rows", () => {
   const result = presentSessions([
     session("invalid-first", "not-a-date"),

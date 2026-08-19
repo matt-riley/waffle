@@ -53,6 +53,52 @@ function sessionChoices(field) {
   })).filter((choice) => choice.id);
 }
 
+function keepPickerClearOfNavigation(field, popover) {
+  const options = popover.querySelector("#memory-session-options");
+  if (!window.matchMedia?.("(max-width: 768px)").matches) {
+    options?.style.removeProperty("max-height");
+    return;
+  }
+  field.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
+  const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+  const scrollOwner = field.closest("main");
+  if (!navigation || !scrollOwner) return;
+  const panel = popover.getBoundingClientRect();
+  if (panel.bottom > navigation.top) {
+    scrollOwner.scrollTop += panel.bottom - navigation.top + 8;
+  }
+  const adjustedPanel = popover.getBoundingClientRect();
+  if (adjustedPanel.bottom > navigation.top && options) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const currentPanel = popover.getBoundingClientRect();
+      if (currentPanel.bottom <= navigation.top) break;
+      const currentOptions = options.getBoundingClientRect();
+      options.style.maxHeight = `${Math.max(0, currentOptions.height - (currentPanel.bottom - navigation.top) - 8)}px`;
+    }
+  } else {
+    options?.style.removeProperty("max-height");
+  }
+}
+
+let pickerClearanceFrame = null;
+
+function scheduleOpenPickerClearOfNavigation() {
+  if (pickerClearanceFrame !== null) return;
+  pickerClearanceFrame = window.requestAnimationFrame(() => {
+    pickerClearanceFrame = window.requestAnimationFrame(() => {
+      pickerClearanceFrame = null;
+      keepOpenPickerClearOfNavigation();
+    });
+  });
+}
+
+function keepOpenPickerClearOfNavigation() {
+  const field = document.querySelector("#memory-session-field");
+  const popover = field?.querySelector("#memory-session-popover");
+  if (!field || !popover || popover.hidden) return;
+  keepPickerClearOfNavigation(field, popover);
+}
+
 export function sessionAccessibleLabels(sessions) {
   const values = Array.isArray(sessions) ? sessions : [];
   const labels = values.map(sessionAccessibleLabel);
@@ -223,16 +269,6 @@ export function initMemorySessionPicker(root = document) {
     trigger.focus();
   }
 
-  function keepPickerClearOfNavigation() {
-    if (!window.matchMedia?.("(max-width: 768px)").matches) return;
-    field.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
-    const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
-    const panel = popover.getBoundingClientRect();
-    const scrollOwner = field.closest("main");
-    if (!navigation || !scrollOwner || panel.bottom <= navigation.top) return;
-    scrollOwner.scrollTop += panel.bottom - navigation.top + 8;
-  }
-
   function select(choice) {
     input.value = choice.id;
     document.body.dataset.waffleMemorySessionSelection = choice.id;
@@ -249,7 +285,7 @@ export function initMemorySessionPicker(root = document) {
     activeIndex = -1;
     render({ scrollSelected: true });
     query.focus();
-    keepPickerClearOfNavigation();
+    keepPickerClearOfNavigation(field, popover);
   }
 
   trigger.addEventListener("click", () => {
@@ -327,6 +363,8 @@ export function initMemorySessionPicker(root = document) {
 }
 
 if (typeof document !== "undefined" && document.body) {
+  window.addEventListener("resize", scheduleOpenPickerClearOfNavigation);
+  window.visualViewport?.addEventListener("resize", scheduleOpenPickerClearOfNavigation);
   document.body.addEventListener("htmx:beforeRequest", (event) => {
     if (!requestPath(event).includes(sessionEndpoint)) return;
     const input = document.querySelector("#memory-session");

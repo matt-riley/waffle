@@ -1053,8 +1053,8 @@ test("structured empty state reflows at an honest 200 percent zoom equivalent", 
     height: 406,
     deviceScaleFactor: 1,
     mobile: false,
-    screenWidth: 375,
-    screenHeight: 812,
+    screenWidth: width,
+    screenHeight: height,
   });
   await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(188);
   const after = await page.evaluate(() => ({
@@ -4158,6 +4158,41 @@ test("memory picker keeps representative metadata readable at compact and zoom w
       }
       await page.goto(deskURL("memory"));
       await page.locator("#memory-session-trigger").click();
+      const allOptions = page.locator("#memory-session-options [role='option']");
+      expect(await allOptions.count(), `${viewport.width}px picker data set`).toBeGreaterThanOrEqual(35);
+      const fullGeometry = await page.locator("#memory-session-field").evaluate((field) => {
+        const options = field.querySelector("#memory-session-options");
+        const panel = field.querySelector("#memory-session-popover")?.getBoundingClientRect();
+        const navigation = document.querySelector(".desk-navigation")?.getBoundingClientRect();
+        return {
+          options: {
+            clientHeight: options?.clientHeight || 0,
+            scrollHeight: options?.scrollHeight || 0,
+          },
+          panel: panel && { left: panel.left, right: panel.right, bottom: panel.bottom },
+          navigation: navigation && { top: navigation.top, bottom: navigation.bottom },
+          viewport: { width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth },
+        };
+      });
+      expect(fullGeometry.options.scrollHeight, `${viewport.width}px options region`).toBeGreaterThanOrEqual(fullGeometry.options.clientHeight);
+      expect(fullGeometry.viewport.scrollWidth, `${viewport.width}px full picker horizontal overflow`).toBeLessThanOrEqual(fullGeometry.viewport.width);
+      expect(fullGeometry.panel?.left, `${viewport.width}px full panel left`).toBeGreaterThanOrEqual(0);
+      expect(fullGeometry.panel?.right, `${viewport.width}px full panel right`).toBeLessThanOrEqual(fullGeometry.viewport.width + 1);
+      if (fullGeometry.navigation) {
+        expect(fullGeometry.panel?.bottom, `${viewport.width}px full picker clears navigation`).toBeLessThanOrEqual(fullGeometry.navigation.top + 1);
+      }
+      if (viewport.zoom) {
+        const scrollMetrics = await page.locator("#memory-session-options").evaluate((options) => {
+          options.scrollTop = options.scrollHeight;
+          return {
+            clientHeight: options.clientHeight,
+            scrollHeight: options.scrollHeight,
+            scrollTop: options.scrollTop,
+          };
+        });
+        expect(scrollMetrics.scrollHeight, "200%-equivalent options content").toBeGreaterThan(scrollMetrics.clientHeight);
+        expect(scrollMetrics.scrollTop, "200%-equivalent options scroll position").toBeGreaterThan(0);
+      }
       const query = page.locator("#memory-session-query");
       await query.fill("Duplicate title");
       const option = page.locator("#memory-session-options [data-session-id='session-duplicate-a']");
@@ -4220,6 +4255,91 @@ test("memory picker keeps representative metadata readable at compact and zoom w
   } finally {
     await cdp.send("Emulation.clearDeviceMetricsOverride");
     await page.setViewportSize({ width: 1470, height: 1000 });
+  }
+});
+
+test("memory picker remains clear through viewport resize and picker outer swaps", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalAdd = EventTarget.prototype.addEventListener;
+    const originalRemove = EventTarget.prototype.removeEventListener;
+    const listenerIDs = new WeakMap();
+    const active = new Map();
+    let nextID = 0;
+    const targetName = (target) => {
+      if (target === window) return "window";
+      if (target === window.visualViewport) return "visualViewport";
+      return "other";
+    };
+    const keyFor = (target, type, listener) => {
+      const name = targetName(target);
+      if (name === "other" || type !== "resize") return null;
+      if (!listenerIDs.has(listener)) listenerIDs.set(listener, ++nextID);
+      return `${name}:${type}:${listenerIDs.get(listener)}`;
+    };
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      const key = keyFor(this, type, listener);
+      if (key) active.set(key, true);
+      return originalAdd.call(this, type, listener, options);
+    };
+    EventTarget.prototype.removeEventListener = function (type, listener, options) {
+      const key = keyFor(this, type, listener);
+      if (key) active.delete(key);
+      return originalRemove.call(this, type, listener, options);
+    };
+    window.__memoryResizeListenerSnapshot = () => [...active.keys()].sort();
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const cdp = await page.context().newCDPSession(page);
+  const setMetrics = (width, height) => cdp.send("Emulation.setDeviceMetricsOverride", {
+    width,
+    height,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 375,
+    screenHeight: 812,
+  });
+
+  try {
+    await setMetrics(375, 812);
+    await page.goto(deskURL("memory"));
+    await page.locator("#memory-session-trigger").click();
+
+    const query = page.locator("#memory-session-query");
+    await expect(query).toBeFocused();
+    await setMetrics(375, 480);
+    await expect.poll(() => page.evaluate(() => {
+      const panel = document.querySelector("#memory-session-popover").getBoundingClientRect();
+      const navigation = document.querySelector(".desk-navigation").getBoundingClientRect();
+      return panel.bottom <= navigation.top + 1;
+    })).toBe(true);
+    await expect(query).toBeFocused();
+
+    const listenersBeforeSwap = await page.evaluate(() => window.__memoryResizeListenerSnapshot());
+    const refresh = page.waitForResponse((response) => response.url().includes("/api/v1/desk/memory/sessions"));
+    await page.evaluate(() => window.htmx.ajax("GET", "/api/v1/desk/memory/sessions", {
+      target: "#memory-session-field",
+      swap: "outerHTML",
+    }));
+    await refresh;
+    const listenersAfterSwap = await page.evaluate(() => window.__memoryResizeListenerSnapshot());
+    expect(listenersAfterSwap).toEqual(listenersBeforeSwap);
+
+    await page.locator("#memory-session-trigger").click();
+    const refreshedQuery = page.locator("#memory-session-query");
+    await expect(refreshedQuery).toBeFocused();
+    await setMetrics(769, 480);
+    await expect.poll(() => page.locator("#memory-session-options").evaluate((options) => options.style.maxHeight)).toBe("");
+    await setMetrics(768, 480);
+    await expect.poll(() => page.evaluate(() => {
+      const panel = document.querySelector("#memory-session-popover").getBoundingClientRect();
+      const navigation = document.querySelector(".desk-navigation").getBoundingClientRect();
+      return panel.bottom <= navigation.top + 1;
+    })).toBe(true);
+    await refreshedQuery.press("Escape");
+    await expect(page.locator("#memory-session-trigger")).toBeFocused();
+  } finally {
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await page.setViewportSize({ width: 375, height: 812 });
   }
 });
 
