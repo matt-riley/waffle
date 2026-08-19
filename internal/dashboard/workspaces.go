@@ -57,6 +57,7 @@ type WorkspaceSnapshot struct {
 type WorkspaceGitView struct {
 	WorkspaceID string `json:"workspace"`
 	Available   bool   `json:"available"`
+	Partial     bool   `json:"partial,omitempty"`
 	// Reason explains an unavailable projection in fixed, redacted text.
 	Reason string `json:"reason,omitempty"`
 
@@ -242,6 +243,9 @@ func (s *WorkspacesService) GitStatus(ctx context.Context, id string) (Workspace
 		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
 			return WorkspaceGitView{}, err
 		}
+		if !errors.Is(err, workspace.ErrWorkspaceNotRunning) && !errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) {
+			view.Partial = true
+		}
 		view.Reason = workspaceGitUnavailableReason(err, ws.Status)
 		return view, nil
 	}
@@ -266,7 +270,8 @@ func (s *WorkspacesService) GitStatus(ctx context.Context, id string) (Workspace
 // text. Upstream error strings can carry paths, remote URLs, or command
 // output and are never surfaced.
 func workspaceGitUnavailableReason(err error, status string) string {
-	if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) || status == workspace.StatusClosed {
+	if errors.Is(err, workspace.ErrWorkspaceAlreadyClosed) ||
+		(status == workspace.StatusClosed && errors.Is(err, workspace.ErrWorkspaceNotRunning)) {
 		return "The workspace is closed."
 	}
 	if errors.Is(err, workspace.ErrWorkspaceNotRunning) {
@@ -483,7 +488,7 @@ func newWorkspaceListHandler(service *WorkspacesService) http.Handler {
 					partial = true
 					view = WorkspaceGitView{WorkspaceID: item.ID, Reason: "Git status could not be read from this workspace."}
 				}
-				if item.Status == workspace.StatusOpen && !view.Available {
+				if view.Partial || (item.Status == workspace.StatusOpen && !view.Available) {
 					partial = true
 				}
 				git[item.ID] = view

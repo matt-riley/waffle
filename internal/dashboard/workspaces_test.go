@@ -201,22 +201,39 @@ func TestWorkspaceListPartialOnlyReportsRunningInspectionFailures(t *testing.T) 
 		}
 	})
 
-	t.Run("actual inspection error is partial for an idle row too", func(t *testing.T) {
-		harness := newWorkspaceRouteHarness(t)
-		harness.manager.addWorkspace(workspace.Workspace{
-			ID: "ws-idle", Repo: "matt-riley/idle", SessionID: "session-workspace",
-			Status: workspace.StatusIdle,
-		})
-		harness.manager.getErr = errors.New("inspection dependency unavailable")
+	for _, tc := range []struct {
+		name   string
+		id     string
+		repo   string
+		status string
+		reason string
+	}{
+		{name: "idle", id: "ws-idle", repo: "matt-riley/idle", status: workspace.StatusIdle, reason: "The workspace is idle. Resume it to read git status."},
+		{name: "failed", id: "ws-failed", repo: "matt-riley/failed", status: workspace.StatusFailed, reason: "The workspace is not running."},
+	} {
+		t.Run("actual inspection error is partial for "+tc.name+" row", func(t *testing.T) {
+			harness := newWorkspaceRouteHarness(t)
+			harness.manager.addWorkspace(workspace.Workspace{
+				ID: tc.id, Repo: tc.repo, SessionID: "session-workspace",
+				Status: tc.status,
+			})
+			harness.manager.gitErr = errors.New("inspection dependency unavailable")
 
-		response := harness.requestHTML("/api/v1/desk/workspaces")
-		if response.Code != http.StatusOK {
-			t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
-		}
-		if !strings.Contains(response.Body.String(), "Some workspace evidence is temporarily unavailable.") {
-			t.Fatalf("actual idle inspection error was downgraded: %s", response.Body.String())
-		}
-	})
+			response := harness.requestHTML("/api/v1/desk/workspaces")
+			if response.Code != http.StatusOK {
+				t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "Some workspace evidence is temporarily unavailable.") {
+				t.Fatalf("actual %s inspection error was downgraded: %s", tc.name, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "Git status could not be read from this workspace.") {
+				t.Fatalf("actual %s inspection error lost its redacted reason: %s", tc.name, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), tc.reason) {
+				t.Fatalf("actual %s inspection error was mislabeled as lifecycle unavailability: %s", tc.name, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestWorkspaceClosePreviewIsInspectOnlyExactAndResourceBound(t *testing.T) {
@@ -930,6 +947,7 @@ func TestWorkspaceGitStatusProjection(t *testing.T) {
 			gitErr: errors.New("exec: /var/lib/waffle/queues/ws-1: https://x-access-token:ghs_secret@github.com"),
 			want: WorkspaceGitView{
 				WorkspaceID: "ws-1",
+				Partial:     true,
 				Reason:      "Git status could not be read from this workspace.",
 			},
 		},

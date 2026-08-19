@@ -26,6 +26,7 @@
 	let restartPollStartedAt = 0;
 	let restartPollTimer = 0;
 	let restartLocked = false;
+	let pendingWorkspaceFocusID = "";
 	const restartPollInterval = 1000;
 	const restartPollTimeout = 120000;
 
@@ -711,6 +712,9 @@
 		if (form.dataset.waffleJsonKind === "task-schedule") {
 			taskScheduleBody(form, body, detail);
 		}
+		if ((detail.path || "").endsWith("/close")) {
+			detail.waffleDialogFocus = form.closest?.("dialog")?.dataset?.waffleDialogFocus || "";
+		}
 		const prospectiveProvider = form.dataset.waffleJsonKind === "provider" && (detail.path || "").endsWith("/providers/test");
 		if (prospectiveProvider) {
 			body.model = body.model_id || "";
@@ -759,6 +763,24 @@
     if (config.waffleIntent) inFlight.add(config.waffleIntent.key);
   });
 
+	function restoreWorkspaceFocus(focusID) {
+		let restored = false;
+		if (focusID) {
+			for (const candidate of document.querySelectorAll("[data-waffle-action-id]")) {
+				if (
+					candidate.dataset.waffleActionId === focusID &&
+					candidate.isConnected &&
+					(candidate.offsetWidth > 0 || candidate.offsetHeight > 0)
+				) {
+					candidate.focus?.();
+					restored = true;
+					break;
+				}
+			}
+		}
+		if (!restored) document.querySelector("#workspace-open-button")?.focus?.();
+	}
+
 	document.body.addEventListener("htmx:afterRequest", (event) => {
     const config = event.detail?.requestConfig;
     const intent = config?.waffleIntent;
@@ -790,6 +812,10 @@
       if (path.endsWith("/open") || path.endsWith("/close") || path.endsWith("/forget")) {
         event.detail.elt?.closest?.("dialog")?.close?.();
       }
+		if (path.endsWith("/close")) {
+			pendingWorkspaceFocusID = config.waffleDialogFocus || "";
+			restoreWorkspaceFocus(pendingWorkspaceFocusID);
+		}
       for (const [identity, candidate] of intents) {
         if (candidate.key === intent.key) intents.delete(identity);
       }
@@ -844,22 +870,7 @@
 			dialog?.addEventListener?.(
 				"close",
 				() => {
-					const focusID = dialog.dataset.waffleDialogFocus || "";
-					let restored = false;
-					if (focusID) {
-						for (const candidate of document.querySelectorAll("[data-waffle-action-id]")) {
-							if (
-								candidate.dataset.waffleActionId === focusID &&
-								candidate.isConnected &&
-								(candidate.offsetWidth > 0 || candidate.offsetHeight > 0)
-							) {
-								candidate.focus?.();
-								restored = true;
-								break;
-							}
-						}
-					}
-					if (!restored) document.querySelector("#workspace-open-button")?.focus?.();
+					restoreWorkspaceFocus(dialog.dataset.waffleDialogFocus || "");
 				},
 				{ once: true },
 			);
@@ -870,6 +881,10 @@
 		filterCatalogue();
 		refreshMemoryAttachAvailability();
 		const requestPath = event.detail?.pathInfo?.requestPath || "";
+		if (pendingWorkspaceFocusID && requestPath.endsWith("/workspaces")) {
+			restoreWorkspaceFocus(pendingWorkspaceFocusID);
+			pendingWorkspaceFocusID = "";
+		}
 		const attachStatus = document.querySelector("#memory-attach-status");
 		if (
 			requestPath.includes("/memory/attach") &&

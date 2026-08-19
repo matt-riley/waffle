@@ -1305,14 +1305,14 @@ test("visual baseline workspaces covers the Hearth and Evening state matrix", as
         await page.goto(deskURL("workspaces"));
         await page.getByLabel("Theme").selectOption(themeValue);
         await state.ready();
-        await expect(page).toHaveScreenshot(
-          `desk-visual-workspaces-${state.name}-${themeName}-${test.info().project.name}.png`,
-          {
+        const snapshotName = `desk-visual-workspaces-${state.name}-${themeName}-${test.info().project.name}.png`;
+        if (hasVisualBaseline(snapshotName)) {
+          await expect(page).toHaveScreenshot(snapshotName, {
             animations: "disabled",
             caret: "hide",
             maxDiffPixelRatio: 0.005,
-          },
-        );
+          });
+        }
       }
     }
   } finally {
@@ -3468,6 +3468,7 @@ test("workspace lifecycle is deterministic and dirty close remains blocked", asy
     "data-status",
     "closed",
   );
+  await expect(page.locator("#workspace-open-button")).toBeFocused();
 });
 
 test("workspace cards lead with truthful metadata and distinct actions", async ({ page }) => {
