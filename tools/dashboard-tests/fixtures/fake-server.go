@@ -480,9 +480,6 @@ func (r fixtureRuns) Snapshot(context.Context) (observability.Snapshot, error) {
 	case fixtureTaskModeEmpty:
 		return observability.Snapshot{}, nil
 	case fixtureTaskModePartial, fixtureTaskModeFailure:
-		if fixtureTaskMode.Load() == fixtureTaskModeFailure {
-			return observability.Snapshot{}, errors.New("fixture runs unavailable")
-		}
 		return observability.Snapshot{}, errors.New("fixture runs unavailable")
 	}
 	return r.snapshot, nil
