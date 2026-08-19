@@ -3647,6 +3647,55 @@ test("Workspaces rows preserve action tiers, wrapping, and 44px targets", async 
         expect(target.width).toBeGreaterThanOrEqual(44);
         expect(target.height).toBeGreaterThanOrEqual(44);
       }
+
+      const metadataActions = await page.locator(".workspace-card").evaluateAll((cards) =>
+        cards.map((card) => {
+          const metadata = [...card.querySelectorAll(
+            ":scope > h3, :scope > .workspace-status, :scope > .waffle-fragment-facts, :scope > .workspace-git",
+          )].map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              text: element.textContent || "",
+              left: rect.left,
+              right: rect.right,
+              top: rect.top,
+              bottom: rect.bottom,
+            };
+          });
+          const actions = card.querySelector(":scope > .waffle-fragment-actions");
+          const actionRect = actions?.getBoundingClientRect();
+          const actionBox = actionRect
+            ? {
+                left: actionRect.left,
+                right: actionRect.right,
+                top: actionRect.top,
+                bottom: actionRect.bottom,
+              }
+            : null;
+          const overlaps = actionBox
+            ? metadata.filter((item) =>
+                item.left < actionBox.right &&
+                item.right > actionBox.left &&
+                item.top < actionBox.bottom &&
+                item.bottom > actionBox.top,
+              )
+            : [];
+          return {
+            id: card.getAttribute("data-workspace-id"),
+            metadata,
+            actionBox,
+            overlaps,
+          };
+        }),
+      );
+      expect(metadataActions.length).toBeGreaterThan(1);
+      for (const card of metadataActions) {
+        expect(card.actionBox).not.toBeNull();
+        expect(card.overlaps).toEqual([]);
+      }
+      const longCard = metadataActions.find((card) => card.id === "workspace-dirty");
+      expect(longCard).toBeDefined();
+      expect(longCard.metadata.some((item) => item.text.includes("deliberately-long"))).toBe(true);
       await cdp.send("Emulation.clearDeviceMetricsOverride");
     }
 
