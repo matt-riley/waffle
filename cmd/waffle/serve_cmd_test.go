@@ -98,7 +98,10 @@ func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
 		})
 	}()
 	lockPath := filepath.Join(home, "serve.lock")
-	deadline := time.Now().Add(2 * time.Second)
+	// Generous budgets throughout this file: when the whole package suite runs
+	// in parallel, serve startup alone can take seconds. These deadlines bound
+	// a hang; none of them is a timing assertion.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(lockPath); err == nil {
 			break
@@ -114,7 +117,7 @@ func TestServeStopsWhenOwnershipHeartbeatIsLost(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "serve ownership lost") {
 			t.Fatalf("serve ownership loss = %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not stop after ownership loss")
 	}
 }
@@ -177,7 +180,7 @@ func TestServeStartsConfiguredStatusListenerAndShutsItDown(t *testing.T) {
 	}()
 
 	client := &http.Client{Timeout: 100 * time.Millisecond}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		resp, err := client.Get("http://" + addr + "/status")
 		if err == nil {
@@ -244,7 +247,7 @@ func TestServeDashboardEnabledServesDeskOnSharedSecuredListener(t *testing.T) {
 		})
 	}()
 	client := &http.Client{Timeout: 100 * time.Millisecond}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		resp, err := client.Get("http://" + addr + "/status")
 		if err == nil {
@@ -427,7 +430,7 @@ learn = false
 		if serveErr != nil {
 			t.Fatalf("serve shutdown: %v", serveErr)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not stop after deferred finalization test")
 	}
 }
@@ -468,7 +471,7 @@ func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
 
 	client := &http.Client{Timeout: time.Second}
 	var token string
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for token == "" {
 		response, requestErr := client.Get("http://" + statusAddr + "/desk/")
 		if requestErr == nil {
@@ -521,7 +524,7 @@ func TestServeDashboardChatRouteSharesSessionOwnersWithSocket(t *testing.T) {
 		if err != nil {
 			t.Fatalf("serve shutdown = %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not stop after cancellation")
 	}
 }
@@ -592,7 +595,7 @@ func TestServeChatStartsConfiguredSocketAcceptsHandshakeAndRemovesOnShutdown(t *
 		if err != nil {
 			t.Fatalf("serve shutdown: %v\nlogs:\n%s", err, logs.String())
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not stop after chat context cancellation")
 	}
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
@@ -674,7 +677,7 @@ func TestServeChatListenerCloseErrorFailsOtherwiseSuccessfulShutdown(t *testing.
 		if !errors.Is(err, want) || !strings.Contains(err.Error(), "chat listener cleanup") {
 			t.Fatalf("serve listener cleanup = %v, want wrapped %v", err, want)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after listener close failure")
 	}
 }
