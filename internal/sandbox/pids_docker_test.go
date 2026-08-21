@@ -40,6 +40,13 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	maxSeen := 0
 	for time.Now().Before(deadline) {
+		state, stateErr := exec.CommandContext(ctx, "docker", "inspect", "--format",
+			"{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}", name).CombinedOutput()
+		if stateErr != nil {
+			logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput()
+			t.Fatalf("container %s vanished before pressure could be observed: %v (%s)\nlogs: %s",
+				name, stateErr, strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
+		}
 		top, topErr := exec.CommandContext(ctx, "docker", "top", name).CombinedOutput()
 		if topErr == nil {
 			lines := strings.Split(strings.TrimSpace(string(top)), "\n")
@@ -58,7 +65,10 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	}
 	if maxSeen < 8 {
 		logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput()
-		t.Fatalf("fork workload did not create enough pressure: max=%d logs=%s", maxSeen, strings.TrimSpace(string(logs)))
+		state, _ := exec.CommandContext(ctx, "docker", "inspect", "--format",
+			"{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}} oom={{.State.OOMKilled}}", name).CombinedOutput()
+		t.Fatalf("fork workload did not create enough pressure: max=%d state=%s logs=%s",
+			maxSeen, strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
 	}
 
 	var configured string
