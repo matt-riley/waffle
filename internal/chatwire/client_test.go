@@ -402,6 +402,10 @@ func TestClientAbandonedFullRouteDoesNotBlockLaterResponses(t *testing.T) {
 	}
 }
 
+// maxUnixSocketPath is the practical sockaddr_un.sun_path budget (Darwin
+// allows 104 bytes including the NUL terminator).
+const maxUnixSocketPath = 100
+
 func unixListener(t *testing.T) (net.Listener, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "waffle-chatwire-")
@@ -411,6 +415,19 @@ func unixListener(t *testing.T) (net.Listener, string) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	path := filepath.Join(dir, "chat.sock")
 	listener, err := net.Listen("unix", path)
+	if err != nil && len(path) >= maxUnixSocketPath {
+		// A deep ambient TMPDIR (sandboxed CI, agent harnesses) overflows
+		// Darwin's sun_path cap and bind fails with "invalid argument".
+		// Retry from a short root so the suite does not depend on how deep
+		// the host's temp directory happens to be.
+		shortDir, shortErr := os.MkdirTemp("/tmp", "waffle-chatwire-")
+		if shortErr != nil {
+			t.Fatalf("listen unix %s: %v (short-path retry failed: %v)", path, err, shortErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(shortDir) })
+		path = filepath.Join(shortDir, "chat.sock")
+		listener, err = net.Listen("unix", path)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
