@@ -1,5 +1,5 @@
 [tools]
-go = "1.26.6"
+go = "1.26.7"
 node = "26.7.0"
 pnpm = "11.21.0"
 
@@ -105,4 +105,18 @@ dir = "tools/dashboard-tests"
 run = """
 pnpm install --frozen-lockfile --ignore-scripts
 pnpm run capture-docs-screenshots
+"""
+
+[tasks.v1-check]
+description = "Complete v1 release gate: static checks, race suite, evals, browser, website, brand, artifact repro, vulnerability scan"
+run = """
+mise run fmt
+mise run vet
+mise run lint
+mise run test
+mise run dashboard-check
+mise run website-check
+mise run brand-check
+bash scripts/check-linux-artifact-repro.sh
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 """
