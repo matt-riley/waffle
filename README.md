@@ -71,6 +71,7 @@ then, treat tags as preview.
 ## Docs
 
 - [Architecture and trust model](docs/plan.md)
+- [v1 readiness contract](V1-READINESS.md)
 - [Start here — Meet Waffle](https://waffle.mattriley.tools/docs/meet/what-waffle-is/) (plain language)
 - [First run and chat](https://waffle.mattriley.tools/docs/under-the-hood/chat-clients/)
 - [Skills, profiles, cron, learning](https://waffle.mattriley.tools/docs/under-the-hood/skills-profiles-and-jobs/)
