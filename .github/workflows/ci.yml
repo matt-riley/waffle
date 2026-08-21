@@ -264,10 +264,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # One toolchain source of truth: dev, CI, and release builds all use the
+      # Go pinned in mise.toml. go.mod keeps its own (older) language version
+      # on purpose; it must not select the release compiler.
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
         with:
-          go-version-file: go.mod
-          cache: false
+          version: 2026.8.4
+          install: true
+          cache: true
+          cache_save: false
       - uses: ./.github/actions/restore-go-caches
         with:
           dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
@@ -292,10 +297,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # One toolchain source of truth: dev, CI, and release builds all use the
+      # Go pinned in mise.toml. go.mod keeps its own (older) language version
+      # on purpose; it must not select the release compiler.
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
         with:
-          go-version-file: go.mod
-          cache: false
+          version: 2026.8.4
+          install: true
+          cache: true
+          cache_save: false
       - name: Check Linux artifact reproducibility
         run: bash scripts/check-linux-artifact-repro.sh
 

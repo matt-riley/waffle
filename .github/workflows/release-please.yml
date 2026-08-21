@@ -64,10 +64,15 @@ jobs:
           # build-linux-artifact.sh stamps the version from `git describe
           # --tags`, so the tag release-please just pushed must be present.
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # One toolchain source of truth: dev, CI, and release builds all use the
+      # Go pinned in mise.toml. go.mod keeps its own (older) language version
+      # on purpose; it must not select the release compiler.
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
         with:
-          go-version-file: go.mod
-          cache: false
+          version: 2026.8.4
+          install: true
+          cache: true
+          cache_save: false
       - name: Build artifact
         run: >
           scripts/build-linux-artifact.sh
