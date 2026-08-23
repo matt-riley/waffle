@@ -114,8 +114,11 @@ func openQueueDB(path, schema string) (*sql.DB, error) {
 		}
 	}
 	// sql.Open is lazy: the file exists only after the schema exec above
-	// (or after the first write when schema == ""). chmod it here so both
-	// sides can write regardless of which uid created it.
+	// (or after the first write when schema == ""). chmod the db and its
+	// persisted TRUNCATE journal here so both sides can write regardless
+	// of which uid created them (the journal keeps the mode it was first
+	// created with).
 	_ = os.Chmod(path, 0o666)
+	_ = os.Chmod(path+"-journal", 0o666)
 	return db, nil
 }
