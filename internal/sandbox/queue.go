@@ -67,9 +67,15 @@ func OpenQueueReader(path string) (*sql.DB, error) {
 // provided. Both client and runner pass the idempotent schema for each file,
 // so either process can start first.
 func openQueueDB(path, schema string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
 		return nil, err
 	}
+	// The runner serves with an empty capability set (it sheds CAP_NET_ADMIN
+	// and everything else after the network lockdown), so it cannot rely on
+	// root's DAC override to reach a queue dir owned by the host user on
+	// Linux. Both sides make the dir and its files cross-uid accessible;
+	// MkdirAll alone leaves an existing dir's mode untouched.
+	_ = os.Chmod(filepath.Dir(path), 0o777)
 	// TRUNCATE journaling instead of WAL: the queue files live on a bind
 	// mount shared across a container boundary, and rollback journals are
 	// the most conservative choice there. Throughput is irrelevant at
@@ -82,6 +88,7 @@ func openQueueDB(path, schema string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open queue %s: %w", path, err)
 	}
+	_ = os.Chmod(path, 0o666)
 	db.SetMaxOpenConns(1)
 	if schema != "" {
 		if _, err := db.Exec(schema); err != nil {
@@ -106,5 +113,12 @@ func openQueueDB(path, schema string) (*sql.DB, error) {
 			}
 		}
 	}
+	// sql.Open is lazy: the file exists only after the schema exec above
+	// (or after the first write when schema == ""). chmod the db and its
+	// persisted TRUNCATE journal here so both sides can write regardless
+	// of which uid created them (the journal keeps the mode it was first
+	// created with).
+	_ = os.Chmod(path, 0o666)
+	_ = os.Chmod(path+"-journal", 0o666)
 	return db, nil
 }

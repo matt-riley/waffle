@@ -473,7 +473,10 @@ the host gateway, so the credential broker is unreachable. Docker `--internal`
 also blocks host-gateway on Docker Desktop. Instead, `waffle-ws` is a normal
 bridge (so host-gateway works) and the **linux runner** applies netlock at
 start (`CAP_NET_ADMIN` + drop default route, host `/32` only). That yields the
-same operational outcome: broker reachable, raw external probes fail.
+same operational outcome: broker reachable, raw external probes fail. After applying the
+lockdown the runner drops every Linux capability (re-exec'ing so nothing inherits
+`CAP_NET_ADMIN`), so workspace code cannot re-add routes; IPv6 default routes are removed
+too.
 
 **Clone under `none`:** before `git clone`, Open allows the repository host on
 the broker egress allowlist so proxy-aware git can fetch that host only.

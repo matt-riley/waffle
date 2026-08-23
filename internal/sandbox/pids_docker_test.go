@@ -30,9 +30,13 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	defer func() { _ = exec.Command("docker", "rm", "-f", name).Run() }()
 	// Keep asking for processes after the limit is reached. Docker/cgroups
 	// must reject those forks while the host and test process remain usable.
+	// The bomb runs in a background subshell with a keepalive PID 1: ash
+	// exits when a fork fails ("sh: can't fork"), which under --rm would
+	// erase the container before pressure is observable.
 	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm",
 		"--name", name, "--network", "none", "--pids-limit", strconv.Itoa(limit),
-		"alpine:3.20", "sh", "-c", "while :; do sleep 300 & done").CombinedOutput()
+		"alpine:3.20", "sh", "-c",
+		"(while :; do sleep 300 & done) & while :; do sleep 5; done").CombinedOutput()
 	if err != nil {
 		t.Fatalf("start contained fork bomb: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -40,6 +44,13 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	maxSeen := 0
 	for time.Now().Before(deadline) {
+		state, stateErr := exec.CommandContext(ctx, "docker", "inspect", "--format",
+			"{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}", name).CombinedOutput()
+		if stateErr != nil {
+			logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput()
+			t.Fatalf("container %s vanished before pressure could be observed: %v (%s)\nlogs: %s",
+				name, stateErr, strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
+		}
 		top, topErr := exec.CommandContext(ctx, "docker", "top", name).CombinedOutput()
 		if topErr == nil {
 			lines := strings.Split(strings.TrimSpace(string(top)), "\n")
@@ -58,7 +69,10 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	}
 	if maxSeen < 8 {
 		logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput()
-		t.Fatalf("fork workload did not create enough pressure: max=%d logs=%s", maxSeen, strings.TrimSpace(string(logs)))
+		state, _ := exec.CommandContext(ctx, "docker", "inspect", "--format",
+			"{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}} oom={{.State.OOMKilled}}", name).CombinedOutput()
+		t.Fatalf("fork workload did not create enough pressure: max=%d state=%s logs=%s",
+			maxSeen, strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
 	}
 
 	var configured string

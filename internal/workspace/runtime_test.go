@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -361,7 +362,9 @@ func TestDockerEgressAllowlistProxyPolicy(t *testing.T) {
 // when host is in allow (nil/empty = deny all, matching egress=none).
 func startMockBroker(t *testing.T, allow map[string]bool) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Bind all interfaces: containers reach the broker through host-gateway,
+	// which is not loopback on Linux CI runners.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// HTTP proxy clients send absolute-form request lines.
 		if r.URL.IsAbs() || strings.HasPrefix(r.URL.Path, "http://") || strings.HasPrefix(r.URL.Path, "https://") {
 			host := strings.ToLower(r.URL.Hostname())
@@ -383,6 +386,12 @@ func startMockBroker(t *testing.T, allow map[string]bool) *httptest.Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("broker-ok"))
 	}))
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Listener = l
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
 }

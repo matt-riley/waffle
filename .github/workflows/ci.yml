@@ -248,6 +248,33 @@ jobs:
       cancel-in-progress: true
       concurrency-suffix: security
 
+  docker-integration:
+    name: docker integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.8.4
+          install: true
+          cache: true
+          cache_save: false
+      - uses: ./.github/actions/restore-go-caches
+        with:
+          dependency-hash: ${{ hashFiles('go.mod', 'go.sum') }}
+      # Every suite reports even when an earlier one fails: these gates were
+      # previously runnable only on maintainer machines, and one stale test
+      # must not mask the others' results.
+      - name: Docker-gated sandbox, netlock, and workspace suites
+        run: |
+          status=0
+          WAFFLE_TEST_DOCKER=1 go test -tags=sandbox_docker ./internal/sandbox -count=1 || status=1
+          WAFFLE_TEST_DOCKER=1 go test -tags=sandbox_stress ./internal/sandbox -run Stress -count=1 || status=1
+          WAFFLE_TEST_DOCKER=1 go test ./internal/netlock -count=1 || status=1
+          WAFFLE_TEST_DOCKER=1 go test ./internal/workspace -run TestDocker -count=1 || status=1
+          exit $status
+
   build-linux-artifact:
     name: build linux artifact
     runs-on: ubuntu-latest

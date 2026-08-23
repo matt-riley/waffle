@@ -6,3 +6,8 @@ package netlock
 func LockdownExceptHost(hostName string) error {
 	return nil
 }
+
+// DropCapabilities is a no-op where Linux capabilities do not apply.
+func DropCapabilities() error {
+	return nil
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -19,15 +20,52 @@ import (
 // bind-mounted into a container, serving tool execution over the queue
 // pair. It has no access to config, secrets, or the database — only the
 // queue directory and whatever the container can see.
+// lockdownPhaseEnv marks that the setup phase below has already applied the
+// network lockdown and dropped capabilities; it prevents re-exec loops.
+const lockdownPhaseEnv = "WAFFLE_RUNNER_LOCKDOWN_APPLIED"
+
 func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
 	// Workspace none/allowlist set WAFFLE_NET_LOCKDOWN so the runner must
 	// drop the default route (keep waffle-host only) before serving (#95).
 	// Fail closed: do not serve with an open default route.
-	if err := netlock.ApplyFromEnv(os.Getenv, netlock.LockdownExceptHost); err != nil {
-		return fmt.Errorf("waffle runner: %w", err)
-	}
-	if v := strings.TrimSpace(os.Getenv(netlock.EnvLockdown)); v == "1" || strings.EqualFold(v, "true") {
-		fmt.Fprintf(stderr, "waffle runner: network lockdown active\n")
+	//
+	// Linux capabilities are per-thread, so dropping them inside this
+	// long-lived multithreaded process would leave the Go runtime's other
+	// threads — and every tool they exec — holding CAP_NET_ADMIN, able to
+	// re-add the routes the lockdown removed. The setup phase therefore
+	// applies the lockdown, drops every capability, and re-execs: the
+	// serving process starts single-threaded with an empty capability set
+	// that untrusted workspace commands inherit.
+	if os.Getenv(lockdownPhaseEnv) == "" {
+		if err := netlock.ApplyFromEnv(os.Getenv, netlock.LockdownExceptHost); err != nil {
+			return fmt.Errorf("waffle runner: %w", err)
+		}
+		if v := strings.TrimSpace(os.Getenv(netlock.EnvLockdown)); v == "1" || strings.EqualFold(v, "true") {
+			fmt.Fprintf(stderr, "waffle runner: network lockdown active\n")
+			// The session token lives on the bind-mounted queue dir owned by
+			// the host user; after the drop, the serving process and every tool
+			// it starts (git-credential included) could not read a 0600 file
+			// owned by another uid on Linux. Copy it to a container-local path
+			// while full capabilities are still held, and repoint the env var
+			// that children inherit.
+			if p := os.Getenv(sandbox.EnvSessionTokenFile); p != "" {
+				if raw, err := os.ReadFile(p); err == nil {
+					dest := filepath.Join(os.TempDir(), sandbox.SessionTokenFileName)
+					if err := os.WriteFile(dest, raw, 0o600); err == nil {
+						_ = os.Setenv(sandbox.EnvSessionTokenFile, dest)
+					}
+				}
+			}
+			if err := netlock.DropCapabilities(); err != nil {
+				return fmt.Errorf("waffle runner: drop capabilities: %w", err)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("waffle runner: locate self for re-exec: %w", err)
+			}
+			env := append(os.Environ(), lockdownPhaseEnv+"=1")
+			return syscall.Exec(self, append([]string{self, "runner"}, args...), env)
+		}
 	}
 
 	dir, err := queueDirArg(args)

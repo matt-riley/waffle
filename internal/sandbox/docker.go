@@ -140,8 +140,14 @@ func WriteSessionToken(queueDir, token string) error {
 	if queueDir == "" {
 		return fmt.Errorf("sandbox: queue dir required to write session token")
 	}
-	if err := os.MkdirAll(queueDir, 0o700); err != nil {
+	// The runner may open the queue before the host-side client exists and
+	// serves it with an empty capability set, so the dir must be cross-uid
+	// accessible before docker run.
+	if err := os.MkdirAll(queueDir, 0o777); err != nil {
 		return fmt.Errorf("sandbox: create queue dir for session token: %w", err)
+	}
+	if err := os.Chmod(queueDir, 0o777); err != nil {
+		return fmt.Errorf("sandbox: chmod queue dir: %w", err)
 	}
 	path := filepath.Join(queueDir, SessionTokenFileName)
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {

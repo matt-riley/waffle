@@ -27,9 +27,17 @@ func TestLockdownExceptHostBlocksExternal(t *testing.T) {
 		t.Skip("docker not on PATH")
 	}
 
-	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Bind all interfaces: containers reach the broker through host-gateway,
+	// which is not loopback on Linux CI runners.
+	broker := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "broker-ok")
 	}))
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker.Listener = l
+	broker.Start()
 	t.Cleanup(broker.Close)
 	_, port, err := net.SplitHostPort(broker.Listener.Addr().String())
 	if err != nil {

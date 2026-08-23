@@ -76,7 +76,7 @@ never reaches provider logs, delivered messages, or existing backups.
 
 | # | Blocker | Status |
 | --- | --- | --- |
-| 1 | Workspace egress lockdown is reversible in-container (`CAP_NET_ADMIN` retained; IPv4-only route deletion) | open |
+| 1 | Workspace egress lockdown is reversible in-container (`CAP_NET_ADMIN` retained; IPv4-only route deletion) | **closed** — setup phase applies IPv4+IPv6 lockdown then re-execs with capabilities dropped; adversarial restore-route test plus positive control run in the new `docker integration` CI job |
 | 2 | `waffle doctor` accepts unusable Docker setups (busybox probe, no runner boot, no arch check) | open |
 | 3 | Toolchain security advisories; release builds not on the dev toolchain | **closed** — go 1.26.7 pinned, workflows use mise, govulncheck in gate |
 | 4 | Durable PAT handed to workspaces by default | open — decision 2 defines the target |
