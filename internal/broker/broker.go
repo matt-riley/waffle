@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/id"
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/netutil"
 	"github.com/matt-riley/waffle/internal/store"
 	"github.com/matt-riley/waffle/internal/usage"
 )
@@ -1377,8 +1379,12 @@ func safeDialContext(ctx context.Context, network, address string) (net.Conn, er
 }
 
 func isPrivateIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		// Unparseable net.IP: fail closed rather than dial it.
+		return true
+	}
+	return netutil.IsSpecialOrPrivate(addr) || addr.IsMulticast()
 }
 
 // serveGitCredential speaks git's credential wire format: key=value lines

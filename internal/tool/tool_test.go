@@ -329,7 +329,13 @@ func TestFetchBlocksPrivateAndAllowsHostPort(t *testing.T) {
 }
 
 func TestFetchAddressClasses(t *testing.T) {
-	for _, raw := range []string{"127.0.0.1", "::1", "169.254.1.1", "fe80::1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "fc00::1", "0.0.0.0", "::"} {
+	for _, raw := range []string{
+		"127.0.0.1", "::1", "169.254.1.1", "fe80::1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "fc00::1", "0.0.0.0", "::",
+		// Special-purpose ranges netip.IsPrivate misses: CGNAT/Tailscale
+		// (RFC 6598), protocol assignments, benchmarking, TEST-NET, NAT64 (#593).
+		"100.64.0.1", "100.127.255.254", "192.0.0.1", "198.18.0.1", "198.19.255.255",
+		"192.0.2.1", "198.51.100.1", "203.0.113.1", "64:ff9b::192.0.2.1",
+	} {
 		addr, err := netip.ParseAddr(raw)
 		if err != nil {
 			t.Fatal(err)
