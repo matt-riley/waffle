@@ -118,6 +118,15 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 	if maxIter <= 0 {
 		maxIter = 50
 	}
+	// Media-bearing user content taints the origin like fetch output: anything
+	// a later model-invoked write depends on came from an image or document no
+	// text filter inspected. This must run before the first runTools call so a
+	// remember in the first tool batch is already untrusted (#592). The tail
+	// is the inbound user message here — inside the loop the tail is the
+	// assistant response, which never carries media.
+	if history[len(history)-1].HasMedia() {
+		sesspkg.MarkUntrusted(ctx)
+	}
 	var cumulativeUsage llm.Usage
 	observeUsage := func(callUsage llm.Usage) error {
 		cumulativeUsage.InputTokens += callUsage.InputTokens
@@ -205,15 +214,19 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, hooks Hooks) ([]
 				sesspkg.MarkUntrusted(ctx)
 			}
 		}
-		// Media-bearing user content taints the origin like fetch output:
-		// anything a later model-invoked write depends on came from an
-		// image or document no text filter inspected.
-		if history[len(history)-1].HasMedia() {
-			sesspkg.MarkUntrusted(ctx)
-		}
 		blocks := make([]llm.Block, len(results))
 		for j, res := range results {
 			blocks[j] = llm.Block{Type: llm.BlockToolResult, ToolResult: &res}
+		}
+		// Media-bearing tool results taint the origin like user attachments:
+		// their blocks come from an image or document no text filter
+		// inspected. Mark before the next iteration's tools run, so a later
+		// remember in the same run is already untrusted (#592).
+		for _, res := range results {
+			if (llm.Message{Blocks: res.Blocks}).HasMedia() {
+				sesspkg.MarkUntrusted(ctx)
+				break
+			}
 		}
 		history = append(history, llm.Message{Role: llm.RoleUser, Blocks: blocks})
 	}

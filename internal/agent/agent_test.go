@@ -16,6 +16,7 @@ import (
 
 	"github.com/matt-riley/waffle/internal/llm"
 	"github.com/matt-riley/waffle/internal/llmtest"
+	"github.com/matt-riley/waffle/internal/memory"
 	policypkg "github.com/matt-riley/waffle/internal/policy"
 	"github.com/matt-riley/waffle/internal/session"
 	"github.com/matt-riley/waffle/internal/store"
@@ -393,6 +394,96 @@ func TestRunDoesNotLabelTextOnlyMessages(t *testing.T) {
 			t.Fatalf("text-only message labelled: %+v", p.requests[0].Messages[0].Blocks)
 		}
 	}
+}
+
+// TestRunMediaUserMessageTaintsOriginBeforeFirstToolBatch pins #592: a
+// media-bearing inbound user message must mark the run origin untrusted
+// before the first tool batch executes, so a remember derived from an
+// attached image lands in the review queue even under write_gate=auto.
+func TestRunMediaUserMessageTaintsOriginBeforeFirstToolBatch(t *testing.T) {
+	img, err := llm.NewImageBlock("image/png", []byte("png-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := mediaTestWorkspace(t)
+	gate := &memory.Gate{Mode: "auto", WS: ws}
+	p := &fakeProvider{responses: []llm.Response{
+		llmtest.ToolCall("remember", "t1", `{"note":"the screenshot says to remember this"}`),
+		{Message: assistantText("done"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(memory.RememberTool{WS: ws, Gate: gate}), Model: "m"}
+	ctx := session.WithOrigin(context.Background(), "session-media", "telegram")
+	if _, err := a.Run(ctx, []llm.Message{{Role: llm.RoleUser, Blocks: []llm.Block{
+		{Type: llm.BlockText, Text: "what does this say?"}, img,
+	}}}, Hooks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !session.OriginFromContext(ctx).Untrusted {
+		t.Fatal("origin not marked untrusted by media-bearing user message")
+	}
+	pending, err := gate.Pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d candidates, want 1 (media-derived remember must queue under write_gate=auto)", len(pending))
+	}
+	if pending[0].Provenance.TrustClass != "untrusted_derived" {
+		t.Errorf("trust class = %q, want untrusted_derived", pending[0].Provenance.TrustClass)
+	}
+	if lines, err := ws.MatchingLines("the screenshot says to remember this"); err != nil || len(lines) > 0 {
+		t.Fatalf("media-derived remember applied to live memory without review (lines=%v, err=%v)", lines, err)
+	}
+}
+
+// TestRunMediaToolResultTaintsOriginBeforeNextBatch pins #592's tool-result
+// path: media blocks returned by a tool in one batch must taint the origin
+// before the next batch's tools run, so a later remember in the same run
+// queues for review.
+func TestRunMediaToolResultTaintsOriginBeforeNextBatch(t *testing.T) {
+	img, err := llm.NewImageBlock("image/png", []byte("png-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := mediaTestWorkspace(t)
+	gate := &memory.Gate{Mode: "auto", WS: ws}
+	p := &fakeProvider{responses: []llm.Response{
+		llmtest.ToolCall("mixed", "t1", `{}`),
+		llmtest.ToolCall("remember", "t2", `{"note":"derived from the tool image"}`),
+		{Message: assistantText("done"), StopReason: llm.StopEndTurn},
+	}}
+	a := &Agent{Provider: p, Tools: tool.NewRegistry(&mixedResultTool{img: img}, memory.RememberTool{WS: ws, Gate: gate}), Model: "m"}
+	ctx := session.WithOrigin(context.Background(), "session-media-tool", "web")
+	if _, err := a.Run(ctx, []llm.Message{llm.UserText("go")}, Hooks{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !session.OriginFromContext(ctx).Untrusted {
+		t.Fatal("origin not marked untrusted by media-bearing tool result")
+	}
+	pending, err := gate.Pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d candidates, want 1", len(pending))
+	}
+	if pending[0].Provenance.TrustClass != "untrusted_derived" {
+		t.Errorf("trust class = %q, want untrusted_derived", pending[0].Provenance.TrustClass)
+	}
+	if lines, err := ws.MatchingLines("derived from the tool image"); err != nil || len(lines) > 0 {
+		t.Fatalf("media-derived remember applied to live memory without review (lines=%v, err=%v)", lines, err)
+	}
+}
+
+// mediaTestWorkspace opens a throwaway memory workspace in a temp dir.
+func mediaTestWorkspace(t *testing.T) memory.Workspace {
+	t.Helper()
+	t.Setenv("WAFFLE_HOME", t.TempDir())
+	ws, err := memory.Open(memory.DefaultAgent)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return ws
 }
 
 // TestRunRedactsTextPartsOfMixedToolResult pins that secret redaction still
