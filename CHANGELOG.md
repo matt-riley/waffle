@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.3](https://github.com/matt-riley/waffle/compare/v0.31.2...v0.31.3) (2026-08-23)
+
+
+### Bug Fixes
+
+* **sandbox:** re-resolve the inbound queue handle on VirtioFS ([#590](https://github.com/matt-riley/waffle/issues/590)) ([ccb9864](https://github.com/matt-riley/waffle/commit/ccb9864d397d8c6d4e87e6bbe1211b446c7ea6f4))
+
 ## [0.31.2](https://github.com/matt-riley/waffle/compare/v0.31.1...v0.31.2) (2026-08-23)
 
 
