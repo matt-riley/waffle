@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -37,9 +37,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -63,9 +63,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -131,9 +131,9 @@ jobs:
             cmd_group: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -159,9 +159,9 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -192,9 +192,9 @@ jobs:
       # each one re-downloads the mise tarball from GitHub releases — six
       # download attempts per run, every run, each a chance to fail the whole
       # job on a transient connection reset before any test body executes.
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.5
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: true
@@ -237,13 +237,13 @@ jobs:
           key: ${{ steps.restore-go-build.outputs.cache-primary-key }}
 
   lint:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@3a7b18fc7be1a2b7ee2de806f2c631ca661ea6a9
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
     with:
       cancel-in-progress: true
       concurrency-suffix: lint
 
   security:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@3a7b18fc7be1a2b7ee2de806f2c631ca661ea6a9
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
     with:
       cancel-in-progress: true
       concurrency-suffix: security
@@ -267,9 +267,9 @@ jobs:
       # One toolchain source of truth: dev, CI, and release builds all use the
       # Go pinned in mise.toml. go.mod keeps its own (older) language version
       # on purpose; it must not select the release compiler.
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.4
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
@@ -300,9 +300,9 @@ jobs:
       # One toolchain source of truth: dev, CI, and release builds all use the
       # Go pinned in mise.toml. go.mod keeps its own (older) language version
       # on purpose; it must not select the release compiler.
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.4
+          version: 2026.8.6
           install: true
           cache: true
           cache_save: false
