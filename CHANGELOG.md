@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.1](https://github.com/matt-riley/waffle/compare/v0.31.0...v0.31.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **ci:** expect jdx/mise-action pins in the workflow guard test ([db0d1b4](https://github.com/matt-riley/waffle/commit/db0d1b4cbd0450d02d21e185540a23feca35685c))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.63.0 ([#573](https://github.com/matt-riley/waffle/issues/573)) ([c6d983f](https://github.com/matt-riley/waffle/commit/c6d983f77b814480a7e59f6503f0f47ada465559))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.63.1 ([#578](https://github.com/matt-riley/waffle/issues/578)) ([065d78c](https://github.com/matt-riley/waffle/commit/065d78c2d34eb090fe02ea042f885fdef2ad65d4))
+
 ## [0.31.0](https://github.com/matt-riley/waffle/compare/v0.30.4...v0.31.0) (2026-08-19)
 
 
