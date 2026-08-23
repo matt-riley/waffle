@@ -97,6 +97,12 @@ func (b Bash) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	cleanupLimit := configureProcessLimit(cmd, limit)
 	defer cleanupLimit()
 	configureProcessGroup(cmd)
+	// A daemonizing grandchild (setsid / double-fork) escapes the group kill
+	// but keeps the output pipe open, so Wait would block on pipe EOF
+	// forever. WaitDelay bounds that wait: after the cancel-kill, Wait
+	// abandons the pipe copy after this delay and returns ErrWaitDelay with
+	// the partial output (#594).
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	// Return up to HostReturnCap so Agent.runOne can spill before OutputLimit
 	// truncation (#69). Do not Truncate to OutputLimit here.
