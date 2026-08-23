@@ -31,9 +31,9 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 		"9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0": "v7",
 		"3d3c42e5aac5ba805825da76410c181273ba90b1": "v7",
 	})
-	assertWorkflowActionPins(t, workflow, "actions/setup-go", map[string]string{
-		"924ae3a1cded613372ab5595356fb5720e22ba16": "v6",
-		"b7ad1dad31e06c5925ef5d2fc7ad053ef454303e": "v7.0.0",
+	// #579 moved every job from actions/setup-go to the mise-pinned toolchain.
+	assertWorkflowActionPins(t, workflow, "jdx/mise-action", map[string]string{
+		"f10502fc09dadecfefb962fff68ce77213930204": "v4",
 	})
 
 	for _, want := range []string{
