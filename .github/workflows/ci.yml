@@ -237,7 +237,7 @@ jobs:
           key: ${{ steps.restore-go-build.outputs.cache-primary-key }}
 
   lint:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@3a7b18fc7be1a2b7ee2de806f2c631ca661ea6a9
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
     with:
       cancel-in-progress: true
       concurrency-suffix: lint
