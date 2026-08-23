@@ -37,6 +37,11 @@ func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
 	}
 
 	qdir := t.TempDir()
+	// The cap-less runner opens the queue before the host-side client
+	// exists, so the dir must be cross-uid accessible before docker run.
+	if err := os.Chmod(qdir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	run := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name,
 		"--network", netName,
 		"--cap-add", "NET_ADMIN",
@@ -149,6 +154,9 @@ func TestWorkspaceRunnerKeepsCapabilitiesWithoutLockdown(t *testing.T) {
 	}
 
 	qdir := t.TempDir()
+	if err := os.Chmod(qdir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	run := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name,
 		"--network", netName,
 		"--cap-add", "NET_ADMIN",
