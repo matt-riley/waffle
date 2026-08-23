@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -41,6 +42,20 @@ func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		if v := strings.TrimSpace(os.Getenv(netlock.EnvLockdown)); v == "1" || strings.EqualFold(v, "true") {
 			fmt.Fprintf(stderr, "waffle runner: network lockdown active\n")
+			// The session token lives on the bind-mounted queue dir owned by
+			// the host user; after the drop, the serving process and every tool
+			// it starts (git-credential included) could not read a 0600 file
+			// owned by another uid on Linux. Copy it to a container-local path
+			// while full capabilities are still held, and repoint the env var
+			// that children inherit.
+			if p := os.Getenv(sandbox.EnvSessionTokenFile); p != "" {
+				if raw, err := os.ReadFile(p); err == nil {
+					dest := filepath.Join(os.TempDir(), sandbox.SessionTokenFileName)
+					if err := os.WriteFile(dest, raw, 0o600); err == nil {
+						_ = os.Setenv(sandbox.EnvSessionTokenFile, dest)
+					}
+				}
+			}
 			if err := netlock.DropCapabilities(); err != nil {
 				return fmt.Errorf("waffle runner: drop capabilities: %w", err)
 			}
