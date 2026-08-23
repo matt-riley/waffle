@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.2](https://github.com/matt-riley/waffle/compare/v0.31.1...v0.31.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* **netlock:** drop capabilities after workspace lockdown; enforce IPv6 egress ([#582](https://github.com/matt-riley/waffle/issues/582)) ([b7c6a3a](https://github.com/matt-riley/waffle/commit/b7c6a3a8205154d2337b9ae7753d5e8345f69fde))
+
 ## [0.31.1](https://github.com/matt-riley/waffle/compare/v0.31.0...v0.31.1) (2026-08-23)
 
 
