@@ -49,7 +49,7 @@ func runnerCmd(ctx context.Context, args []string, stderr io.Writer) error {
 				return fmt.Errorf("waffle runner: locate self for re-exec: %w", err)
 			}
 			env := append(os.Environ(), lockdownPhaseEnv+"=1")
-			return syscall.Exec(self, append([]string{self}, args...), env)
+			return syscall.Exec(self, append([]string{self, "runner"}, args...), env)
 		}
 	}
 
