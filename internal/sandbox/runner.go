@@ -94,6 +94,14 @@ func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 
 	ticker := time.NewTicker(r.pollInterval())
 	defer ticker.Stop()
+	// Docker Desktop's VirtioFS can pin a long-lived fd to a stale inode
+	// after the host-side client writes: fresh opens see the current data
+	// while the old fd keeps serving orphaned pages, stalling the queue for
+	// a minute or more under load. Reopening the inbound handle after a
+	// short idle streak re-resolves the path and caps such a stall at about
+	// a second; the reopen costs the same class of work as the poll itself.
+	const idlePollsPerReopen = 10
+	idlePolls := 0
 	for {
 		next, stop, err := r.step(ctx, in, out, last)
 		if err != nil {
@@ -103,11 +111,21 @@ func (r *Runner) Serve(ctx context.Context, dir string) (err error) {
 			return nil
 		}
 		if next == last {
+			idlePolls++
+			if idlePolls >= idlePollsPerReopen {
+				idlePolls = 0
+				if fresh, err := openQueueDB(dir+"/"+inboundFile, ""); err == nil {
+					_ = in.Close()
+					in = fresh
+				}
+			}
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():
 				return nil
 			}
+		} else {
+			idlePolls = 0
 		}
 		last = next
 	}
