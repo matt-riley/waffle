@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.4](https://github.com/matt-riley/waffle/compare/v0.31.3...v0.31.4) (2026-08-23)
+
+
+### Bug Fixes
+
+* **agent:** taint origin on media-bearing input and tool results ([#592](https://github.com/matt-riley/waffle/issues/592)) ([#595](https://github.com/matt-riley/waffle/issues/595)) ([0635174](https://github.com/matt-riley/waffle/commit/063517448c874262e49289ebf54c5bcc32011d9e))
+* **security:** block CGNAT and special-purpose ranges in outbound guards ([#593](https://github.com/matt-riley/waffle/issues/593)) ([#597](https://github.com/matt-riley/waffle/issues/597)) ([b37057c](https://github.com/matt-riley/waffle/commit/b37057c5a6747e59ca70bdad5aec59340b7c32a7))
+* **tool:** bound bash Wait with WaitDelay so setsid escapees cannot hang Run ([#594](https://github.com/matt-riley/waffle/issues/594)) ([#598](https://github.com/matt-riley/waffle/issues/598)) ([e343054](https://github.com/matt-riley/waffle/commit/e34305429e9d9470921842f89563a4e66057648d))
+
 ## [0.31.3](https://github.com/matt-riley/waffle/compare/v0.31.2...v0.31.3) (2026-08-23)
 
 
