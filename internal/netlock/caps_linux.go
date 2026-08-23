@@ -16,7 +16,9 @@ const capV3 = 0x20080522
 // DropCapabilities clears the effective, permitted, and inheritable
 // capability sets of the calling thread. Dropping your own capabilities is
 // always permitted, so after the network lockdown has been applied the runner
-// can shed CAP_NET_ADMIN without holding CAP_SETPCAP.
+// can shed CAP_NET_ADMIN without holding CAP_SETPCAP. exec() preserves no
+// capabilities for a binary without file capabilities, so the re-exec that
+// runner_cmd performs yields a serving process with an empty set either way.
 //
 // Capability sets are per-thread: the caller must re-exec (as runner_cmd does)
 // so the serving process and every tool it starts inherit an empty set.

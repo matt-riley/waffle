@@ -16,8 +16,8 @@ import (
 
 // TestWorkspaceRunnerDropsCapabilitiesAfterLockdown is the adversarial proof
 // for the egress boundary: after the workspace runner applies its lockdown it
-// re-execs with an empty capability set, so untrusted container code cannot
-// re-add IPv4 or IPv6 default routes. Gated like the other Docker suites:
+// re-execs with only the DAC capability pair, so untrusted container code
+// cannot re-add IPv4 or IPv6 default routes. Gated like the other Docker suites:
 //
 //	WAFFLE_TEST_DOCKER=1 go test ./internal/netlock -run TestWorkspaceRunnerDrops -count=1 -v
 func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
@@ -52,7 +52,7 @@ func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
 		t.Fatalf("docker run: %v (%s)", err, out)
 	}
 
-	// PID 1 carries the empty effective set only once the setup phase has
+	// PID 1 carries the empty capability set once the setup phase has
 	// re-exec'd into the serving process.
 	deadline := time.Now().Add(30 * time.Second)
 	dropped := false
