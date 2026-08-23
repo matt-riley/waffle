@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matt-riley/waffle/internal/sandbox"
 )
 
 // TestWorkspaceRunnerDropsCapabilitiesAfterLockdown is the adversarial proof
@@ -67,20 +69,64 @@ func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
 		t.Fatalf("runner never reached an empty capability set\nlogs:\n%s", logs)
 	}
 
+	// The Bash tool execs "bash"; busybox ships only sh. The wrapper is test
+	// scaffolding — the adversarial commands below still run through the
+	// runner's own queue.
+	wrapper := filepath.Join(t.TempDir(), "bash-wrapper")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec /bin/sh \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.CommandContext(ctx, "docker", "cp", wrapper, name+":/bin/bash").CombinedOutput(); err != nil {
+		t.Fatalf("install bash wrapper: %v (%s)", err, out)
+	}
+
 	gw := strings.TrimSpace(dockerOut(t, ctx, "network", "inspect",
 		"-f", "{{(index .IPAM.Config 0).Gateway}}", netName))
-	for _, tc := range []struct{ name, cmd string }{
-		{"restore ipv4 default route", "ip route add default via " + gw + " dev eth0"},
-		{"restore ipv6 default route", "ip -6 route add default via fe80::1 dev eth0"},
-	} {
-		out, err := exec.CommandContext(ctx, "docker", "exec", name, "sh", "-c", tc.cmd).CombinedOutput()
-		if err == nil {
-			t.Fatalf("%s: succeeded after the capability drop", tc.name)
-		}
-		if !strings.Contains(strings.ToLower(string(out)), "not permitted") {
-			t.Fatalf("%s: failed for an unexpected reason (want EPERM): %v (%s)", tc.name, err, out)
-		}
+	// Drive the runner's own Bash tool through the shared queue so the
+	// commands execute as children of the dropped-capability PID 1. docker
+	// exec would instead start a fresh process carrying the container's
+	// original NET_ADMIN set, bypassing the drop entirely. Both attempts run
+	// in one queue round trip: the bind-mounted queue can serve one request
+	// reliably before cross-OS sqlite locking staleness kicks in.
+	client, err := sandbox.NewClient(qdir)
+	if err != nil {
+		t.Fatalf("open queue client: %v", err)
 	}
+	defer func() { _ = client.Close() }()
+	cmd := "ip route add default via " + gw + " dev eth0; echo V4=$?; " +
+		"ip -6 route add default dev eth0; echo V6=$?"
+	out, _, err := bashViaQueue(ctx, client, cmd)
+	if err != nil {
+		t.Fatalf("queue exec: %v", err)
+	}
+	if strings.Contains(out, "V4=0") {
+		t.Fatalf("restore ipv4 default route: succeeded after the capability drop\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "not permitted") {
+		t.Fatalf("restore ipv4 default route: failed for an unexpected reason (want EPERM): %s", out)
+	}
+	// The kernel may lack IPv6 in some environments; a zero V6 exit would be
+	// the only meaningful failure (a route added back without capabilities).
+	if strings.Contains(out, "V6=0") {
+		t.Fatalf("restore ipv6 default route: succeeded after the capability drop\n%s", out)
+	}
+}
+
+// bashViaQueue runs one bash command through the runner's queue with a short
+// retry window for the moment between the re-exec and the serving loop.
+func bashViaQueue(ctx context.Context, client *sandbox.Client, cmd string) (string, bool, error) {
+	input := fmt.Sprintf(`{"command": %q}`, cmd)
+	var out string
+	var isError bool
+	var err error
+	for range 25 {
+		out, isError, err = client.Exec(ctx, "bash", input)
+		if err == nil || !strings.Contains(err.Error(), "runner") {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return out, isError, err
 }
 
 // TestWorkspaceRunnerKeepsCapabilitiesWithoutLockdown is the positive
@@ -115,22 +161,23 @@ func TestWorkspaceRunnerKeepsCapabilitiesWithoutLockdown(t *testing.T) {
 		t.Fatalf("docker run: %v (%s)", err, out)
 	}
 
-	gw := strings.TrimSpace(dockerOut(t, ctx, "network", "inspect",
-		"-f", "{{(index .IPAM.Config 0).Gateway}}", netName))
-	add := "ip route add default via " + gw + " dev eth0"
+	// A fresh container already has a default route, so adding one cannot
+	// serve as the positive control (EEXIST). Adding an address exercises
+	// the same CAP_NET_ADMIN check without colliding with existing state.
+	addAddr := "ip addr add 198.51.100.1/32 dev eth0"
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
 	var lastOut []byte
 	for time.Now().Before(deadline) {
-		lastOut, lastErr = exec.CommandContext(ctx, "docker", "exec", name, "sh", "-c", add).CombinedOutput()
+		lastOut, lastErr = exec.CommandContext(ctx, "docker", "exec", name, "sh", "-c", addAddr).CombinedOutput()
 		if lastErr == nil {
 			_, _ = exec.CommandContext(ctx, "docker", "exec", name, "sh", "-c",
-				"ip route del default via "+gw+" dev eth0").CombinedOutput()
+				"ip addr del 198.51.100.1/32 dev eth0").CombinedOutput()
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("positive control failed: a NET_ADMIN container could not add a route (environment problem, not the fix): %v (%s)", lastErr, lastOut)
+	t.Fatalf("positive control failed: a NET_ADMIN container could not add an address (environment problem, not the fix): %v (%s)", lastErr, lastOut)
 }
 
 func skipUnlessDocker(t *testing.T) {

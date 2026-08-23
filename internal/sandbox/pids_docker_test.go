@@ -30,9 +30,13 @@ func TestDockerPIDLimitContainsForkBomb(t *testing.T) {
 	defer func() { _ = exec.Command("docker", "rm", "-f", name).Run() }()
 	// Keep asking for processes after the limit is reached. Docker/cgroups
 	// must reject those forks while the host and test process remain usable.
+	// The bomb runs in a background subshell with a keepalive PID 1: ash
+	// exits when a fork fails ("sh: can't fork"), which under --rm would
+	// erase the container before pressure is observable.
 	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm",
 		"--name", name, "--network", "none", "--pids-limit", strconv.Itoa(limit),
-		"alpine:3.20", "sh", "-c", "while :; do sleep 300 & done").CombinedOutput()
+		"alpine:3.20", "sh", "-c",
+		"(while :; do sleep 300 & done) & while :; do sleep 5; done").CombinedOutput()
 	if err != nil {
 		t.Fatalf("start contained fork bomb: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
