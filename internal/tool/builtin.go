@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/matt-riley/waffle/internal/llm"
+	"github.com/matt-riley/waffle/internal/netutil"
 	"github.com/matt-riley/waffle/internal/textcut"
 )
 
@@ -719,7 +720,7 @@ func (p fetchPolicy) allows(addr netip.Addr, hostport string) bool {
 }
 
 func blockedFetchAddr(addr netip.Addr) bool {
-	return addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() || addr.IsPrivate()
+	return netutil.IsSpecialOrPrivate(addr)
 }
 
 const (
