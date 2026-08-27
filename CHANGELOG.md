@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.5](https://github.com/matt-riley/waffle/compare/v0.31.4...v0.31.5) (2026-08-27)
+
+
+### Bug Fixes
+
+* **deps:** update dependency fast-xml-parser to v5.11.0 ([#602](https://github.com/matt-riley/waffle/issues/602)) ([8609aaa](https://github.com/matt-riley/waffle/commit/8609aaa92ae16c92de862189ac36c62057601e0e))
+* **deps:** update module charm.land/bubbletea/v2 to v2.0.9 ([#606](https://github.com/matt-riley/waffle/issues/606)) ([b7156d3](https://github.com/matt-riley/waffle/commit/b7156d33d678a7e007b2e2bbb27e45802ba3206d))
+
 ## [0.31.4](https://github.com/matt-riley/waffle/compare/v0.31.3...v0.31.4) (2026-08-23)
 
 
