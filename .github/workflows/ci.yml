@@ -351,7 +351,7 @@ jobs:
     # was set (#240).
     needs: [build-linux-artifact, linux-artifact-repro]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.APP_ID != ''
-    uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
+    uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@cc38a793ae2c2ee5eeea41a7614b2e906daa7cb2
     with:
       app-name: waffle
       infra-repo: infra
