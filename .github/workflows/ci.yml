@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -133,7 +133,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -161,7 +161,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -194,7 +194,7 @@ jobs:
       # job on a transient connection reset before any test body executes.
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: true
@@ -256,7 +256,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -296,7 +296,7 @@ jobs:
       # on purpose; it must not select the release compiler.
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
@@ -329,7 +329,7 @@ jobs:
       # on purpose; it must not select the release compiler.
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
-          version: 2026.8.10
+          version: 2026.8.11
           install: true
           cache: true
           cache_save: false
