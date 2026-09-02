@@ -2,7 +2,7 @@
   "name": "waffle-brand-assets",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.23.0",
+  "packageManager": "pnpm@11.24.0",
   "scripts": {
     "render:rig-motion": "node render-waffle-rig-motion.mjs",
     "test": "node --test",
