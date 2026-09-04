@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.6](https://github.com/matt-riley/waffle/compare/v0.31.5...v0.31.6) (2026-09-04)
+
+
+### Bug Fixes
+
+* **deps:** update dependency fast-xml-parser to v5.11.1 ([#631](https://github.com/matt-riley/waffle/issues/631)) ([32518e6](https://github.com/matt-riley/waffle/commit/32518e6573b4320692280731f1597f1f48bbabc3))
+* **deps:** update module charm.land/bubbles/v2 to v2.2.1 ([#620](https://github.com/matt-riley/waffle/issues/620)) ([033764c](https://github.com/matt-riley/waffle/commit/033764ce9c3a4a5ac53e0c3997baf699c000f106))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.66.0 ([#609](https://github.com/matt-riley/waffle/issues/609)) ([7f2ee34](https://github.com/matt-riley/waffle/commit/7f2ee34760af6fe89ff6f28fe660ecd832e5fb33))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.68.0 ([#630](https://github.com/matt-riley/waffle/issues/630)) ([a8d17df](https://github.com/matt-riley/waffle/commit/a8d17df00fcf0588e7a3d110082dad02670972c3))
+* **deps:** update module modernc.org/sqlite to v1.57.0 ([#610](https://github.com/matt-riley/waffle/issues/610)) ([f620fdf](https://github.com/matt-riley/waffle/commit/f620fdf96303950155e464d99780d82b526388b4))
+* **deps:** update opentelemetry to v1.46.0 ([#627](https://github.com/matt-riley/waffle/issues/627)) ([723f466](https://github.com/matt-riley/waffle/commit/723f466352ba62736339718aa07eb8bfe6980fd0))
+
 ## [0.31.5](https://github.com/matt-riley/waffle/compare/v0.31.4...v0.31.5) (2026-08-27)
 
 
