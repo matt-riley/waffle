@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -37,9 +37,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -63,9 +63,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -131,9 +131,9 @@ jobs:
             cmd_group: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -159,9 +159,9 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -192,9 +192,9 @@ jobs:
       # each one re-downloads the mise tarball from GitHub releases — six
       # download attempts per run, every run, each a chance to fail the whole
       # job on a transient connection reset before any test body executes.
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: true
@@ -254,9 +254,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -294,9 +294,9 @@ jobs:
       # One toolchain source of truth: dev, CI, and release builds all use the
       # Go pinned in mise.toml. go.mod keeps its own (older) language version
       # on purpose; it must not select the release compiler.
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
@@ -327,9 +327,9 @@ jobs:
       # One toolchain source of truth: dev, CI, and release builds all use the
       # Go pinned in mise.toml. go.mod keeps its own (older) language version
       # on purpose; it must not select the release compiler.
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.8.11
+          version: 2026.8.14
           install: true
           cache: true
           cache_save: false
