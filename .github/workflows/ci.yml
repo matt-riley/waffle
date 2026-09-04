@@ -243,7 +243,7 @@ jobs:
       concurrency-suffix: lint
 
   security:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@508a6f0dfc2b34068c1c29798ff09550c77829cc
     with:
       cancel-in-progress: true
       concurrency-suffix: security
