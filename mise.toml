@@ -1,7 +1,7 @@
 [tools]
 go = "1.27.1"
 node = "26.8.1"
-pnpm = "11.25.0"
+pnpm = "12.3.4"
 
 [tasks.build]
 description = "Build bin/waffle with a git-stamped version"
