@@ -1,6 +1,6 @@
 module github.com/matt-riley/waffle
 
-go 1.25.13
+go 1.26.0
 
 require (
 	charm.land/bubbles/v2 v2.2.1
@@ -20,7 +20,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	golang.org/x/net v0.58.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.58.0
