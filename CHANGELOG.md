@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.31.6](https://github.com/matt-riley/waffle/compare/v0.31.5...v0.31.6) (2026-09-12)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @astrojs/starlight to ^0.42.0 ([#647](https://github.com/matt-riley/waffle/issues/647)) ([5e56539](https://github.com/matt-riley/waffle/commit/5e56539d3f2a4b7b2d68edb40a91bf74cc798c27))
+* **deps:** update dependency fast-xml-parser to v5.11.1 ([#631](https://github.com/matt-riley/waffle/issues/631)) ([32518e6](https://github.com/matt-riley/waffle/commit/32518e6573b4320692280731f1597f1f48bbabc3))
+* **deps:** update module charm.land/bubbles/v2 to v2.2.1 ([#620](https://github.com/matt-riley/waffle/issues/620)) ([033764c](https://github.com/matt-riley/waffle/commit/033764ce9c3a4a5ac53e0c3997baf699c000f106))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.66.0 ([#609](https://github.com/matt-riley/waffle/issues/609)) ([7f2ee34](https://github.com/matt-riley/waffle/commit/7f2ee34760af6fe89ff6f28fe660ecd832e5fb33))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.68.0 ([#630](https://github.com/matt-riley/waffle/issues/630)) ([a8d17df](https://github.com/matt-riley/waffle/commit/a8d17df00fcf0588e7a3d110082dad02670972c3))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.69.0 ([#645](https://github.com/matt-riley/waffle/issues/645)) ([f6b3599](https://github.com/matt-riley/waffle/commit/f6b359995e0ec3eb93a6c67bbe75ee27c2afc9ba))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.70.1 ([#651](https://github.com/matt-riley/waffle/issues/651)) ([8a03019](https://github.com/matt-riley/waffle/commit/8a030199cdc1b86f00feab4db6da464d3afde1fd))
+* **deps:** update module github.com/yuin/goldmark to v1.8.6 ([#649](https://github.com/matt-riley/waffle/issues/649)) ([760711a](https://github.com/matt-riley/waffle/commit/760711af0a4113c9d8d6be4aa1bc713c6b906e63))
+* **deps:** update module modernc.org/sqlite to v1.57.0 ([#610](https://github.com/matt-riley/waffle/issues/610)) ([f620fdf](https://github.com/matt-riley/waffle/commit/f620fdf96303950155e464d99780d82b526388b4))
+* **deps:** update module modernc.org/sqlite to v1.58.0 ([#648](https://github.com/matt-riley/waffle/issues/648)) ([7f347b2](https://github.com/matt-riley/waffle/commit/7f347b27ab033a7283185839399697e0e598989a))
+* **deps:** update opentelemetry to v1.46.0 ([#627](https://github.com/matt-riley/waffle/issues/627)) ([723f466](https://github.com/matt-riley/waffle/commit/723f466352ba62736339718aa07eb8bfe6980fd0))
+
 ## [0.31.5](https://github.com/matt-riley/waffle/compare/v0.31.4...v0.31.5) (2026-08-27)
 
 
