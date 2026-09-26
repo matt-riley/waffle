@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.7](https://github.com/matt-riley/waffle/compare/v0.31.6...v0.31.7) (2026-09-26)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.74.0 ([#675](https://github.com/matt-riley/waffle/issues/675)) ([c44a34c](https://github.com/matt-riley/waffle/commit/c44a34c1c90912d5cb641d20dffea951c5c3db8f))
+
 ## [0.31.6](https://github.com/matt-riley/waffle/compare/v0.31.5...v0.31.6) (2026-09-23)
 
 
