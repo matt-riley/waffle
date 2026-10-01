@@ -92,9 +92,11 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		// check, so no deploy request leaves a run whose artifact is not
 		// proven reproducible.
 		"needs: [build-linux-artifact, linux-artifact-repro]",
-		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.APP_ID != ''",
-		"uses: matt-riley/matt-riley-ci/.github/workflows/request-infra-deploy.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4",
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''",
+		"uses: matt-riley/infra/.github/workflows/request-app-deploy.yml@808e96590227b291e6cc49b709558a1f33647ad7",
 		"artifact-run-id: ${{ github.run_id }}",
+		"dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}",
+		"INFRA_DISPATCH_PRIVATE_KEY: ${{ secrets.INFRA_DISPATCH_PRIVATE_KEY }}",
 		"artifact-name: waffle-linux-amd64",
 		"artifact-digest: ${{ needs.build-linux-artifact.outputs.artifact_digest }}",
 	} {
@@ -104,6 +106,8 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 	}
 
 	for _, forbidden := range []string{
+		"vars.APP_ID",
+		"secrets.PRIVATE_KEY",
 		"api-key",
 		"provider-key",
 		"router",
