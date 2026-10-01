@@ -346,7 +346,7 @@ jobs:
     # The pinned shared public caller uses a dispatch-only GitHub App.
     needs: [build-linux-artifact, linux-artifact-repro]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''
-    uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@88566328ddaec1ac3f2384dfbd48e844ad35af92
+    uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@d59f89f6a5644b10b8478b20ddec02289431b8ee
     with:
       dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}
       app: waffle
