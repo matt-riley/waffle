@@ -94,7 +94,7 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		// proven reproducible.
 		"needs: [build-linux-artifact, linux-artifact-repro, dispatch-config]",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dispatch-config.outputs.configured == 'true'",
-		"uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@d59f89f6a5644b10b8478b20ddec02289431b8ee",
+		"uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@2aedbf6107ff792f9dd41b9c9074dc4801b5888c",
 		"app: waffle",
 		"artifact-run-id: ${{ github.run_id }}",
 		"dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}",
