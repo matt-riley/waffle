@@ -359,8 +359,11 @@ Immediate push-triggered handoff is optional. If the Waffle repository has an
 immutable provenance through the pinned public `matt-riley-ci` dispatcher.
 These credentials belong to a dedicated dispatch App installed only on Infra;
 never place Infra’s administrative App key in Waffle. Without that
-explicit opt-in, the handoff job is skipped and artifact publication remains
-successful; no setup credential is required in Waffle.
+complete credential pair, the handoff job is skipped and artifact publication remains
+successful; no setup credential is required in Waffle. Provision the dispatch key
+first and the App ID last; disable handoff by removing the ID first. A present
+but invalid key remains an authentication error rather than silently disabling
+the requested handoff.
 
 This split is intentional:
 

@@ -2,6 +2,7 @@ package eval
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -91,8 +92,8 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		// #335: the dispatch waits for both the artifact build and the repro
 		// check, so no deploy request leaves a run whose artifact is not
 		// proven reproducible.
-		"needs: [build-linux-artifact, linux-artifact-repro]",
-		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''",
+		"needs: [build-linux-artifact, linux-artifact-repro, dispatch-config]",
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dispatch-config.outputs.configured == 'true'",
 		"uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@d59f89f6a5644b10b8478b20ddec02289431b8ee",
 		"app: waffle",
 		"artifact-run-id: ${{ github.run_id }}",
@@ -165,4 +166,56 @@ func readRepoPath(t *testing.T, rel string) string {
 		t.Fatal("caller path unavailable")
 	}
 	return filepath.Join(filepath.Dir(file), "..", "..", rel)
+}
+
+func TestCIWorkflowOptionalDispatchRequiresCredentialPair(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/ci.yml")
+	_, after, found := strings.Cut(workflow, "  dispatch-config:\n")
+	if !found {
+		t.Fatal("missing dispatch configuration check")
+	}
+	job, _, found := strings.Cut(after, "  request-infra-deploy:\n")
+	if !found {
+		t.Fatal("missing downstream deployment request")
+	}
+	for _, required := range []string{
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''",
+		"configured: ${{ steps.check.outputs.configured }}",
+		"DISPATCH_APP_ID: ${{ vars.INFRA_DISPATCH_APP_ID }}",
+		"DISPATCH_PRIVATE_KEY: ${{ secrets.INFRA_DISPATCH_PRIVATE_KEY }}",
+	} {
+		if !strings.Contains(job, required) {
+			t.Fatalf("configuration job missing %q", required)
+		}
+	}
+	_, script, found := strings.Cut(job, "        run: |\n")
+	if !found {
+		t.Fatal("missing executable configuration check")
+	}
+	for _, tc := range []struct{ name, id, key, want string }{
+		{"missing both", "", "", "false"},
+		{"missing key", "123", "", "false"},
+		{"missing id", "", "test-placeholder", "false"},
+		{"present pair", "123", "test-placeholder", "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "outputs")
+			command := exec.Command("bash", "-c", script)
+			command.Env = append(os.Environ(), "DISPATCH_APP_ID="+tc.id, "DISPATCH_PRIVATE_KEY="+tc.key, "GITHUB_OUTPUT="+output)
+			logs, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("configuration check failed: %v: %s", err, logs)
+			}
+			if len(logs) != 0 {
+				t.Fatalf("configuration check must not log credential data: %s", logs)
+			}
+			actual, err := os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(actual) != "configured="+tc.want+"\n" {
+				t.Fatalf("unexpected output %q", actual)
+			}
+		})
+	}
 }

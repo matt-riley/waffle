@@ -336,6 +336,26 @@ jobs:
       - name: Check Linux artifact reproducibility
         run: bash scripts/check-linux-artifact-repro.sh
 
+  dispatch-config:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check optional dispatch credentials
+        id: check
+        shell: bash
+        env:
+          DISPATCH_APP_ID: ${{ vars.INFRA_DISPATCH_APP_ID }}
+          DISPATCH_PRIVATE_KEY: ${{ secrets.INFRA_DISPATCH_PRIVATE_KEY }}
+        run: |
+          if [[ -n "$DISPATCH_APP_ID" && -n "$DISPATCH_PRIVATE_KEY" ]]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          fi
+
   request-infra-deploy:
     # linux-artifact-repro gates the dispatch (not the artifact build): a
     # deploy request must not leave the run while reproducibility is still
@@ -344,8 +364,8 @@ jobs:
     # .status == "completed" and .conclusion == "success" per #240.
     #
     # The pinned shared public caller uses a dispatch-only GitHub App.
-    needs: [build-linux-artifact, linux-artifact-repro]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_DISPATCH_APP_ID != ''
+    needs: [build-linux-artifact, linux-artifact-repro, dispatch-config]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dispatch-config.outputs.configured == 'true'
     uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@d59f89f6a5644b10b8478b20ddec02289431b8ee
     with:
       dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}
