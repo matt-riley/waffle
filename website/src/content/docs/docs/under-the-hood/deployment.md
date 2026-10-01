@@ -348,14 +348,17 @@ from the same commit produce the same payload shape.
 
 Application pushes do not create or replace Hetzner infrastructure directly.
 After the artifact upload completes, Infra's zero-input **Operate Waffle**
-workflow (and its scheduled discovery job) can resolve the latest successful
+workflow can resolve the latest successful
 run, artifact name, and uploaded digest, then roll that already-built artifact
 out to the existing server. This default path keeps cross-repository GitHub App
 credentials in Infra.
 
 Immediate push-triggered handoff is optional. If the Waffle repository has an
-`APP_ID` variable and matching `PRIVATE_KEY` Actions secret, CI sends the same
-immutable provenance through the released shared workflow. Without that
+`INFRA_DISPATCH_APP_ID` variable and matching
+`INFRA_DISPATCH_PRIVATE_KEY` Actions secret, CI sends the same
+immutable provenance through the pinned public `matt-riley-ci` dispatcher.
+These credentials belong to a dedicated dispatch App installed only on Infra;
+never place Infra’s administrative App key in Waffle. Without that
 explicit opt-in, the handoff job is skipped and artifact publication remains
 successful; no setup credential is required in Waffle.
 

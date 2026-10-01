@@ -116,7 +116,7 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		"anthropic",
 		"openai",
 	} {
-		if strings.Contains(strings.ToLower(job), forbidden) {
+		if strings.Contains(strings.ToLower(job), strings.ToLower(forbidden)) {
 			t.Fatalf("deploy request job forwards provider or infrastructure detail %q:\n%s", forbidden, job)
 		}
 	}
