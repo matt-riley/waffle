@@ -88,7 +88,6 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-${{ matrix.name }}
-      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +155,6 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-aux
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
@@ -184,7 +182,6 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}-cache-save
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # The only job that writes the mise cache. Without this the cache key is
@@ -237,16 +234,20 @@ jobs:
           key: ${{ steps.restore-go-build.outputs.cache-primary-key }}
 
   lint:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
-    with:
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}:${{ github.ref }}:lint
       cancel-in-progress: true
-      concurrency-suffix: lint
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-lint.yml@cb986078a5bd4775e5fb05348f3618e41fedf4de # v4
 
   security:
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@a6a9d0cf05916bbc5a44f0bc9818133ab08baba4
-    with:
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}:${{ github.ref }}:security
       cancel-in-progress: true
-      concurrency-suffix: security
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@cb986078a5bd4775e5fb05348f3618e41fedf4de # v4
 
   docker-integration:
     name: docker integration
@@ -357,6 +358,8 @@ jobs:
           fi
 
   request-infra-deploy:
+    permissions:
+      contents: read
     # linux-artifact-repro gates the dispatch (not the artifact build): a
     # deploy request must not leave the run while reproducibility is still
     # being checked. Any other late failure (e.g. ci) is still caught by the
@@ -366,7 +369,7 @@ jobs:
     # The pinned shared public caller uses a dispatch-only GitHub App.
     needs: [build-linux-artifact, linux-artifact-repro, dispatch-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dispatch-config.outputs.configured == 'true'
-    uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@2aedbf6107ff792f9dd41b9c9074dc4801b5888c
+    uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@cb986078a5bd4775e5fb05348f3618e41fedf4de # v4
     with:
       dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}
       app: waffle

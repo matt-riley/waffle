@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -87,6 +88,9 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		t.Fatalf("workflow lacks request-infra-deploy job:\n%s", workflow)
 	}
 	job := workflow[jobStart:]
+	if !regexp.MustCompile(`(?m)^\s+uses: matt-riley/matt-riley-ci/\.github/workflows/request-app-deploy\.yml@[a-f0-9]{40}(?:[ \t]+#.*)?[ \t]*$`).MatchString(job) {
+		t.Fatal("deploy request must use the shared dispatcher pinned to a full commit SHA")
+	}
 
 	for _, want := range []string{
 		// #335: the dispatch waits for both the artifact build and the repro
@@ -94,7 +98,6 @@ func TestCIWorkflowRequestsInfraDeployWithImmutableArtifactOnly(t *testing.T) {
 		// proven reproducible.
 		"needs: [build-linux-artifact, linux-artifact-repro, dispatch-config]",
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.dispatch-config.outputs.configured == 'true'",
-		"uses: matt-riley/matt-riley-ci/.github/workflows/request-app-deploy.yml@2aedbf6107ff792f9dd41b9c9074dc4801b5888c",
 		"app: waffle",
 		"artifact-run-id: ${{ github.run_id }}",
 		"dispatch-app-id: ${{ vars.INFRA_DISPATCH_APP_ID }}",
