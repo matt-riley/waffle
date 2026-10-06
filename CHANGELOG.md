@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.8](https://github.com/matt-riley/waffle/compare/v0.31.7...v0.31.8) (2026-10-06)
+
+
+### Bug Fixes
+
+* **ci:** use dedicated deployment dispatch credentials ([#687](https://github.com/matt-riley/waffle/issues/687)) ([9ef5998](https://github.com/matt-riley/waffle/commit/9ef5998e4f1f3f258494fd7f11f125ea183f9a34))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.75.0 ([#684](https://github.com/matt-riley/waffle/issues/684)) ([a13857b](https://github.com/matt-riley/waffle/commit/a13857b48e140df343a202e19b11f896796d9d53))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.76.0 ([#695](https://github.com/matt-riley/waffle/issues/695)) ([42c887e](https://github.com/matt-riley/waffle/commit/42c887ebd59e7f5c1e64d6d0d267a0d647265dec))
+
 ## [0.31.7](https://github.com/matt-riley/waffle/compare/v0.31.6...v0.31.7) (2026-09-28)
 
 
