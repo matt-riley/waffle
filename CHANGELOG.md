@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.10](https://github.com/matt-riley/waffle/compare/v0.31.9...v0.31.10) (2026-10-11)
+
+
+### Bug Fixes
+
+* **ci:** unblock dependency update workflows ([#702](https://github.com/matt-riley/waffle/issues/702)) ([f395ef3](https://github.com/matt-riley/waffle/commit/f395ef36ac4cc74aa55d49b1a2f24197d4b775b3))
+* **deps:** update dependency fast-xml-parser to v5.11.2 ([#698](https://github.com/matt-riley/waffle/issues/698)) ([0456e7e](https://github.com/matt-riley/waffle/commit/0456e7e4971b641c25584ff41f4b01fd1f30a97d))
+* **deps:** update golang.org/x packages ([#646](https://github.com/matt-riley/waffle/issues/646)) ([0dd8d31](https://github.com/matt-riley/waffle/commit/0dd8d3127c2ba7946261cc4bf8651ea41d8afdc3))
+* **deps:** update module charm.land/bubbletea/v2 to v2.0.10 ([#689](https://github.com/matt-riley/waffle/issues/689)) ([d43ae65](https://github.com/matt-riley/waffle/commit/d43ae6580e8886adfc8279e2be051f80f91e79cb))
+* **deps:** update module modernc.org/sqlite to v1.60.1 ([#696](https://github.com/matt-riley/waffle/issues/696)) ([ae81bf7](https://github.com/matt-riley/waffle/commit/ae81bf78495e832f1b724b13da8fa8e7eb651afd))
+* **test:** initialize netlock queue before docker runner ([#704](https://github.com/matt-riley/waffle/issues/704)) ([053be5d](https://github.com/matt-riley/waffle/commit/053be5d13163fbcd03d33353bd3dd13638387033))
+
 ## [0.31.9](https://github.com/matt-riley/waffle/compare/v0.31.8...v0.31.9) (2026-10-11)
 
 
