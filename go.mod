@@ -9,13 +9,12 @@ require (
 	filippo.io/age v1.3.2
 	github.com/BurntSushi/toml v1.6.0
 	github.com/a-h/templ v0.3.1020
-	github.com/anthropics/anthropic-sdk-go v1.76.0
+	github.com/anthropics/anthropic-sdk-go v1.79.1
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/creack/pty v1.1.24
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/yuin/goldmark v1.4.13
-	github.com/yuin/goldmark/v2 v2.1.6
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0
