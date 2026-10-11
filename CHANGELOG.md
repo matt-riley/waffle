@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.9](https://github.com/matt-riley/waffle/compare/v0.31.8...v0.31.9) (2026-10-11)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/yuin/goldmark to v2 ([#633](https://github.com/matt-riley/waffle/issues/633)) ([a943a44](https://github.com/matt-riley/waffle/commit/a943a448eb90b139168350d8783bcf6ab5f89828))
+
 ## [0.31.8](https://github.com/matt-riley/waffle/compare/v0.31.7...v0.31.8) (2026-10-06)
 
 
