@@ -37,11 +37,18 @@ func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
 	}
 
 	qdir := t.TempDir()
-	// The cap-less runner opens the queue before the host-side client
-	// exists, so the dir must be cross-uid accessible before docker run.
+	// Initialize the queue on the host before mounting it, matching
+	// StartDocker's startup order. The runner opens these files after it drops
+	// capabilities, so they must remain cross-uid accessible.
 	if err := os.Chmod(qdir, 0o777); err != nil {
 		t.Fatal(err)
 	}
+	client, err := sandbox.NewClient(qdir)
+	if err != nil {
+		t.Fatalf("open queue client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
 	run := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name,
 		"--network", netName,
 		"--cap-add", "NET_ADMIN",
@@ -91,13 +98,7 @@ func TestWorkspaceRunnerDropsCapabilitiesAfterLockdown(t *testing.T) {
 	// commands execute as children of the dropped-capability PID 1. docker
 	// exec would instead start a fresh process carrying the container's
 	// original NET_ADMIN set, bypassing the drop entirely. Both attempts run
-	// in one queue round trip: the bind-mounted queue can serve one request
-	// reliably before cross-OS sqlite locking staleness kicks in.
-	client, err := sandbox.NewClient(qdir)
-	if err != nil {
-		t.Fatalf("open queue client: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	// in one queue round trip so the shared SQLite files only need one write.
 	cmd := "ip route add default via " + gw + " dev eth0; echo V4=$?; " +
 		"ip -6 route add default dev eth0; echo V6=$?"
 	out, _, err := bashViaQueue(ctx, client, cmd)
