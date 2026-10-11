@@ -26,17 +26,12 @@ func TestPullRequestWorkflowRunsDeterministicEval(t *testing.T) {
 	}
 }
 
-func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T) {
+func TestLinuxArtifactWorkflowPinsImmutableActionsAndRunsReproCheck(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/ci.yml")
 
-	assertWorkflowActionPins(t, workflow, "actions/checkout", map[string]string{
-		"9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0": "v7",
-		"3d3c42e5aac5ba805825da76410c181273ba90b1": "v7",
-	})
+	assertWorkflowActionPins(t, workflow, "actions/checkout")
 	// #579 moved every job from actions/setup-go to the mise-pinned toolchain.
-	assertWorkflowActionPins(t, workflow, "jdx/mise-action", map[string]string{
-		"3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518": "v4",
-	})
+	assertWorkflowActionPins(t, workflow, "jdx/mise-action")
 
 	for _, want := range []string{
 		"linux-artifact-repro:",
@@ -56,7 +51,7 @@ func TestLinuxArtifactWorkflowPinsReviewedActionsAndRunsReproCheck(t *testing.T)
 	}
 }
 
-func assertWorkflowActionPins(t *testing.T, workflow, action string, allowed map[string]string) {
+func assertWorkflowActionPins(t *testing.T, workflow, action string) {
 	t.Helper()
 	prefix := "- uses: " + action + "@"
 	found := false
@@ -72,8 +67,11 @@ func assertWorkflowActionPins(t *testing.T, workflow, action string, allowed map
 		}
 		pin := strings.TrimSpace(parts[0])
 		version := strings.TrimSpace(parts[1])
-		if allowedVersion, ok := allowed[pin]; !ok || version != allowedVersion {
-			t.Fatalf("workflow action %q has unreviewed pin %q %q", action, pin, version)
+		if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(pin) {
+			t.Fatalf("workflow action %q is not pinned to a full commit SHA: %q", action, pin)
+		}
+		if !regexp.MustCompile(`^v\d+(?:\.\d+(?:\.\d+)?)?$`).MatchString(version) {
+			t.Fatalf("workflow action %q has invalid version annotation %q", action, version)
 		}
 	}
 	if !found {

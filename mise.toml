@@ -49,20 +49,18 @@ description = "Install Waffle Desk browser-test dependencies"
 env = { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1" }
 run = """
 dashboard_node="$(mise which node)"
-dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
 test "$("$dashboard_node" --version)" = "v$(mise current node)"
-test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "$(mise current pnpm)"
-"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts
+test "$(pnpm --version)" = "$(mise current pnpm)"
+pnpm --dir tools/dashboard-tests install --frozen-lockfile --ignore-scripts
 """
 
 [tasks.dashboard-test]
 description = "Run Waffle Desk browser tests with system Chrome"
 run = """
 dashboard_node="$(mise which node)"
-dashboard_pnpm_cli="$(dirname "$(mise which pnpm)")/dist/pnpm.mjs"
 test "$("$dashboard_node" --version)" = "v$(mise current node)"
-test "$("$dashboard_node" "$dashboard_pnpm_cli" --version)" = "$(mise current pnpm)"
-"$dashboard_node" "$dashboard_pnpm_cli" --dir tools/dashboard-tests test
+test "$(pnpm --version)" = "$(mise current pnpm)"
+pnpm --dir tools/dashboard-tests test
 """
 
 [tasks.dashboard-check]
