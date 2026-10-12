@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.11](https://github.com/matt-riley/waffle/compare/v0.31.10...v0.31.11) (2026-10-12)
+
+
+### Bug Fixes
+
+* **deps:** update opentelemetry to v1.47.0 ([#708](https://github.com/matt-riley/waffle/issues/708)) ([d93f901](https://github.com/matt-riley/waffle/commit/d93f9018881aa7d5f7dfe1c962b813f61e3ca736))
+
 ## [0.31.10](https://github.com/matt-riley/waffle/compare/v0.31.9...v0.31.10) (2026-10-11)
 
 
