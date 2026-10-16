@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.12](https://github.com/matt-riley/waffle/compare/v0.31.11...v0.31.12) (2026-10-16)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/yuin/goldmark to v1.8.6 ([#707](https://github.com/matt-riley/waffle/issues/707)) ([f15693d](https://github.com/matt-riley/waffle/commit/f15693de0881b5485b66d7931ba9ba5ef4933f39))
+* **deps:** update module golang.org/x/sys to v0.49.0 ([#716](https://github.com/matt-riley/waffle/issues/716)) ([27b6688](https://github.com/matt-riley/waffle/commit/27b6688e8342be2ed73b3d33b5b4a0b7561d34c8))
+
 ## [0.31.11](https://github.com/matt-riley/waffle/compare/v0.31.10...v0.31.11) (2026-10-12)
 
 
